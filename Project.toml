@@ -1,7 +1,7 @@
 name = "CedarSim"
 uuid = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
-version = "0.13.0"
 authors = ["JuliaHub, Inc. and other contributors"]
+version = "0.13.0"
 
 [deps]
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
@@ -12,6 +12,7 @@ OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 

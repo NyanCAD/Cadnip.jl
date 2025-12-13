@@ -2,7 +2,7 @@
 
 julia_version = "1.10.10"
 manifest_format = "2.0"
-project_hash = "9ee9d6287e07396e671df308974d4f7d67f34b52"
+project_hash = "6116f751e3e9abf3c9f3771c0879d154a102624f"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "8b2b045b22740e4be20654175cc38291d48539db"
@@ -492,6 +492,11 @@ deps = ["LinearAlgebra", "Printf"]
 git-tree-sha1 = "a694e2a57394e409f7a11ee0977362a9fafcb8c7"
 uuid = "c145ed77-6b09-5dd9-b285-bf645a82121e"
 version = "0.5.6"
+
+[[deps.HashArrayMappedTries]]
+git-tree-sha1 = "2eaa69a7cab70a52b9687c8bf950a5a93ec895ae"
+uuid = "076d061b-32b6-4027-95e0-9a2c6f6d7e74"
+version = "0.2.0"
 
 [[deps.IfElse]]
 git-tree-sha1 = "debdd00ffef04665ccbb3e150747a77560e8fad1"
@@ -1285,6 +1290,12 @@ deps = ["ArrayInterface"]
 git-tree-sha1 = "566c4ed301ccb2a44cbd5a27da5f885e0ed1d5df"
 uuid = "53ae85a6-f571-4167-b2af-e1d143709226"
 version = "1.7.0"
+
+[[deps.ScopedValues]]
+deps = ["HashArrayMappedTries", "Logging"]
+git-tree-sha1 = "c3b2323466378a2ba15bea4b2f73b081e022f473"
+uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
+version = "1.5.0"
 
 [[deps.Serialization]]
 uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
