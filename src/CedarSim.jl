@@ -81,9 +81,11 @@ MNA Verilog-A Integration
 =#
 
 include("mna_veriloga.jl")
+include("mna_vasim.jl")
 
 # Re-exports for Verilog-A integration
 export VADevice, MNAVAResistor, varesistor!, MNAMosfet, nmos!, pmos!
+export @mna_va_str, MNAVAFile, mna_va_load
 
 # Re-exports for MNA-Spectre integration
 export mna_circuit, MNANetRef, mna_net, mna_ground
