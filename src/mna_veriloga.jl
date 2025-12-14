@@ -21,7 +21,7 @@ using VerilogAParser.VerilogATokenize:
     Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, is_scale_factor
 using AbstractTrees
 
-export @mna_va_str, VADevice, mna_va_device
+export VADevice, mna_va_device
 
 const VAP = VerilogAParser
 const VACP = VerilogAParser.VerilogACSTParser
@@ -478,18 +478,7 @@ endmodule
 \"\"\"
 ```
 """
-macro mna_va_str(str)
-    va = VerilogAParser.parse(IOBuffer(str))
-    if va.ps.errored
-        error("Verilog-A parse error")
-    end
-
-    vamod = va.stmts[end]
-    parsed = parse_va_module(vamod)
-    code = make_mna_device(parsed)
-
-    esc(code)
-end
+# Note: @mna_va_str macro is defined in mna_vasim.jl (full implementation)
 
 """
     MNAVAResistor
@@ -742,4 +731,4 @@ function pmos!(circuit::MNACircuit, n_d, n_g, n_s, n_b; kwargs...)
     return dev
 end
 
-export VADevice, MNAVAResistor, varesistor!, MNAMosfet, nmos!, pmos!, @mna_va_str
+export VADevice, MNAVAResistor, varesistor!, MNAMosfet, nmos!, pmos!

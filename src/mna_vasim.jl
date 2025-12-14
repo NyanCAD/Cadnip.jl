@@ -26,7 +26,7 @@ using Combinatorics
 const MNA_VAT = VerilogAParser.VerilogATokenize
 const MNA_VANode = VerilogAParser.VerilogACSTParser.Node
 
-export @mna_va_str, MNAVAFile, mna_va_load
+export @mna_va_str, MNAVAFile, mna_va_load, MNABranchKind, MNA_CURRENT, MNA_VOLTAGE
 
 #=
 MNA VA Code Generation Strategy:
@@ -665,7 +665,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         svar = Symbol("branch_state_", a, "_", b)
         eqvar = Symbol("branch_value_", a, "_", b)
         quote
-            $svar = MNA_CURRENT
+            $svar = CedarSim.MNA_CURRENT
             $eqvar = 0.0
         end
     end
@@ -700,7 +700,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         b_idx = findfirst(==(b), node_order)
 
         push!(current_contributions, quote
-            if $svar == MNA_CURRENT
+            if $svar == CedarSim.MNA_CURRENT
                 # Current contribution: I(a,b) flows from a to b
                 # Current INTO a = -I(a,b), Current INTO b = +I(a,b)
                 if $a_idx <= length(_pin_voltages)
@@ -735,10 +735,10 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         mna_isdefault(x) = false  # For now, assume not default
         mna_ddt(x) = 0.0  # For DC analysis, ddt = 0
 
-        # Device struct
-        Base.@kwdef struct $symname <: MNADevice
+        # Device struct - use fully qualified types for macro hygiene
+        Base.@kwdef struct $symname <: CedarSim.MNADevice
             # MNA connection info (filled in by constructor)
-            _nets::Vector{MNANet} = MNANet[]
+            _nets::Vector{CedarSim.MNANet} = CedarSim.MNANet[]
             _internal_net_indices::Vector{Int} = Int[]
             _name::Symbol = $(QuoteNode(symname))
             # Parameters
@@ -746,15 +746,15 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
 
         # Constructor that connects to MNA circuit
-        function $symname(circuit::MNACircuit, $(ps...); name::Symbol=$(QuoteNode(symname)), kwargs...)
+        function $symname(circuit::CedarSim.MNACircuit, $(ps...); name::Symbol=$(QuoteNode(symname)), kwargs...)
             # Get/create nets for external pins
-            nets = [get_net!(circuit, n) for n in [$(ps...)]]
+            nets = [CedarSim.get_net!(circuit, n) for n in [$(ps...)]]
 
             # Create internal nodes
             internal_indices = Int[]
             for i in 1:$n_internal
                 internal_name = Symbol(name, :_, :internal, i)
-                internal_net = get_net!(circuit, internal_name)
+                internal_net = CedarSim.get_net!(circuit, internal_name)
                 push!(internal_indices, internal_net.index)
             end
 
@@ -762,14 +762,14 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
 
         # Stamp function - adds device to MNA system
-        function stamp!(device::$symname, circuit::MNACircuit)
+        function CedarSim.stamp!(device::$symname, circuit::CedarSim.MNACircuit)
             # Add as nonlinear element
             push!(circuit.nonlinear_elements, (x, params, circ) -> _mna_residual(device, x, circ))
         end
 
         # Residual function - computes current contributions
-        function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::MNACircuit)
-            n = length(x)
+        function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::CedarSim.MNACircuit)
+            _mna_n_size = length(x)
 
             # Get pin voltages from solution vector
             _pin_voltages = Float64[]
@@ -807,7 +807,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             $(current_contributions...)
 
             # Build residual vector
-            residual = zeros(n)
+            residual = zeros(_mna_n_size)
             for (i, net) in enumerate(_self._nets)
                 idx = net.index
                 if idx > 0
@@ -823,9 +823,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
 
         # Convenience function to add device to circuit
-        function $(Symbol(lowercase(modname), "!"))(circuit::MNACircuit, $(ps...); kwargs...)
+        function $(Symbol(lowercase(modname), "!"))(circuit::CedarSim.MNACircuit, $(ps...); kwargs...)
             dev = $symname(circuit, $(ps...); kwargs...)
-            stamp!(dev, circuit)
+            CedarSim.stamp!(dev, circuit)
             return dev
         end
     end

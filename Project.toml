@@ -4,12 +4,15 @@ authors = ["JuliaHub, Inc. and other contributors"]
 version = "0.13.0"
 
 [deps]
+ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
+Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 Lexers = "8fc43420-9e17-4e89-a998-f4e9593a1dfc"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+NonlinearSolve = "8913a72c-1f9b-4ce2-8d82-65094dcecaec"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"

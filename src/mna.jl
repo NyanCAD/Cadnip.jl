@@ -6,7 +6,7 @@ using SparseArrays
 using NonlinearSolve
 using ADTypes
 
-export MNACircuit, MNANet, stamp!, compile_circuit, solve_dc!, dc!, transient_problem
+export MNACircuit, MNANet, stamp!, compile_circuit, solve_dc!, transient_problem
 
 #=
 MNA Matrix Structure:
@@ -548,12 +548,7 @@ function solve_dc!(circuit::MNACircuit; maxiter=200, tol=1e-9)
     return sol.u
 end
 
-"""
-    dc!(circuit::MNACircuit; kwargs...)
-
-Alias for solve_dc! for convenience.
-"""
-dc!(circuit::MNACircuit; kwargs...) = solve_dc!(circuit; kwargs...)
+# Note: dc!() is defined in CedarSim.jl as a wrapper that returns DCResult
 
 """
     DiodeModel
