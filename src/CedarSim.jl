@@ -67,6 +67,15 @@ MNA-Spectre Integration Layer
 
 include("mna_spectre.jl")
 
+#=
+SPICE/Spectre Netlist Parser
+=#
+
+include("mna_parser.jl")
+
+# Re-exports for parser
+export parse_spice, parse_spice_file, MNANetlist, build_circuit, simulate_netlist, @spice_str
+
 # Re-exports for MNA-Spectre integration
 export mna_circuit, MNANetRef, mna_net, mna_ground
 export MNASimpleResistor, MNASimpleCapacitor, MNASimpleInductor

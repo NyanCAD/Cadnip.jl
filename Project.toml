@@ -4,8 +4,10 @@ authors = ["JuliaHub, Inc. and other contributors"]
 version = "0.13.0"
 
 [deps]
+AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+Lexers = "8fc43420-9e17-4e89-a998-f4e9593a1dfc"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
@@ -14,9 +16,11 @@ Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
+AbstractTrees = "0.4"
 DiffEqBase = "6"
 ForwardDiff = "0.10"
 NLsolve = "4"
