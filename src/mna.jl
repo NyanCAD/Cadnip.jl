@@ -6,7 +6,8 @@ using SparseArrays
 using NonlinearSolve
 using ADTypes
 
-export MNACircuit, MNANet, stamp!, compile_circuit, solve_dc!, transient_problem
+export MNACircuit, MNANet, BranchVar, ChargeVar, stamp!, compile_circuit, solve_dc!, transient_problem
+export get_net!, get_branch!, get_charge!, initialize_charges!, update_charges!
 
 #=
 MNA Matrix Structure:
@@ -57,6 +58,19 @@ end
 BranchVar(name::Symbol) = BranchVar(name, -1)
 
 """
+    ChargeVar
+
+Represents a charge state variable (for ddt() calls in VA models).
+Charges are integrated by the transient solver: dQ/dt = I
+"""
+mutable struct ChargeVar
+    name::Symbol
+    index::Int  # index into the charge state section
+end
+
+ChargeVar(name::Symbol) = ChargeVar(name, -1)
+
+"""
     MNACircuit
 
 Container for circuit topology and MNA matrices.
@@ -70,6 +84,11 @@ mutable struct MNACircuit
     # Branch current management (for voltage sources, inductors)
     branches::Dict{Symbol, BranchVar}
     num_branches::Int
+
+    # Charge state management (for ddt() calls in VA models)
+    charges::Dict{Symbol, ChargeVar}
+    num_charges::Int
+    charge_values::Vector{Float64}  # Current Q values during transient
 
     # Linear part of MNA matrix (constant coefficients)
     # Stored in COO format for assembly, converted to sparse later
@@ -105,6 +124,10 @@ mutable struct MNACircuit
 
     # gmin (minimum conductance for convergence)
     gmin::Float64
+
+    # Transient simulation state
+    time::Float64  # Current simulation time
+    dt::Float64    # Current timestep
 end
 
 function MNACircuit(;temp=27.0, gmin=1e-12)
@@ -115,6 +138,9 @@ function MNACircuit(;temp=27.0, gmin=1e-12)
         0,
         Dict{Symbol, BranchVar}(),
         0,
+        Dict{Symbol, ChargeVar}(),  # charges
+        0,                           # num_charges
+        Float64[],                   # charge_values
         Int[], Int[], Float64[],  # G matrix COO
         Int[], Int[], Float64[],  # C matrix COO
         Int[], Float64[],          # b vector
@@ -123,7 +149,9 @@ function MNACircuit(;temp=27.0, gmin=1e-12)
         Dict{Symbol, Any}(),       # params
         :dcop,                     # mode
         temp,                      # temperature
-        gmin                       # gmin
+        gmin,                      # gmin
+        0.0,                       # time
+        0.0                        # dt
     )
 end
 
@@ -164,6 +192,23 @@ function get_branch!(circuit::MNACircuit, name::Symbol)
     branch = BranchVar(name, circuit.num_branches)
     circuit.branches[name] = branch
     return branch
+end
+
+"""
+    get_charge!(circuit::MNACircuit, name::Symbol) -> ChargeVar
+
+Get or create a charge state variable for transient simulation.
+Each ddt(Q) expression in a VA model gets a unique charge state.
+"""
+function get_charge!(circuit::MNACircuit, name::Symbol)
+    if haskey(circuit.charges, name)
+        return circuit.charges[name]
+    end
+    circuit.num_charges += 1
+    charge = ChargeVar(name, circuit.num_charges)
+    circuit.charges[name] = charge
+    push!(circuit.charge_values, 0.0)  # Initialize charge to 0
+    return charge
 end
 
 """
@@ -722,32 +767,88 @@ Computes: C * du/dt = b(t) - G * u - f_nonlinear(u)
 Rearranged: du/dt = C^{-1} * (b(t) - G * u - f_nonlinear(u))
 
 For DAE form, this computes the residual: C * du - (b - G*u - f_nl) = 0
+
+For charge-based models (from ddt() calls in VA):
+- Q is computed as a function of voltages: Q = f(V)
+- I = dQ/dt is computed using backward Euler: I ≈ (Q - Q_prev) / dt
+- This current is added to the KCL equations
 """
 function (sys::MNAODESystem)(du, u, p, t)
+    circuit = sys.circuit
+
+    # Update circuit time and compute dt
+    dt = t - circuit.time
+    if dt <= 0
+        dt = 1e-12  # Small dt for initial evaluation
+    end
+    circuit.dt = dt
+
     # Start with linear contribution: -G * u + b
     rhs = sys.b - sys.G * u
 
     # Add time-dependent sources
-    for source_func in sys.circuit.time_sources
+    for source_func in circuit.time_sources
         contributions = source_func(t, p)
         for (i, v) in contributions
             rhs[i] += v
         end
     end
 
-    # Add nonlinear contributions
-    for elem_func in sys.circuit.nonlinear_elements
-        residual, _ = elem_func(u, p, sys.circuit)
-        rhs .-= residual
+    # Add nonlinear contributions (including VA devices with ddt)
+    for elem_func in circuit.nonlinear_elements
+        result = elem_func(u, p, circuit)
+
+        # Handle different return formats
+        if length(result) >= 4
+            # VA device with charges: (residual, jacobian, charge_values, charge_indices)
+            residual, _, charge_values, charge_indices = result
+
+            # For each charge, compute dQ/dt using backward Euler
+            # dQ/dt = (Q_current - Q_previous) / dt
+            for (i, charge_idx) in enumerate(charge_indices)
+                Q_current = charge_values[i]
+                Q_prev = circuit.charge_values[charge_idx]
+                dQdt = (Q_current - Q_prev) / dt
+
+                # Store dQ/dt for the device to use
+                circuit.params[Symbol(:dQdt_, charge_idx)] = dQdt
+            end
+
+            rhs .-= residual
+        else
+            # Standard device: (residual, jacobian)
+            residual, _ = result
+            rhs .-= residual
+        end
     end
 
     # For differential equations: C * du/dt = rhs
-    # We need to solve for du/dt
-    # For now, handle the simple case where C is diagonal or use DAE form
-
     # Use the DAE residual form: 0 = C * du - rhs
     # DifferentialEquations.jl will handle this with mass matrix
     du .= rhs
+end
+
+"""
+    update_charges!(circuit::MNACircuit, u::Vector{Float64})
+
+Update stored charge values after a successful timestep.
+Called after the ODE solver accepts a step.
+"""
+function update_charges!(circuit::MNACircuit, u::Vector{Float64})
+    # Re-evaluate nonlinear elements to get final charge values
+    for elem_func in circuit.nonlinear_elements
+        result = elem_func(u, circuit.params, circuit)
+
+        if length(result) >= 4
+            _, _, charge_values, charge_indices = result
+            for (i, charge_idx) in enumerate(charge_indices)
+                circuit.charge_values[charge_idx] = charge_values[i]
+            end
+        end
+    end
+
+    # Update simulation time
+    circuit.time += circuit.dt
 end
 
 """
@@ -782,6 +883,12 @@ function transient_problem(circuit::MNACircuit, tspan; u0=nothing)
         circuit.mode = :tran
     end
 
+    # Initialize charge values from DC solution
+    # Evaluate devices to get initial Q values
+    circuit.time = tspan[1]
+    circuit.dt = 1e-12  # Small initial dt
+    initialize_charges!(circuit, u0)
+
     # For circuits with capacitors/inductors, we need a DAE formulation
     # Check if we have dynamic elements
     has_dynamics = !isempty(circuit.C_i)
@@ -796,5 +903,30 @@ function transient_problem(circuit::MNACircuit, tspan; u0=nothing)
     else
         # Pure algebraic system (resistive circuit)
         return (f!, u0, tspan, nothing, sys)
+    end
+end
+
+"""
+    initialize_charges!(circuit::MNACircuit, u0::Vector{Float64})
+
+Initialize charge state values from initial conditions.
+This evaluates all devices to compute Q = f(V) at the initial point.
+"""
+function initialize_charges!(circuit::MNACircuit, u0::Vector{Float64})
+    # Initialize all dQ/dt to 0 (DC steady state)
+    for i in 1:circuit.num_charges
+        circuit.params[Symbol(:dQdt_, i)] = 0.0
+    end
+
+    # Evaluate devices to get initial charge values
+    for elem_func in circuit.nonlinear_elements
+        result = elem_func(u0, circuit.params, circuit)
+
+        if length(result) >= 4
+            _, _, charge_values, charge_indices = result
+            for (i, charge_idx) in enumerate(charge_indices)
+                circuit.charge_values[charge_idx] = charge_values[i]
+            end
+        end
     end
 end

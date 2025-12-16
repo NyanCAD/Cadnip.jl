@@ -115,11 +115,12 @@ struct MNAScope
     all_functions::Dict{Symbol, MNAVAFunction}
     undefault_ids::Bool
     ddx_order::Vector{Symbol}       # Nodes used in ddx() calls for ForwardDiff tracking
+    ddt_exprs::Vector{Any}          # Expressions inside ddt() calls for transient tracking
 end
 
 MNAScope() = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0, Vector{Pair{Symbol}}(),
     Set{Pair{Symbol}}(), Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
-    Dict{Symbol, MNAVAFunction}(), false, Vector{Symbol}())
+    Dict{Symbol, MNAVAFunction}(), false, Vector{Symbol}(), Vector{Any}())
 
 """
     find_ddx!(ddx_order::Vector{Symbol}, va::MNA_VANode)
@@ -137,6 +138,21 @@ function find_ddx!(ddx_order::Vector{Symbol}, va::MNA_VANode)
                 name = Symbol(mna_assemble_id_string(arg.item))
                 !in(name, ddx_order) && push!(ddx_order, name)
             end
+        end
+    end
+end
+
+"""
+    find_ddt!(ddt_count::Ref{Int}, va::MNA_VANode)
+
+Scan a Verilog-A AST node for ddt() calls and count them.
+Each ddt() call gets a unique charge state index for transient simulation.
+Returns the number of ddt() calls found.
+"""
+function find_ddt!(ddt_count::Ref{Int}, va::MNA_VANode)
+    for stmt in AbstractTrees.PreOrderDFS(va)
+        if stmt isa MNA_VANode{FunctionCall} && Symbol(stmt.id) == :ddt
+            ddt_count[] += 1
         end
     end
 end
@@ -296,7 +312,8 @@ function (to_julia::MNAScope)(asb::MNA_VANode{AnalogSeqBlock})
         end
         to_julia_block = MNAScope(to_julia.parameters, to_julia.node_order,
             to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-            block_var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
+            block_var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
+            to_julia.ddt_exprs)
     else
         to_julia_block = to_julia
     end
@@ -427,10 +444,24 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
 
     # ddt() - time derivative (for transient)
     elseif fname == :ddt
-        # For DC analysis, ddt() = 0
-        # For transient, this would need to be handled by the ODE solver
-        args = map(x->to_julia(x.item), stmt.args)
-        return :(mna_ddt($(args...)))
+        # For transient simulation, ddt(Q) = dQ/dt where Q is a charge state variable
+        # We track each ddt() call with a unique index for the charge state
+        expr_code = to_julia(stmt.args[1].item)
+
+        # Assign charge index (1-based, incremented for each ddt call)
+        push!(to_julia.ddt_exprs, expr_code)
+        charge_idx = length(to_julia.ddt_exprs)
+
+        # Generated code:
+        # - _charge_values[idx] stores the computed charge Q = expr
+        # - _dQdt[idx] receives the charge derivative from transient solver
+        # - For DC: ddt = 0, for transient: ddt = _dQdt[idx]
+        return quote
+            let _q = $(ForwardDiff.value)($(CedarSim.MNASimTag), $expr_code)
+                _charge_values[$charge_idx] = _q
+                _dQdt[$charge_idx]  # This is 0.0 for DC, set by transient solver
+            end
+        end
 
     # ddx() - derivative with respect to a node voltage
     # ddx(expr, V(node)) returns d(expr)/d(V(node))
@@ -612,7 +643,8 @@ function (to_julia::MNAScope)(fd::MNA_VANode{AnalogFunctionDeclaration})
 
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-        var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
+        var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
+        to_julia.ddt_exprs)
 
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
@@ -739,11 +771,14 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
     ddx_order = Vector{Symbol}()
     find_ddx!(ddx_order, vm)
 
+    # ddt_exprs will be populated during code generation
+    ddt_exprs = Vector{Any}()
+
     # Create scope for default expression evaluation
     to_julia_defaults = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0,
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
-        Dict{Symbol, MNAVAFunction}(), true, ddx_order)
+        Dict{Symbol, MNAVAFunction}(), true, ddx_order, Vector{Any}())
 
     # First pass: collect declarations
     for child in vm.items
@@ -796,7 +831,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         collect(map(x->Pair(x...), combinations(node_order, 2))),
         Set{Pair{Symbol}}(),
         var_types,
-        Dict{Symbol, MNAVAFunction}(), false, ddx_order)
+        Dict{Symbol, MNAVAFunction}(), false, ddx_order, ddt_exprs)
 
     # Second pass: translate analog block and function declarations
     analog_code = Expr(:block)
@@ -818,6 +853,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
     # Determine which branches are used
     all_branch_order = filter(branch -> branch in to_julia.used_branches, to_julia.branch_order)
     n_branches = length(all_branch_order)
+
+    # Number of charge state variables (for ddt() calls)
+    n_charges = length(to_julia.ddt_exprs)
 
     # Generate branch state/value initialization
     branch_init = map(all_branch_order) do (a, b)
@@ -949,12 +987,14 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         mna_ddt(x) = 0.0  # For DC analysis, ddt = 0
 
         # Device struct - use fully qualified types for macro hygiene
-        Base.@kwdef struct $symname <: CedarSim.MNADevice
+        Base.@kwdef mutable struct $symname <: CedarSim.MNADevice
             # MNA connection info (filled in by constructor)
             _nets::Vector{CedarSim.MNANet} = CedarSim.MNANet[]
             _internal_net_indices::Vector{Int} = Int[]
             _branch_indices::Vector{Int} = Int[]  # Branch current indices for voltage contributions
+            _charge_indices::Vector{Int} = Int[]  # Charge state indices for ddt() calls
             _name::Symbol = $(QuoteNode(symname))
+            _n_charges::Int = $n_charges  # Number of charge state variables
             # Parameters
             $(struct_fields...)
         end
@@ -981,8 +1021,16 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 push!(branch_indices, branch.index)  # Store local index only
             end
 
+            # Create charge state variables for ddt() calls
+            charge_indices = Int[]
+            for i in 1:$n_charges
+                charge = CedarSim.get_charge!(circuit, Symbol(name, :_Q, i))
+                push!(charge_indices, charge.index)
+            end
+
             $symname(_nets=nets, _internal_net_indices=internal_indices,
-                     _branch_indices=branch_indices, _name=name; kwargs...)
+                     _branch_indices=branch_indices, _charge_indices=charge_indices,
+                     _name=name, _n_charges=$n_charges; kwargs...)
         end
 
         # Stamp function - adds device to MNA system
@@ -992,6 +1040,8 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
 
         # Residual function - computes current contributions
+        # Returns: (residual, jacobian_entries, charge_values)
+        # where charge_values contains Q for each ddt(Q) for transient integration
         function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::CedarSim.MNACircuit)
             _mna_n_size = length(x)
 
@@ -1009,6 +1059,26 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             _pin_currents = zeros($n_pins)
             _internal_currents = zeros($n_internal)
             _branch_residuals = zeros($n_branches)  # For voltage contributions
+
+            # Initialize charge tracking arrays
+            # _charge_values[i] stores Q computed from ddt(Q) expressions
+            # _dQdt[i] stores dQ/dt from transient solver (0 for DC)
+            _charge_values = zeros($n_charges)
+            _dQdt = zeros($n_charges)
+
+            # For transient simulation, get charge derivatives from state vector
+            if circuit.mode == :tran && $n_charges > 0
+                # In transient mode, charges are state variables
+                # The ODE solver provides dQ/dt through the extended state
+                # For now, we compute dQ/dt = (Q_current - Q_stored) / dt
+                # This will be updated by the ODE solver infrastructure
+                for (i, charge_idx) in enumerate(_self._charge_indices)
+                    # Get stored charge from circuit (set by ODE solver)
+                    if haskey(circuit.params, Symbol(:dQdt_, charge_idx))
+                        _dQdt[i] = circuit.params[Symbol(:dQdt_, charge_idx)]
+                    end
+                end
+            end
 
             # Temperature (Kelvin)
             _temperature = circuit.temp + 273.15
@@ -1029,6 +1099,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             $(branch_init...)
 
             # Execute analog block (computes branch values)
+            # This also populates _charge_values through ddt() calls
             $analog_code
 
             # Convert branch values to current contributions
@@ -1050,8 +1121,8 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 residual[circuit.num_nodes + local_idx] = _branch_residuals[i]
             end
 
-            # Return residual and empty jacobian (using autodiff)
-            return (residual, Tuple{Int,Int,Float64}[])
+            # Return residual, empty jacobian, and charge values for transient
+            return (residual, Tuple{Int,Int,Float64}[], _charge_values, _self._charge_indices)
         end
 
         # Convenience function to add device to circuit
