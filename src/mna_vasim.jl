@@ -160,14 +160,15 @@ end
 # V(p,n) <+ expr  means: set voltage V(p) - V(n) = expr (requires branch variable)
 function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
     bpfc = cs.lvalue
-    kind = Symbol(bpfc.id)
+    kind_sym = Symbol(bpfc.id)
 
-    if kind == :I
-        kind = MNA_CURRENT
-    elseif kind == :V
-        kind = MNA_VOLTAGE
+    # Use fully qualified names for macro hygiene
+    if kind_sym == :I
+        kind_expr = :(CedarSim.MNA_CURRENT)
+    elseif kind_sym == :V
+        kind_expr = :(CedarSim.MNA_VOLTAGE)
     else
-        return :(error("Unknown branch contribution kind: $kind"))
+        return :(error("Unknown branch contribution kind: $kind_sym"))
     end
 
     refs = map(bpfc.references) do ref
@@ -181,9 +182,9 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
         eqvar = Symbol("branch_value_", node, "_0")
         push!(to_julia.used_branches, node => Symbol("0"))
         return quote
-            if $svar != $kind
+            if $svar != $kind_expr
                 $eqvar = 0.0
-                $svar = $kind
+                $svar = $kind_expr
             end
             $eqvar += $(to_julia(cs.assign_expr))
         end
@@ -204,9 +205,9 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
         eqvar = Symbol("branch_value_", branch[1], "_", branch[2])
 
         return quote
-            if $svar != $kind
+            if $svar != $kind_expr
                 $eqvar = 0.0
-                $svar = $kind
+                $svar = $kind_expr
             end
             $s = $(to_julia(cs.assign_expr))
             $eqvar += $(reversed ? :(-$s) : s)
@@ -733,6 +734,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
 
     # Determine which branches are used
     all_branch_order = filter(branch -> branch in to_julia.used_branches, to_julia.branch_order)
+    n_branches = length(all_branch_order)
 
     # Generate branch state/value initialization
     branch_init = map(all_branch_order) do (a, b)
@@ -743,6 +745,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             $eqvar = 0.0
         end
     end
+
+    # Generate branch name symbols for struct storage
+    branch_syms = [Symbol("branch_", a, "_", b) for (a, b) in all_branch_order]
 
     # Generate node voltage assignments from solution vector
     # External pins get voltage from connected MNA nodes
@@ -789,6 +794,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         a_idx = findfirst(==(a), node_order)
         b_idx = findfirst(==(b), node_order)
 
+        # Branch index in the device's _branch_indices array (1-based)
+        branch_local_idx = findfirst(==(a => b), all_branch_order)
+
         push!(current_contributions, quote
             if $svar == CedarSim.MNA_CURRENT
                 # Current contribution: I(a,b) flows from a to b
@@ -798,7 +806,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 elseif $a_idx <= length(_pin_voltages) + length(_internal_voltages)
                     _internal_currents[$a_idx - length(_pin_voltages)] -= $eqvar
                 end
-                if $b != Symbol("0")
+                if $(b != Symbol("0"))
                     if $b_idx <= length(_pin_voltages)
                         _pin_currents[$b_idx] += $eqvar
                     elseif $b_idx <= length(_pin_voltages) + length(_internal_voltages)
@@ -806,9 +814,38 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                     end
                 end
             else
-                # Voltage contribution - need branch current variable
-                # For now, treat as error
-                error("Voltage contributions not yet fully supported in MNA backend")
+                # Voltage contribution: V(a,b) = branch_value
+                # The branch current I_br flows through this voltage constraint
+                # For MNA: G[a, br] = +1, G[b, br] = -1 in the stamped formulation
+                # Since F .-= residual, we need opposite signs to get same effect:
+                # residual[a] = -I_br gives F[a] = ... - (-I_br) = ... + I_br
+                # residual[b] = +I_br gives F[b] = ... - (+I_br) = ... - I_br
+                _branch_idx = circuit.num_nodes + _self._branch_indices[$branch_local_idx]
+                _I_br = x[_branch_idx]
+
+                # Add branch current to KCL (note: signs are negated because F .-= residual)
+                if $a_idx <= length(_pin_voltages)
+                    _pin_currents[$a_idx] -= _I_br
+                elseif $a_idx <= length(_pin_voltages) + length(_internal_voltages)
+                    _internal_currents[$a_idx - length(_pin_voltages)] -= _I_br
+                end
+                if $(b != Symbol("0"))
+                    if $b_idx <= length(_pin_voltages)
+                        _pin_currents[$b_idx] += _I_br
+                    elseif $b_idx <= length(_pin_voltages) + length(_internal_voltages)
+                        _internal_currents[$b_idx - length(_pin_voltages)] += _I_br
+                    end
+                end
+
+                # Voltage constraint goes into _branch_residuals
+                # Since F .-= residual, we need residual = -(V_a - V_b - V_source)
+                # so that F = -(-(V_a - V_b - V_source)) = V_a - V_b - V_source = 0 at solution
+                _V_a = $a_idx <= length(_pin_voltages) ? _pin_voltages[$a_idx] :
+                       _internal_voltages[$a_idx - length(_pin_voltages)]
+                _V_b = $(b == Symbol("0")) ? 0.0 :
+                       ($b_idx <= length(_pin_voltages) ? _pin_voltages[$b_idx] :
+                        _internal_voltages[$b_idx - length(_pin_voltages)])
+                _branch_residuals[$branch_local_idx] = $eqvar - (_V_a - _V_b)
             end
         end)
     end
@@ -830,6 +867,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             # MNA connection info (filled in by constructor)
             _nets::Vector{CedarSim.MNANet} = CedarSim.MNANet[]
             _internal_net_indices::Vector{Int} = Int[]
+            _branch_indices::Vector{Int} = Int[]  # Branch current indices for voltage contributions
             _name::Symbol = $(QuoteNode(symname))
             # Parameters
             $(struct_fields...)
@@ -848,7 +886,17 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 push!(internal_indices, internal_net.index)
             end
 
-            $symname(_nets=nets, _internal_net_indices=internal_indices, _name=name; kwargs...)
+            # Create branch current variables for voltage contributions
+            # Store branch local indices (not full indices) - full index = num_nodes + local_index
+            branch_indices = Int[]
+            branch_names = $(Expr(:vect, [QuoteNode(s) for s in branch_syms]...))
+            for bname in branch_names
+                branch = CedarSim.get_branch!(circuit, Symbol(name, :_, bname))
+                push!(branch_indices, branch.index)  # Store local index only
+            end
+
+            $symname(_nets=nets, _internal_net_indices=internal_indices,
+                     _branch_indices=branch_indices, _name=name; kwargs...)
         end
 
         # Stamp function - adds device to MNA system
@@ -874,6 +922,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             # Initialize current accumulators
             _pin_currents = zeros($n_pins)
             _internal_currents = zeros($n_internal)
+            _branch_residuals = zeros($n_branches)  # For voltage contributions
 
             # Temperature (Kelvin)
             _temperature = circuit.temp + 273.15
@@ -909,6 +958,10 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             end
             for (i, idx) in enumerate(_self._internal_net_indices)
                 residual[idx] = _internal_currents[i]
+            end
+            # Add branch residuals (voltage constraints)
+            for (i, local_idx) in enumerate(_self._branch_indices)
+                residual[circuit.num_nodes + local_idx] = _branch_residuals[i]
             end
 
             # Return residual and empty jacobian (using autodiff)
