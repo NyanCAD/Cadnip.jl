@@ -110,7 +110,7 @@ end
 function MNACircuit(;temp=27.0, gmin=1e-12)
     ground = MNANet(:ground, 0)
     MNACircuit(
-        Dict{Symbol, MNANet}(:ground => ground, Symbol("0") => ground),
+        Dict{Symbol, MNANet}(:ground => ground, Symbol("0") => ground, :gnd => ground),
         ground,
         0,
         Dict{Symbol, BranchVar}(),
@@ -135,6 +135,12 @@ Get or create a net with the given name.
 function get_net!(circuit::MNACircuit, name::Symbol)
     if haskey(circuit.nets, name)
         return circuit.nets[name]
+    end
+    # Check for common ground names
+    if name in (:gnd, :GND, :ground, :GROUND, Symbol("0"), :vss, :VSS)
+        # Map to ground
+        circuit.nets[name] = circuit.ground
+        return circuit.ground
     end
     circuit.num_nodes += 1
     net = MNANet(name, circuit.num_nodes)
@@ -531,8 +537,17 @@ function solve_dc!(circuit::MNACircuit; maxiter=200, tol=1e-9)
         return nothing
     end
 
-    # Initial guess - small random values help escape local minima
-    x0 = 0.1 * randn(n)
+    # Initial guess - start from linear solution (ignoring nonlinear elements)
+    # This provides a better starting point than random values
+    x0 = try
+        lin_sol = G \ b
+        # Clamp to reasonable values to avoid NaN/Inf
+        clamp!(lin_sol, -1e3, 1e3)
+        lin_sol
+    catch e
+        # If linear solve fails, use small random values
+        0.1 * randn(n)
+    end
 
     # Create and solve the nonlinear problem
     prob = NonlinearProblem(mna_residual!, x0)

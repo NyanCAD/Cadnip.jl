@@ -28,6 +28,38 @@ const MNA_VANode = VerilogAParser.VerilogACSTParser.Node
 
 export @mna_va_str, MNAVAFile, mna_va_load, MNABranchKind, MNA_CURRENT, MNA_VOLTAGE
 
+# Verilog-A compatible math functions (exported for use in generated code)
+# These are referenced via fully qualified names in generated code
+const pow = ^
+const ln = log
+const sqrt = Base.sqrt
+const abs = Base.abs
+const exp = Base.exp
+const log10 = Base.log10
+const sin = Base.sin
+const cos = Base.cos
+const tan = Base.tan
+const asin = Base.asin
+const acos = Base.acos
+const atan = Base.atan
+const sinh = Base.sinh
+const cosh = Base.cosh
+const tanh = Base.tanh
+const asinh = Base.asinh
+const acosh = Base.acosh
+const atanh = Base.atanh
+const hypot = Base.hypot
+const min = Base.min
+const max = Base.max
+const floor = Base.floor
+const ceil = Base.ceil
+
+# Verilog-A limit function (clamping)
+limexp(x) = x > 80.0 ? exp(80.0) * (1 + x - 80.0) : exp(x)  # Limited exponential to avoid overflow
+
+# Export Verilog-A math functions for generated code
+export pow, ln, limexp
+
 #=
 MNA VA Code Generation Strategy:
 
@@ -292,7 +324,18 @@ end
 
 # Unary operator
 function (to_julia::MNAScope)(stmt::MNA_VANode{UnaryOp})
-    return Expr(:call, Symbol(stmt.op), to_julia(stmt.operand))
+    op = Symbol(stmt.op)
+    operand = to_julia(stmt.operand)
+    # In Verilog-A, ! (logical not) works on integers where 0 is false, non-zero is true
+    # Julia's ! only works on Bool, so we need to convert
+    if op == :!
+        return Expr(:call, :!, Expr(:call, :!=, operand, 0))
+    elseif op == :~
+        # Bitwise not - need to use Int conversion
+        return Expr(:call, :~, Expr(:call, :Int, operand))
+    else
+        return Expr(:call, op, operand)
+    end
 end
 
 # Function call
@@ -378,8 +421,39 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
         return ret
     end
 
-    # Standard math functions
-    return Expr(:call, fname, map(x->to_julia(x.item), stmt.args)...)
+    # Standard math functions - map to CedarSim qualified names
+    # This ensures the functions are found when code is eval'd in Main
+    va_math_functions = Dict(
+        :pow => :(CedarSim.pow),
+        :ln => :(CedarSim.ln),
+        :limexp => :(CedarSim.limexp),
+        :sqrt => :sqrt,
+        :abs => :abs,
+        :exp => :exp,
+        :log => :log,
+        :log10 => :log10,
+        :sin => :sin,
+        :cos => :cos,
+        :tan => :tan,
+        :asin => :asin,
+        :acos => :acos,
+        :atan => :atan,
+        :atan2 => :atan,  # Julia's atan(y, x)
+        :sinh => :sinh,
+        :cosh => :cosh,
+        :tanh => :tanh,
+        :asinh => :asinh,
+        :acosh => :acosh,
+        :atanh => :atanh,
+        :hypot => :hypot,
+        :min => :min,
+        :max => :max,
+        :floor => :floor,
+        :ceil => :ceil,
+    )
+
+    qualified_fname = get(va_math_functions, fname, fname)
+    return Expr(:call, qualified_fname, map(x->to_julia(x.item), stmt.args)...)
 end
 
 # Variable assignment
@@ -686,6 +760,22 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         :($id = _self.$id)
     end
 
+    # Generate local variable initializations (excluding parameters which are already set)
+    var_inits = Any[]
+    for (name, T) in var_types
+        # Skip if this is a parameter (already assigned from struct)
+        if name in parameter_names
+            continue
+        end
+        if T == Float64
+            push!(var_inits, :($name = 0.0))
+        elseif T == Int
+            push!(var_inits, :($name = 0))
+        else
+            push!(var_inits, :($name = zero($T)))
+        end
+    end
+
     # Generate current contributions from branch values
     # For each branch (a,b) with current contribution:
     #   - Current INTO node a = -I(a,b)
@@ -797,6 +887,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             # Assign parameters
             $(param_assigns...)
 
+            # Initialize local variables
+            $(var_inits...)
+
             # Initialize branch state/values
             $(branch_init...)
 
@@ -881,4 +974,23 @@ function mna_va_load(mod::Module, file::MNAVAFile)
     vamod = va.stmts[end]
     code = make_mna_va_device(vamod)
     Core.eval(mod, code)
+end
+
+"""
+    mna_va_load(path::String)
+
+Convenience function to load a Verilog-A file from a path string.
+Returns the generated device type.
+"""
+function mna_va_load(path::String)
+    mna_va_load(Main, MNAVAFile(path))
+end
+
+"""
+    mna_va_load(mod::Module, path::String)
+
+Load a Verilog-A file into the specified module.
+"""
+function mna_va_load(mod::Module, path::String)
+    mna_va_load(mod, MNAVAFile(path))
 end

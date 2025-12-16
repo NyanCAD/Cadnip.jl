@@ -376,6 +376,11 @@ end
 Add a ground reference to the circuit.
 """
 function ground!(circuit::MNACircuit, net; name=:GND)
+    n = get_net!(circuit, net)
+    # If the net is already ground (index 0), nothing to do
+    if node_index(n) == 0
+        return nothing
+    end
     dev = MNAGround(circuit, net; name=name)
     stamp!(dev, circuit)
     return dev
