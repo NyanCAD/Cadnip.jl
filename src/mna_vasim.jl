@@ -111,6 +111,7 @@ struct MNAScope
     ninternal_nodes::Int
     branch_order::Vector{Pair{Symbol}}
     used_branches::Set{Pair{Symbol}}
+    voltage_branches::Set{Pair{Symbol}}  # Branches with V(p,n) <+ contributions (need branch vars)
     var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}}}
     all_functions::Dict{Symbol, MNAVAFunction}
     undefault_ids::Bool
@@ -119,7 +120,7 @@ struct MNAScope
 end
 
 MNAScope() = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0, Vector{Pair{Symbol}}(),
-    Set{Pair{Symbol}}(), Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
+    Set{Pair{Symbol}}(), Set{Pair{Symbol}}(), Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
     Dict{Symbol, MNAVAFunction}(), false, Vector{Symbol}(), Vector{Any}())
 
 """
@@ -212,8 +213,10 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
     # Use fully qualified names for macro hygiene
     if kind_sym == :I
         kind_expr = :(CedarSim.MNA_CURRENT)
+        is_voltage = false
     elseif kind_sym == :V
         kind_expr = :(CedarSim.MNA_VOLTAGE)
+        is_voltage = true
     else
         return :(error("Unknown branch contribution kind: $kind_sym"))
     end
@@ -225,9 +228,14 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
     if length(refs) == 1
         # Single node reference: I(node) or V(node) - relative to ground
         node = refs[1]
+        branch = node => Symbol("0")
         svar = Symbol("branch_state_", node, "_0")
         eqvar = Symbol("branch_value_", node, "_0")
-        push!(to_julia.used_branches, node => Symbol("0"))
+        push!(to_julia.used_branches, branch)
+        # Track voltage contributions - they need branch current variables
+        if is_voltage
+            push!(to_julia.voltage_branches, branch)
+        end
         return quote
             if $svar != $kind_expr
                 $eqvar = 0.0
@@ -246,6 +254,10 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
         @assert idx !== nothing "Branch ($id1, $id2) not found in branch_order"
         branch = to_julia.branch_order[idx]
         push!(to_julia.used_branches, branch)
+        # Track voltage contributions - they need branch current variables
+        if is_voltage
+            push!(to_julia.voltage_branches, branch)
+        end
         reversed = branch == (id2 => id1)
 
         s = gensym()
@@ -312,8 +324,8 @@ function (to_julia::MNAScope)(asb::MNA_VANode{AnalogSeqBlock})
         end
         to_julia_block = MNAScope(to_julia.parameters, to_julia.node_order,
             to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-            block_var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
-            to_julia.ddt_exprs)
+            to_julia.voltage_branches, block_var_types, to_julia.all_functions,
+            to_julia.undefault_ids, to_julia.ddx_order, to_julia.ddt_exprs)
     else
         to_julia_block = to_julia
     end
@@ -651,8 +663,8 @@ function (to_julia::MNAScope)(fd::MNA_VANode{AnalogFunctionDeclaration})
 
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-        var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
-        to_julia.ddt_exprs)
+        to_julia.voltage_branches, var_types, to_julia.all_functions,
+        to_julia.undefault_ids, to_julia.ddx_order, to_julia.ddt_exprs)
 
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
@@ -784,7 +796,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
 
     # Create scope for default expression evaluation
     to_julia_defaults = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0,
-        Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
+        Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
         Dict{Symbol, MNAVAFunction}(), true, ddx_order, Vector{Any}())
 
@@ -837,7 +849,8 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
     node_order = [ps; internal_nodes; Symbol("0")]
     to_julia = MNAScope(parameter_names, node_order, length(internal_nodes),
         collect(map(x->Pair(x...), combinations(node_order, 2))),
-        Set{Pair{Symbol}}(),
+        Set{Pair{Symbol}}(),  # used_branches
+        Set{Pair{Symbol}}(),  # voltage_branches
         var_types,
         Dict{Symbol, MNAVAFunction}(), false, ddx_order, ddt_exprs)
 
@@ -858,9 +871,13 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
     end
 
-    # Determine which branches are used
+    # Determine which branches are used (for state/value tracking)
     all_branch_order = filter(branch -> branch in to_julia.used_branches, to_julia.branch_order)
     n_branches = length(all_branch_order)
+
+    # Determine which branches need branch current variables (voltage contributions only)
+    voltage_branch_order = filter(branch -> branch in to_julia.voltage_branches, to_julia.branch_order)
+    n_voltage_branches = length(voltage_branch_order)
 
     # Number of charge state variables (for ddt() calls)
     n_charges = length(to_julia.ddt_exprs)
@@ -875,8 +892,8 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         end
     end
 
-    # Generate branch name symbols for struct storage
-    branch_syms = [Symbol("branch_", a, "_", b) for (a, b) in all_branch_order]
+    # Generate branch name symbols for struct storage (only for voltage branches that need MNA variables)
+    branch_syms = [Symbol("branch_", a, "_", b) for (a, b) in voltage_branch_order]
 
     # Generate node voltage assignments from solution vector
     # External pins get voltage from connected MNA nodes
@@ -923,58 +940,61 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         a_idx = findfirst(==(a), node_order)
         b_idx = findfirst(==(b), node_order)
 
-        # Branch index in the device's _branch_indices array (1-based)
-        branch_local_idx = findfirst(==(a => b), all_branch_order)
+        # Branch index in voltage_branch_order (for _branch_indices lookup)
+        # Only voltage branches have entries in _branch_indices
+        voltage_branch_idx = findfirst(==(a => b), voltage_branch_order)
 
         push!(current_contributions, quote
             if $svar == CedarSim.MNA_CURRENT
                 # Current contribution: I(a,b) flows from a to b
-                # Current INTO a = -I(a,b), Current INTO b = +I(a,b)
+                # MNA convention: G*u gives current LEAVING nodes
+                # For I(a,b) = I flowing from a to b:
+                #   - Current LEAVING a = +I (add to residual)
+                #   - Current LEAVING b = -I (subtract from residual)
                 if $a_idx <= length(_pin_voltages)
-                    _pin_currents[$a_idx] -= $eqvar
+                    _pin_currents[$a_idx] += $eqvar
                 elseif $a_idx <= length(_pin_voltages) + length(_internal_voltages)
-                    _internal_currents[$a_idx - length(_pin_voltages)] -= $eqvar
+                    _internal_currents[$a_idx - length(_pin_voltages)] += $eqvar
                 end
                 if $(b != Symbol("0"))
                     if $b_idx <= length(_pin_voltages)
-                        _pin_currents[$b_idx] += $eqvar
+                        _pin_currents[$b_idx] -= $eqvar
                     elseif $b_idx <= length(_pin_voltages) + length(_internal_voltages)
-                        _internal_currents[$b_idx - length(_pin_voltages)] += $eqvar
+                        _internal_currents[$b_idx - length(_pin_voltages)] -= $eqvar
                     end
                 end
             else
                 # Voltage contribution: V(a,b) = branch_value
-                # The branch current I_br flows through this voltage constraint
-                # For MNA: G[a, br] = +1, G[b, br] = -1 in the stamped formulation
-                # Since F .-= residual, we need opposite signs to get same effect:
-                # residual[a] = -I_br gives F[a] = ... - (-I_br) = ... + I_br
-                # residual[b] = +I_br gives F[b] = ... - (+I_br) = ... - I_br
-                _branch_idx = circuit.num_nodes + _self._branch_indices[$branch_local_idx]
+                # A branch current variable I_br is introduced
+                # The branch current I_br flows from a to b (like a voltage source)
+                # MNA convention: current LEAVING nodes
+                #   - Current LEAVING a = +I_br
+                #   - Current LEAVING b = -I_br
+                _branch_idx = circuit.num_nodes + _self._branch_indices[$voltage_branch_idx]
                 _I_br = x[_branch_idx]
 
-                # Add branch current to KCL (note: signs are negated because F .-= residual)
+                # Add branch current to KCL (current LEAVING convention)
                 if $a_idx <= length(_pin_voltages)
-                    _pin_currents[$a_idx] -= _I_br
+                    _pin_currents[$a_idx] += _I_br
                 elseif $a_idx <= length(_pin_voltages) + length(_internal_voltages)
-                    _internal_currents[$a_idx - length(_pin_voltages)] -= _I_br
+                    _internal_currents[$a_idx - length(_pin_voltages)] += _I_br
                 end
                 if $(b != Symbol("0"))
                     if $b_idx <= length(_pin_voltages)
-                        _pin_currents[$b_idx] += _I_br
+                        _pin_currents[$b_idx] -= _I_br
                     elseif $b_idx <= length(_pin_voltages) + length(_internal_voltages)
-                        _internal_currents[$b_idx - length(_pin_voltages)] += _I_br
+                        _internal_currents[$b_idx - length(_pin_voltages)] -= _I_br
                     end
                 end
 
-                # Voltage constraint goes into _branch_residuals
-                # Since F .-= residual, we need residual = -(V_a - V_b - V_source)
-                # so that F = -(-(V_a - V_b - V_source)) = V_a - V_b - V_source = 0 at solution
+                # Voltage constraint: V_a - V_b = branch_value
+                # Residual = V_a - V_b - value (should be 0 at solution)
                 _V_a = $a_idx <= length(_pin_voltages) ? _pin_voltages[$a_idx] :
                        _internal_voltages[$a_idx - length(_pin_voltages)]
                 _V_b = $(b == Symbol("0")) ? 0.0 :
                        ($b_idx <= length(_pin_voltages) ? _pin_voltages[$b_idx] :
                         _internal_voltages[$b_idx - length(_pin_voltages)])
-                _branch_residuals[$branch_local_idx] = $eqvar - (_V_a - _V_b)
+                _branch_residuals[$voltage_branch_idx] = (_V_a - _V_b) - $eqvar
             end
         end)
     end
@@ -1066,7 +1086,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             # Initialize current accumulators (resistive contributions)
             _pin_currents = zeros($n_pins)
             _internal_currents = zeros($n_internal)
-            _branch_residuals = zeros($n_branches)  # For voltage contributions
+            _branch_residuals = zeros($n_voltage_branches)  # For voltage contributions only
 
             # Initialize reactive charge storage
             # _react_charges[i] stores Q from ddt(Q) expressions (current step)
