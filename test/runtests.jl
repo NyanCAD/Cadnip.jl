@@ -19,3 +19,8 @@ end
 @testset "VA Devices" begin
     include("test_va_devices.jl")
 end
+
+# Clean API tests (without MNA prefixes)
+@testset "Clean API" begin
+    include("test_clean_api.jl")
+end

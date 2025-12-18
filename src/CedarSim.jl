@@ -468,6 +468,43 @@ end
 export net
 
 #=
+Clean API Aliases - User-friendly names without MNA prefix
+
+These aliases provide a cleaner API that mirrors SciML/SPICE conventions.
+The underlying MNA types are still available for users who prefer them.
+=#
+
+# Core types
+const Circuit = MNACircuit
+const Net = MNANet
+const NetRef = MNANetRef
+
+# Devices with cleaner names
+const SimpleResistor = MNASimpleResistor
+const SimpleCapacitor = MNASimpleCapacitor
+const SimpleInductor = MNASimpleInductor
+const SimpleDiode = MNASimpleDiode
+const VoltageSource = SpcVoltageSource
+const CurrentSource = SpcCurrentSource
+const VCVS = SpcVCVS
+const VCCS = SpcVCCS
+
+# Context variable (cleaner name)
+const circuit = mna_circuit  # Use @with circuit => ckt begin ... end
+
+# VA device loading
+const va_load = mna_va_load
+
+# Simulation API
+const SimSpec = MNASimSpec
+const Gnd = MNAGnd
+
+export Circuit, Net, NetRef
+export SimpleResistor, SimpleCapacitor, SimpleInductor, SimpleDiode
+export VoltageSource, CurrentSource, VCVS, VCCS
+export circuit, va_load, SimSpec, Gnd
+
+#=
 Precompilation
 =#
 
