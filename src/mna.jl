@@ -180,6 +180,8 @@ end
 
 get_net!(circuit::MNACircuit, name::String) = get_net!(circuit, Symbol(name))
 get_net!(circuit::MNACircuit, net::MNANet) = net
+# MNANetRef support - extract the underlying net
+get_net!(circuit::MNACircuit, ref) = get_net!(circuit, ref.net)  # Handles MNANetRef
 
 """
     get_branch!(circuit::MNACircuit, name::Symbol) -> BranchVar
