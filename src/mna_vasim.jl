@@ -405,11 +405,11 @@ end
 function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
     fname = Symbol(stmt.id)
 
-    # $param_given check
+    # $param_given check - access params through _self._params
     if fname == Symbol("\$param_given")
         id = Symbol(stmt.args[1].item)
         return Expr(:call, :(!), Expr(:call, :mna_isdefault,
-            Expr(:call, :getfield, :_self, QuoteNode(id))))
+            Expr(:., Expr(:., :_self, QuoteNode(:_params)), QuoteNode(id))))
     end
 
     # V() probe - returns voltage
@@ -906,9 +906,18 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         push!(voltage_assigns, :($inode = _internal_voltages[$i]))
     end
 
-    # Generate parameter assignments from struct
+    # Generate parameter assignments from immutable params struct
+    # Using _params field for constant folding optimization
+    # Aliases reference their target parameter instead of having their own field
     param_assigns = map(collect(parameter_names)) do id
-        :($id = _self.$id)
+        if haskey(aliases, id)
+            # Alias: assign from target parameter
+            target = aliases[id]
+            :($id = _self._params.$target)
+        else
+            # Regular parameter: assign from params struct
+            :($id = _self._params.$id)
+        end
     end
 
     # Generate local variable initializations (excluding parameters which are already set)
@@ -1014,17 +1023,23 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         mna_isdefault(x) = false  # For now, assume not default
         mna_ddt(x) = 0.0  # For DC analysis, ddt = 0
 
-        # Device struct - use fully qualified types for macro hygiene
-        Base.@kwdef mutable struct $symname <: CedarSim.MNADevice
-            # MNA connection info (filled in by constructor)
-            _nets::Vector{CedarSim.MNANet} = CedarSim.MNANet[]
-            _internal_net_indices::Vector{Int} = Int[]
-            _branch_indices::Vector{Int} = Int[]  # Branch current indices for voltage contributions
-            _charge_indices::Vector{Int} = Int[]  # Charge state indices for ddt() calls
-            _name::Symbol = $(QuoteNode(symname))
-            _n_charges::Int = $n_charges  # Number of charge state variables
-            # Parameters
+        # Immutable params struct for constant folding optimization
+        # When device is inlined, Julia can constant-fold parameter branches
+        Base.@kwdef struct $(Symbol(symname, "Params"))
             $(struct_fields...)
+        end
+
+        # Device struct - stores immutable params for optimization
+        struct $symname <: CedarSim.MNADevice
+            # MNA connection info
+            _nets::Vector{CedarSim.MNANet}
+            _internal_net_indices::Vector{Int}
+            _branch_indices::Vector{Int}  # Branch current indices for voltage contributions
+            _charge_indices::Vector{Int}  # Charge state indices for ddt() calls
+            _name::Symbol
+            _n_charges::Int  # Number of charge state variables
+            # Immutable parameters (enables constant folding when inlined)
+            _params::$(Symbol(symname, "Params"))
         end
 
         # Constructor that connects to MNA circuit
@@ -1056,9 +1071,11 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 push!(charge_indices, charge.index)
             end
 
-            $symname(_nets=nets, _internal_net_indices=internal_indices,
-                     _branch_indices=branch_indices, _charge_indices=charge_indices,
-                     _name=name, _n_charges=$n_charges; kwargs...)
+            # Build immutable params struct from kwargs
+            params = $(Symbol(symname, "Params"))(; kwargs...)
+
+            $symname(nets, internal_indices, branch_indices, charge_indices,
+                     name, $n_charges, params)
         end
 
         # Stamp function - adds device to MNA system
@@ -1070,7 +1087,8 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         # Residual function - computes resist (I) and react (Q) contributions separately
         # Returns: (residual, jacobian_entries, react_charges, charge_indices)
         # OpenVAF approach: resist + alpha * react where alpha is integration coefficient
-        function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::CedarSim.MNACircuit)
+        # @inline enables constant folding of parameter branches when device is created inline
+        @inline function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::CedarSim.MNACircuit)
             _mna_n_size = length(x)
 
             # Get pin voltages from solution vector
