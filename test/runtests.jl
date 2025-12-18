@@ -24,3 +24,8 @@ end
 @testset "Clean API" begin
     include("test_clean_api.jl")
 end
+
+# Ported legacy tests (from DAECompiler-based test suite)
+@testset "Ported Legacy Tests" begin
+    include("test_ported_legacy.jl")
+end
