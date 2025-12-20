@@ -347,6 +347,28 @@ function evaluate!(dev, ctx, p, n, x)
 end
 ```
 
+### General Case: AD with s-Dual
+
+For arbitrary VA contributions with mixed resistive/reactive terms, we use ForwardDiff
+with the Laplace variable `s` as a Dual to automatically separate components:
+
+```julia
+using ForwardDiff: Dual, value, partials
+
+# s = Dual(0, 1) represents the Laplace variable
+# ddt(x) = s * x in the Laplace domain
+const s = Dual(0.0, 1.0)
+ddt(x) = s * x
+
+# Example: I(p,n) <+ V/R + C*ddt(V)
+# Evaluates to: V/R + s*(C*V) = Dual(V/R, C*V)
+# - value() = V/R → resistive, stamps into G
+# - partials() = C*V → charge q, stamps into C via ∂q/∂V
+```
+
+See `doc/mna_ad_stamping.md` for the complete AD-based approach to general
+VA contribution stamping.
+
 ### VCCS (Voltage-Controlled Current Source)
 
 ```julia
@@ -391,9 +413,10 @@ end
 - Controlled sources (VCVS, VCCS)
 
 ### Phase 3: Verilog-A Codegen
-- Modify vasim.jl to classify contributions
-- Generate direct stamps for linear cases
-- Generate evaluate! for nonlinear cases
+- Modify vasim.jl to emit contribution functions
+- Use ForwardDiff with s-dual for resist/react separation (ddt(x) = s*x)
+- Nested duals for Jacobian computation
+- Voltage contributions (`V(p,n) <+ ...`) allocate current variables
 
 ### Phase 4: Analysis Types
 - Transient via ODEProblem with mass matrix

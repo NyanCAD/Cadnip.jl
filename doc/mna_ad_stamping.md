@@ -9,172 +9,196 @@ I(p,n) <+ complex_expression(V(a,b), V(c,d), params, ddt(...));
 
 Can we stamp this into MNA matrices without AST analysis?
 
-**Yes, using AD to automatically extract Jacobians.**
+**Yes, using ForwardDiff to automatically extract both Jacobians and resistive/reactive separation.**
 
 ---
 
-## The General Approach
+## The Key Insight: Use Laplace Variable s as a Dual
 
-### Step 1: Separate Resistive and Reactive Contributions
-
-Every Verilog-A current contribution has the form:
-```
-I = f(V) + ddt(q(V))
-```
-
-Where:
-- `f(V)` is the resistive (DC) part → stamps into G
-- `q(V)` is the charge → stamps into C (via ∂q/∂V)
-
-We need to separate these during evaluation.
-
-### Step 2: Use Tagged Values for ddt
-
-```julia
-# A value that carries both resistive and reactive components
-struct SplitValue{T}
-    resist::T    # f(V) - resistive part
-    react::T     # q(V) - reactive/charge part
-end
-
-# Arithmetic propagates both components
-Base.:+(a::SplitValue, b::SplitValue) = SplitValue(a.resist + b.resist, a.react + b.react)
-Base.:*(a::SplitValue, b::Number) = SplitValue(a.resist * b, a.react * b)
-Base.:*(a::Number, b::SplitValue) = SplitValue(a * b.resist, a * b.react)
-# ... etc for other operations
-
-# ddt moves value from resist to react
-function ddt(x::SplitValue)
-    # ddt(f + ddt(q)) = ddt(f) + ddt(ddt(q))
-    # But ddt(ddt(q)) is not supported, so:
-    SplitValue(x.react, zero(x.react))  # react becomes new resist (it will be differentiated)
-end
-
-function ddt(x::Number)
-    # Plain number becomes reactive contribution
-    SplitValue(zero(x), x)
-end
-```
-
-Wait, this isn't quite right. Let me think more carefully...
-
-### Better Approach: Accumulate Separately
-
-```julia
-mutable struct ContributionAccumulator{T}
-    resist::T    # Resistive contribution (no ddt)
-    react::T     # Reactive contribution (inside ddt)
-end
-
-# When we see: I(p,n) <+ expr
-# We accumulate into resist
-
-# When we see: I(p,n) <+ ddt(q_expr)
-# We accumulate q_expr into react
-
-# The issue: how do we detect ddt in the middle of an expression?
-```
-
-The challenge is that `ddt` can appear anywhere in an expression:
-```verilog
-I(p,n) <+ V(p,n)/R + C1*ddt(V(p,n)) + ddt(C2*V(p,n)*V(p,n));
-```
-
-### Solution: ddt Returns a Tagged Type
-
-```julia
-struct ReactiveValue{T}
-    value::T  # The charge q - what's inside ddt()
-end
-
-# ddt(x) marks x as reactive
-ddt(x) = ReactiveValue(x)
-
-# When adding ReactiveValue to regular value, track separately
-struct MixedValue{T}
-    resist::T
-    react::T
-end
-
-Base.:+(a::Number, b::ReactiveValue) = MixedValue(a, b.value)
-Base.:+(a::ReactiveValue, b::Number) = MixedValue(b, a.value)
-Base.:+(a::MixedValue, b::ReactiveValue) = MixedValue(a.resist, a.react + b.value)
-Base.:+(a::MixedValue, b::Number) = MixedValue(a.resist + b, a.react)
-# ... etc
-```
-
-This way, when we evaluate a contribution expression, we get a `MixedValue` that tells us:
-- `resist`: the f(V) part → stamp into G
-- `react`: the q(V) part → stamp into C
-
----
-
-## Complete Implementation Sketch
+In the Laplace domain, `ddt(x) = s * x`. We can leverage this by representing `s`
+as a ForwardDiff Dual number with `value=0` and `partial=1`:
 
 ```julia
 using ForwardDiff
 
-# Tagged types for separating resistive/reactive
-struct ReactiveValue{T}
-    charge::T  # q(V) - the charge
-end
+# The Laplace variable s as a Dual
+# value = 0 (no DC contribution from s itself)
+# partial = 1 (tracks reactive contributions)
+const s = ForwardDiff.Dual(0.0, 1.0)
 
-struct MixedContribution{T}
-    resist::T  # f(V) - stamps into G
-    react::T   # q(V) - stamps into C
-end
+# ddt in Laplace domain is just multiplication by s
+ddt(x) = s * x
+```
 
-# Convert plain numbers
-MixedContribution(x::Number) = MixedContribution(x, zero(x))
-MixedContribution(x::ReactiveValue) = MixedContribution(zero(x.charge), x.charge)
+Now when we evaluate a contribution:
+```julia
+result = V/R + C*ddt(V)
+       = V/R + C*(s*V)
+       = V/R + s*(C*V)
+```
 
-# ddt creates reactive contribution
-ddt(x::Number) = ReactiveValue(x)
-ddt(x::ForwardDiff.Dual) = ReactiveValue(x)  # Works with AD too
+The dual arithmetic automatically separates:
+- `ForwardDiff.value(result) = V/R` → **resistive part f(V)** → stamps into G
+- `ForwardDiff.partials(result, 1) = C*V` → **charge q(V)** → stamps into C (via ∂q/∂V)
 
-# Arithmetic on MixedContribution
-function Base.:+(a::MixedContribution, b::MixedContribution)
-    MixedContribution(a.resist + b.resist, a.react + b.react)
-end
-function Base.:+(a::MixedContribution, b::Number)
-    MixedContribution(a.resist + b, a.react)
-end
-function Base.:+(a::Number, b::MixedContribution)
-    MixedContribution(a + b.resist, b.react)
-end
-function Base.:+(a::MixedContribution, b::ReactiveValue)
-    MixedContribution(a.resist, a.react + b.charge)
-end
-function Base.:+(a::ReactiveValue, b::MixedContribution)
-    MixedContribution(b.resist, a.charge + b.react)
-end
-function Base.:+(a::Number, b::ReactiveValue)
-    MixedContribution(a, b.charge)
-end
-function Base.:+(a::ReactiveValue, b::Number)
-    MixedContribution(b, a.charge)
-end
-function Base.:+(a::ReactiveValue, b::ReactiveValue)
-    MixedContribution(zero(a.charge), a.charge + b.charge)
-end
+**No custom tagged types needed!** ForwardDiff does the bookkeeping for us.
 
-# Multiplication
-function Base.:*(a::Number, b::MixedContribution)
-    MixedContribution(a * b.resist, a * b.react)
-end
-function Base.:*(a::MixedContribution, b::Number)
-    MixedContribution(a.resist * b, a.react * b)
-end
-function Base.:*(a::Number, b::ReactiveValue)
-    ReactiveValue(a * b.charge)
-end
+---
 
-# Division, etc... (similar patterns)
+## Complete Approach: Nested Duals
+
+To get both the resistive/reactive separation AND the Jacobians, we use nested Duals:
+
+1. **Inner Dual**: Partials for node voltages (∂/∂Vi) - gives us the Jacobian
+2. **Outer Dual**: Partial for s - separates resistive from reactive
+
+```julia
+using ForwardDiff
+using ForwardDiff: Dual, Tag, value, partials
+
+# Define tags to avoid mixing up our duals
+struct STag end    # Tag for the s (Laplace) dual
+struct VTag end    # Tag for voltage partials
+
+# Create the s variable with its own tag
+const s = Dual{STag}(0.0, 1.0)
+
+# ddt is multiplication by s
+ddt(x) = s * x
+ddt(x::Dual{STag}) = s * x  # Works with already-tagged values
 
 #==============================================================================#
-# MNA Context and Stamping
+# Evaluating a Contribution
 #==============================================================================#
 
+"""
+    evaluate_contribution(contrib_func, x::Vector{Float64})
+
+Evaluate a VA contribution function and return:
+- resist_val: f(V) value at operating point
+- react_val: q(V) value at operating point
+- ∂f/∂V: Jacobian of resistive part
+- ∂q/∂V: Jacobian of reactive part (charge Jacobian)
+"""
+function evaluate_contribution(contrib_func, x::Vector{Float64})
+    n = length(x)
+
+    # Create voltage duals with VTag for Jacobian computation
+    # Wrap each in an STag dual for resist/react separation
+    function make_dual_voltage(i)
+        # Inner: voltage partial (1.0 for variable i, 0.0 otherwise)
+        v_partials = ntuple(j -> j == i ? 1.0 : 0.0, n)
+        v_dual = Dual{VTag}(x[i], v_partials...)
+        # Outer: wrap in STag (value only, s partial is 0 for voltages)
+        return Dual{STag}(v_dual, zero(v_dual))
+    end
+
+    # Evaluate for each voltage partial
+    results = [begin
+        x_dual = [make_dual_voltage(j) for j in 1:n]
+        contrib_func(x_dual...)
+    end for i in 1:n]
+
+    # Actually, simpler approach: evaluate once with all partials
+    x_dual = [make_dual_voltage(i) for i in 1:n]
+    result = contrib_func(x_dual...)
+
+    # Extract components
+    # result is Dual{STag}(resist_dual, react_dual)
+    resist_dual = value(result)           # Dual{VTag} with f(V) and ∂f/∂V
+    react_dual = partials(result, 1)      # Dual{VTag} with q(V) and ∂q/∂V
+
+    resist_val = value(resist_dual)       # f(V₀)
+    react_val = value(react_dual)         # q(V₀)
+
+    df_dV = [partials(resist_dual, i) for i in 1:n]  # ∂f/∂Vᵢ
+    dq_dV = [partials(react_dual, i) for i in 1:n]   # ∂q/∂Vᵢ
+
+    return resist_val, react_val, df_dV, dq_dV
+end
+```
+
+---
+
+## Simplified Single-Dual Approach
+
+For many cases, we can use a simpler approach with just the s-dual, computing
+Jacobians via multiple evaluations:
+
+```julia
+using ForwardDiff: Dual, value, partials
+
+# s as a simple Dual (no tag needed if we're careful)
+const s = Dual(0.0, 1.0)
+ddt(x) = s * x
+
+"""
+    stamp_current_contribution!(ctx, p, n, contrib_func, x)
+
+Stamp a general current contribution I(p,n) <+ expr into MNA matrices.
+Uses ForwardDiff with s-dual for resist/react separation.
+"""
+function stamp_current_contribution!(
+    ctx::MNAContext,
+    p::Int,           # Positive node (0 = ground)
+    n::Int,           # Negative node
+    contrib_func,     # (V₁, V₂, ...) -> contribution (may contain ddt)
+    x::Vector{Float64}
+)
+    num_nodes = length(x)
+
+    # Evaluate at operating point to get resist/react split
+    result = contrib_func(x...)
+
+    if result isa Dual
+        resist_val = value(result)
+        react_val = partials(result, 1)
+    else
+        resist_val = result
+        react_val = 0.0
+    end
+
+    # Compute Jacobians via finite differencing or nested AD
+    for i in 1:num_nodes
+        # Create dual for voltage i
+        x_dual = [j == i ? Dual(x[j], 1.0) : x[j] for j in 1:num_nodes]
+        result_i = contrib_func(x_dual...)
+
+        # result_i has structure: Dual(Dual(f, ∂f/∂Vi), Dual(q, ∂q/∂Vi))
+        # or simpler if x[j] wasn't wrapped in s-dual
+
+        if result_i isa Dual
+            resist_i = value(result_i)
+            react_i = partials(result_i, 1)
+        else
+            resist_i = result_i
+            react_i = 0.0
+        end
+
+        # Extract ∂/∂Vi from resist and react
+        df_dVi = resist_i isa Dual ? partials(resist_i, 1) : 0.0
+        dq_dVi = react_i isa Dual ? partials(react_i, 1) : 0.0
+
+        # Stamp into G (resistive Jacobian)
+        stamp_G!(ctx, p, i,  df_dVi)
+        stamp_G!(ctx, n, i, -df_dVi)
+
+        # Stamp into C (reactive Jacobian = ∂q/∂V)
+        stamp_C!(ctx, p, i,  dq_dVi)
+        stamp_C!(ctx, n, i, -dq_dVi)
+    end
+
+    # Stamp residual into RHS
+    stamp_b!(ctx, p, -resist_val)
+    stamp_b!(ctx, n,  resist_val)
+end
+```
+
+#==============================================================================#
+# MNA Context and Stamping Primitives
+#==============================================================================#
+
+```julia
 mutable struct MNAContext
     n_nodes::Int
     n_currents::Int
@@ -209,107 +233,18 @@ function stamp_b!(ctx::MNAContext, i::Int, val::Float64)
     i == 0 && return
     ctx.b[i] += val
 end
-
-#==============================================================================#
-# General Current Contribution Stamping
-#==============================================================================#
-
-"""
-    stamp_current_contribution!(ctx, p, n, contrib_func, node_voltages)
-
-Stamp a general current contribution I(p,n) <+ expr into MNA matrices.
-
-- `contrib_func(V...)` returns the contribution value (may be MixedContribution)
-- `node_voltages` are the current voltage values for linearization
-"""
-function stamp_current_contribution!(
-    ctx::MNAContext,
-    p::Int,           # Positive node index (0 = ground)
-    n::Int,           # Negative node index
-    contrib_func,     # Function: (V1, V2, ...) -> contribution
-    x::Vector{Float64}  # Current node voltages
-)
-    num_nodes = length(x)
-
-    # Evaluate with ForwardDiff to get Jacobian
-    # Create dual numbers for all node voltages
-    function eval_with_dual(i)
-        # Create vector of Duals where only variable i has partial = 1
-        x_dual = [ForwardDiff.Dual(x[j], j == i ? 1.0 : 0.0) for j in 1:num_nodes]
-        return contrib_func(x_dual...)
-    end
-
-    # Get value at operating point
-    result = contrib_func(x...)
-
-    # Handle different result types
-    resist_val, react_val = if result isa MixedContribution
-        (result.resist, result.react)
-    elseif result isa ReactiveValue
-        (0.0, result.charge)
-    else
-        (result, 0.0)
-    end
-
-    # Compute Jacobians via AD for non-zero components
-    if resist_val != 0.0 || true  # Always compute for Newton
-        # Resistive Jacobian: ∂f/∂V_i
-        for i in 1:num_nodes
-            x_dual = [ForwardDiff.Dual(x[j], j == i ? 1.0 : 0.0) for j in 1:num_nodes]
-            result_dual = contrib_func(x_dual...)
-
-            resist_dual = if result_dual isa MixedContribution
-                result_dual.resist
-            elseif result_dual isa ReactiveValue
-                zero(result_dual.charge)
-            else
-                result_dual
-            end
-
-            # Extract partial derivative
-            dfdVi = ForwardDiff.partials(resist_dual, 1)
-
-            # Stamp into G: current into p, out of n
-            stamp_G!(ctx, p, i,  dfdVi)
-            stamp_G!(ctx, n, i, -dfdVi)
-        end
-    end
-
-    if react_val != 0.0 || true  # Always compute for dynamics
-        # Reactive Jacobian: ∂q/∂V_i → goes into C matrix
-        for i in 1:num_nodes
-            x_dual = [ForwardDiff.Dual(x[j], j == i ? 1.0 : 0.0) for j in 1:num_nodes]
-            result_dual = contrib_func(x_dual...)
-
-            react_dual = if result_dual isa MixedContribution
-                result_dual.react
-            elseif result_dual isa ReactiveValue
-                result_dual.charge
-            else
-                zero(result_dual)
-            end
-
-            # Extract partial derivative
-            dqdVi = ForwardDiff.partials(react_dual, 1)
-
-            # Stamp into C
-            stamp_C!(ctx, p, i,  dqdVi)
-            stamp_C!(ctx, n, i, -dqdVi)
-        end
-    end
-
-    # Stamp equivalent sources for Newton iteration
-    # For resistive: I_eq = f(V) - J_f * V → stamp f(V) - sum(df/dVi * Vi)
-    # This is handled implicitly by the Newton formulation
-
-    # Actually for linearization: stamp the residual
-    stamp_b!(ctx, p, -resist_val)
-    stamp_b!(ctx, n,  resist_val)
-end
+```
 
 #==============================================================================#
 # Example: How Generated VA Code Would Look
 #==============================================================================#
+
+```julia
+using ForwardDiff: Dual, value, partials
+
+# Global s variable for ddt
+const s = Dual(0.0, 1.0)
+ddt(x) = s * x
 
 # For: I(p,n) <+ V(p,n)/R + C*ddt(V(p,n))
 # Generated code:
@@ -319,27 +254,28 @@ struct RCDevice
     C::Float64
 end
 
-function (dev::RCDevice)(p_net, n_net)
-    # This returns a contribution function
-    return (V...) -> begin
-        Vp = V[p_net.idx]
-        Vn = V[n_net.idx]
-        Vpn = Vp - Vn
-
-        # Resistive: V/R
-        # Reactive: C*V (charge, inside ddt)
-        Vpn / dev.R + ddt(dev.C * Vpn)
-    end
+# The contribution function - this is what gets generated from VA
+function rc_contribution(dev::RCDevice, Vp, Vn)
+    Vpn = Vp - Vn
+    # V/R is resistive, C*ddt(V) becomes s*C*V
+    Vpn / dev.R + dev.C * ddt(Vpn)
 end
 
-# Usage:
+# Usage in stamping:
 function stamp_rc_device!(ctx, dev::RCDevice, p, n, x)
-    contrib_func = (V...) -> begin
-        Vpn = V[p] - V[n]
-        Vpn / dev.R + ddt(dev.C * Vpn)
-    end
+    # Define contribution in terms of node voltages
+    contrib_func = (V...) -> rc_contribution(dev, V[p], V[n])
+
+    # Use the general stamping function
     stamp_current_contribution!(ctx, p, n, contrib_func, x)
 end
+
+# Example evaluation:
+# If V[p]=1.0, V[n]=0.0, R=1000, C=1e-6:
+#   result = 1.0/1000 + s * (1e-6 * 1.0)
+#         = Dual(0.001, 1e-6)
+#   value(result) = 0.001      → stamps into G as conductance
+#   partials(result,1) = 1e-6  → stamps into C as capacitance
 ```
 
 ---
@@ -350,58 +286,83 @@ end
 ```verilog
 I(p,n) <+ V(p,n)/R;
 ```
-→ Returns `Float64`, stamps into G only
+→ No `ddt`, so result is plain `Float64`
+→ `value(result) = V/R`, `partials = 0`
+→ Stamps into G only
 
 ### Case 2: Simple Capacitor ✓
 ```verilog
 I(p,n) <+ C * ddt(V(p,n));
 ```
-→ Returns `ReactiveValue`, stamps into C only
+→ `ddt(V)` returns `Dual(0, V)`, then `C * Dual(0, V) = Dual(0, C*V)`
+→ `value(result) = 0`, `partials = C*V`
+→ Stamps into C only
 
 ### Case 3: RC Parallel ✓
 ```verilog
 I(p,n) <+ V(p,n)/R + C*ddt(V(p,n));
 ```
-→ Returns `MixedContribution`, stamps both G and C
+→ Result is `Dual(V/R, C*V)`
+→ `value = V/R` → stamps into G
+→ `partials = C*V` → stamps into C (via ∂q/∂V = C)
 
 ### Case 4: Nonlinear Capacitor ✓
 ```verilog
 q = C0 * V(p,n) * V(p,n);
 I(p,n) <+ ddt(q);
 ```
-→ `ddt(C0*V^2)` returns `ReactiveValue` with `charge = C0*V^2`
-→ AD gives ∂q/∂V = 2*C0*V → stamps into C
+→ `ddt(C0*V²)` returns `Dual(0, C0*V²)`
+→ `partials = C0*V²` is the charge
+→ Nested AD gives ∂q/∂V = 2*C0*V → stamps into C
 
 ### Case 5: Diode ✓
 ```verilog
 I(p,n) <+ Is * (exp(V(p,n)/Vt) - 1);
 ```
-→ Returns `Float64` (nonlinear)
-→ AD gives ∂I/∂V = Is/Vt * exp(V/Vt) → stamps into G
-→ Residual stamps into b
+→ No `ddt`, result is plain `Float64` (nonlinear in V)
+→ Nested AD gives ∂I/∂V = Is/Vt * exp(V/Vt) → stamps into G
+→ Residual stamps into b for Newton iteration
 
-### Case 6: Voltage Source
+### Case 6: Voltage Source ⚠️
 ```verilog
 V(p,n) <+ Vdc;
 ```
-→ **This is different** - need current variable
-→ Handle separately (not a current contribution)
+→ **Needs current variable** - voltage is constrained, current unknown
+→ Detect at codegen time (LHS is V not I)
+→ Use separate `stamp_voltage_contribution!` that allocates current var
 
 ### Case 7: VCCS ✓
 ```verilog
 I(out_p, out_n) <+ gm * V(in_p, in_n);
 ```
-→ AD gives ∂I/∂V_inp = gm, ∂I/∂V_inn = -gm
-→ Stamps off-diagonal G entries
+→ When computing Jacobian w.r.t. V_inp: ∂I/∂V_inp = gm
+→ When computing Jacobian w.r.t. V_inn: ∂I/∂V_inn = -gm
+→ Stamps off-diagonal entries in G
+
+### Case 8: Inductor ⚠️
+```verilog
+V(p,n) <+ L * ddt(I(p,n));
+```
+→ **Needs current variable** - current is a state variable
+→ Current appears in ddt, making it part of the state vector
+→ Handle specially at codegen time
 
 ---
 
 ## Key Insight
 
-**We don't need AST analysis.** The combination of:
-1. Tagged types for `ddt()` to separate resistive/reactive
-2. ForwardDiff for automatic Jacobian computation
+**We don't need AST analysis or custom tagged types.** ForwardDiff does everything:
 
-...gives us everything we need to stamp any current contribution correctly.
+1. **s-dual for `ddt()`**: `ddt(x) = s * x` where `s = Dual(0,1)`
+   - `value(result)` = resistive part f(V) → stamps into G
+   - `partials(result)` = charge q(V) → stamps into C (via ∂q/∂V)
 
-**Voltage contributions** still need special handling (allocate current variable), but those are rare and easy to detect at codegen time (LHS is V not I).
+2. **Nested duals for Jacobians**: Wrap voltages in inner Dual for ∂/∂Vi
+   - Automatically gives us ∂f/∂V for G matrix
+   - Automatically gives us ∂q/∂V for C matrix
+
+3. **ForwardDiff tags**: Use `Dual{STag}` and `Dual{VTag}` to keep duals separated
+
+**Only two special cases need current variables:**
+- `V(p,n) <+ ...` - voltage contributions (detect LHS)
+- `V(p,n) <+ L*ddt(I)` - inductors (I is state)
