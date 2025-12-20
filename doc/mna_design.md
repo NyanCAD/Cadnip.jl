@@ -354,7 +354,20 @@ for Jacobian computation.
 
 ## SciML Integration
 
-### ODEProblem with Mass Matrix
+### Formulation Options
+
+With separate G and C matrices, we can choose the formulation at solve time:
+
+| Formulation | Pros | Cons | Best For |
+|-------------|------|------|----------|
+| Mass matrix ODE | More solver options (Rosenbrock, SDIRK) | Unstable with state-dependent mass matrix | Linear circuits, constant C |
+| Implicit DAE | Robust for any circuit | Limited to DAE solvers (IDA, DFBDF) | Nonlinear capacitors, BSIM models |
+
+**The issue:** For voltage-dependent capacitors like MOSFET Cgs/Cgd, `C(V) = ∂q/∂V` changes with state. State-dependent mass matrices can cause solver instabilities.
+
+**Recommendation:** Start with mass matrix for simple circuits, fall back to DAEProblem for circuits with nonlinear capacitors.
+
+### ODEProblem with Mass Matrix (constant C)
 
 ```julia
 function make_ode_problem(sys::MNASystem, tspan)
@@ -369,6 +382,26 @@ function make_ode_problem(sys::MNASystem, tspan)
 
     f = ODEFunction(rhs!; mass_matrix=C, jac=(J,u,p,t) -> (J .= -G))
     return ODEProblem(f, zeros(size(G,1)), tspan)
+end
+```
+
+### DAEProblem (nonlinear capacitors)
+
+```julia
+function make_dae_problem(sys::MNASystem, tspan, stamp_devices!)
+    function residual!(res, du, u, p, t)
+        # Rebuild matrices at current operating point
+        ctx = MNAContext()
+        stamp_devices!(ctx, u)  # Stamps depend on u for nonlinear devices
+        G, C, b = build_matrices(ctx)
+
+        # Residual: G*u + C*du/dt - b = 0
+        mul!(res, G, u)
+        mul!(res, C, du, 1.0, 1.0)  # res += C*du
+        res .-= b
+    end
+
+    return DAEProblem(residual!, du0, u0, tspan)
 end
 ```
 
