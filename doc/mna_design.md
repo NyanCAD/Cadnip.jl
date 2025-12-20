@@ -433,6 +433,168 @@ end
 
 ---
 
+## Phased Implementation
+
+Each phase must be verified before proceeding. No phase should exceed ~500 LOC of changes.
+
+### Phase 1: MNA Core (~200 LOC)
+
+**Goal:** Standalone MNA context and stamping primitives, tested in isolation.
+
+**Files:**
+- Create `src/mna/context.jl` - MNAContext struct, stamp_G!, stamp_C!, stamp_b!
+- Create `src/mna/build.jl` - build sparse matrices from COO
+
+**Tests:** Hand-build simple circuits in Julia (no codegen):
+```julia
+# Test: voltage divider
+ctx = MNAContext()
+vcc = get_node!(ctx, :vcc); out = get_node!(ctx, :out)
+# Stamp V source, two resistors manually
+# Verify G matrix structure, solve G\b, check V(out) = expected
+```
+
+**Exit criteria:**
+- DC solve of hand-stamped voltage divider matches analytical solution
+- RC circuit stamps produce correct G and C matrices
+
+---
+
+### Phase 2: Simple Device Stamps (~300 LOC)
+
+**Goal:** Rewrite simpledevices.jl with stamp! interface, coexisting with old API.
+
+**Files:**
+- Add stamp! methods to `src/simpledevices.jl` (don't remove old methods yet)
+- Create `src/mna/devices.jl` if needed for MNA-specific device wrappers
+
+**Tests:** Unit tests for each device type:
+```julia
+# Test each device stamps correctly
+ctx = MNAContext(); stamp!(SimpleResistor(r=1000), ctx, 1, 2)
+@test ctx.G_V == [0.001, -0.001, -0.001, 0.001]  # or similar
+```
+
+**Exit criteria:**
+- stamp! works for: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+- Hand-built RLC circuit solves correctly
+
+---
+
+### Phase 3: DC Solver Integration (~200 LOC)
+
+**Goal:** DC operating point via MNA, tested against existing solve_circuit results.
+
+**Files:**
+- Create `src/mna/solve.jl` - dc!() function
+- Create helper to build MNASystem from hand-specified circuits
+
+**Tests:** Compare against existing solver:
+```julia
+# Use existing solve_circuit for reference
+ref_sol = solve_circuit(simple_rc_circuit, mode=:dcop)
+# Build same circuit with MNA
+mna_sol = dc!(build_mna_system(...))
+@test mna_sol ≈ ref_sol
+```
+
+**Exit criteria:**
+- DC results match existing solver for 3+ simple circuits
+- Ground node handling verified
+
+---
+
+### Phase 4: Transient Solver (~200 LOC)
+
+**Goal:** Transient analysis via ODEProblem with mass matrix.
+
+**Files:**
+- Add make_ode_problem() to `src/mna/solve.jl`
+
+**Tests:** RC step response, RLC oscillation:
+```julia
+# RC circuit: V(t) = V0 * (1 - exp(-t/RC))
+# Compare MNA transient vs analytical
+```
+
+**Exit criteria:**
+- RC step response matches analytical within tolerance
+- RLC oscillation frequency correct
+
+---
+
+### Phase 5: SPICE Codegen (~300 LOC)
+
+**Goal:** Update spc/codegen.jl to emit stamp! calls.
+
+**Files:**
+- Modify `src/spc/codegen.jl` to emit MNA-style circuit functions
+- May need adapter in `src/spc/interface.jl`
+
+**Tests:** Existing SPICE test cases:
+```julia
+# Run existing test/spc/*.jl tests
+# They should produce same results via MNA path
+```
+
+**Exit criteria:**
+- `test/spc/` tests pass with MNA backend
+- Simple SPICE netlists (R, C, L, V, I) work end-to-end
+
+---
+
+### Phase 6: VA Contribution Functions (~400 LOC)
+
+**Goal:** Update vasim.jl to emit contribution functions instead of branch!/equation!.
+
+**Files:**
+- Modify `src/vasim.jl` codegen
+- Add s-dual ddt() implementation
+
+**Tests:** Start with simple VA models:
+1. varesistor.va - pure resistive
+2. vacap.va - reactive (ddt)
+3. vadiode.va - nonlinear
+
+**Exit criteria:**
+- Simple VA models produce correct DC results
+- Transient with VA capacitor works
+
+---
+
+### Phase 7: Nonlinear & Complex VA (~400 LOC)
+
+**Goal:** Full VA support including nonlinear capacitors.
+
+**Files:**
+- DAEProblem formulation in `src/mna/solve.jl`
+- Newton iteration support if needed
+
+**Tests:**
+- BSIM-level model DC operating point
+- Transient with voltage-dependent capacitance
+
+**Exit criteria:**
+- Existing VA test suite passes
+- BSIM inverter transient matches reference
+
+---
+
+### Phase 8: Cleanup (~200 LOC removed)
+
+**Goal:** Remove old infrastructure once MNA path is proven.
+
+**Files:**
+- Remove branch!/kcl!/equation! from `src/simulate_ir.jl`
+- Remove old device call operators from `src/simpledevices.jl`
+- Remove DAECompiler dependency
+
+**Exit criteria:**
+- Full test suite passes
+- No DAECompiler imports remain
+
+---
+
 ## Files to Modify/Create
 
 | File | Change |
