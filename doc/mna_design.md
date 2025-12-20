@@ -446,7 +446,7 @@ Verify against analytical solutions and ngspice where applicable.
 - Create `src/mna/context.jl` - MNAContext struct, stamp_G!, stamp_C!, stamp_b!
 - Create `src/mna/build.jl` - build sparse matrices from COO
 
-**Tests:** Hand-build simple circuits in Julia (no codegen):
+**New tests:** `test/mna/core.jl`
 ```julia
 # Test: voltage divider (5V, 1k/1k) → V(out) = 2.5V
 ctx = MNAContext()
@@ -471,7 +471,7 @@ x = solve_dc(ctx)
 **Files:**
 - Create stamp! methods (can be in `src/mna/devices.jl` or `src/simpledevices.jl`)
 
-**Tests:** Unit tests for each device stamp pattern:
+**New tests:** `test/mna/devices.jl`
 ```julia
 # Resistor stamps 4 entries into G
 # Capacitor stamps 4 entries into C
@@ -492,12 +492,16 @@ x = solve_dc(ctx)
 **Files:**
 - Create `src/mna/solve.jl` - dc(), transient()
 
-**Tests:** Analytical solutions:
+**New tests:** `test/mna/solve.jl` - analytical solutions:
 ```julia
 # DC: voltage dividers, current sources
 # Transient RC: V(t) = V0 * (1 - exp(-t/RC))
 # Transient RLC: oscillation at f = 1/(2π√LC)
 ```
+
+**Existing tests to validate (subset, hand-built circuits):**
+- `basic.jl`: "Simple VR Circuit", "Simple IR circuit", "Simple VRC circuit"
+- `transients.jl`: "Butterworth Filter" (RLC analytical solution)
 
 **Exit criteria:**
 - DC matches hand calculations
@@ -514,18 +518,19 @@ x = solve_dc(ctx)
 - Modify `src/spc/codegen.jl`
 - Update `src/spc/interface.jl` as needed
 
-**Tests:** Simple SPICE netlists:
-```spice
-V1 vcc 0 DC 5
-R1 vcc out 1k
-R2 out 0 1k
-.op
-```
-→ V(out) = 2.5V
+**Existing tests that must pass:**
+- `basic.jl`: "Simple Spectre sources", "Simple SPICE sources"
+- `basic.jl`: "Simple Spectre subcircuit", "SPICE include .LIB"
+- `basic.jl`: "SPICE parameter scope", "multiplicities"
+- `basic.jl`: "units and magnitudes", "functions", "ifelse"
+- `transients.jl`: "PWL" (SPICE PWL source)
+- `compilation.jl`: "Subcircuit net naming conflict"
+- `alias.jl`: net aliasing
 
 **Exit criteria:**
 - Basic SPICE netlists (R, C, L, V, I) parse and solve correctly
 - Results match ngspice for same netlists
+- All listed existing tests pass
 
 ---
 
@@ -537,13 +542,19 @@ R2 out 0 1k
 - Modify `src/vasim.jl` codegen
 - Add s-dual ddt() in `src/mna/contrib.jl`
 
-**Tests:** Simple VA models validated against ngspice:
+**Existing tests that must pass:**
+- `basic.jl`: "Verilog include"
+- `ddx.jl`: ddx() functionality
+- `varegress.jl`: VA resistor with reversed ports
+
+**New tests:** Simple VA models validated against ngspice:
 1. varesistor.va - DC I-V curve
 2. vacap.va - AC impedance
 3. vadiode.va - DC I-V curve
 
 **Exit criteria:**
 - Simple VA models match ngspice results
+- All listed existing tests pass
 
 ---
 
@@ -555,17 +566,35 @@ R2 out 0 1k
 - DAEProblem formulation in `src/mna/solve.jl`
 - Handle voltage-dependent capacitance
 
-**Tests:**
-- BSIM-class model DC operating point vs ngspice
-- Inverter transient vs ngspice
+**Existing tests that must pass:**
+- `inverter.jl`: GF180 BSIM4 inverter transient
+- `bsimcmg/inverter.jl`: BSIMCMG inverter
+- `bsimcmg/demo_bsimcmg.jl`: BSIMCMG demo
+- `ac.jl`: AC analysis (linear + BSIM inverter)
 
 **Exit criteria:**
 - BSIM DC within tolerance of ngspice
-- Transient waveforms qualitatively correct
+- Inverter transient waveforms match expected behavior
+- AC frequency response correct
 
 ---
 
-### Phase 7: Cleanup
+### Phase 7: Advanced Features (~300 LOC)
+
+**Goal:** ParamSim, sweeps, sensitivity.
+
+**Existing tests that must pass:**
+- `params.jl`: ParamSim, ParamLens, ParamObserver
+- `sweep.jl`: Sweep, ProductSweep, CircuitSweep, dc! sweeps
+- `sensitivity.jl`: Forward sensitivity analysis
+
+**Exit criteria:**
+- Parameter sweeping works
+- Sensitivity analysis produces correct gradients
+
+---
+
+### Phase 8: Cleanup
 
 **Goal:** Remove dead code.
 
@@ -574,9 +603,12 @@ R2 out 0 1k
 - Remove DAECompiler dependency
 - Clean up unused code paths
 
+**All tests must pass:**
+- `runtests.jl` complete suite
+
 **Exit criteria:**
 - No DAECompiler imports
-- All tests pass
+- Full test suite passes
 
 ---
 
