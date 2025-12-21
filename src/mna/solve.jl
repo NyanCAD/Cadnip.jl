@@ -540,6 +540,163 @@ function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
 end
 
 #==============================================================================#
+# MNASim: Parameterized MNA Circuit Wrapper
+#==============================================================================#
+
+"""
+    MNASim{F,P}
+
+Parameterized MNA circuit simulation wrapper, similar to CedarSim's ParamSim.
+
+# Fields
+- `builder::F`: Function that builds the circuit given parameters
+- `mode::Symbol`: Simulation mode (:tran, :dcop, :tranop)
+- `params::P`: Named tuple of circuit parameters
+
+# Modes
+- `:tran` - Full transient simulation with time-dependent sources
+- `:dcop` - DC operating point (time-dependent sources at t=0)
+- `:tranop` - Transient operating point (steady state for tran)
+
+# Example
+```julia
+function build_circuit(p)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+    stamp!(Resistor(p.R), ctx, vcc, out)
+    stamp!(Capacitor(p.C), ctx, out, 0)
+
+    return ctx
+end
+
+sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
+sys = assemble!(sim)
+sol = solve_dc(sys)
+```
+"""
+struct MNASim{F,P}
+    builder::F
+    mode::Symbol
+    params::P
+
+    function MNASim(builder::F; mode::Symbol=:tran, kwargs...) where {F}
+        params = NamedTuple(kwargs)
+        new{F,typeof(params)}(builder, mode, params)
+    end
+end
+
+export MNASim, alter, with_mode
+
+# Allow calling the sim to build the circuit
+function (sim::MNASim)()
+    return sim.builder(sim.params)
+end
+
+# Build and assemble in one step
+function assemble!(sim::MNASim)
+    ctx = sim()
+    return assemble!(ctx)
+end
+
+# Create a new sim with different mode
+function with_mode(sim::MNASim, mode::Symbol)
+    return MNASim(sim.builder; mode=mode, sim.params...)
+end
+
+# Create a new sim with altered parameters
+function alter(sim::MNASim; kwargs...)
+    new_params = merge(sim.params, NamedTuple(kwargs))
+    return MNASim(sim.builder; mode=sim.mode, new_params...)
+end
+
+"""
+    solve_dc(sim::MNASim) -> DCSolution
+
+Build circuit from sim and solve DC operating point.
+"""
+function solve_dc(sim::MNASim)
+    sys = assemble!(sim)
+    return solve_dc(sys)
+end
+
+"""
+    solve_ac(sim::MNASim, freqs; kwargs...) -> ACSolution
+
+Build circuit from sim and perform AC analysis.
+"""
+function solve_ac(sim::MNASim, freqs::AbstractVector{<:Real}; kwargs...)
+    sys = assemble!(sim)
+    return solve_ac(sys, freqs; kwargs...)
+end
+
+#==============================================================================#
+# DC-Initialized Transient Setup
+#==============================================================================#
+
+"""
+    make_dc_initialized_dae_problem(sys::MNASystem, tspan; kwargs...) -> NamedTuple
+
+Create a DAE problem with DC-initialized state, similar to CedarDCOp.
+
+This is the recommended way to set up transient analysis:
+1. Solves DC operating point for consistent initial voltages
+2. Computes consistent initial derivatives
+3. Returns data for DAEProblem construction
+
+# Usage
+```julia
+using Sundials
+using DiffEqBase: BrownFullBasicInit
+
+dae_data = make_dc_initialized_dae_problem(sys, (0.0, 1e-3))
+prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
+                  differential_vars = dae_data.differential_vars)
+sol = solve(prob, IDA(); initializealg = BrownFullBasicInit())
+```
+"""
+function make_dc_initialized_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real})
+    # Step 1: Solve DC to get consistent initial state
+    dc_sol = solve_dc(sys)
+    u0 = dc_sol.x
+
+    # Step 2: Create DAE problem with DC-initialized state
+    return make_dae_problem(sys, tspan; u0=u0)
+end
+
+export make_dc_initialized_dae_problem
+
+"""
+    make_dc_initialized_ode_problem(sys::MNASystem, tspan) -> NamedTuple
+
+Create an ODE problem (mass matrix formulation) with DC-initialized state.
+
+# Usage
+```julia
+using OrdinaryDiffEq
+
+ode_data = make_dc_initialized_ode_problem(sys, (0.0, 1e-3))
+f = ODEFunction(ode_data.f;
+                mass_matrix = ode_data.mass_matrix,
+                jac = ode_data.jac,
+                jac_prototype = ode_data.jac_prototype)
+prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
+sol = solve(prob, Rodas5P())
+```
+"""
+function make_dc_initialized_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real})
+    # Solve DC to get consistent initial state
+    dc_sol = solve_dc(sys)
+    u0 = dc_sol.x
+
+    return make_ode_problem(sys, tspan; u0=u0)
+end
+
+export make_dc_initialized_ode_problem
+
+#==============================================================================#
 # Utility Functions
 #==============================================================================#
 

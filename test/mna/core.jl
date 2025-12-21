@@ -937,4 +937,160 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         end
     end
 
+    #==========================================================================#
+    # MNASim: Parameterized Circuit Wrapper
+    #==========================================================================#
+
+    # Import new exports
+    using CedarSim.MNA: MNASim, alter, with_mode
+    using CedarSim.MNA: make_dc_initialized_dae_problem, make_dc_initialized_ode_problem
+
+    @testset "MNASim basics" begin
+        # Define a parameterized circuit builder
+        function build_voltage_divider(p)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(p.R1), ctx, vcc, out)
+            stamp!(Resistor(p.R2), ctx, out, 0)
+
+            return ctx
+        end
+
+        # Create sim with parameters
+        sim = MNASim(build_voltage_divider; Vcc=10.0, R1=1000.0, R2=1000.0)
+
+        @test sim.mode == :tran
+        @test sim.params.Vcc == 10.0
+        @test sim.params.R1 == 1000.0
+
+        # Build and solve
+        sol = solve_dc(sim)
+        @test voltage(sol, :out) ≈ 5.0  # Voltage divider: Vcc * R2/(R1+R2)
+
+        # Alter parameters
+        sim2 = alter(sim; R2=3000.0)
+        @test sim2.params.R2 == 3000.0
+        @test sim2.params.R1 == 1000.0  # Unchanged
+
+        sol2 = solve_dc(sim2)
+        @test voltage(sol2, :out) ≈ 7.5  # 10 * 3000/4000
+
+        # Change mode
+        sim3 = with_mode(sim, :dcop)
+        @test sim3.mode == :dcop
+        @test sim3.params.Vcc == 10.0  # Params preserved
+    end
+
+    @testset "MNASim with RC circuit" begin
+        function build_rc(p)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(p.R), ctx, vcc, out)
+            stamp!(Capacitor(p.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        sim = MNASim(build_rc; Vcc=5.0, R=1000.0, C=1e-6)
+
+        # DC solution (capacitor is open circuit)
+        sol = solve_dc(sim)
+        @test voltage(sol, :out) ≈ 5.0  # At DC, capacitor is open
+
+        # AC sweep - cutoff fc = 1/(2πRC) ≈ 159Hz for R=1kΩ, C=1μF
+        # At 10Hz (well below cutoff), gain should be ~1
+        freqs = [10.0, 100.0, 1000.0]
+        ac_sol = solve_ac(sim, freqs)
+
+        # At 10Hz (f << fc), gain ≈ 1 (within 1%)
+        @test abs(voltage(ac_sol, :out)[1]) > 0.99 * sim.params.Vcc
+        # At 1000Hz (f >> fc), gain should be < 0.2 (rolloff)
+        @test abs(voltage(ac_sol, :out)[3]) < 0.2 * sim.params.Vcc
+    end
+
+    @testset "DC-initialized transient (ODE)" begin
+        using OrdinaryDiffEq
+
+        # Build RC circuit and use DC-initialized transient
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        Vcc = 5.0
+        R = 1000.0
+        C = 1e-6
+        τ = R * C
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R), ctx, vcc, out)
+        stamp!(Capacitor(C), ctx, out, 0)
+
+        sys = assemble!(ctx)
+        tspan = (0.0, 5τ)
+
+        # Use DC-initialized problem - should start at steady state
+        ode_data = make_dc_initialized_ode_problem(sys, tspan)
+
+        # DC initialization means V_out starts at Vcc (steady state)
+        @test ode_data.u0[2] ≈ Vcc
+
+        f = ODEFunction(ode_data.f;
+                        mass_matrix = ode_data.mass_matrix,
+                        jac = ode_data.jac,
+                        jac_prototype = ode_data.jac_prototype)
+        prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
+        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Starting from steady state, should stay at Vcc
+        @test sol(0.0)[2] ≈ Vcc
+        @test sol(5τ)[2] ≈ Vcc
+    end
+
+    @testset "DC-initialized transient (DAE)" begin
+        using Sundials
+        using DiffEqBase: BrownFullBasicInit
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        Vcc = 3.3
+        R = 2200.0
+        C = 100e-9
+        τ = R * C
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R), ctx, vcc, out)
+        stamp!(Capacitor(C), ctx, out, 0)
+
+        sys = assemble!(ctx)
+        tspan = (0.0, 5τ)
+
+        # Use DC-initialized problem
+        dae_data = make_dc_initialized_dae_problem(sys, tspan)
+
+        # DC initialization means consistent ICs
+        @test dae_data.u0[1] ≈ Vcc  # vcc
+        @test dae_data.u0[2] ≈ Vcc  # out (DC steady state)
+
+        prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
+                          differential_vars = dae_data.differential_vars)
+        sol = solve(prob, IDA(); reltol=1e-8, abstol=1e-10,
+                    initializealg = BrownFullBasicInit())
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Starting from steady state, should stay there
+        @test sol(0.0)[2] ≈ Vcc rtol=1e-3
+        @test sol(5τ)[2] ≈ Vcc rtol=1e-3
+    end
+
 end  # @testset "MNA Core Tests"
