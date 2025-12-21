@@ -438,6 +438,24 @@ end
 Each phase must be verified before proceeding. No phase should exceed ~500 LOC.
 Verify against analytical solutions and ngspice where applicable.
 
+### Phase 0: Dependency Cleanup
+
+**Goal:** Clean baseline on latest Julia with minimal dependencies.
+
+**Tasks:**
+- Update to latest Julia release (1.11+)
+- Aggressively prune unused dependencies from Project.toml
+- Update remaining dependencies to latest versions
+- Remove or isolate DAECompiler dependency
+- Fix any segfaults or compatibility issues from updates
+
+**Exit criteria:**
+- `] test` runs without segfaults on latest Julia
+- Minimal dependency set identified
+- CI passes on latest Julia
+
+---
+
 ### Phase 1: MNA Core (~200 LOC)
 
 **Goal:** Standalone MNA context and stamping primitives, tested in isolation.
