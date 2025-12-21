@@ -352,6 +352,33 @@ Integration with SciML follows SciMLBase.jl patterns:
 - Jacobian is constant: `-G`
 - Compatible with stiff solvers (Rodas5, QNDF, etc.)
 
+### Bug Fixes (2024-12-21)
+
+After initial implementation, testing with Julia 1.12 revealed several issues:
+
+1. **Missing Dependencies**
+   - Added `Printf` and `SparseArrays` to Project.toml
+
+2. **Missing Exports**
+   - Added `stamp_conductance!`, `stamp_capacitance!` to context.jl exports
+   - Added `voltage`, `current` helper functions to solve.jl exports
+
+3. **VCCS Sign Convention Error**
+   - Original: stamps `+gm` into `G[out_p, in_p]` (incorrect)
+   - Fixed: stamps `-gm` into `G[out_p, in_p]` (current INTO out_p = negative)
+   - MNA convention: "current leaving node is positive"
+   - When I = gm * V(in) flows into out_p, it contributes -gm to G[out_p, :]
+
+4. **Test Import Conflicts**
+   - Changed from `using CedarSim` to explicit imports from `CedarSim.MNA`
+   - Avoids conflicts between CedarSim.VoltageSource and MNA.VoltageSource
+
+5. **RL High-Pass Filter Test**
+   - Fixed test circuit topology (R in series, L to ground)
+   - Original test had incorrect topology (L in series, R to ground)
+
+All 92 MNA tests now pass on Julia 1.12.
+
 ### Next Steps
 
 Phase 4 (SPICE Codegen) will:
