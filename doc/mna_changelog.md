@@ -89,10 +89,38 @@ Clean baseline on Julia 1.12 with minimal dependencies. Simulation won't work ye
 - Tests that eval generated circuits or call `solve_circuit`
 - PDK-dependent tests (BSIM4, Sky130PDK, etc.)
 
+### Test Infrastructure Changes
+
+**test/runtests.jl**
+- Added `PHASE0_MINIMAL` flag for conditional test execution
+- Phase 0 runs only: `spectre_expr.jl`, `sweep.jl`
+- Full test suite runs when all dependencies are available
+
+**test/common.jl**
+- Conditional `DAECompiler` import with `HAS_DAECOMPILER` flag
+- Stub implementations of `solve_circuit`, `solve_spice_*`, `solve_spectre_*`
+- `sim_time` falls back to stubs when DAECompiler unavailable
+
+**test/spectre_expr.jl**
+- Added `HAS_SIMULATION` guards around `eval(fn)` and variable tests
+- Parsing and codegen tests work without simulation
+
+**test/sweep.jl**
+- Added `HAS_SIMULATION` guards around `dc!` tests
+- Sweep data structure tests work without simulation
+
+**test/Project.toml**
+- Removed heavy dependencies: BSIM4, Sky130PDK, GF180MCUPDK, etc.
+- Minimal deps for parsing tests only
+
+**.github/workflows/ci.yml**
+- Updated to run `Pkg.test("CedarSim")` instead of smoke tests
+- Develops local packages in test environment
+
 ### Notes
 - Stubs return placeholder values to allow codegen testing
 - `equation` struct is both a type and callable (matches DAECompiler API)
-- Some tests will fail because they try to execute generated code
+- Phase 0 tests validate parsing and code generation only
 
 ---
 
