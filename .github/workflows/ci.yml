@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.12'
+        os:
+          - ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Install dependencies
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+          '
+
+      - name: Run SpectreNetlistParser tests
+        run: |
+          julia --project=SpectreNetlistParser.jl -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.test()
+          '
+
+      - name: Run VerilogAParser tests
+        run: |
+          julia --project=VerilogAParser.jl -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.test()
+          '
+
+      - name: Install and precompile test dependencies
+        run: |
+          julia --project=test -e '
+            using Pkg
+            # Develop the main package and subpackages in test environment
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="SpectreNetlistParser.jl"),
+              PackageSpec(path="VerilogAParser.jl"),
+              PackageSpec(path="Lexers.jl")
+            ])
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run CedarSim tests
+        run: julia --project=test test/runtests.jl

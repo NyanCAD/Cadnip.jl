@@ -6,6 +6,8 @@ using SpectreNetlistParser.SPICENetlistParser: SPICENetlistCSTParser
 using Test
 using CedarSim.SpectreEnvironment
 
+# Phase 0: Check if simulation is available
+const HAS_SIMULATION = CedarSim.USE_DAECOMPILER
 
 code = """
 parameters p1=23pf p2=.3 p3 = 1&2~^3 p4 = true && false || true p5 = M_1_PI * 3.0
@@ -18,27 +20,43 @@ r6 (1 0) resistor r=((p1<1) ? p4+1 : p3)  // the ternary operator
 """
 
 @testset "spectre parameters" begin
-ast = SpectreNetlistParser.parse(code);
-fn = CedarSim.make_spectre_netlist(ast)
-eval(fn)
+    # Test parsing
+    ast = SpectreNetlistParser.parse(code)
+    @test ast !== nothing
 
-global_to_julia = CedarSim.SpcScope()
-val = ast.stmts[1].params[1].val
-@test global_to_julia(val) ≈ 23e-12
-val = ast.stmts[1].params[2].val
-@test global_to_julia(val) == 0.3
-val = ast.stmts[1].params[3].val
-@test eval(global_to_julia(val)) == ~((1&2) ⊻ 3)
-val = ast.stmts[1].params[4].val
-@test eval(global_to_julia(val)) == (true && false || true)
-val = ast.stmts[1].params[5].val
-@test eval(global_to_julia(val)) == M_1_PI * 3.0
+    # Test code generation (produces valid Julia AST)
+    fn = CedarSim.make_spectre_netlist(ast)
+    @test fn isa Expr
 
-@test p1 ≈ 23e-12
-@test p2 == 0.3
-@test p3 == ~((1&2) ⊻ 3)
-@test p4 == (true && false || true)
-@test p5 == M_1_PI * 3.0
+    # Test individual parameter value parsing
+    global_to_julia = CedarSim.SpcScope()
+
+    val = ast.stmts[1].params[1].val
+    @test global_to_julia(val) ≈ 23e-12
+
+    val = ast.stmts[1].params[2].val
+    @test global_to_julia(val) == 0.3
+
+    val = ast.stmts[1].params[3].val
+    @test eval(global_to_julia(val)) == ~((1&2) ⊻ 3)
+
+    val = ast.stmts[1].params[4].val
+    @test eval(global_to_julia(val)) == (true && false || true)
+
+    val = ast.stmts[1].params[5].val
+    @test eval(global_to_julia(val)) == M_1_PI * 3.0
+
+    # Phase 0: Skip eval(fn) and variable tests - requires simulation
+    if HAS_SIMULATION
+        eval(fn)
+        @test p1 ≈ 23e-12
+        @test p2 == 0.3
+        @test p3 == ~((1&2) ⊻ 3)
+        @test p4 == (true && false || true)
+        @test p5 == M_1_PI * 3.0
+    else
+        @info "Skipping eval tests (Phase 0: simulation not available)"
+    end
 end
 
 @testset "3 port BJT" begin
@@ -49,6 +67,35 @@ end
     stmt = SPICENetlistCSTParser.parse(IOBuffer(str))
     spc = CedarSim.SpcScope()
     @test spc(stmt.stmts[2]) isa Expr
+end
+
+@testset "spectre parsing" begin
+    # Additional parsing tests for Phase 0
+    spectre_code = """
+    c1 (Y 0) capacitor c=100f
+    r2 (Y VDD) resistor R=10k
+    v1 (VDD 0) vsource type=dc dc=0.7
+    """
+    ast = SpectreNetlistParser.parse(spectre_code)
+    @test ast !== nothing
+    @test length(ast.stmts) >= 3
+
+    code = CedarSim.make_spectre_circuit(ast)
+    @test code isa Expr
+end
+
+@testset "SPICE parsing" begin
+    spice_code = """
+    * Simple RC circuit
+    V1 vcc 0 DC 5
+    R1 vcc out 1k
+    C1 out 0 1u
+    """
+    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice)
+    @test ast !== nothing
+
+    code = CedarSim.make_spectre_circuit(ast)
+    @test code isa Expr
 end
 
 end # module test_spectre

@@ -4,6 +4,9 @@ module test_sweep
 using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
+# Phase 0: Check if simulation is available
+const HAS_SIMULATION = CedarSim.USE_DAECOMPILER
+
 # Simple two-resistor circuit:
 #
 #  ┌─R1─┬── +
@@ -241,6 +244,9 @@ end
 
 end
 
+# Phase 0: Simulation-dependent tests - require DAECompiler
+if HAS_SIMULATION
+
 @testset "CircuitSweep" begin
     # Test construction of the `CircuitSweep` object
     cs = CircuitSweep(TwoResistorCircuit, Sweep(R1 = 1.0:10.0))
@@ -369,6 +375,10 @@ end
         @test isapprox_deftol(v_in/r_load, sol[cs.sys.x1.r1.I][end])
     end
 end
+
+else
+    @info "Skipping CircuitSweep and dc! tests (Phase 0: simulation not available)"
+end  # if HAS_SIMULATION
 
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration
