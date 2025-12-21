@@ -6,3 +6,4 @@ test/ir.tar.gz
 ir/
 docs/Manifest.toml
 docs/build
+test/Manifest.toml
