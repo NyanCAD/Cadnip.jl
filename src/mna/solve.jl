@@ -15,6 +15,7 @@ using SparseArrays
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
 export make_ode_problem, make_ode_function
+export make_dae_problem, make_dae_function
 export voltage, current, magnitude_db, phase_deg
 
 #==============================================================================#
@@ -386,6 +387,155 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
         jac = ode_funcs.jac!,
         jac_prototype = ode_funcs.jac_prototype,
         sys = sys  # Keep reference for solution interpretation
+    )
+end
+
+"""
+    make_dae_function(sys::MNASystem) -> NamedTuple
+
+Create a DAE function for use with DAE solvers (e.g., Sundials IDA).
+
+The MNA system G*x + C*dx/dt = b is converted to implicit DAE form:
+    F(du, u, p, t) = C*du + G*u - b = 0
+
+This is useful when C is singular (has zero rows for algebraic equations).
+
+# Returns
+NamedTuple with:
+- `f!`: Residual function F!(resid, du, u, p, t)
+- `jac_du!`: Jacobian w.r.t. du (= C)
+- `jac_u!`: Jacobian w.r.t. u (= G)
+- `differential_vars`: Boolean vector indicating differential variables
+
+# Usage with Sundials
+```julia
+using Sundials
+
+dae_data = make_dae_function(sys)
+prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, tspan;
+                  differential_vars = dae_data.differential_vars)
+sol = solve(prob, IDA())
+```
+"""
+function make_dae_function(sys::MNASystem)
+    G = sys.G
+    C = sys.C
+    b = sys.b
+    n = system_size(sys)
+
+    # DAE residual: F = C*du + G*u - b = 0
+    function dae_residual!(resid, du, u, p, t)
+        # resid = C*du + G*u - b
+        mul!(resid, C, du)        # resid = C*du
+        mul!(resid, G, u, 1.0, 1.0)  # resid += G*u
+        resid .-= b               # resid -= b
+        return nothing
+    end
+
+    # Jacobian w.r.t. du: dF/d(du) = C
+    function jac_du!(J, du, u, p, gamma, t)
+        copyto!(J, C)
+        return nothing
+    end
+
+    # Jacobian w.r.t. u: dF/du = G
+    function jac_u!(J, du, u, p, gamma, t)
+        copyto!(J, G)
+        return nothing
+    end
+
+    # Determine which variables are differential (have nonzero C row)
+    # A variable is differential if its corresponding row in C has nonzeros
+    differential_vars = zeros(Bool, n)
+    for j in 1:n
+        for k in nzrange(C, j)
+            i = rowvals(C)[k]
+            differential_vars[i] = true
+        end
+    end
+
+    return (
+        f! = dae_residual!,
+        jac_du! = jac_du!,
+        jac_u! = jac_u!,
+        differential_vars = differential_vars,
+        C = C,
+        G = G,
+        b = b
+    )
+end
+
+"""
+    make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+                     u0::Union{Nothing,Vector{Float64}}=nothing) -> NamedTuple
+
+Create a DAEProblem-like structure for transient analysis with DAE solvers.
+
+# Arguments
+- `sys::MNASystem`: The assembled MNA system
+- `tspan`: Time span (tstart, tstop)
+- `u0`: Initial condition (default: DC solution)
+
+# Returns
+NamedTuple with fields for DAEProblem construction.
+"""
+function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+                          u0::Union{Nothing,Vector{Float64}}=nothing)
+    n = system_size(sys)
+
+    # Default initial condition: DC solution
+    if u0 === nothing
+        dc_sol = solve_dc(sys)
+        u0 = dc_sol.x
+    end
+
+    # Get DAE function components
+    dae_funcs = make_dae_function(sys)
+
+    # Initial du from the DAE: C*du = b - G*u => du = C \ (b - G*u)
+    # For consistent initialization, du should satisfy F(du, u, 0) = 0
+    rhs = sys.b - sys.G * u0
+
+    # Compute initial du (only for differential variables)
+    # C is often singular (zero rows for algebraic equations)
+    du0 = zeros(n)
+    C = sys.C
+    diff_vars = dae_funcs.differential_vars
+
+    if any(diff_vars)
+        # For each differential variable, compute its initial derivative
+        # from the corresponding row of C*du = rhs
+        C_dense = Matrix(C)
+        for i in 1:n
+            if diff_vars[i]
+                # Find the diagonal element of C for this variable
+                c_ii = C_dense[i, i]
+                if abs(c_ii) > 1e-15
+                    # Simple case: diagonal C element, du[i] = rhs[i] / c_ii
+                    du0[i] = rhs[i] / c_ii
+                else
+                    # Off-diagonal case: solve row by row (simplified)
+                    # For MNA, C is usually diagonal or block-diagonal
+                    row_sum = sum(abs.(C_dense[i, :]))
+                    if row_sum > 1e-15
+                        # Use pseudoinverse for this row
+                        du0[i] = rhs[i] / row_sum
+                    end
+                end
+            end
+            # Algebraic variables (diff_vars[i] == false) keep du0[i] = 0
+        end
+    end
+
+    return (
+        f! = dae_funcs.f!,
+        u0 = u0,
+        du0 = du0,
+        tspan = Float64.(tspan),
+        differential_vars = dae_funcs.differential_vars,
+        jac_du! = dae_funcs.jac_du!,
+        jac_u! = dae_funcs.jac_u!,
+        sys = sys
     )
 end
 

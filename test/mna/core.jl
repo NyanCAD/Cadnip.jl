@@ -14,6 +14,7 @@
 using Test
 using LinearAlgebra
 using SparseArrays
+using SciMLBase: ReturnCode
 
 # Import MNA module - use explicit imports to avoid conflicts with CedarSim types
 using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!
@@ -25,6 +26,7 @@ using CedarSim.MNA: assemble!, assemble_G, assemble_C, get_rhs
 using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
 using CedarSim.MNA: voltage, current, magnitude_db, phase_deg
 using CedarSim.MNA: make_ode_problem, make_ode_function
+using CedarSim.MNA: make_dae_problem, make_dae_function
 
 @testset "MNA Core Tests" begin
 
@@ -612,6 +614,327 @@ using CedarSim.MNA: make_ode_problem, make_ode_function
 
         # Just check no errors
         @test true
+    end
+
+    #==========================================================================#
+    # Transient Analysis - Actual ODE/DAE Solving
+    #==========================================================================#
+
+    @testset "Transient - RC Charging (Mass Matrix ODE)" begin
+        using OrdinaryDiffEq
+
+        # RC circuit: V -> R -> C -> GND
+        #
+        #  Vcc──┬──R──┬──out
+        #       │     │
+        #      [V]    C
+        #       │     │
+        #      GND   GND
+        #
+        # Time constant τ = R*C
+        # V(t) = Vcc * (1 - exp(-t/τ))
+
+        Vcc = 5.0
+        R_val = 1000.0   # 1 kΩ
+        C_val = 1e-6     # 1 μF
+        τ = R_val * C_val  # 1 ms
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R_val), ctx, vcc, out)
+        stamp!(Capacitor(C_val), ctx, out, 0)
+
+        sys = assemble!(ctx)
+
+        # Initial condition: capacitor starts at 0V
+        # The voltage source forces vcc = Vcc, so we set u0 manually
+        n = system_size(sys)
+        u0 = zeros(n)
+        u0[1] = Vcc  # vcc node
+        u0[2] = 0.0  # out node (capacitor voltage)
+        # Current through voltage source will be solved
+
+        # Solve for 5 time constants (>99% charged)
+        tspan = (0.0, 5.0 * τ)
+
+        # Get ODE problem data
+        prob_data = make_ode_problem(sys, tspan; u0=u0)
+
+        # Create ODEFunction with mass matrix
+        f = ODEFunction(prob_data.f;
+                        mass_matrix = prob_data.mass_matrix,
+                        jac = prob_data.jac,
+                        jac_prototype = prob_data.jac_prototype)
+        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+
+        # Solve with stiff solver (Rodas5 handles mass matrices well)
+        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Analytical solution: V_out(t) = Vcc * (1 - exp(-t/τ))
+        V_analytical(t) = Vcc * (1.0 - exp(-t / τ))
+
+        # Test at multiple time points
+        test_times = [0.0, τ/2, τ, 2τ, 3τ, 5τ]
+        for t in test_times
+            V_sim = sol(t)[2]  # out node is index 2
+            V_exact = V_analytical(t)
+            @test isapprox(V_sim, V_exact; rtol=1e-4) || (t, V_sim, V_exact)
+        end
+
+        # At t=0, V_out should be 0
+        @test isapprox(sol(0.0)[2], 0.0; atol=1e-10)
+
+        # At t=5τ, V_out should be ~99.3% of Vcc
+        @test isapprox(sol(5τ)[2], Vcc * (1 - exp(-5)); rtol=1e-4)
+    end
+
+    @testset "Transient - RC Charging (Implicit DAE)" begin
+        using Sundials
+        using DiffEqBase: BrownFullBasicInit
+
+        # Same RC circuit as above, but using DAE formulation
+        Vcc = 5.0
+        R_val = 1000.0
+        C_val = 1e-6
+        τ = R_val * C_val
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R_val), ctx, vcc, out)
+        stamp!(Capacitor(C_val), ctx, out, 0)
+
+        sys = assemble!(ctx)
+
+        # Initial condition: need consistent ICs for DAE
+        # For RC circuit at t=0: V_cap = 0, so I = Vcc/R = 5mA
+        n = system_size(sys)
+        u0 = zeros(n)
+        u0[1] = Vcc        # vcc = 5V
+        u0[2] = 0.0        # out = 0V (cap initially uncharged)
+        u0[3] = Vcc/R_val  # I_V = Vcc/R = 5mA (current through voltage source)
+
+        tspan = (0.0, 5.0 * τ)
+
+        # Get DAE problem data
+        dae_data = make_dae_problem(sys, tspan; u0=u0)
+
+        # Create DAEProblem
+        prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
+                          differential_vars = dae_data.differential_vars)
+
+        # Solve with IDA using Brown's initialization for consistent ICs
+        sol = solve(prob, IDA(); reltol=1e-8, abstol=1e-10,
+                    initializealg = BrownFullBasicInit())
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Analytical solution
+        V_analytical(t) = Vcc * (1.0 - exp(-t / τ))
+
+        # Test at multiple time points
+        test_times = [0.0, τ/2, τ, 2τ, 3τ, 5τ]
+        for t in test_times
+            V_sim = sol(t)[2]
+            V_exact = V_analytical(t)
+            @test isapprox(V_sim, V_exact; rtol=1e-3) || (t, V_sim, V_exact)
+        end
+    end
+
+    @testset "Transient - RL Circuit (Inductor Current)" begin
+        using OrdinaryDiffEq
+
+        # RL circuit: V -> R -> L -> GND
+        #
+        # The inductor current rises as: I(t) = (V/R) * (1 - exp(-t*R/L))
+        # Time constant τ = L/R
+
+        Vcc = 10.0
+        R_val = 100.0    # 100 Ω
+        L_val = 0.01     # 10 mH
+        τ = L_val / R_val  # 100 μs
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        mid = get_node!(ctx, :mid)
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R_val), ctx, vcc, mid)
+        I_L = stamp!(Inductor(L_val), ctx, mid, 0)  # Returns current index
+
+        sys = assemble!(ctx)
+
+        # Initial condition: inductor starts with 0 current
+        n = system_size(sys)
+        u0 = zeros(n)
+        u0[1] = Vcc  # vcc
+        u0[2] = Vcc  # mid (initially at Vcc since no current flows)
+        # Current variables start at 0
+
+        tspan = (0.0, 5.0 * τ)
+
+        prob_data = make_ode_problem(sys, tspan; u0=u0)
+
+        f = ODEFunction(prob_data.f;
+                        mass_matrix = prob_data.mass_matrix,
+                        jac = prob_data.jac,
+                        jac_prototype = prob_data.jac_prototype)
+        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+
+        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Steady state current: I_ss = V/R
+        I_ss = Vcc / R_val
+
+        # Analytical: I(t) = I_ss * (1 - exp(-t/τ))
+        I_analytical(t) = I_ss * (1.0 - exp(-t / τ))
+
+        # Test current at various times
+        # The inductor current is at index I_L in the solution
+        for t in [0.0, τ/2, τ, 2τ, 5τ]
+            I_sim = sol(t)[I_L]
+            I_exact = I_analytical(t)
+            @test isapprox(I_sim, I_exact; rtol=1e-3) || (t, I_sim, I_exact)
+        end
+
+        # At t=0, current should be 0
+        @test isapprox(sol(0.0)[I_L], 0.0; atol=1e-8)
+
+        # At t=5τ, current should be ~99.3% of I_ss
+        @test isapprox(sol(5τ)[I_L], I_ss * (1 - exp(-5)); rtol=1e-3)
+    end
+
+    @testset "Transient - RLC Oscillator" begin
+        using OrdinaryDiffEq
+
+        # Underdamped RLC circuit
+        # V -> R -> L ─┬─ C -> GND
+        #              │
+        #             out
+        #
+        # For underdamped: R < 2*sqrt(L/C)
+        # Natural frequency: ω₀ = 1/sqrt(LC)
+        # Damping factor: α = R/(2L)
+        # Damped frequency: ωd = sqrt(ω₀² - α²)
+
+        Vcc = 5.0
+        R_val = 10.0      # 10 Ω (small for underdamping)
+        L_val = 0.001     # 1 mH
+        C_val = 1e-6      # 1 μF
+
+        ω0 = 1.0 / sqrt(L_val * C_val)  # ~31.6 krad/s
+        α = R_val / (2 * L_val)          # 5000 rad/s
+        ωd = sqrt(ω0^2 - α^2)            # Damped frequency
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        mid = get_node!(ctx, :mid)
+        out = get_node!(ctx, :out)
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R_val), ctx, vcc, mid)
+        I_L = stamp!(Inductor(L_val), ctx, mid, out)
+        stamp!(Capacitor(C_val), ctx, out, 0)
+
+        sys = assemble!(ctx)
+
+        # Initial condition: everything at 0 except voltage source
+        n = system_size(sys)
+        u0 = zeros(n)
+        u0[1] = Vcc  # vcc
+
+        # Simulate for several oscillation periods
+        period = 2π / ωd
+        tspan = (0.0, 5.0 * period)
+
+        prob_data = make_ode_problem(sys, tspan; u0=u0)
+
+        f = ODEFunction(prob_data.f;
+                        mass_matrix = prob_data.mass_matrix,
+                        jac = prob_data.jac,
+                        jac_prototype = prob_data.jac_prototype)
+        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+
+        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # The capacitor voltage should oscillate and eventually settle to Vcc
+        # At late times, it should approach Vcc
+        V_final = sol(tspan[2])[3]  # out node
+        @test isapprox(V_final, Vcc; rtol=0.01)
+
+        # Check that oscillation occurred by looking for overshoot
+        # In an underdamped system, the voltage should exceed Vcc at some point
+        times = range(0, tspan[2], length=1000)
+        V_out = [sol(t)[3] for t in times]
+        @test maximum(V_out) > Vcc * 1.01  # Should overshoot by at least 1%
+    end
+
+    @testset "Transient - Comparison ODE vs DAE" begin
+        using OrdinaryDiffEq
+        using Sundials
+        using DiffEqBase: BrownFullBasicInit
+
+        # Solve the same RC circuit with both methods and compare
+        Vcc = 3.3
+        R_val = 2200.0
+        C_val = 100e-9
+        τ = R_val * C_val
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
+        stamp!(Resistor(R_val), ctx, vcc, out)
+        stamp!(Capacitor(C_val), ctx, out, 0)
+
+        sys = assemble!(ctx)
+
+        # Consistent initial conditions for DAE
+        n = system_size(sys)
+        u0 = zeros(n)
+        u0[1] = Vcc        # vcc = 3.3V
+        u0[2] = 0.0        # out = 0V
+        u0[3] = Vcc/R_val  # I_V = Vcc/R
+        tspan = (0.0, 10.0 * τ)
+
+        # Solve with mass matrix ODE
+        prob_ode = make_ode_problem(sys, tspan; u0=u0)
+        f_ode = ODEFunction(prob_ode.f;
+                            mass_matrix = prob_ode.mass_matrix,
+                            jac = prob_ode.jac,
+                            jac_prototype = prob_ode.jac_prototype)
+        ode_prob = ODEProblem(f_ode, prob_ode.u0, prob_ode.tspan)
+        sol_ode = solve(ode_prob, Rodas5P(); reltol=1e-10, abstol=1e-12)
+
+        # Solve with DAE using Brown's initialization
+        dae_data = make_dae_problem(sys, tspan; u0=u0)
+        dae_prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
+                              differential_vars = dae_data.differential_vars)
+        sol_dae = solve(dae_prob, IDA(); reltol=1e-10, abstol=1e-12,
+                        initializealg = BrownFullBasicInit())
+
+        @test sol_ode.retcode == ReturnCode.Success
+        @test sol_dae.retcode == ReturnCode.Success
+
+        # Solutions should match within tolerance
+        test_times = range(0, tspan[2], length=20)
+        for t in test_times
+            V_ode = sol_ode(t)[2]
+            V_dae = sol_dae(t)[2]
+            @test isapprox(V_ode, V_dae; rtol=1e-4) || (t, V_ode, V_dae)
+        end
     end
 
 end  # @testset "MNA Core Tests"
