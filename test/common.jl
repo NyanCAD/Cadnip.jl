@@ -2,11 +2,19 @@ using CedarSim
 using CedarSim.SpectreEnvironment
 using SpectreNetlistParser
 using Test
+using Random
+
+# Phase 0: Conditional imports - simulation packages only if available
 using OrdinaryDiffEq
 using SciMLBase
-using DAECompiler
-using Random
 using Sundials
+
+# Phase 0: DAECompiler may not be available
+const HAS_DAECOMPILER = CedarSim.USE_DAECOMPILER
+
+if HAS_DAECOMPILER
+    using DAECompiler
+end
 
 # These must be top-level `const` values, otherwise `DAECompiler` doesn't know
 # that we're not about to redefine it halfway through the model, and some of our
@@ -16,7 +24,13 @@ const C = CedarSim.SimpleCapacitor
 const L = CedarSim.SimpleInductor
 const V(v) = CedarSim.VoltageSource(dc=v)
 const I(i) = CedarSim.CurrentSource(dc=i)
-const sim_time = CedarSim.DAECompiler.sim_time
+
+# Phase 0: sim_time comes from stubs when DAECompiler not available
+const sim_time = if HAS_DAECOMPILER
+    CedarSim.DAECompiler.sim_time
+else
+    CedarSim.DAECompilerStubs.sim_time
+end
 
 const deftol = 1e-8
 
@@ -25,6 +39,9 @@ isapprox_deftol(x, y) = isapprox(x, y; atol=deftol*10, rtol=deftol*10)
 isapprox_deftol(x) = y->isapprox(x, y; atol=deftol*10, rtol=deftol*10)
 
 allapprox_deftol(itr) = isempty(itr) ? true : all(isapprox_deftol(first(itr)), itr)
+
+# Phase 0: Simulation functions require DAECompiler
+if HAS_DAECOMPILER
 
 """
     solve_circuit(circuit::Function; time_bounds = (0.0, 1.0), reltol, abstol, u0)
@@ -92,6 +109,25 @@ function solve_spectre_code(spectre_code::String; include_dirs::Vector{String} =
     invokelatest(fn)
     return solve_circuit(fn; kwargs...)
 end
+
+else
+    # Phase 0: Stub implementations that error if called
+    function solve_circuit(args...; kwargs...)
+        error("solve_circuit requires DAECompiler (Phase 1+)")
+    end
+    function solve_spice_file(args...; kwargs...)
+        error("solve_spice_file requires DAECompiler (Phase 1+)")
+    end
+    function solve_spice_code(args...; kwargs...)
+        error("solve_spice_code requires DAECompiler (Phase 1+)")
+    end
+    function solve_spectre_file(args...; kwargs...)
+        error("solve_spectre_file requires DAECompiler (Phase 1+)")
+    end
+    function solve_spectre_code(args...; kwargs...)
+        error("solve_spectre_code requires DAECompiler (Phase 1+)")
+    end
+end  # if HAS_DAECOMPILER
 
 #=
 # This is a useful define for ensuring that our SPICE simulations are giving reasonable answers

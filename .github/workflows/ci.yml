@@ -56,36 +56,23 @@ jobs:
             Pkg.test()
           '
 
-      - name: Test CedarSim loads
+      - name: Install test dependencies
         run: |
-          julia --project=. -e '
+          julia --project=test -e '
             using Pkg
-            Pkg.precompile()
-            using CedarSim
-            println("CedarSim loaded successfully")
+            # Develop the main package and subpackages in test environment
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="SpectreNetlistParser.jl"),
+              PackageSpec(path="VerilogAParser.jl"),
+              PackageSpec(path="Lexers.jl")
+            ])
+            Pkg.instantiate()
+          '
 
-            # Test basic parsing works
-            using SpectreNetlistParser
-            using VerilogAParser
-
-            # Parse a simple Spectre netlist
-            spectre = """
-            r1 (a b) resistor r=1k
-            c1 (b 0) capacitor c=1p
-            """
-            sa = SpectreNetlistParser.parse(spectre)
-            code = CedarSim.make_spectre_circuit(sa)
-            println("Spectre parsing: OK")
-
-            # Parse a simple Verilog-A file
-            va_code = """
-            module resistor(p, n);
-              inout p, n;
-              electrical p, n;
-              parameter real R = 1.0;
-              analog I(p, n) <+ V(p, n) / R;
-            endmodule
-            """
-            # Note: VerilogAParser.parse expects a file, use parsefile or test differently
-            println("Basic load test: PASSED")
+      - name: Run CedarSim tests
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.test("CedarSim")
           '
