@@ -942,7 +942,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
     #==========================================================================#
 
     # Import new exports
-    using CedarSim.MNA: MNASim, MNASpec, alter, with_mode, with_spec, eval_circuit
+    using CedarSim.MNA: MNASim, MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
     using CedarSim.MNA: make_dc_initialized_dae_problem, make_dc_initialized_ode_problem
 
     @testset "MNASim basics" begin
@@ -1315,6 +1315,75 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test sol(0.0)[2] ≈ 0.0 rtol=1e-3
         @test sol(τ)[2] ≈ 5.0 * (1 - exp(-1)) rtol=1e-2  # ~3.16V at t=τ
         @test sol(5τ)[2] ≈ 5.0 rtol=1e-2  # ~5V at t=5τ
+    end
+
+    @testset "MNASpec and temperature" begin
+        # Test MNASpec creation and manipulation
+        spec = MNASpec()
+        @test spec.temp == 27.0
+        @test spec.mode == :tran
+
+        spec2 = MNASpec(temp=50.0, mode=:dcop)
+        @test spec2.temp == 50.0
+        @test spec2.mode == :dcop
+
+        # Test with_temp and with_mode on MNASpec
+        spec3 = with_temp(spec, 100.0)
+        @test spec3.temp == 100.0
+        @test spec3.mode == :tran  # unchanged
+
+        spec4 = with_mode(spec, :ac)
+        @test spec4.temp == 27.0  # unchanged
+        @test spec4.mode == :ac
+
+        # Test temperature-dependent circuit
+        function build_temp_dependent(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # Temperature-dependent resistance: R(T) = R0 * (1 + tc*(T-Tnom))
+            R_temp = params.R0 * (1 + params.tc * (spec.temp - 27.0))
+
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(R_temp), ctx, vcc, out)
+            stamp!(Resistor(params.R2), ctx, out, 0)
+
+            return ctx
+        end
+
+        # At 27°C (nominal), R_temp = R0
+        sim_27 = MNASim(build_temp_dependent;
+                        spec=MNASpec(temp=27.0),
+                        Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0)
+        sol_27 = solve_dc(sim_27)
+        @test voltage(sol_27, :out) ≈ 5.0  # Equal resistors
+
+        # At 127°C, R_temp = 1000 * (1 + 0.004*100) = 1400 Ω
+        sim_127 = with_temp(sim_27, 127.0)
+        @test sim_127.spec.temp == 127.0
+        sol_127 = solve_dc(sim_127)
+        # Voltage divider: Vout = Vcc * R2/(R_temp + R2) = 10 * 1000/2400 ≈ 4.167V
+        @test voltage(sol_127, :out) ≈ 10.0 * 1000.0 / 2400.0 rtol=1e-6
+
+        # At -73°C, R_temp = 1000 * (1 + 0.004*(-100)) = 600 Ω
+        sim_m73 = with_temp(sim_27, -73.0)
+        sol_m73 = solve_dc(sim_m73)
+        # Voltage divider: Vout = 10 * 1000/1600 = 6.25V
+        @test voltage(sol_m73, :out) ≈ 10.0 * 1000.0 / 1600.0 rtol=1e-6
+
+        # Test with_spec
+        new_spec = MNASpec(temp=85.0, mode=:dcop)
+        sim_85 = with_spec(sim_27, new_spec)
+        @test sim_85.spec.temp == 85.0
+        @test sim_85.spec.mode == :dcop
+
+        # Test eval_circuit directly
+        sys = eval_circuit(build_temp_dependent,
+                          (Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0),
+                          MNASpec(temp=27.0))
+        @test sys isa MNASystem
+        @test sys.n_nodes == 2
     end
 
 end  # @testset "MNA Core Tests"

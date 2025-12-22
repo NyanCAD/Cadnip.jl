@@ -65,7 +65,7 @@ Create new spec with different mode.
 """
 with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode)
 
-export with_temp
+export with_temp, with_mode
 
 #==============================================================================#
 # Solution Types
