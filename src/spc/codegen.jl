@@ -4,29 +4,9 @@ struct CodegenState
     sema::SemaResult
 end
 
-LString(s::SNode{<:SP.Terminal}) = lowercase(String(s))
-LString(s::SNode{<:SP.AbstractASTNode}) = lowercase(String(s))
-LString(s::SNode{<:SC.Terminal}) = String(s)
-LString(s::SNode{<:SC.AbstractASTNode}) = String(s)
-LString(s::AbstractString) = lowercase(s)
-LString(s::Symbol) = lowercase(String(s))
-LSymbol(s) = Symbol(LString(s))
-
-function Base.LineNumberNode(n::SNode)
-    sf = n.ps.srcfile
-    lsf = sf.lineinfo
-    lno_first = SpectreNetlistParser.LineNumbers.compute_line(lsf, n.startof+n.expr.off)
-    LineNumberNode(lno_first, Symbol(sf.path))
-end
-
-function hasparam(params, name)
-    for p in params
-        if LString(p.name) == name
-            return true
-        end
-    end
-    return false
-end
+# LString and LSymbol are defined in spectre.jl
+# LineNumberNode is defined in SpectreNetlistCSTParser
+# hasparam is defined in spectre.jl
 
 function cg_net_name!(state::CodegenState, net)
     return LSymbol(net)
@@ -56,13 +36,18 @@ Codegen a SPICE or Spectre expression `expr` to julia.
 """
 function cg_expr! end
 
-cg_expr!(state::CodegenState, cs::Union{SNode{SP.NumericValue}, SNode{SC.NumericValue}}) = cg_expr!(state, cs.val)
-function cg_expr!(state::CodegenState, cs::SNode{SC.FloatLiteral})
+# Phase 0: NumberLiteral is now the leaf node (FloatLiteral/IntLiteral don't exist)
+function cg_expr!(state::CodegenState, cs::SNode{SC.NumberLiteral})
     txt = String(cs)
-    sf = 1
-    if txt[end] ∈ keys(spectre_magnitudes)
+    sf = d"1"
+    if !isempty(txt) && txt[end] ∈ keys(spectre_magnitudes)
         sf = spectre_magnitudes[txt[end]]
         txt = txt[begin:end-1]
+    end
+    # Try to parse as integer first, then as float
+    ret = tryparse(Int64, txt)
+    if ret !== nothing
+        return ret * Float64(sf)
     end
     ret = Base.parse(Dec64, txt)
     ret *= sf
@@ -104,22 +89,23 @@ const spice_regex = Regex("($(join(keys(spice_magnitudes), "|")))\$")
 
 const binning_rx = r"(.*)\.([0-9]+)"
 
-function cg_expr!(state::CodegenState, cs::SNode{SP.FloatLiteral})
+# Phase 0: NumberLiteral is now the leaf node (FloatLiteral/IntLiteral don't exist)
+function cg_expr!(state::CodegenState, cs::SNode{SP.NumberLiteral})
     txt = lowercase(String(cs))
-    sf = 1
+    sf = d"1"
     m = match(spice_regex, txt)
     if m !== nothing && haskey(spice_magnitudes, m.match)
         sf = spice_magnitudes[m.match]
         txt = txt[begin:end-length(m.match)]
     end
+    # Try to parse as integer first, then as float
+    ret = tryparse(Int64, txt)
+    if ret !== nothing
+        return ret * Float64(sf)
+    end
     ret = Base.parse(Dec64, txt)
     ret *= sf
     return Float64(ret)
-end
-
-function cg_expr!(state::CodegenState, cs::Union{SNode{SC.IntLiteral}, SNode{SP.IntLiteral}})
-    txt = String(cs)
-    Base.parse(Int64, txt)
 end
 
 function cg_expr!(state::CodegenState, cs::SNode{SP.JuliaEscape})
@@ -247,10 +233,7 @@ function cg_instance!(state::CodegenState, instance::SNode{SP.SubcktCall})
     ret
 end
 
-function cg_instance!(state::CodegenState, instance::SNode{SP.VAModelCall})
-    model = cg_model_name!(state, LSymbol(instance.model))
-    return cg_spice_instance!(state, sema_nets(instance), instance.name, model, cg_params!(state, instance.params))
-end
+# Phase 0: VAModelCall doesn't exist in the parser
 
 function cg_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     # if params contains r or l, val is the model or nothing
@@ -316,18 +299,7 @@ function cg_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltage, S
     return cg_spice_instance!(state, [instance.pos, instance.neg], instance.name, constructor, kws)
 end
 
-function devtype_param(model_kind, mosfet_kind)
-    if model_kind.name === :bsim4
-        return :TYPE => (mosfet_kind == :pmos ? -1 : 1)
-    elseif startswith(String(model_kind.name), "bsimcmg")
-        return :DEVTYPE => (mosfet_kind == :pmos ? 0 : 1)
-    elseif model_kind == :UnimplementedDevice
-        # skip
-        return nothing
-    else
-        error("Needs to be filled in per model")
-    end
-end
+# devtype_param is defined in spectre.jl
 
 function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, GlobalRef}, bins::Dict{Symbol, Vector{Symbol}})
     params = Any[]
@@ -523,4 +495,738 @@ end
 
 function codegen(scope::SemaResult)
     codegen!(CodegenState(scope))
+end
+
+#==============================================================================#
+# MNA Codegen: Generate stamp! calls instead of Named(spicecall(...))
+#
+# Phase 4: SPICE Codegen for MNA Backend
+#
+# These functions generate MNA builder code from the same SemaResult.
+# The generated function signature is:
+#   function circuit_name(params, spec::MNASpec) -> MNAContext
+#==============================================================================#
+
+# Import MNA types for codegen
+using ..MNA: MNAContext, MNASpec, get_node!, stamp!
+using ..MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using ..MNA: VCVS, VCCS, CCVS, CCCS
+
+# Helper to get a param value
+function getparam(params, name, default=nothing)
+    for p in params
+        if LString(p.name) == name
+            return p.val
+        end
+    end
+    return default
+end
+
+"""
+    cg_mna_instance!(state, instance)
+
+Generate MNA stamp! call for a device instance.
+Returns an expression that stamps the device into the context.
+"""
+function cg_mna_instance! end
+
+"""
+Generate stamp! call for a resistor.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
+    nets = sema_nets(instance)
+    p = cg_net_name!(state, nets[1])
+    n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get resistance value
+    r_expr = if hasparam(instance.params, "r")
+        cg_expr!(state, getparam(instance.params, "r"))
+    elseif instance.val !== nothing
+        cg_expr!(state, instance.val)
+    else
+        # Calculate from rsh, l, w if present
+        if hasparam(instance.params, "l") && hasparam(instance.params, "rsh")
+            l_expr = cg_expr!(state, getparam(instance.params, "l"))
+            w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
+            rsh_expr = cg_expr!(state, getparam(instance.params, "rsh"))
+            :($rsh_expr * $l_expr / $w_expr)
+        else
+            1000.0  # Default
+        end
+    end
+
+    # Handle multiplicity
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+
+    return quote
+        let r_val = $r_expr, m_val = $m_expr
+            # Parallel resistors: R_eff = R / m
+            stamp!(Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a capacitor.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Capacitor})
+    nets = sema_nets(instance)
+    p = cg_net_name!(state, nets[1])
+    n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get capacitance value
+    c_expr = if hasparam(instance.params, "c")
+        cg_expr!(state, getparam(instance.params, "c"))
+    elseif instance.val !== nothing
+        cg_expr!(state, instance.val)
+    else
+        1e-12  # Default 1pF
+    end
+
+    # Handle multiplicity
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+
+    return quote
+        let c_val = $c_expr, m_val = $m_expr
+            # Parallel capacitors: C_eff = C * m
+            stamp!(Capacitor(c_val * m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for an inductor.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Inductor})
+    nets = sema_nets(instance)
+    p = cg_net_name!(state, nets[1])
+    n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get inductance value
+    l_expr = if hasparam(instance.params, "l")
+        cg_expr!(state, getparam(instance.params, "l"))
+    elseif instance.val !== nothing
+        cg_expr!(state, instance.val)
+    else
+        1e-6  # Default 1uH
+    end
+
+    return quote
+        let l_val = $l_expr
+            stamp!(Inductor(l_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a voltage source.
+"""
+function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.Voltage})
+    p = cg_net_name!(state, instance.pos)
+    n = cg_net_name!(state, instance.neg)
+    name = LString(instance.name)
+
+    # Parse source values
+    dc_val = 0.0
+    for val in instance.vals
+        if val isa SNode{SP.DCSource}
+            dc_val = cg_expr!(state, val.dcval)
+        end
+    end
+
+    return quote
+        let v = $dc_val
+            stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a current source.
+
+SPICE convention: I1 n+ n- val means current flows from n+ to n- through the source.
+This injects current into n- and extracts from n+.
+MNA convention: stamp!(CurrentSource, ctx, p, n) injects into p, extracts from n.
+So we swap: p=neg, n=pos.
+"""
+function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.Current})
+    pos = cg_net_name!(state, instance.pos)
+    neg = cg_net_name!(state, instance.neg)
+    name = LString(instance.name)
+
+    # Parse source values
+    dc_val = 0.0
+    for val in instance.vals
+        if val isa SNode{SP.DCSource}
+            dc_val = cg_expr!(state, val.dcval)
+        end
+    end
+
+    # Swap nodes: MNA injects into first arg, SPICE injects into neg
+    return quote
+        let i = $dc_val
+            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $neg, $pos)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a VCVS (E element) - ControlledSource{:V,:V}.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:V}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    in_p = cg_net_name!(state, nets[3])
+    in_n = cg_net_name!(state, nets[4])
+    name = LString(instance.name)
+
+    # Get the voltage control node which contains the gain
+    voltage_ctrl = instance.val
+    @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Get the gain value from VoltageControl
+    gain_expr = if voltage_ctrl.val !== nothing
+        cg_expr!(state, voltage_ctrl.val)
+    elseif voltage_ctrl.params !== nothing && hasparam(voltage_ctrl.params, "gain")
+        cg_expr!(state, getparam(voltage_ctrl.params, "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let gain = $gain_expr
+            stamp!(VCVS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a VCCS (G element) - ControlledSource{:V,:C}.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:C}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    in_p = cg_net_name!(state, nets[3])
+    in_n = cg_net_name!(state, nets[4])
+    name = LString(instance.name)
+
+    # Get the voltage control node which contains the gm
+    voltage_ctrl = instance.val
+    @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Get the transconductance value from VoltageControl
+    gm_expr = if voltage_ctrl.val !== nothing
+        cg_expr!(state, voltage_ctrl.val)
+    elseif voltage_ctrl.params !== nothing && (hasparam(voltage_ctrl.params, "gm") || hasparam(voltage_ctrl.params, "gain"))
+        cg_expr!(state, getparam(voltage_ctrl.params, hasparam(voltage_ctrl.params, "gm") ? "gm" : "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let gm = $gm_expr
+            stamp!(VCCS(gm; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a CCVS (H element) - ControlledSource{:C,:V}.
+Current-controlled voltage source: V(out) = rm * I(vname)
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:C,:V}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get the controlling current info from val
+    current_ctrl = instance.val
+    @assert isa(current_ctrl, SNode{SP.CurrentControl})
+
+    # Get the voltage source name that provides the controlling current
+    vname_sym = if current_ctrl.vnam !== nothing
+        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    else
+        error("CCVS $name requires a voltage source name for current sensing")
+    end
+
+    # Get the transresistance value
+    rm_expr = if current_ctrl.val !== nothing
+        cg_expr!(state, current_ctrl.val)
+    elseif hasparam(current_ctrl.params, "rm") || hasparam(current_ctrl.params, "gain")
+        cg_expr!(state, getparam(current_ctrl.params, hasparam(current_ctrl.params, "rm") ? "rm" : "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let rm = $rm_expr
+            # Get the current index of the referenced voltage source
+            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            stamp!(CCVS(rm; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a CCCS (F element) - ControlledSource{:C,:C}.
+Current-controlled current source: I(out) = gain * I(vname)
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:C,:C}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get the controlling current info from val
+    current_ctrl = instance.val
+    @assert isa(current_ctrl, SNode{SP.CurrentControl})
+
+    # Get the voltage source name that provides the controlling current
+    vname_sym = if current_ctrl.vnam !== nothing
+        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    else
+        error("CCCS $name requires a voltage source name for current sensing")
+    end
+
+    # Get the current gain value
+    gain_expr = if current_ctrl.val !== nothing
+        cg_expr!(state, current_ctrl.val)
+    elseif hasparam(current_ctrl.params, "gain")
+        cg_expr!(state, getparam(current_ctrl.params, "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let gain = $gain_expr
+            # Get the current index of the referenced voltage source
+            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            stamp!(CCCS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+        end
+    end
+end
+
+"""
+Generate MNA subcircuit call.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
+    ssema = resolve_subckt(state.sema, LSymbol(instance.model))
+
+    # Build parameter expressions
+    implicit_params = Expr[Expr(:kw, name, cg_expr!(state, name)) for name in ssema.exposed_parameters]
+
+    callee_codegen = CodegenState(ssema)
+    s = gensym()
+    ca = :(let $s=(;$(implicit_params...)); end)
+    params = Symbol[]
+
+    # Find Parameter children in the AST (SubcktCall doesn't have .params field)
+    for child in SpectreNetlistParser.RedTree.children(instance)
+        if child !== nothing && isa(child, SNode{SP.Parameter})
+            name = LSymbol(child.name)
+            def = cg_expr!(callee_codegen, child.val)
+            push!(ca.args[end].args, :($name = $def))
+            push!(params, name)
+        end
+    end
+
+    push!(ca.args[end].args, Expr(:call, merge, s, Expr(:tuple, Expr(:parameters, params...))))
+    params_expr = ca
+
+    # Port expressions
+    port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
+
+    subckt_name = LSymbol(instance.model)
+    builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
+
+    return quote
+        let subckt_params = $params_expr
+            # Call subcircuit builder with inherited context
+            $builder_name(subckt_params, spec, ctx, $(port_exprs...))
+        end
+    end
+end
+
+# Fallback for unhandled instance types - generate nothing
+function cg_mna_instance!(state::CodegenState, instance)
+    return :(nothing)  # Skip unimplemented devices
+end
+
+# Version without subckt_builders dict - just use default naming
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall})
+    return cg_mna_instance!(state, instance, Dict{Symbol, Symbol}())
+end
+
+# Disambiguate Voltage/Current source calls
+function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltage, SP.Current}})
+    pos = cg_net_name!(state, instance.pos)
+    neg = cg_net_name!(state, instance.neg)
+    name = LString(instance.name)
+    is_voltage = instance isa SNode{SP.Voltage}
+
+    # SPICE convention: Iname n+ n- val means current flows from n+ to n- through source
+    # This injects current into n- and extracts from n+
+    # MNA convention: stamp!(CurrentSource, ctx, p, n) injects into p, extracts from n
+    # So for current sources, swap the nodes
+    p, n = is_voltage ? (pos, neg) : (neg, pos)
+
+    # Parse source values - check for DC, AC, and transient
+    dc_val = nothing
+    tran_source = nothing
+
+    for val in instance.vals
+        if val isa SNode{SP.DCSource}
+            dc_val = cg_expr!(state, val.dcval)
+        elseif val isa SNode{SP.TranSource}
+            tran_source = val
+        end
+        # AC sources not handled in MNA transient (yet)
+    end
+
+    # If we have a transient source, generate appropriate device
+    if tran_source !== nothing
+        fname = LSymbol(tran_source.kw)
+
+        if fname == :pwl
+            # PWL source: values are interleaved time-value pairs
+            # PWL(t1 v1 t2 v2 ...)
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+
+            if is_voltage
+                return quote
+                    let vals = [$(vals...)]
+                        n_points = div(length(vals), 2)
+                        times = vals[1:2:end]
+                        values = vals[2:2:end]
+                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let vals = [$(vals...)]
+                        n_points = div(length(vals), 2)
+                        times = vals[1:2:end]
+                        values = vals[2:2:end]
+                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        elseif fname == :sin
+            # SIN source: SIN(vo va freq [td theta phase])
+            # SPICE order: vo, va, freq, td, theta, phase
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+            n_vals = length(vals)
+
+            vo_expr = n_vals >= 1 ? vals[1] : 0.0
+            va_expr = n_vals >= 2 ? vals[2] : 0.0
+            freq_expr = n_vals >= 3 ? vals[3] : 1.0
+            td_expr = n_vals >= 4 ? vals[4] : 0.0
+            theta_expr = n_vals >= 5 ? vals[5] : 0.0
+            phase_expr = n_vals >= 6 ? vals[6] : 0.0
+
+            if is_voltage
+                return quote
+                    let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
+                                                name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
+                                                name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        elseif fname == :pulse
+            # PULSE source: pulse(v1 v2 td tr tf pw period)
+            # For now, implement as PWL approximation
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+            n_vals = length(vals)
+
+            v1_expr = n_vals >= 1 ? vals[1] : 0.0
+            v2_expr = n_vals >= 2 ? vals[2] : 1.0
+            td_expr = n_vals >= 3 ? vals[3] : 0.0
+            tr_expr = n_vals >= 4 ? vals[4] : 1e-9
+            tf_expr = n_vals >= 5 ? vals[5] : 1e-9
+            pw_expr = n_vals >= 6 ? vals[6] : 1e-3
+            per_expr = n_vals >= 7 ? vals[7] : 2e-3
+
+            if is_voltage
+                # Generate pulse as PWL for one period
+                return quote
+                    let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                        # PWL approximation of pulse for first period
+                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                        values = [v1, v1, v2, v2, v1, v1]
+                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                        values = [i1, i1, i2, i2, i1, i1]
+                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        else
+            # Unknown transient source type - fall back to DC
+            @warn "Unknown transient source type: $fname, using DC value"
+            dc_val_actual = dc_val !== nothing ? dc_val : 0.0
+            if is_voltage
+                return quote
+                    stamp!(VoltageSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                end
+            else
+                return quote
+                    stamp!(CurrentSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                end
+            end
+        end
+    end
+
+    # No transient source - use DC value
+    dc_val_actual = dc_val !== nothing ? dc_val : 0.0
+    if is_voltage
+        return quote
+            let v = $dc_val_actual
+                stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+    else
+        return quote
+            let i = $dc_val_actual
+                stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+    end
+end
+
+"""
+    codegen_mna!(state::CodegenState)
+
+Generate MNA builder function body from semantic analysis result.
+Returns code that builds an MNAContext with all devices stamped.
+"""
+function codegen_mna!(state::CodegenState)
+    block = Expr(:block)
+    ret = block
+
+    # Handle temperature option - update spec if temp is set
+    if haskey(state.sema.options, :temp)
+        temp_expr = cg_expr!(state, state.sema.options[:temp][end][2].val)
+        push!(block.args, :(spec = MNASpec(temp=$temp_expr, mode=spec.mode)))
+    end
+
+    # Codegen nets - get_node! for each net
+    for (net, _) in state.sema.nets
+        net_name = cg_net_name!(state, net)
+        push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
+    end
+
+    # Parameters from lens/params
+    if !isempty(state.sema.formal_parameters) || !isempty(state.sema.exposed_parameters)
+        push!(block.args, :(var"*params#" = params isa ParamLens ? getfield(params, :nt) : params))
+        push!(block.args, :(var"*params#" = hasfield(typeof(var"*params#"), :params) ? getfield(var"*params#", :params) : var"*params#"))
+    end
+
+    for param in state.sema.exposed_parameters
+        push!(block.args, :($param = hasfield(typeof(var"*params#"), $(QuoteNode(param))) ? getfield(var"*params#", $(QuoteNode(param))) : 0.0))
+    end
+
+    # Codegen parameter defs
+    params_in_order = collect(state.sema.params)
+    cond_syms = Vector{Symbol}(undef, length(state.sema.conditionals))
+    for n in state.sema.parameter_order
+        if n <= length(params_in_order)
+            (name, defs) = params_in_order[n]
+            for def in defs
+                cd = def[2]
+                def_expr = cg_expr!(state, cd.val.val)
+                if name in state.sema.formal_parameters
+                    expr = :($name = hasfield(typeof(var"*params#"), $(QuoteNode(name))) ? getfield(var"*params#", $(QuoteNode(name))) : $def_expr)
+                else
+                    expr = :($name = $def_expr)
+                end
+                if cd.cond != 0
+                    cond = cond_syms[abs(cd.cond)]
+                    cd.cond < 0 && (cond = :(!$cond))
+                    expr = :($cond && $expr)
+                end
+                push!(block.args, expr)
+            end
+        else
+            cond_idx = n - length(params_in_order)
+            _, cd = state.sema.conditionals[cond_idx]
+            s = cond_syms[cond_idx] = gensym()
+            expr = cg_expr!(state, cd.val.body)
+            if cd.cond != 0
+                if cd.cond > 0
+                    expr = :($(cond_syms[cd.cond]) && $expr)
+                else
+                    expr = :($(cond_syms[-cd.cond]) || $expr)
+                end
+            end
+            push!(block.args, :($s = $expr))
+        end
+    end
+
+    # Codegen device instances using MNA stamps
+    for (name, instances) in state.sema.instances
+        if length(instances) == 1 && only(instances)[2].cond == 0
+            (_, instance) = only(instances)
+            instance = instance.val
+            push!(block.args, cg_mna_instance!(state, instance))
+        else
+            # Handle conditional instances
+            for (_, instance) in instances
+                if instance.cond != 0
+                    cond = cond_syms[abs(instance.cond)]
+                    instance.cond < 0 && (cond = :(!$cond))
+                    push!(block.args, Expr(:if, cond, cg_mna_instance!(state, instance.val)))
+                else
+                    push!(block.args, cg_mna_instance!(state, instance.val))
+                end
+            end
+        end
+    end
+
+    return ret
+end
+
+"""
+    codegen_mna(scope::SemaResult)
+
+Generate MNA builder code from semantic analysis result.
+"""
+function codegen_mna(scope::SemaResult)
+    codegen_mna!(CodegenState(scope))
+end
+
+"""
+    extract_subcircuit_ports(sema::SemaResult) -> Vector{Symbol}
+
+Extract port names from a subcircuit's AST.
+Ports are the HierarchialNode children of the Subckt AST node.
+"""
+function extract_subcircuit_ports(sema::SemaResult)
+    ports = Symbol[]
+    subckt_ast = sema.ast
+    for child in SpectreNetlistParser.RedTree.children(subckt_ast)
+        if child !== nothing && isa(child, SNode{SP.HierarchialNode})
+            port_name = LSymbol(child)
+            push!(ports, port_name)
+        end
+    end
+    return ports
+end
+
+"""
+    codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+
+Generate an MNA subcircuit builder function from semantic analysis.
+
+The generated function has signature:
+    function subckt_name_mna_builder(params, spec, ctx, port1, port2, ...) -> nothing
+
+It stamps devices directly into the passed context.
+"""
+function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+    state = CodegenState(sema)
+    body = codegen_mna!(state)
+
+    # Extract ports from AST
+    subckt_ports = extract_subcircuit_ports(sema)
+
+    # Build port arguments - subcircuit ports become function parameters
+    port_args = [Symbol("port_", i) for i in 1:length(subckt_ports)]
+
+    # Map internal port names to function parameters
+    port_mappings = Expr[:($internal_name = $arg)
+        for (internal_name, arg) in zip(subckt_ports, port_args)]
+
+    builder_name = Symbol(subckt_name, "_mna_builder")
+
+    return quote
+        function $(builder_name)(params, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...))
+            # Map ports to internal names
+            $(port_mappings...)
+            $body
+            return nothing
+        end
+    end
+end
+
+"""
+    make_mna_circuit(ast; circuit_name=:circuit)
+
+Generate an MNA builder function from a SPICE/Spectre AST.
+
+The generated function has signature:
+    function circuit_name(params, spec::MNASpec) -> MNAContext
+
+# Example
+```julia
+ast = SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
+code = make_mna_circuit(ast)
+circuit_fn = eval(code)
+ctx = circuit_fn((R1=1000.0,), MNASpec())
+sys = MNA.assemble!(ctx)
+sol = MNA.solve_dc(sys)
+```
+"""
+function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
+    # Run semantic analysis
+    sema = sema_file_or_section(ast)
+    state = CodegenState(sema)
+
+    # Generate subcircuit builders first
+    subckt_defs = Expr[]
+    for (name, subckt_list) in sema.subckts
+        if !isempty(subckt_list)
+            # Take the first (non-conditional) subcircuit definition
+            _, subckt_sema = first(subckt_list)
+            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name)
+            push!(subckt_defs, subckt_def)
+        end
+    end
+
+    # Generate the body
+    body = codegen_mna!(state)
+
+    # Wrap in function definition
+    return quote
+        # Subcircuit builders
+        $(subckt_defs...)
+
+        # Main circuit builder
+        function $(circuit_name)(params, spec::$(MNASpec)=$(MNASpec)())
+            ctx = $(MNAContext)()
+            $body
+            return ctx
+        end
+    end
 end

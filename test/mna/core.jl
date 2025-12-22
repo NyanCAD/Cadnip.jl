@@ -297,6 +297,74 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test G[5, 4] ≈ 10.0   # -gain * (-Vin_n)
     end
 
+    @testset "CCVS stamp" begin
+        # CCVS (transresistance): Vout = rm * I_in
+        # Needs current variables for both input sensing and output
+        ctx = MNAContext()
+        out_p = get_node!(ctx, :out_p)
+        out_n = get_node!(ctx, :out_n)
+        in_p = get_node!(ctx, :in_p)
+        in_n = get_node!(ctx, :in_n)
+
+        H = CCVS(1000.0; name=:H1)  # rm = 1kΩ
+        (I_out_idx, I_in_idx) = stamp!(H, ctx, out_p, out_n, in_p, in_n)
+
+        # I_in allocated first (index 5), I_out second (index 6)
+        @test I_in_idx == 5   # First current variable (after 4 nodes)
+        @test I_out_idx == 6  # Second current variable
+
+        sys = assemble!(ctx)
+        @test size(sys.G) == (6, 6)
+
+        G = Matrix(sys.G)
+
+        # Input sensing branch (zero-volt source) - uses I_in_idx = 5
+        @test G[3, 5] ≈ 1.0   # in_p
+        @test G[4, 5] ≈ -1.0  # in_n
+        @test G[5, 3] ≈ 1.0   # V(in_p)
+        @test G[5, 4] ≈ -1.0  # V(in_n)
+
+        # Output branch - uses I_out_idx = 6
+        @test G[1, 6] ≈ 1.0   # out_p
+        @test G[2, 6] ≈ -1.0  # out_n
+
+        # Voltage equation: V(out) = rm * I_in  - row I_out_idx = 6
+        # V(out_p) - V(out_n) - rm * I_in = 0
+        @test G[6, 1] ≈ 1.0     # Vout_p
+        @test G[6, 2] ≈ -1.0    # Vout_n
+        @test G[6, 5] ≈ -1000.0 # -rm * I_in
+    end
+
+    @testset "CCCS stamp" begin
+        # CCCS: I_out = gain * I_in
+        # Needs current variable for input sensing
+        ctx = MNAContext()
+        out_p = get_node!(ctx, :out_p)
+        out_n = get_node!(ctx, :out_n)
+        in_p = get_node!(ctx, :in_p)
+        in_n = get_node!(ctx, :in_n)
+
+        F = CCCS(2.0; name=:F1)  # Current gain = 2
+        I_in_idx = stamp!(F, ctx, out_p, out_n, in_p, in_n)
+
+        @test I_in_idx == 5  # After 4 nodes
+
+        sys = assemble!(ctx)
+        @test size(sys.G) == (5, 5)
+
+        G = Matrix(sys.G)
+
+        # Input sensing branch (zero-volt source)
+        @test G[3, 5] ≈ 1.0   # in_p
+        @test G[4, 5] ≈ -1.0  # in_n
+        @test G[5, 3] ≈ 1.0   # V(in_p)
+        @test G[5, 4] ≈ -1.0  # V(in_n)
+
+        # Output current: gain * I_in flows into out_p (out of out_n)
+        @test G[1, 5] ≈ -2.0   # out_p: -gain (current entering)
+        @test G[2, 5] ≈ 2.0    # out_n: +gain (current leaving)
+    end
+
     #==========================================================================#
     # DC Analysis - Analytical Validation
     #==========================================================================#
@@ -413,6 +481,55 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
         @test voltage(sol, :inp) ≈ 0.5
         @test voltage(sol, :out) ≈ -5.0 atol=1e-10
+    end
+
+    @testset "DC: Transresistance amplifier with CCVS" begin
+        # CCVS: Vout = rm * I_in
+        # Current source I = 1mA through sensing branch (in_p -> in_n)
+        # rm = 1000 Ω
+        # Expected: Vout = 1000 * 1e-3 = 1V
+
+        ctx = MNAContext()
+        inp = get_node!(ctx, :inp)
+        out = get_node!(ctx, :out)
+
+        # Drive the sensing branch with a current source
+        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
+
+        # CCVS senses current in (inp, 0) and outputs voltage at (out, 0)
+        stamp!(CCVS(1000.0), ctx, out, 0, inp, 0)
+
+        # Need a load to close the output circuit
+        stamp!(Resistor(1e6), ctx, out, 0)  # High-impedance load
+
+        sol = solve_dc(ctx)
+
+        @test voltage(sol, :out) ≈ 1.0 atol=1e-6
+    end
+
+    @testset "DC: Current mirror with CCCS" begin
+        # CCCS: I_out = gain * I_in
+        # Current source I = 1mA through sensing branch
+        # Gain = 2
+        # Output into 1k resistor
+        # Expected: I_out = 2mA, V_out = 2mA * 1kΩ = 2V
+
+        ctx = MNAContext()
+        inp = get_node!(ctx, :inp)
+        out = get_node!(ctx, :out)
+
+        # Drive the sensing branch with a current source
+        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
+
+        # CCCS senses current in (inp, 0) and outputs current at (out, 0)
+        stamp!(CCCS(2.0), ctx, out, 0, inp, 0)
+
+        # Load resistor
+        stamp!(Resistor(1000.0), ctx, out, 0)
+
+        sol = solve_dc(ctx)
+
+        @test voltage(sol, :out) ≈ 2.0 atol=1e-10
     end
 
     @testset "DC: Multi-node network" begin
@@ -1566,6 +1683,200 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         # Test voltage with NodeRef
         v_at_t = voltage(acc, s.x1.out, 0.0)
         @test v_at_t isa Float64
+    end
+
+    #==========================================================================#
+    # PWL and SIN Time-Dependent Sources
+    #==========================================================================#
+
+    using CedarSim.MNA: SinVoltageSource, SinCurrentSource
+    using CedarSim.MNA: PWLCurrentSource, sin_value
+
+    @testset "SinVoltageSource evaluation" begin
+        # SIN(vo, va, freq, [td, theta, phase])
+        # V(t) = vo + va * sin(2π*freq*t + phase)  (simplified, no damping)
+
+        # Simple sine: 1V offset, 2V amplitude, 1kHz
+        sin_src = SinVoltageSource(1.0, 2.0, 1000.0; name=:Vsin)
+
+        # At t=0 (phase=0), V = vo + va*sin(0) = 1 + 0 = 1
+        @test sin_value(sin_src, 0.0) ≈ 1.0
+
+        # At t=0.25ms (quarter period), V = 1 + 2*sin(90°) = 3
+        @test sin_value(sin_src, 0.25e-3) ≈ 3.0 atol=1e-10
+
+        # At t=0.5ms (half period), V = 1 + 2*sin(180°) = 1
+        @test sin_value(sin_src, 0.5e-3) ≈ 1.0 atol=1e-10
+
+        # At t=0.75ms (3/4 period), V = 1 + 2*sin(270°) = -1
+        @test sin_value(sin_src, 0.75e-3) ≈ -1.0 atol=1e-10
+
+        # Test with delay
+        sin_delayed = SinVoltageSource(0.0, 1.0, 1000.0; td=1e-3, name=:Vdelay)
+        # Before delay: V = vo + va*sin(phase) = 0
+        @test sin_value(sin_delayed, 0.0) ≈ 0.0
+        @test sin_value(sin_delayed, 0.5e-3) ≈ 0.0
+        # After delay: starts oscillating
+        @test sin_value(sin_delayed, 1.25e-3) ≈ 1.0 atol=1e-10  # peak at t=1.25ms
+
+        # Test with phase
+        sin_phase = SinVoltageSource(0.0, 1.0, 1000.0; phase=90.0, name=:Vphase)
+        # At t=0, V = sin(90°) = 1
+        @test sin_value(sin_phase, 0.0) ≈ 1.0 atol=1e-10
+
+        # Test DC mode
+        @test get_source_value(sin_src, 0.0, :dcop) ≈ 1.0  # vo + va*sin(phase) = 1 + 0
+        @test get_source_value(sin_src, 0.5e-3, :dcop) ≈ 1.0  # Same DC regardless of t
+    end
+
+    @testset "PWLVoltageSource evaluation" begin
+        # Ramp from 0 to 5V over 1ms, then hold
+        pwl = PWLVoltageSource([0.0, 1e-3, 2e-3], [0.0, 5.0, 5.0]; name=:Vramp)
+
+        @test pwl_value(pwl, 0.0) ≈ 0.0
+        @test pwl_value(pwl, 0.5e-3) ≈ 2.5  # midpoint
+        @test pwl_value(pwl, 1e-3) ≈ 5.0
+        @test pwl_value(pwl, 1.5e-3) ≈ 5.0  # hold
+        @test pwl_value(pwl, 5e-3) ≈ 5.0    # after last point
+
+        # Before first point
+        @test pwl_value(pwl, -1e-3) ≈ 0.0
+
+        # DC mode: use value at t=0
+        @test get_source_value(pwl, 0.0, :dcop) ≈ 0.0
+        @test get_source_value(pwl, 1e-3, :dcop) ≈ 0.0  # t=0 value regardless of t
+
+        # Tran mode: use actual value
+        @test get_source_value(pwl, 0.0, :tran) ≈ 0.0
+        @test get_source_value(pwl, 1e-3, :tran) ≈ 5.0
+    end
+
+    @testset "PWL/SIN stamp! methods" begin
+        using CedarSim.MNA: MNASpec
+
+        # Test PWL voltage source stamping
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+
+        pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
+        stamp!(pwl, ctx, vcc, 0; t=0.5e-3, mode=:tran)
+
+        sys = assemble!(ctx)
+        sol = solve_dc(sys)
+
+        # At t=0.5ms, PWL value = 2.5V
+        @test voltage(sol, :vcc) ≈ 2.5 atol=1e-10
+
+        # Test SIN voltage source stamping
+        ctx2 = MNAContext()
+        vcc2 = get_node!(ctx2, :vcc)
+
+        sin_src = SinVoltageSource(0.0, 5.0, 1000.0; name=:Vsin)
+        # At t=0.25ms, sin = 5*sin(90°) = 5
+        stamp!(sin_src, ctx2, vcc2, 0; t=0.25e-3, mode=:tran)
+
+        sys2 = assemble!(ctx2)
+        sol2 = solve_dc(sys2)
+        @test voltage(sol2, :vcc) ≈ 5.0 atol=1e-10
+    end
+
+    @testset "Time-dependent ODE with builder" begin
+        using OrdinaryDiffEq
+
+        # Build RC circuit with PWL voltage source
+        function build_pwl_rc(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # PWL: ramp from 0 to Vmax over ramp_time, then hold
+            pwl = PWLVoltageSource(
+                [0.0, params.ramp_time],
+                [0.0, params.Vmax];
+                name=:Vpwl
+            )
+            stamp!(pwl, ctx, vcc, 0; t=spec.time, mode=spec.mode)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        params = (Vmax=5.0, ramp_time=1e-3, R=1000.0, C=1e-6)
+        τ = params.R * params.C  # 1ms
+
+        # Create ODE problem (time-dependent sources handled automatically)
+        prob_data = make_ode_problem(build_pwl_rc, params, (0.0, 5e-3))
+
+        f = ODEFunction(prob_data.f;
+                        mass_matrix = prob_data.mass_matrix,
+                        jac = prob_data.jac,
+                        jac_prototype = prob_data.jac_prototype)
+        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+
+        sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # At t=0, source is 0V
+        @test sol(0.0)[1] ≈ 0.0 atol=1e-6  # vcc
+
+        # At t=5ms (after ramp), source should be at 5V
+        # Capacitor should be nearly charged
+        @test sol(5e-3)[1] ≈ 5.0 atol=0.1  # vcc
+        @test sol(5e-3)[2] > 4.0  # out should be approaching 5V
+    end
+
+    @testset "SIN transient simulation" begin
+        using OrdinaryDiffEq
+
+        # RC circuit with sinusoidal source
+        function build_sin_rc(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            sin_src = SinVoltageSource(
+                params.vo, params.va, params.freq;
+                name=:Vsin
+            )
+            stamp!(sin_src, ctx, vcc, 0; t=spec.time, mode=spec.mode)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        # Low-pass RC filter with SIN source
+        # R = 1k, C = 1μF, fc = 159Hz
+        # Source: 1kHz (well above cutoff) - should be attenuated
+        params = (vo=0.0, va=5.0, freq=1000.0, R=1000.0, C=1e-6)
+        fc = 1.0 / (2π * params.R * params.C)  # ~159 Hz
+
+        prob_data = make_ode_problem(build_sin_rc, params, (0.0, 5e-3))
+
+        f = ODEFunction(prob_data.f;
+                        mass_matrix = prob_data.mass_matrix,
+                        jac = prob_data.jac,
+                        jac_prototype = prob_data.jac_prototype)
+        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+
+        sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # The output amplitude should be attenuated since freq >> fc
+        # At steady state, |H(jω)| = 1/sqrt(1 + (f/fc)²) ≈ 0.157 for f=1000Hz, fc=159Hz
+        # So output amplitude should be about 5 * 0.157 ≈ 0.79V
+
+        # After initial transient (a few ms), check output amplitude
+        times = 3e-3:0.01e-3:5e-3
+        out_vals = [sol(t)[2] for t in times]
+        amplitude = (maximum(out_vals) - minimum(out_vals)) / 2
+
+        # Output should be attenuated (less than input amplitude of 5V)
+        @test amplitude < 2.0
+        @test amplitude > 0.3
     end
 
 end  # @testset "MNA Core Tests"

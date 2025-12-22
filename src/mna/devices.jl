@@ -209,6 +209,178 @@ end
 export pwl_value
 
 """
+    PWLCurrentSource
+
+Piecewise-linear current source defined by time-value pairs.
+
+# Example
+```julia
+# Ramp from 0A to 1mA over 1ms
+pwl = PWLCurrentSource([0.0, 1e-3], [0.0, 1e-3]; name=:Iramp)
+```
+"""
+struct PWLCurrentSource
+    times::Vector{Float64}
+    values::Vector{Float64}
+    name::Symbol
+
+    function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
+        @assert length(times) == length(values) "times and values must have same length"
+        @assert issorted(times) "times must be sorted"
+        new(Float64.(times), Float64.(values), name)
+    end
+end
+
+export PWLCurrentSource
+
+function pwl_value(src::PWLCurrentSource, t::Real)
+    ts, vs = src.times, src.values
+    n = length(ts)
+
+    if t <= ts[1]
+        return vs[1]
+    end
+    if t >= ts[end]
+        return vs[end]
+    end
+
+    for i in 1:(n-1)
+        if ts[i] <= t <= ts[i+1]
+            dt = ts[i+1] - ts[i]
+            dv = vs[i+1] - vs[i]
+            return vs[i] + dv * (t - ts[i]) / dt
+        end
+    end
+    return vs[end]
+end
+
+function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
+    if mode == :dcop
+        return pwl_value(src, 0.0)
+    else
+        return pwl_value(src, t)
+    end
+end
+
+"""
+    SinVoltageSource
+
+Sinusoidal voltage source with SPICE-compatible parameters.
+
+V(t) = vo + va * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
+
+For t < td: V(t) = vo + va * sin(phase)
+
+# Fields
+- `vo::Float64`: DC offset voltage
+- `va::Float64`: Amplitude
+- `freq::Float64`: Frequency in Hz
+- `td::Float64`: Delay time (default: 0)
+- `theta::Float64`: Damping factor (default: 0)
+- `phase::Float64`: Phase in degrees (default: 0)
+- `name::Symbol`: Source name
+
+# Example
+```julia
+# 1kHz sine wave, 1V amplitude, 0.5V offset
+sin_src = SinVoltageSource(0.5, 1.0, 1000.0; name=:Vsin)
+```
+"""
+struct SinVoltageSource
+    vo::Float64      # DC offset
+    va::Float64      # Amplitude
+    freq::Float64    # Frequency (Hz)
+    td::Float64      # Delay
+    theta::Float64   # Damping factor
+    phase::Float64   # Phase (degrees)
+    name::Symbol
+end
+
+function SinVoltageSource(vo::Real, va::Real, freq::Real;
+                          td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
+                          name::Symbol=:V)
+    SinVoltageSource(Float64(vo), Float64(va), Float64(freq),
+                     Float64(td), Float64(theta), Float64(phase), name)
+end
+
+export SinVoltageSource
+
+"""
+    sin_value(src::SinVoltageSource, t::Real) -> Float64
+
+Evaluate sinusoidal source at time t.
+"""
+function sin_value(src::SinVoltageSource, t::Real)
+    if t < src.td
+        # Before delay: DC offset + initial phase
+        return src.vo + src.va * sind(src.phase)
+    else
+        # Damped sinusoid
+        t_eff = t - src.td
+        damping = src.theta == 0.0 ? 1.0 : exp(-t_eff * src.theta)
+        return src.vo + src.va * damping * sind(360.0 * src.freq * t_eff + src.phase)
+    end
+end
+
+function get_source_value(src::SinVoltageSource, t::Real, mode::Symbol)
+    if mode == :dcop
+        # DC: use value at t=0 (before delay)
+        return src.vo + src.va * sind(src.phase)
+    else
+        return sin_value(src, t)
+    end
+end
+
+export sin_value
+
+"""
+    SinCurrentSource
+
+Sinusoidal current source with SPICE-compatible parameters.
+
+I(t) = io + ia * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
+
+# Fields
+Same as SinVoltageSource but for current.
+"""
+struct SinCurrentSource
+    io::Float64      # DC offset
+    ia::Float64      # Amplitude
+    freq::Float64    # Frequency (Hz)
+    td::Float64      # Delay
+    theta::Float64   # Damping factor
+    phase::Float64   # Phase (degrees)
+    name::Symbol
+end
+
+function SinCurrentSource(io::Real, ia::Real, freq::Real;
+                          td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
+                          name::Symbol=:I)
+    SinCurrentSource(Float64(io), Float64(ia), Float64(freq),
+                     Float64(td), Float64(theta), Float64(phase), name)
+end
+
+export SinCurrentSource
+
+function sin_value(src::SinCurrentSource, t::Real)
+    if t < src.td
+        return src.io + src.ia * sind(src.phase)
+    else
+        t_eff = t - src.td
+        damping = src.theta == 0.0 ? 1.0 : exp(-t_eff * src.theta)
+        return src.io + src.ia * damping * sind(360.0 * src.freq * t_eff + src.phase)
+    end
+end
+
+function get_source_value(src::SinCurrentSource, t::Real, mode::Symbol)
+    if mode == :dcop
+        return src.io + src.ia * sind(src.phase)
+    else
+        return sin_value(src, t)
+    end
+end
+
+"""
     VCVS(gain::Float64; name::Symbol=:E)
 
 Voltage-Controlled Voltage Source.
@@ -595,11 +767,156 @@ function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_
     stamp_G!(ctx, I_in_idx, in_p,  1.0)
     stamp_G!(ctx, I_in_idx, in_n, -1.0)
 
-    # Output current: gain * I_in flows into out_p
-    stamp_G!(ctx, out_p, I_in_idx,  F.gain)
-    stamp_G!(ctx, out_n, I_in_idx, -F.gain)
+    # Output current: gain * I_in flows into out_p (out of out_n)
+    # Negative stamp means current entering the node
+    stamp_G!(ctx, out_p, I_in_idx, -F.gain)
+    stamp_G!(ctx, out_n, I_in_idx,  F.gain)
 
     return I_in_idx
+end
+
+#------------------------------------------------------------------------------#
+# SPICE-style Current-Controlled Sources (reference existing V-source)
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Int
+
+Stamp a CCVS using an existing current variable (SPICE-style).
+V(out_p, out_n) = H.rm * I_in
+
+I_in_idx is the index of an existing current variable (e.g., from a voltage source).
+This is used when the SPICE netlist references a voltage source name for current sensing.
+
+Returns I_out_idx - the index of the output current variable.
+"""
+function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+    # Output current variable
+    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
+
+    # Output branch
+    stamp_G!(ctx, out_p, I_out_idx,  1.0)
+    stamp_G!(ctx, out_n, I_out_idx, -1.0)
+
+    # Voltage equation: V(out) = rm * I(in)
+    # V(out_p) - V(out_n) - rm * I_in = 0
+    stamp_G!(ctx, I_out_idx, out_p,     1.0)
+    stamp_G!(ctx, I_out_idx, out_n,    -1.0)
+    stamp_G!(ctx, I_out_idx, I_in_idx, -H.rm)
+
+    return I_out_idx
+end
+
+"""
+    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Nothing
+
+Stamp a CCCS using an existing current variable (SPICE-style).
+I(out_p, out_n) = F.gain * I_in
+
+I_in_idx is the index of an existing current variable (e.g., from a voltage source).
+This is used when the SPICE netlist references a voltage source name for current sensing.
+"""
+function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+    # Output current: gain * I_in flows into out_p (out of out_n)
+    # Negative stamp means current entering the node
+    stamp_G!(ctx, out_p, I_in_idx, -F.gain)
+    stamp_G!(ctx, out_n, I_in_idx,  F.gain)
+
+    return nothing
+end
+
+#------------------------------------------------------------------------------#
+# Time-Dependent Voltage Sources
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+
+Stamp a time-dependent voltage source.
+"""
+function stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int;
+                t::Real=0.0, mode::Symbol=:dcop)
+    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    v = get_source_value(V, t, mode)
+    stamp_b!(ctx, I_idx, v)
+
+    return I_idx
+end
+
+"""
+    stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+
+Stamp a PWL voltage source evaluated at time t.
+"""
+function stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int;
+                t::Real=0.0, mode::Symbol=:dcop)
+    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    v = get_source_value(V, t, mode)
+    stamp_b!(ctx, I_idx, v)
+
+    return I_idx
+end
+
+"""
+    stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+
+Stamp a sinusoidal voltage source evaluated at time t.
+"""
+function stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int;
+                t::Real=0.0, mode::Symbol=:dcop)
+    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    v = get_source_value(V, t, mode)
+    stamp_b!(ctx, I_idx, v)
+
+    return I_idx
+end
+
+#------------------------------------------------------------------------------#
+# Time-Dependent Current Sources
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+
+Stamp a PWL current source evaluated at time t.
+"""
+function stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int;
+                t::Real=0.0, mode::Symbol=:dcop)
+    i = get_source_value(I, t, mode)
+    stamp_b!(ctx, p,  i)
+    stamp_b!(ctx, n, -i)
+    return nothing
+end
+
+"""
+    stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+
+Stamp a sinusoidal current source evaluated at time t.
+"""
+function stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int;
+                t::Real=0.0, mode::Symbol=:dcop)
+    i = get_source_value(I, t, mode)
+    stamp_b!(ctx, p,  i)
+    stamp_b!(ctx, n, -i)
+    return nothing
 end
 
 #==============================================================================#
@@ -619,4 +936,11 @@ function stamp!(device, ctx::MNAContext, out_p::Symbol, out_n::Symbol, in_p::Sym
     stamp!(device, ctx,
            get_node!(ctx, out_p), get_node!(ctx, out_n),
            get_node!(ctx, in_p), get_node!(ctx, in_n))
+end
+
+# Convenience for time-dependent sources with symbols
+function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinVoltageSource,
+                              PWLCurrentSource, SinCurrentSource},
+                ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, mode=mode)
 end

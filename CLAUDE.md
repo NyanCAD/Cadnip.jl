@@ -2,9 +2,13 @@
 
 ## Environment
 
-- **Julia is installed via juliaup** and is NOT on PATH
+- **Julia is NOT pre-installed** - install juliaup first:
+  - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
+  - Then source the profile: `. ~/.bashrc`
   - Use `~/.juliaup/bin/julia` to run Julia
   - Example: `~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test()'`
+- **Use Julia 1.12** (default from juliaup) - this is what CI uses
+  - Don't add compatibility hacks for older Julia versions
 
 ## Development Guidelines
 
@@ -74,9 +78,11 @@ sweep = ProductSweep(var"inner.params.R1" = 100.0:200.0)
 cs = CircuitSweep(builder, sweep; inner=(params=(R1=100.0,),))
 ```
 
-### Phase 4 Notes
-The SPICE codegen test in `test/sweep.jl` is commented out - re-enable after Phase 4 ports SPICE codegen to emit `stamp!` calls instead of DAECompiler primitives.
+### Phase 4 Status
+SPICE codegen now emits MNA `stamp!` calls. Key files:
+- `src/spc/codegen.jl` - Main codegen with `make_mna_circuit()`, `cg_mna_instance!()`
+- `src/spc/interface.jl` - High-level `sp_str` macro generates MNA builders
+- `src/mna/devices.jl` - Device types including time-dependent sources (PWL, SIN)
 
-Key files for Phase 4:
-- `src/spc/*.jl` - SPICE codegen (**focus here**, not spectre.jl which is the old backend)
-- The goal is to emit `stamp!(Device(...), ctx, node1, node2)` calls
+Remaining work:
+- Current-controlled sources (CCVS, CCCS) - require tracking voltage source currents

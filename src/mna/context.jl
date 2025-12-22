@@ -8,7 +8,7 @@
 #==============================================================================#
 
 export MNAContext, MNASystem
-export get_node!, alloc_current!
+export get_node!, alloc_current!, get_current_idx, has_current
 export stamp_G!, stamp_C!, stamp_b!
 export stamp_conductance!, stamp_capacitance!
 export system_size
@@ -199,6 +199,36 @@ function alloc_current!(ctx::MNAContext, name::Symbol)::Int
 end
 
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
+
+"""
+    get_current_idx(ctx::MNAContext, name::Symbol) -> Int
+
+Look up a current variable index by name.
+Returns the system index (n_nodes + position in current_names).
+Throws an error if the current variable doesn't exist.
+
+# Example
+```julia
+# After stamping a voltage source V1
+i_idx = get_current_idx(ctx, :I_V1)
+```
+"""
+function get_current_idx(ctx::MNAContext, name::Symbol)::Int
+    idx = findfirst(==(name), ctx.current_names)
+    idx === nothing && error("Current variable $name not found in MNA context")
+    return ctx.n_nodes + idx
+end
+
+get_current_idx(ctx::MNAContext, name::String) = get_current_idx(ctx, Symbol(name))
+
+"""
+    has_current(ctx::MNAContext, name::Symbol) -> Bool
+
+Check if a current variable with the given name exists.
+"""
+function has_current(ctx::MNAContext, name::Symbol)::Bool
+    return name in ctx.current_names
+end
 
 #==============================================================================#
 # Stamping Primitives

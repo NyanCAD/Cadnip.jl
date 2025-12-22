@@ -12,6 +12,13 @@
 using LinearAlgebra
 using SparseArrays
 using Accessors
+using ForwardDiff: Dual, value
+
+# Extract real value from ForwardDiff.Dual (for tgrad compatibility)
+# When ODE solvers compute time gradients, t is passed as a Dual number.
+# We need to extract the real value to build circuits with Float64 vectors.
+real_time(t::Real) = Float64(t)
+real_time(t::Dual) = Float64(value(t))
 
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
@@ -24,7 +31,7 @@ export voltage, current, magnitude_db, phase_deg
 #==============================================================================#
 
 """
-    MNASpec
+    MNASpec{T}
 
 Simulation specification for MNA analysis.
 
@@ -34,10 +41,15 @@ Passed explicitly to circuit builders (not via ScopedValue) to enable JIT optimi
 # Fields
 - `temp::Float64`: Temperature in Celsius (default: 27.0)
 - `mode::Symbol`: Analysis mode - `:dcop`, `:tran`, `:tranop`, `:ac` (default: :tran)
+- `time::T`: Current simulation time for transient sources (default: 0.0)
+
+The time field is parameterized to support ForwardDiff automatic differentiation
+during transient analysis with Rosenbrock ODE solvers.
 
 # Example
 ```julia
 spec = MNASpec(temp=50.0, mode=:dcop)
+spec_at_1ms = MNASpec(temp=27.0, mode=:tran, time=1e-3)
 ```
 
 # Design Rationale
@@ -45,9 +57,10 @@ Unlike CedarSim's ScopedValue-based SimSpec, MNASpec is passed explicitly.
 This enables full JIT optimization since Julia's closure boxing issue
 prevents optimization of captured ScopedValue accesses.
 """
-Base.@kwdef struct MNASpec
+Base.@kwdef struct MNASpec{T<:Real}
     temp::Float64 = 27.0
     mode::Symbol = :tran
+    time::T = 0.0
 end
 
 export MNASpec
@@ -57,16 +70,24 @@ export MNASpec
 
 Create new spec with different temperature.
 """
-with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode)
+with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time)
 
 """
     with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
 
 Create new spec with different mode.
 """
-with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode)
+with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time)
 
-export with_temp, with_mode
+"""
+    with_time(spec::MNASpec, t::Real) -> MNASpec
+
+Create new spec with different time.
+Note: time type is preserved to support ForwardDiff Dual numbers.
+"""
+with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t)
+
+export with_temp, with_mode, with_time
 
 #==============================================================================#
 # Solution Types
@@ -343,6 +364,7 @@ This returns an ODEFunction with mass_matrix = C.
 # Notes
 - For singular C (algebraic constraints), use a DAE solver
 - For constant C with nonzero diagonal, use implicit ODE solver
+- For time-dependent sources, use `make_ode_function_timed` instead
 """
 function make_ode_function(sys::MNASystem)
     G = sys.G
@@ -383,6 +405,92 @@ function make_ode_function(sys::MNASystem)
         jac_prototype = -G  # Sparsity pattern
     )
 end
+
+"""
+    make_ode_function_timed(builder, params, base_spec::MNASpec) -> NamedTuple
+
+Create an ODEFunction for circuits with time-dependent sources.
+
+This version rebuilds b(t) at each timestep by calling the circuit builder
+with updated time in the spec. G and C matrices are assumed constant.
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `base_spec`: Base simulation spec (mode will be set to :tran)
+
+# Returns
+NamedTuple with `rhs!`, `jac!`, `mass_matrix`, `jac_prototype`
+
+# Example
+```julia
+function build_rc(params, spec)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+    # PWL voltage source - uses spec.time
+    stamp!(PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]), ctx, vcc, 0;
+           t=spec.time, mode=spec.mode)
+    stamp!(Resistor(params.R), ctx, vcc, out)
+    stamp!(Capacitor(params.C), ctx, out, 0)
+    return ctx
+end
+
+ode_data = make_ode_function_timed(build_rc, (R=1000.0, C=1e-6), MNASpec())
+```
+"""
+function make_ode_function_timed(builder::F, params::P, base_spec::MNASpec) where {F,P}
+    # Build at t=0 to get G, C matrices (assumed time-invariant)
+    tran_spec = MNASpec(temp=base_spec.temp, mode=:tran, time=0.0)
+    ctx0 = builder(params, tran_spec)
+    sys0 = assemble!(ctx0)
+
+    G = sys0.G
+    C = sys0.C
+    n = system_size(sys0)
+
+    # Check if C has any structure
+    has_dynamics = nnz(C) > 0
+
+    if !has_dynamics
+        @warn "No capacitors/inductors - system is purely algebraic. Consider using solve_dc instead."
+    end
+
+    # RHS function: C * du/dt = b(t) - G*u
+    # Rebuilds b(t) at each timestep
+    # Note: We use real_time(t) to extract Float64 from ForwardDiff.Dual
+    # This is needed because MNAContext uses Vector{Float64} for b.
+    # Time gradients will be computed via finite differences by the solver.
+    function rhs!(du, u, p, t)
+        # Build circuit at current time to get b(t)
+        t_real = real_time(t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=t_real)
+        ctx_t = builder(params, spec_t)
+        sys_t = assemble!(ctx_t)
+
+        # du = b(t) - G*u
+        mul!(du, G, u)
+        du .*= -1
+        du .+= sys_t.b
+        return nothing
+    end
+
+    # Jacobian: d(rhs)/du = -G (constant, doesn't depend on t)
+    function jac!(J, u, p, t)
+        copyto!(J, -G)
+        return nothing
+    end
+
+    return (
+        rhs! = rhs!,
+        jac! = jac!,
+        mass_matrix = C,
+        jac_prototype = -G,
+        sys0 = sys0  # Reference system for node names etc.
+    )
+end
+
+export make_ode_function_timed
 
 """
     make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
@@ -439,6 +547,91 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
         sys = sys  # Keep reference for solution interpretation
     )
 end
+
+"""
+    make_ode_problem(builder, params, tspan; temp=27.0, dc_for_ic=true)
+
+Create an ODE problem from a circuit builder function.
+
+This is the primary API for transient simulation. Time-dependent sources
+(PWL, SIN, PULSE) are handled automatically by passing `spec.time` to stamps.
+
+The builder is called at each timestep to update b(t), while G and C
+matrices are assumed constant (linear circuit topology).
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `tspan`: Time span (tstart, tstop)
+- `temp`: Temperature in Celsius (default: 27.0)
+- `dc_for_ic`: Use DC operating point for initial condition (default: true)
+
+# Returns
+NamedTuple with fields for ODEProblem construction:
+- `f`: RHS function
+- `u0`: Initial condition
+- `tspan`: Time span
+- `mass_matrix`: C matrix
+- `jac`: Jacobian function
+- `jac_prototype`: Sparsity pattern
+- `sys`: Reference MNASystem
+
+# Example
+```julia
+function build_pwl_circuit(params, spec)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    # PWL source evaluated at spec.time
+    stamp!(PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]), ctx, vcc, 0;
+           t=spec.time, mode=spec.mode)
+    stamp!(Resistor(params.R), ctx, vcc, out)
+    stamp!(Capacitor(params.C), ctx, out, 0)
+    return ctx
+end
+
+prob_data = make_ode_problem(build_pwl_circuit, (R=1e3, C=1e-6), (0.0, 10e-3))
+
+using OrdinaryDiffEq
+f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix)
+prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+sol = solve(prob, Rodas5P())
+```
+"""
+function make_ode_problem(builder::F, params::P, tspan::Tuple{Real,Real};
+                          temp::Real=27.0, dc_for_ic::Bool=true) where {F,P}
+    base_spec = MNASpec(temp=Float64(temp), mode=:tran, time=0.0)
+
+    # Get ODE function components
+    ode_funcs = make_ode_function_timed(builder, params, base_spec)
+
+    # Initial condition: DC operating point
+    u0 = if dc_for_ic
+        dc_spec = MNASpec(temp=Float64(temp), mode=:dcop, time=0.0)
+        dc_ctx = builder(params, dc_spec)
+        dc_sys = assemble!(dc_ctx)
+        dc_sol = solve_dc(dc_sys)
+        dc_sol.x
+    else
+        zeros(system_size(ode_funcs.sys0))
+    end
+
+    return (
+        f = ode_funcs.rhs!,
+        u0 = u0,
+        tspan = Float64.(tspan),
+        mass_matrix = ode_funcs.mass_matrix,
+        jac = ode_funcs.jac!,
+        jac_prototype = ode_funcs.jac_prototype,
+        sys = ode_funcs.sys0
+    )
+end
+
+# Alias for backwards compatibility
+const make_ode_problem_timed = make_ode_problem
+
+export make_ode_problem_timed
 
 """
     make_dae_function(sys::MNASystem) -> NamedTuple
