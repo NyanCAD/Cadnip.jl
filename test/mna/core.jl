@@ -21,6 +21,7 @@ using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!
 using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
 using CedarSim.MNA: stamp!, system_size
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using CedarSim.MNA: TimeDependentVoltageSource, PWLVoltageSource, get_source_value, pwl_value
 using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS
 using CedarSim.MNA: assemble!, assemble_G, assemble_C, get_rhs
 using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
@@ -1167,12 +1168,12 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
             ode_data = make_dc_initialized_ode_problem(sys, tspan)
 
             M = ode_data.mass_matrix
-            f! = ode_data.f!
+            f = ode_data.f
             u0 = ode_data.u0
-            jac! = ode_data.jac!
+            jac = ode_data.jac
             jac_proto = ode_data.jac_prototype
 
-            ode_fn = ODEFunction(f!; mass_matrix=M, jac=jac!, jac_prototype=jac_proto)
+            ode_fn = ODEFunction(f; mass_matrix=M, jac=jac, jac_prototype=jac_proto)
             prob = ODEProblem(ode_fn, u0, tspan)
             sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
 
