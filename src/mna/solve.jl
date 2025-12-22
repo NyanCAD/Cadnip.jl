@@ -19,6 +19,55 @@ export make_dae_problem, make_dae_function
 export voltage, current, magnitude_db, phase_deg
 
 #==============================================================================#
+# Simulation Specification
+#==============================================================================#
+
+"""
+    MNASpec
+
+Simulation specification for MNA analysis.
+
+Contains simulation-level parameters that are separate from circuit parameters.
+Passed explicitly to circuit builders (not via ScopedValue) to enable JIT optimization.
+
+# Fields
+- `temp::Float64`: Temperature in Celsius (default: 27.0)
+- `mode::Symbol`: Analysis mode - `:dcop`, `:tran`, `:tranop`, `:ac` (default: :tran)
+
+# Example
+```julia
+spec = MNASpec(temp=50.0, mode=:dcop)
+```
+
+# Design Rationale
+Unlike CedarSim's ScopedValue-based SimSpec, MNASpec is passed explicitly.
+This enables full JIT optimization since Julia's closure boxing issue
+prevents optimization of captured ScopedValue accesses.
+"""
+Base.@kwdef struct MNASpec
+    temp::Float64 = 27.0
+    mode::Symbol = :tran
+end
+
+export MNASpec
+
+"""
+    with_temp(spec::MNASpec, temp::Real) -> MNASpec
+
+Create new spec with different temperature.
+"""
+with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode)
+
+"""
+    with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
+
+Create new spec with different mode.
+"""
+with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode)
+
+export with_temp
+
+#==============================================================================#
 # Solution Types
 #==============================================================================#
 
@@ -576,25 +625,48 @@ sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
 sys = assemble!(sim)
 sol = solve_dc(sys)
 ```
-"""
-struct MNASim{F,P}
-    builder::F
-    mode::Symbol
-    params::P
 
-    function MNASim(builder::F; mode::Symbol=:tran, kwargs...) where {F}
+# New API with explicit spec:
+```julia
+function build_circuit(params, spec)
+    ctx = MNAContext()
+    # params: circuit parameters (R, C, Vcc, etc.)
+    # spec: MNASpec with temp, mode
+
+    R_temp = params.R * (1 + 0.004 * (spec.temp - 27))
+    stamp!(Resistor(R_temp), ctx, ...)
+
+    v = spec.mode == :dcop ? params.Vdc : params.Vss
+    stamp!(VoltageSource(v), ctx, ...)
+
+    return ctx
+end
+
+sim = MNASim(build_circuit; spec=MNASpec(temp=50.0), Vcc=5.0, R=1000.0)
+```
+"""
+struct MNASim{F,S,P}
+    builder::F
+    spec::S        # MNASpec or compatible
+    params::P      # Circuit parameters (NamedTuple)
+
+    function MNASim(builder::F; spec=MNASpec(), mode::Symbol=:tran, temp::Real=27.0, kwargs...) where {F}
+        # Support both new API (spec=...) and legacy (mode=...)
+        if spec isa MNASpec
+            actual_spec = spec
+        else
+            actual_spec = MNASpec(temp=Float64(temp), mode=mode)
+        end
         params = NamedTuple(kwargs)
-        new{F,typeof(params)}(builder, mode, params)
+        new{F,typeof(actual_spec),typeof(params)}(builder, actual_spec, params)
     end
 end
 
-export MNASim, alter, with_mode
+export MNASim, alter
 
-# Allow calling the sim to build the circuit
-# Passes a NamedTuple with mode and all user params
+# Callable interface - invokes builder with (params, spec)
 function (sim::MNASim)()
-    full_params = merge((mode=sim.mode,), sim.params)
-    return sim.builder(full_params)
+    return sim.builder(sim.params, sim.spec)
 end
 
 # Build and assemble in one step
@@ -603,15 +675,89 @@ function assemble!(sim::MNASim)
     return assemble!(ctx)
 end
 
-# Create a new sim with different mode
-function with_mode(sim::MNASim, mode::Symbol)
-    return MNASim(sim.builder; mode=mode, sim.params...)
+# Create a new sim with different spec
+function with_spec(sim::MNASim, spec::MNASpec)
+    return MNASim(sim.builder; spec=spec, sim.params...)
 end
 
-# Create a new sim with altered parameters
+# Create a new sim with different mode (convenience)
+function with_mode(sim::MNASim, mode::Symbol)
+    new_spec = MNASpec(temp=sim.spec.temp, mode=mode)
+    return with_spec(sim, new_spec)
+end
+
+# Create a new sim with different temperature (convenience)
+function with_temp(sim::MNASim, temp::Real)
+    new_spec = MNASpec(temp=Float64(temp), mode=sim.spec.mode)
+    return with_spec(sim, new_spec)
+end
+
+# Create a new sim with altered circuit parameters
 function alter(sim::MNASim; kwargs...)
     new_params = merge(sim.params, NamedTuple(kwargs))
-    return MNASim(sim.builder; mode=sim.mode, new_params...)
+    return MNASim(sim.builder; spec=sim.spec, new_params...)
+end
+
+export with_spec
+
+#==============================================================================#
+# Out-of-Place Evaluation (GPU-Compatible)
+#==============================================================================#
+
+"""
+    eval_circuit(builder, params, spec; t=0.0, u=nothing) -> MNASystem
+
+Out-of-place circuit evaluation that returns a new MNASystem.
+
+This is the GPU-compatible API that builds fresh matrices each call.
+For ensemble GPU solving and parameter sweeps, this avoids mutation
+and enables `ODEProblem{false}` formulation.
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Simulation specification (MNASpec)
+- `t`: Current time (for time-dependent sources)
+- `u`: Current solution (for non-linear devices, Newton iteration)
+
+# Example
+```julia
+function build_rc(params, spec)
+    ctx = MNAContext()
+    v = spec.mode == :dcop ? 0.0 : params.Vcc
+    stamp!(VoltageSource(v), ctx, get_node!(ctx, :vcc), 0)
+    stamp!(Resistor(params.R), ctx, get_node!(ctx, :vcc), get_node!(ctx, :out))
+    stamp!(Capacitor(params.C), ctx, get_node!(ctx, :out), 0)
+    return ctx
+end
+
+params = (Vcc=5.0, R=1000.0, C=1e-6)
+spec = MNASpec(mode=:tran)
+sys = eval_circuit(build_rc, params, spec)
+```
+
+# Design Notes
+- Returns fresh matrices, no mutation
+- Enables GPU ensemble solving with `EnsembleGPUKernel`
+- JIT optimizes constant stamps to simple assignments
+"""
+function eval_circuit(builder::F, params::P, spec::MNASpec;
+                      t::Real=0.0, u=nothing) where {F,P}
+    # For now, t and u are passed through spec extension
+    # Future: could pass to builder for time-dependent/nonlinear devices
+    ctx = builder(params, spec)
+    return assemble!(ctx)
+end
+
+export eval_circuit
+
+"""
+    eval_circuit(sim::MNASim; t=0.0, u=nothing) -> MNASystem
+
+Out-of-place evaluation from MNASim wrapper.
+"""
+function eval_circuit(sim::MNASim; t::Real=0.0, u=nothing)
+    return eval_circuit(sim.builder, sim.params, sim.spec; t=t, u=u)
 end
 
 """

@@ -942,19 +942,19 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
     #==========================================================================#
 
     # Import new exports
-    using CedarSim.MNA: MNASim, alter, with_mode
+    using CedarSim.MNA: MNASim, MNASpec, alter, with_mode, with_spec, eval_circuit
     using CedarSim.MNA: make_dc_initialized_dae_problem, make_dc_initialized_ode_problem
 
     @testset "MNASim basics" begin
-        # Define a parameterized circuit builder
-        function build_voltage_divider(p)
+        # Define a parameterized circuit builder (new API: params, spec)
+        function build_voltage_divider(params, spec)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
-            stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
-            stamp!(Resistor(p.R1), ctx, vcc, out)
-            stamp!(Resistor(p.R2), ctx, out, 0)
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(params.R1), ctx, vcc, out)
+            stamp!(Resistor(params.R2), ctx, out, 0)
 
             return ctx
         end
@@ -962,7 +962,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         # Create sim with parameters
         sim = MNASim(build_voltage_divider; Vcc=10.0, R1=1000.0, R2=1000.0)
 
-        @test sim.mode == :tran
+        @test sim.spec.mode == :tran
         @test sim.params.Vcc == 10.0
         @test sim.params.R1 == 1000.0
 
@@ -980,19 +980,23 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
         # Change mode
         sim3 = with_mode(sim, :dcop)
-        @test sim3.mode == :dcop
+        @test sim3.spec.mode == :dcop
         @test sim3.params.Vcc == 10.0  # Params preserved
+
+        # Test out-of-place eval_circuit
+        sys = eval_circuit(sim)
+        @test sys isa MNASystem
     end
 
     @testset "MNASim with RC circuit" begin
-        function build_rc(p)
+        function build_rc(params, spec)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
-            stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
-            stamp!(Resistor(p.R), ctx, vcc, out)
-            stamp!(Capacitor(p.C), ctx, out, 0)
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
 
             return ctx
         end
@@ -1100,23 +1104,23 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         # Build a parameterized RC circuit with a step voltage source
         # In :dcop mode, source returns dc_value
         # In :tran mode, source returns time-dependent value
-        function build_rc_step(p)
+        function build_rc_step(params, spec)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
             # Time-dependent voltage: step from 0 to Vcc at t=0
             # In :dcop mode, use 0V (pre-step state) or Vcc (post-step state)
-            if p.mode == :dcop
+            if spec.mode == :dcop
                 # DC operating point at t=0+ (after step)
-                stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+                stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
             else
                 # For transient, use full voltage (step already occurred at t=0)
-                stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+                stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
             end
 
-            stamp!(Resistor(p.R), ctx, vcc, out)
-            stamp!(Capacitor(p.C), ctx, out, 0)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
 
             return ctx
         end
@@ -1147,7 +1151,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
         # Test 4: Mode switching with with_mode()
         sim_dcop = with_mode(sim, :dcop)
-        @test sim_dcop.mode == :dcop
+        @test sim_dcop.spec.mode == :dcop
         sol_dcop = solve_dc(sim_dcop)
         @test voltage(sol_dcop, :out) ≈ 5.0
 
@@ -1234,24 +1238,24 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         using OrdinaryDiffEq
 
         # Build RC circuit with time-dependent source that respects mode
-        function build_mode_aware_rc(p)
+        function build_mode_aware_rc(params, spec)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
             # Use mode to determine source value
-            # :dcop -> use steady-state value (p.Vdc)
+            # :dcop -> use steady-state value (params.Vdc)
             # :tranop -> use t=0 transient value
             # :tran -> (for stamping, use DC value; time-dependence handled in ODE)
-            source_voltage = if p.mode == :dcop
-                p.Vdc  # DC operating point value
+            source_voltage = if spec.mode == :dcop
+                params.Vdc  # DC operating point value
             else
-                p.Vss  # Steady-state transient value
+                params.Vss  # Steady-state transient value
             end
 
             stamp!(VoltageSource(source_voltage), ctx, vcc, 0)
-            stamp!(Resistor(p.R), ctx, vcc, out)
-            stamp!(Capacitor(p.C), ctx, out, 0)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
 
             return ctx
         end

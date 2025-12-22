@@ -454,6 +454,71 @@ The typical SPICE initialization flow is now supported:
 2. **Time-dependent source with mode** - Tests `TimeDependentVoltageSource`, `PWLVoltageSource`
 3. **Mode-aware parameterized simulation** - Tests full SPICE-style init flow (DC → transient)
 
+### Architecture Refactor (2024-12-22)
+
+Major refactor based on analysis of CedarSim patterns, OpenVAF/VACASK interfaces, and GPU requirements.
+
+#### Design Decisions (see `doc/mna_architecture.md`)
+
+1. **Out-of-Place Evaluation**: Circuit evaluation returns new matrices for GPU compatibility
+   - Enables `ODEProblem{false}` formulation for DiffEqGPU.jl
+   - Enables ensemble GPU solving for parameter sweeps
+   - No mutation means no reset needed
+
+2. **Explicit Parameter Passing**: Parameters via function arguments, not ScopedValue
+   - DAECompiler's ScopedValue optimization not available in plain Julia
+   - Avoids Julia's closure boxing bug
+   - Enables full JIT optimization
+
+3. **Separated Spec from Params**:
+   - `MNASpec`: Simulation specification (temp, mode)
+   - `params`: Circuit parameters via ParamLens pattern
+   - Builder signature: `(params, spec) -> MNAContext`
+
+#### New Types and Functions
+
+```julia
+# Simulation specification
+struct MNASpec
+    temp::Float64  # Temperature (Celsius)
+    mode::Symbol   # :dcop, :tran, :tranop, :ac
+end
+
+# MNASim now separates spec from params
+struct MNASim{F,S,P}
+    builder::F
+    spec::S      # MNASpec
+    params::P    # Circuit parameters
+end
+
+# Out-of-place evaluation (GPU-compatible)
+eval_circuit(builder, params, spec; t=0.0, u=nothing) -> MNASystem
+eval_circuit(sim::MNASim; t=0.0, u=nothing) -> MNASystem
+
+# Spec manipulation
+with_spec(sim, spec) -> MNASim
+with_temp(sim, temp) -> MNASim  # Convenience
+with_mode(sim, mode) -> MNASim  # Convenience
+```
+
+#### Research Findings
+
+**OpenVAF/OSDI Interface** (`refs/OpenVAF/melange/core/src/veriloga/osdi_0_4.rs`):
+- `OsdiSimInfo.abstime`: Time passed every iteration
+- `setup_instance(temp, ...)`: Temperature explicit at setup
+- `JACOBIAN_ENTRY_*_CONST` flags: Mark constant vs. variable Jacobian entries
+- Separation of resist/react for C ABI efficiency (not needed in Julia with JIT)
+
+**VACASK** (`refs/VACASK/`):
+- ContextStack for hierarchical parameter resolution
+- Device eval called every Newton iteration
+- Temperature converted from Celsius to Kelvin for Verilog-A
+
+**GPU Support** (DiffEqGPU.jl):
+- Out-of-place required for `EnsembleGPUKernel`
+- `CuSparseMatrixCSR` for sparse matrices on GPU
+- Iterative solvers via Krylov.jl
+
 ### Next Steps
 
 Phase 4 (SPICE Codegen) will:
