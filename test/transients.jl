@@ -34,9 +34,11 @@ const r_val_pwl = 2
     vout_analytic_sol(t) = pwl_val(t) * i_max * r_val_pwl
 
     # Test using SPICE PWL source
+    # SPICE convention: I n+ n- injects current into n-, extracts from n+
+    # So i1 0 vout injects current into vout (n-)
     spice_code = """
     * PWL test
-    i1 vout 0 PWL(1m 0 9m $(i_max))
+    i1 0 vout PWL(1m 0 9m $(i_max))
     R1 vout 0 r=$(r_val_pwl)
     """
 

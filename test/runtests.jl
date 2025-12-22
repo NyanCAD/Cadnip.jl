@@ -30,6 +30,7 @@ if PHASE0_MINIMAL
     # Phase 4: Basic tests using MNA backend
     @testset "Phase 4: MNA Basic Tests" begin
         @testset "basic.jl" include("basic.jl")
+        @testset "transients.jl" include("transients.jl")
     end
 else
     @info "Running full test suite"

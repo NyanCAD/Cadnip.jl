@@ -646,10 +646,15 @@ end
 
 """
 Generate stamp! call for a current source.
+
+SPICE convention: I1 n+ n- val means current flows from n+ to n- through the source.
+This injects current into n- and extracts from n+.
+MNA convention: stamp!(CurrentSource, ctx, p, n) injects into p, extracts from n.
+So we swap: p=neg, n=pos.
 """
 function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.Current})
-    p = cg_net_name!(state, instance.pos)
-    n = cg_net_name!(state, instance.neg)
+    pos = cg_net_name!(state, instance.pos)
+    neg = cg_net_name!(state, instance.neg)
     name = LString(instance.name)
 
     # Parse source values
@@ -660,9 +665,10 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.C
         end
     end
 
+    # Swap nodes: MNA injects into first arg, SPICE injects into neg
     return quote
         let i = $dc_val
-            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $neg, $pos)
         end
     end
 end
@@ -860,10 +866,16 @@ end
 
 # Disambiguate Voltage/Current source calls
 function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltage, SP.Current}})
-    p = cg_net_name!(state, instance.pos)
-    n = cg_net_name!(state, instance.neg)
+    pos = cg_net_name!(state, instance.pos)
+    neg = cg_net_name!(state, instance.neg)
     name = LString(instance.name)
     is_voltage = instance isa SNode{SP.Voltage}
+
+    # SPICE convention: Iname n+ n- val means current flows from n+ to n- through source
+    # This injects current into n- and extracts from n+
+    # MNA convention: stamp!(CurrentSource, ctx, p, n) injects into p, extracts from n
+    # So for current sources, swap the nodes
+    p, n = is_voltage ? (pos, neg) : (neg, pos)
 
     # Parse source values - check for DC, AC, and transient
     dc_val = nothing
