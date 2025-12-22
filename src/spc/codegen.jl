@@ -579,6 +579,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Capacitor})
     # Get capacitance value
     c_expr = if hasparam(instance.params, "c")
         cg_expr!(state, getparam(instance.params, "c"))
+    elseif instance.val !== nothing
+        cg_expr!(state, instance.val)
     else
         1e-12  # Default 1pF
     end
@@ -606,6 +608,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Inductor})
     # Get inductance value
     l_expr = if hasparam(instance.params, "l")
         cg_expr!(state, getparam(instance.params, "l"))
+    elseif instance.val !== nothing
+        cg_expr!(state, instance.val)
     else
         1e-6  # Default 1uH
     end
@@ -674,10 +678,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     in_n = cg_net_name!(state, nets[4])
     name = LString(instance.name)
 
-    gain_expr = if hasparam(instance.params, "gain")
-        cg_expr!(state, getparam(instance.params, "gain"))
-    elseif instance.val !== nothing
-        cg_expr!(state, instance.val)
+    # Get the voltage control node which contains the gain
+    voltage_ctrl = instance.val
+    @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Get the gain value from VoltageControl
+    gain_expr = if voltage_ctrl.val !== nothing
+        cg_expr!(state, voltage_ctrl.val)
+    elseif voltage_ctrl.params !== nothing && hasparam(voltage_ctrl.params, "gain")
+        cg_expr!(state, getparam(voltage_ctrl.params, "gain"))
     else
         1.0
     end
@@ -700,10 +709,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     in_n = cg_net_name!(state, nets[4])
     name = LString(instance.name)
 
-    gm_expr = if hasparam(instance.params, "gm") || hasparam(instance.params, "gain")
-        cg_expr!(state, getparam(instance.params, hasparam(instance.params, "gm") ? "gm" : "gain"))
-    elseif instance.val !== nothing
-        cg_expr!(state, instance.val)
+    # Get the voltage control node which contains the gm
+    voltage_ctrl = instance.val
+    @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Get the transconductance value from VoltageControl
+    gm_expr = if voltage_ctrl.val !== nothing
+        cg_expr!(state, voltage_ctrl.val)
+    elseif voltage_ctrl.params !== nothing && (hasparam(voltage_ctrl.params, "gm") || hasparam(voltage_ctrl.params, "gain"))
+        cg_expr!(state, getparam(voltage_ctrl.params, hasparam(voltage_ctrl.params, "gm") ? "gm" : "gain"))
     else
         1.0
     end
@@ -806,12 +820,17 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     s = gensym()
     ca = :(let $s=(;$(implicit_params...)); end)
     params = Symbol[]
-    for passed_param in instance.params
-        name = LSymbol(passed_param.name)
-        def = cg_expr!(callee_codegen, passed_param.val)
-        push!(ca.args[end].args, :($name = $def))
-        push!(params, name)
+
+    # Find Parameter children in the AST (SubcktCall doesn't have .params field)
+    for child in SpectreNetlistParser.RedTree.children(instance)
+        if child !== nothing && isa(child, SNode{SP.Parameter})
+            name = LSymbol(child.name)
+            def = cg_expr!(callee_codegen, child.val)
+            push!(ca.args[end].args, :($name = $def))
+            push!(params, name)
+        end
     end
+
     push!(ca.args[end].args, Expr(:call, merge, s, Expr(:tuple, Expr(:parameters, params...))))
     params_expr = ca
 
@@ -1096,6 +1115,24 @@ function codegen_mna(scope::SemaResult)
 end
 
 """
+    extract_subcircuit_ports(sema::SemaResult) -> Vector{Symbol}
+
+Extract port names from a subcircuit's AST.
+Ports are the HierarchialNode children of the Subckt AST node.
+"""
+function extract_subcircuit_ports(sema::SemaResult)
+    ports = Symbol[]
+    subckt_ast = sema.ast
+    for child in SpectreNetlistParser.RedTree.children(subckt_ast)
+        if child !== nothing && isa(child, SNode{SP.HierarchialNode})
+            port_name = LSymbol(child)
+            push!(ports, port_name)
+        end
+    end
+    return ports
+end
+
+"""
     codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
 
 Generate an MNA subcircuit builder function from semantic analysis.
@@ -1109,12 +1146,15 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
     state = CodegenState(sema)
     body = codegen_mna!(state)
 
+    # Extract ports from AST
+    subckt_ports = extract_subcircuit_ports(sema)
+
     # Build port arguments - subcircuit ports become function parameters
-    port_args = [Symbol("port_", i) for i in 1:length(sema.ports)]
+    port_args = [Symbol("port_", i) for i in 1:length(subckt_ports)]
 
     # Map internal port names to function parameters
     port_mappings = Expr[:($internal_name = $arg)
-        for (internal_name, arg) in zip(sema.ports, port_args)]
+        for (internal_name, arg) in zip(subckt_ports, port_args)]
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 

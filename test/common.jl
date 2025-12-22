@@ -136,6 +136,7 @@ end  # if HAS_DAECOMPILER
 using CedarSim.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
 using CedarSim.MNA: voltage, current, get_node!, stamp!
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using CedarSim.MNA: make_ode_problem
 
 """
     solve_mna_spice_code(spice_code::String; temp=27.0) -> (ctx, sol)
@@ -165,7 +166,7 @@ function solve_mna_spice_code(spice_code::String; temp::Real=27.0)
     circuit_fn = Base.eval(m, code)
 
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = circuit_fn((;), spec)
+    ctx = Base.invokelatest(circuit_fn, (;), spec)
     sys = assemble!(ctx)
     sol = solve_dc(sys)
 
@@ -218,8 +219,6 @@ ctx, sol = tran_mna_circuit(rc_circuit, (0.0, 1e-3); params=(V=5.0, R=1000.0, C=
 ```
 """
 function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, solver=Rodas5P())
-    using CedarSim.MNA: make_ode_problem
-
     spec = MNASpec(temp=Float64(temp), mode=:tran)
     ctx = builder(params, spec)
     sys = assemble!(ctx)
