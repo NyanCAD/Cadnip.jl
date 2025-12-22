@@ -8,7 +8,7 @@ include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 using CedarSim.MNA: MNAContext, MNASim, get_node!, stamp!
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current, DCSolution
-using Accessors: @optic
+using CedarSim: ParamLens
 
 # Simple two-resistor circuit (MNA builder function):
 #
@@ -285,39 +285,41 @@ end
     @test :R2 ∈ sweepvars(cs)
 
     # Test nested parameter access with var-strings (like SPICE codegen will use)
-    # Builder uses Accessors lenses to access nested params
+    # Builder uses ParamLens for hierarchical params with defaults
     function build_nested_resistor(params, spec)
-        # Use lenses to access nested params (demonstrates SPICE codegen pattern)
-        inner_R1 = (@optic _.inner.R1)(params)
-        inner_R2 = (@optic _.inner.R2)(params)
+        # Convert params to ParamLens for SPICE-style hierarchical access
+        lens = ParamLens(params)
+        # lens.inner(; defaults...) returns params merged with lens overrides
+        p = lens.inner(; R1=1000.0, R2=1000.0)
 
         ctx = MNAContext()
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)
 
         stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-        stamp!(Resistor(inner_R1), ctx, vcc, out)
-        stamp!(Resistor(inner_R2), ctx, out, 0)
+        stamp!(Resistor(p.R1), ctx, vcc, out)
+        stamp!(Resistor(p.R2), ctx, out, 0)
 
         return ctx
     end
 
     sweep = ProductSweep(
-        TandemSweep(var"inner.R1" = 100.0:100.0:200.0,
-                    var"inner.R2" = 100.0:100.0:200.0),
+        TandemSweep(var"inner.params.R1" = 100.0:100.0:200.0,
+                    var"inner.params.R2" = 100.0:100.0:200.0),
     )
+    # ParamLens expects (inner=(params=(...),)) structure for hierarchical override
     cs = CircuitSweep(build_nested_resistor, sweep;
-                      inner = (R1 = 100.0, R2 = 100.0))
+                      inner = (params = (R1 = 100.0, R2 = 100.0),))
     @test length(cs) == 2
     @test size(cs) == (2,)
     @test size(cs, 1) == 2
-    @test first(cs).params.inner.R1 == 100.0
-    @test first(cs).params.inner.R2 == 100.0
-    @test last(collect(cs)).params.inner.R1 == 200.0
-    @test last(collect(cs)).params.inner.R2 == 200.0
+    @test first(cs).params.inner.params.R1 == 100.0
+    @test first(cs).params.inner.params.R2 == 100.0
+    @test last(collect(cs)).params.inner.params.R1 == 200.0
+    @test last(collect(cs)).params.inner.params.R2 == 200.0
     @test length(sweepvars(cs)) == 2
-    @test Symbol("inner.R1") ∈ sweepvars(cs)
-    @test Symbol("inner.R2") ∈ sweepvars(cs)
+    @test Symbol("inner.params.R1") ∈ sweepvars(cs)
+    @test Symbol("inner.params.R2") ∈ sweepvars(cs)
 end
 
 @testset "dc! sweeps" begin
