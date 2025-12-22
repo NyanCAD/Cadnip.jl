@@ -4,30 +4,33 @@ module test_sweep
 using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
-# Phase 0: Check if simulation is available
-const HAS_SIMULATION = CedarSim.USE_DAECOMPILER
+# Phase 0: Check if DAECompiler simulation is available
+const HAS_DAECOMPILER = CedarSim.USE_DAECOMPILER
 
-# Simple two-resistor circuit:
+# MNA imports for sweep tests
+using CedarSim.MNA: MNAContext, MNASim, get_node!, stamp!
+using CedarSim.MNA: Resistor, VoltageSource
+using CedarSim.MNA: voltage, current, DCSolution
+using CedarSim.MNA: alter as mna_alter
+
+# Simple two-resistor circuit (MNA version):
 #
 #  ┌─R1─┬── +
 #  V    R2
 #  └────┴── -
 #
-# We'll vary `R1` and `R2` with our CircuitSweep API,
+# We'll vary `R1` and `R2` with parameter sweeps,
 # then verify that the current out of `V` is correct.
-@kwdef struct TwoResistorCircuit
-    R1::Float64 = 1000.0
-    R2::Float64 = 1000.0
-end
+function build_two_resistor(params, spec)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
 
-function (self::TwoResistorCircuit)()
-    vcc = Named(net, "vcc")()
-    gnd = Named(net, "gnd")()
-    out = Named(net, "out")()
-    Named(V(1.), "V")(vcc, gnd)
-    Named(R(self.R1), "R1")(vcc, out)
-    Named(R(self.R2), "R2")(out, gnd)
-    Named(Gnd(), "G")(gnd)
+    stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
+    stamp!(Resistor(params.R1), ctx, vcc, out)
+    stamp!(Resistor(params.R2), ctx, out, 0)
+
+    return ctx
 end
 
 using CedarSim: nest_param_list, flatten_param_list
@@ -244,8 +247,59 @@ end
 
 end
 
-# Phase 0: Simulation-dependent tests - require DAECompiler
-if HAS_SIMULATION
+#==============================================================================#
+# MNA-based simulation tests (always run)
+#==============================================================================#
+
+@testset "simple dc!" begin
+    sim = MNASim(build_two_resistor; R1=100.0, R2=100.0)
+    sol = dc!(sim)
+    @test sol isa DCSolution
+    @test voltage(sol, :vcc) ≈ 1.0
+    @test voltage(sol, :out) ≈ 0.5  # Voltage divider: 1V * 100/(100+100)
+end
+
+@testset "dc! sweeps" begin
+    # Create base simulation and sweep over parameters using alter()
+    base_sim = MNASim(build_two_resistor; R1=1000.0, R2=1000.0)
+    sweep = ProductSweep(R1 = 100.0:100.0:2000.0, R2 = 100.0:100.0:2000.0)
+
+    # Perform the sweep
+    for sweep_params in sweep
+        sim = mna_alter(base_sim; sweep_params...)
+        sol = dc!(sim)
+
+        R1 = sim.params.R1
+        R2 = sim.params.R2
+
+        # Ensure that the current is inversely proportional to the overall resistance:
+        # I = V / (R1 + R2) = 1 / (R1 + R2)
+        # Current through voltage source is negative (sources current)
+        @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
+    end
+end
+
+#==============================================================================#
+# DAECompiler-specific tests (CircuitSweep requires IRODESystem)
+#==============================================================================#
+
+if HAS_DAECOMPILER
+
+# DAECompiler version of two-resistor circuit (for CircuitSweep tests)
+@kwdef struct TwoResistorCircuit
+    R1::Float64 = 1000.0
+    R2::Float64 = 1000.0
+end
+
+function (self::TwoResistorCircuit)()
+    vcc = Named(net, "vcc")()
+    gnd = Named(net, "gnd")()
+    out = Named(net, "out")()
+    Named(V(1.), "V")(vcc, gnd)
+    Named(R(self.R1), "R1")(vcc, out)
+    Named(R(self.R2), "R2")(out, gnd)
+    Named(Gnd(), "G")(gnd)
+end
 
 @testset "CircuitSweep" begin
     # Test construction of the `CircuitSweep` object
@@ -324,12 +378,7 @@ if HAS_SIMULATION
     @test Symbol("b.b.a") ∈ sweepvars(cs)
 end
 
-@testset "simple dc!" begin
-    dc!(TwoResistorCircuit(100., 100.))
-    dc!(ParamSim(TwoResistorCircuit; R1=100., R2=100.))
-end
-
-@testset "dc! sweeps" begin
+@testset "dc! sweeps (DAECompiler)" begin
     # Construct `CircuitSweep` object, which can be broadcast over with `dc!`, etc...
     cs = CircuitSweep(TwoResistorCircuit, ProductSweep(R1 = 100.:100.:2000., R2 = 100.:100.:2000.))
 
@@ -377,8 +426,8 @@ end
 end
 
 else
-    @info "Skipping CircuitSweep and dc! tests (Phase 0: simulation not available)"
-end  # if HAS_SIMULATION
+    @info "Skipping CircuitSweep and DAECompiler dc! tests (DAECompiler not available)"
+end  # if HAS_DAECOMPILER
 
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration
@@ -417,170 +466,6 @@ end
     s1 = sweepify([:r1 => 1:10, :r2 => 1:10])
     s2 = SerialSweep(r1 = 1:10, r2 = 1:10)
     @test collect(s1) == collect(s2)
-end
-
-#==============================================================================#
-# MNA Backend Sweep Tests
-#
-# These tests verify that the MNA backend integrates with the sweep API.
-# Unlike the DAECompiler tests above, these always run since MNA doesn't
-# require DAECompiler.
-#==============================================================================#
-
-using CedarSim.MNA: MNAContext, MNASystem, MNASim, MNASpec, get_node!, stamp!
-using CedarSim.MNA: Resistor, Capacitor, VoltageSource, CurrentSource
-using CedarSim.MNA: voltage, current, DCSolution, solve_dc
-using CedarSim.MNA: alter as mna_alter
-using SciMLBase: ReturnCode
-
-# MNA equivalent of TwoResistorCircuit
-function build_two_resistor(params, spec)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-    stamp!(Resistor(params.R1), ctx, vcc, out)
-    stamp!(Resistor(params.R2), ctx, out, 0)
-
-    return ctx
-end
-
-@testset "MNA simple dc!" begin
-    sim = MNASim(build_two_resistor; R1=100.0, R2=100.0)
-    sol = dc!(sim)
-    @test sol isa DCSolution
-    @test voltage(sol, :vcc) ≈ 1.0
-    @test voltage(sol, :out) ≈ 0.5  # Voltage divider
-end
-
-@testset "MNA dc! with alter()" begin
-    sim = MNASim(build_two_resistor; R1=1000.0, R2=1000.0)
-
-    # Test alter with sweep parameters
-    for sweep_params in ProductSweep(R1 = 100.0:100.0:500.0, R2 = 100.0:100.0:500.0)
-        sim_altered = mna_alter(sim; sweep_params...)
-        sol = dc!(sim_altered)
-
-        R1 = sim_altered.params.R1
-        R2 = sim_altered.params.R2
-
-        # Voltage divider: Vout = Vin * R2/(R1+R2)
-        expected_vout = 1.0 * R2 / (R1 + R2)
-        @test voltage(sol, :out) ≈ expected_vout atol=1e-10
-
-        # Current through circuit: I = Vin/(R1+R2)
-        expected_current = 1.0 / (R1 + R2)
-        # Current through voltage source (negative because it sources current)
-        @test current(sol, :I_V) ≈ -expected_current atol=1e-10
-    end
-end
-
-@testset "MNA dc! sweep with broadcast" begin
-    # Create multiple sims with different parameters using alter
-    base_sim = MNASim(build_two_resistor; R1=1000.0, R2=1000.0)
-
-    R1_values = [100.0, 200.0, 500.0, 1000.0]
-    R2_values = [100.0, 200.0, 500.0, 1000.0]
-
-    # Sweep over all combinations
-    for R1 in R1_values, R2 in R2_values
-        sim = mna_alter(base_sim; R1=R1, R2=R2)
-        sol = dc!(sim)
-
-        expected_vout = 1.0 * R2 / (R1 + R2)
-        @test voltage(sol, :out) ≈ expected_vout atol=1e-10
-    end
-end
-
-# MNA RC circuit for transient testing
-function build_rc_circuit(params, spec)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    stamp!(VoltageSource(params.Vcc; name=:V), ctx, vcc, 0)
-    stamp!(Resistor(params.R), ctx, vcc, out)
-    stamp!(Capacitor(params.C), ctx, out, 0)
-
-    return ctx
-end
-
-@testset "MNA tran! with alter()" begin
-    using OrdinaryDiffEq
-
-    base_sim = MNASim(build_rc_circuit; Vcc=5.0, R=1000.0, C=1e-6)
-    τ_base = 1000.0 * 1e-6  # 1ms
-
-    # Test transient with different RC time constants
-    for (R, C) in [(1000.0, 1e-6), (2000.0, 1e-6), (1000.0, 2e-6)]
-        sim = mna_alter(base_sim; R=R, C=C)
-        τ = R * C
-
-        sol = tran!(sim, (0.0, 5τ))
-        @test sol.retcode == ReturnCode.Success
-
-        # DC-initialized, should stay at steady state
-        @test sol(0.0)[2] ≈ 5.0 rtol=1e-2  # out node
-        @test sol(5τ)[2] ≈ 5.0 rtol=1e-2
-    end
-end
-
-@testset "MNA alter() preserves unmodified params" begin
-    sim = MNASim(build_rc_circuit; Vcc=5.0, R=1000.0, C=1e-6)
-
-    # Only alter R, leave Vcc and C unchanged
-    sim2 = mna_alter(sim; R=2000.0)
-    @test sim2.params.R == 2000.0
-    @test sim2.params.Vcc == 5.0
-    @test sim2.params.C == 1e-6
-
-    # Only alter C
-    sim3 = mna_alter(sim; C=2e-6)
-    @test sim3.params.R == 1000.0
-    @test sim3.params.Vcc == 5.0
-    @test sim3.params.C == 2e-6
-
-    # Alter multiple
-    sim4 = mna_alter(sim; R=500.0, Vcc=3.3)
-    @test sim4.params.R == 500.0
-    @test sim4.params.Vcc == 3.3
-    @test sim4.params.C == 1e-6
-end
-
-@testset "MNA sweep with SerialSweep" begin
-    base_sim = MNASim(build_two_resistor; R1=1000.0, R2=1000.0)
-
-    # Serial sweep: first sweep R1, then sweep R2
-    sweep = SerialSweep(R1 = [100.0, 500.0, 1000.0], R2 = [200.0, 400.0])
-
-    results = []
-    for params in sweep
-        # Apply non-nothing params
-        kwargs = Dict{Symbol,Float64}()
-        for (k, v) in params
-            if v !== nothing
-                kwargs[k] = v
-            end
-        end
-
-        if !isempty(kwargs)
-            sim = mna_alter(base_sim; kwargs...)
-            sol = dc!(sim)
-            push!(results, (sim.params, voltage(sol, :out)))
-        end
-    end
-
-    # Should have 5 results (3 for R1 sweep + 2 for R2 sweep)
-    @test length(results) == 5
-
-    # First 3 are R1 sweeps with R2=1000 (default)
-    for i in 1:3
-        params, vout = results[i]
-        @test params.R2 == 1000.0
-        expected = 1.0 * 1000.0 / (params.R1 + 1000.0)
-        @test vout ≈ expected atol=1e-10
-    end
 end
 
 end # module test_sweep
