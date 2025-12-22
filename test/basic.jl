@@ -260,4 +260,50 @@ end
     @test isapprox(sol.u[end][sys.n_nodes + I_L_idx], I_ss; atol=0.001)
 end
 
+@testset "SPICE CCVS (H element)" begin
+    # CCVS: Transresistance amplifier using zero-volt source for sensing
+    # Vin provides 5V, R1 sets current = 5V/1kΩ = 5mA through Vsense
+    # Vsense is a zero-volt source that senses this current
+    # H1 outputs voltage = rm * I = 200 * 5mA = 1V
+    spice_code = """
+    * CCVS test with zero-volt sense source
+    Vin vcc 0 DC 5
+    R1 vcc sense 1k
+    Vsense sense 0 DC 0
+    H1 out 0 Vsense 200
+    Rload out 0 1Meg
+    """
+    ctx, sol = solve_mna_spice_code(spice_code)
+
+    # Current through Vsense = 5V/1kΩ = 5mA (positive, flowing from sense to ground)
+    # Vout = rm * I = 200 * 5mA = 1V
+    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
+    @test isapprox(voltage(sol, :sense), 0.0; atol=deftol)
+    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+end
+
+@testset "SPICE CCCS (F element)" begin
+    # CCCS: Current mirror using zero-volt source for sensing
+    # Vin provides 5V, R1 sets current = 5V/1kΩ = 5mA through Vsense
+    # Vsense is a zero-volt source that senses this current
+    # F1 outputs current = gain * I = 2 * 5mA = 10mA
+    # V_out = I_out * R = 10mA * 100Ω = 1V
+    spice_code = """
+    * CCCS test with zero-volt sense source
+    Vin vcc 0 DC 5
+    R1 vcc sense 1k
+    Vsense sense 0 DC 0
+    F1 out 0 Vsense 2
+    Rload out 0 100
+    """
+    ctx, sol = solve_mna_spice_code(spice_code)
+
+    # Current through Vsense = 5V/1kΩ = 5mA
+    # I_out = gain * I = 2 * 5mA = 10mA
+    # V_out = I_out * R = 10mA * 100Ω = 1V
+    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
+    @test isapprox(voltage(sol, :sense), 0.0; atol=deftol)
+    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+end
+
 end # basic_tests

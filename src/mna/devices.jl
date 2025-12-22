@@ -767,11 +767,62 @@ function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_
     stamp_G!(ctx, I_in_idx, in_p,  1.0)
     stamp_G!(ctx, I_in_idx, in_n, -1.0)
 
-    # Output current: gain * I_in flows into out_p
-    stamp_G!(ctx, out_p, I_in_idx,  F.gain)
-    stamp_G!(ctx, out_n, I_in_idx, -F.gain)
+    # Output current: gain * I_in flows into out_p (out of out_n)
+    # Negative stamp means current entering the node
+    stamp_G!(ctx, out_p, I_in_idx, -F.gain)
+    stamp_G!(ctx, out_n, I_in_idx,  F.gain)
 
     return I_in_idx
+end
+
+#------------------------------------------------------------------------------#
+# SPICE-style Current-Controlled Sources (reference existing V-source)
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Int
+
+Stamp a CCVS using an existing current variable (SPICE-style).
+V(out_p, out_n) = H.rm * I_in
+
+I_in_idx is the index of an existing current variable (e.g., from a voltage source).
+This is used when the SPICE netlist references a voltage source name for current sensing.
+
+Returns I_out_idx - the index of the output current variable.
+"""
+function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+    # Output current variable
+    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
+
+    # Output branch
+    stamp_G!(ctx, out_p, I_out_idx,  1.0)
+    stamp_G!(ctx, out_n, I_out_idx, -1.0)
+
+    # Voltage equation: V(out) = rm * I(in)
+    # V(out_p) - V(out_n) - rm * I_in = 0
+    stamp_G!(ctx, I_out_idx, out_p,     1.0)
+    stamp_G!(ctx, I_out_idx, out_n,    -1.0)
+    stamp_G!(ctx, I_out_idx, I_in_idx, -H.rm)
+
+    return I_out_idx
+end
+
+"""
+    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Nothing
+
+Stamp a CCCS using an existing current variable (SPICE-style).
+I(out_p, out_n) = F.gain * I_in
+
+I_in_idx is the index of an existing current variable (e.g., from a voltage source).
+This is used when the SPICE netlist references a voltage source name for current sensing.
+"""
+function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+    # Output current: gain * I_in flows into out_p (out of out_n)
+    # Negative stamp means current entering the node
+    stamp_G!(ctx, out_p, I_in_idx, -F.gain)
+    stamp_G!(ctx, out_n, I_in_idx,  F.gain)
+
+    return nothing
 end
 
 #------------------------------------------------------------------------------#

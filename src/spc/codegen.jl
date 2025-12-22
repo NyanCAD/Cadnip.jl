@@ -716,6 +716,84 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
 end
 
 """
+Generate stamp! call for a CCVS (H element) - ControlledSource{:C,:V}.
+Current-controlled voltage source: V(out) = rm * I(vname)
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:C,:V}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get the controlling current info from val
+    current_ctrl = instance.val
+    @assert isa(current_ctrl, SNode{SP.CurrentControl})
+
+    # Get the voltage source name that provides the controlling current
+    vname_sym = if current_ctrl.vnam !== nothing
+        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    else
+        error("CCVS $name requires a voltage source name for current sensing")
+    end
+
+    # Get the transresistance value
+    rm_expr = if current_ctrl.val !== nothing
+        cg_expr!(state, current_ctrl.val)
+    elseif hasparam(current_ctrl.params, "rm") || hasparam(current_ctrl.params, "gain")
+        cg_expr!(state, getparam(current_ctrl.params, hasparam(current_ctrl.params, "rm") ? "rm" : "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let rm = $rm_expr
+            # Get the current index of the referenced voltage source
+            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            stamp!(CCVS(rm; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+        end
+    end
+end
+
+"""
+Generate stamp! call for a CCCS (F element) - ControlledSource{:C,:C}.
+Current-controlled current source: I(out) = gain * I(vname)
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:C,:C}})
+    nets = sema_nets(instance)
+    out_p = cg_net_name!(state, nets[1])
+    out_n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Get the controlling current info from val
+    current_ctrl = instance.val
+    @assert isa(current_ctrl, SNode{SP.CurrentControl})
+
+    # Get the voltage source name that provides the controlling current
+    vname_sym = if current_ctrl.vnam !== nothing
+        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    else
+        error("CCCS $name requires a voltage source name for current sensing")
+    end
+
+    # Get the current gain value
+    gain_expr = if current_ctrl.val !== nothing
+        cg_expr!(state, current_ctrl.val)
+    elseif hasparam(current_ctrl.params, "gain")
+        cg_expr!(state, getparam(current_ctrl.params, "gain"))
+    else
+        1.0
+    end
+
+    return quote
+        let gain = $gain_expr
+            # Get the current index of the referenced voltage source
+            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            stamp!(CCCS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+        end
+    end
+end
+
+"""
 Generate MNA subcircuit call.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
@@ -1070,7 +1148,7 @@ sol = MNA.solve_dc(sys)
 """
 function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
     # Run semantic analysis
-    sema = sema_file(ast)
+    sema = sema_file_or_section(ast)
     state = CodegenState(sema)
 
     # Generate subcircuit builders first

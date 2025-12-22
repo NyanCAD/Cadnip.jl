@@ -297,6 +297,74 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test G[5, 4] ≈ 10.0   # -gain * (-Vin_n)
     end
 
+    @testset "CCVS stamp" begin
+        # CCVS (transresistance): Vout = rm * I_in
+        # Needs current variables for both input sensing and output
+        ctx = MNAContext()
+        out_p = get_node!(ctx, :out_p)
+        out_n = get_node!(ctx, :out_n)
+        in_p = get_node!(ctx, :in_p)
+        in_n = get_node!(ctx, :in_n)
+
+        H = CCVS(1000.0; name=:H1)  # rm = 1kΩ
+        (I_out_idx, I_in_idx) = stamp!(H, ctx, out_p, out_n, in_p, in_n)
+
+        # I_in allocated first (index 5), I_out second (index 6)
+        @test I_in_idx == 5   # First current variable (after 4 nodes)
+        @test I_out_idx == 6  # Second current variable
+
+        sys = assemble!(ctx)
+        @test size(sys.G) == (6, 6)
+
+        G = Matrix(sys.G)
+
+        # Input sensing branch (zero-volt source) - uses I_in_idx = 5
+        @test G[3, 5] ≈ 1.0   # in_p
+        @test G[4, 5] ≈ -1.0  # in_n
+        @test G[5, 3] ≈ 1.0   # V(in_p)
+        @test G[5, 4] ≈ -1.0  # V(in_n)
+
+        # Output branch - uses I_out_idx = 6
+        @test G[1, 6] ≈ 1.0   # out_p
+        @test G[2, 6] ≈ -1.0  # out_n
+
+        # Voltage equation: V(out) = rm * I_in  - row I_out_idx = 6
+        # V(out_p) - V(out_n) - rm * I_in = 0
+        @test G[6, 1] ≈ 1.0     # Vout_p
+        @test G[6, 2] ≈ -1.0    # Vout_n
+        @test G[6, 5] ≈ -1000.0 # -rm * I_in
+    end
+
+    @testset "CCCS stamp" begin
+        # CCCS: I_out = gain * I_in
+        # Needs current variable for input sensing
+        ctx = MNAContext()
+        out_p = get_node!(ctx, :out_p)
+        out_n = get_node!(ctx, :out_n)
+        in_p = get_node!(ctx, :in_p)
+        in_n = get_node!(ctx, :in_n)
+
+        F = CCCS(2.0; name=:F1)  # Current gain = 2
+        I_in_idx = stamp!(F, ctx, out_p, out_n, in_p, in_n)
+
+        @test I_in_idx == 5  # After 4 nodes
+
+        sys = assemble!(ctx)
+        @test size(sys.G) == (5, 5)
+
+        G = Matrix(sys.G)
+
+        # Input sensing branch (zero-volt source)
+        @test G[3, 5] ≈ 1.0   # in_p
+        @test G[4, 5] ≈ -1.0  # in_n
+        @test G[5, 3] ≈ 1.0   # V(in_p)
+        @test G[5, 4] ≈ -1.0  # V(in_n)
+
+        # Output current: gain * I_in flows into out_p (out of out_n)
+        @test G[1, 5] ≈ -2.0   # out_p: -gain (current entering)
+        @test G[2, 5] ≈ 2.0    # out_n: +gain (current leaving)
+    end
+
     #==========================================================================#
     # DC Analysis - Analytical Validation
     #==========================================================================#
@@ -413,6 +481,55 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
         @test voltage(sol, :inp) ≈ 0.5
         @test voltage(sol, :out) ≈ -5.0 atol=1e-10
+    end
+
+    @testset "DC: Transresistance amplifier with CCVS" begin
+        # CCVS: Vout = rm * I_in
+        # Current source I = 1mA through sensing branch (in_p -> in_n)
+        # rm = 1000 Ω
+        # Expected: Vout = 1000 * 1e-3 = 1V
+
+        ctx = MNAContext()
+        inp = get_node!(ctx, :inp)
+        out = get_node!(ctx, :out)
+
+        # Drive the sensing branch with a current source
+        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
+
+        # CCVS senses current in (inp, 0) and outputs voltage at (out, 0)
+        stamp!(CCVS(1000.0), ctx, out, 0, inp, 0)
+
+        # Need a load to close the output circuit
+        stamp!(Resistor(1e6), ctx, out, 0)  # High-impedance load
+
+        sol = solve_dc(ctx)
+
+        @test voltage(sol, :out) ≈ 1.0 atol=1e-6
+    end
+
+    @testset "DC: Current mirror with CCCS" begin
+        # CCCS: I_out = gain * I_in
+        # Current source I = 1mA through sensing branch
+        # Gain = 2
+        # Output into 1k resistor
+        # Expected: I_out = 2mA, V_out = 2mA * 1kΩ = 2V
+
+        ctx = MNAContext()
+        inp = get_node!(ctx, :inp)
+        out = get_node!(ctx, :out)
+
+        # Drive the sensing branch with a current source
+        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
+
+        # CCCS senses current in (inp, 0) and outputs current at (out, 0)
+        stamp!(CCCS(2.0), ctx, out, 0, inp, 0)
+
+        # Load resistor
+        stamp!(Resistor(1000.0), ctx, out, 0)
+
+        sol = solve_dc(ctx)
+
+        @test voltage(sol, :out) ≈ 2.0 atol=1e-10
     end
 
     @testset "DC: Multi-node network" begin

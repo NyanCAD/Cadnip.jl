@@ -228,7 +228,7 @@ function solve_spice_mna(spice_code::String; temp::Real=27.0)
     circuit_fn = Base.eval(m, code)
 
     spec = MNA.MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = circuit_fn((;), spec)
+    ctx = Base.invokelatest(circuit_fn, (;), spec)
     sys = MNA.assemble!(ctx)
     sol = MNA.solve_dc(sys)
 

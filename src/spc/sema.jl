@@ -331,7 +331,25 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 for val in stmt.vals
                     sema_visit_expr!(scope, val)
                 end
-            else
+            elseif isa(stmt, SNode{SP.ControlledSource{:C,:V}}) || isa(stmt, SNode{SP.ControlledSource{:C,:C}})
+                # Current-controlled sources: params are in stmt.val (CurrentControl)
+                ctrl = stmt.val
+                if ctrl !== nothing && isa(ctrl, SNode{SP.CurrentControl})
+                    ctrl.val !== nothing && sema_visit_expr!(scope, ctrl.val)
+                    for param in ctrl.params
+                        sema_visit_expr!(scope, param.val)
+                    end
+                end
+            elseif isa(stmt, SNode{SP.ControlledSource{:V,:V}}) || isa(stmt, SNode{SP.ControlledSource{:V,:C}})
+                # Voltage-controlled sources: params are in stmt.val (VoltageControl)
+                ctrl = stmt.val
+                if ctrl !== nothing && isa(ctrl, SNode{SP.VoltageControl})
+                    ctrl.val !== nothing && sema_visit_expr!(scope, ctrl.val)
+                    for param in ctrl.params
+                        sema_visit_expr!(scope, param.val)
+                    end
+                end
+            elseif hasproperty(stmt, :params)
                 for param in stmt.params
                     sema_visit_expr!(scope, param.val)
                 end
