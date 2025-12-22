@@ -182,26 +182,52 @@ the compiler knows a value is constant, it can:
 3. **Fold arithmetic** at compile time
 4. **Unroll loops** with known bounds
 
-### Why Explicit Passing Matters
+### The Key Insight: In-Function Literals vs Arguments
 
-Julia's JIT specializes functions on **argument types**, not values. However, when
-arguments are **immutable structs with concrete types**, the values become available
-for constant propagation.
+Julia's JIT specializes functions on **argument types**, not values. This means:
+
+- **Function arguments are NOT constants** - even immutable struct fields
+- **Literals defined inside the function body ARE constants** - the compiler sees them
 
 ```julia
-# This enables optimization:
-struct MNASpec
-    temp::Float64   # Concrete type
-    mode::Symbol    # Concrete type
+# BAD: R comes from argument, NOT constant-folded
+function build_circuit(params)
+    R = params.R  # This is NOT a constant - it came from outside
+    stamp_resistor!(G, n1, n2, R)
 end
 
-function build_circuit(params::NamedTuple{(:R,:C), Tuple{Float64,Float64}}, spec::MNASpec)
-    # Julia specializes on the *types* of params and spec
-    # Since NamedTuple and MNASpec are immutable, values propagate
-    R = params.R  # Compiler knows this is Float64, can inline if constant
-    ...
+# GOOD: R is a literal in the function body, IS constant-folded
+function build_circuit()
+    R = 1000.0  # This IS a constant - defined right here
+    stamp_resistor!(G, n1, n2, R)
 end
 ```
+
+### The ParamLens Pattern
+
+The brilliance of ParamLens is that it lets you define defaults as literals inside
+the function, while still allowing external overrides:
+
+```julia
+function build_circuit(lens, spec)
+    # Defaults are LITERALS defined right here in the function body
+    p = lens(; R=1000.0, C=1e-6, Vcc=5.0)
+
+    # If lens doesn't override R, the compiler sees R=1000.0 as a constant!
+    # Only parameters actually in the lens are runtime values
+    stamp!(Resistor(p.R), ctx, n1, n2)
+end
+```
+
+When called with `IdentityLens()` or an empty `ParamLens()`:
+- All values use the in-function literals → **all constants**
+
+When called with `ParamLens((params=(R=2000.0,),))`:
+- `R` comes from the lens → **not constant**
+- `C` and `Vcc` use literals → **still constants**
+
+This is why the pattern is "defaults in function, overrides in lens" rather than
+"pass all parameters as arguments".
 
 ### The Closure Boxing Problem
 
@@ -216,54 +242,26 @@ function make_circuit_fn(R)
     end
 end
 
-# GOOD: Pass as argument
-function circuit_fn!(G, b, params)
-    stamp!(G, params.R)  # params is an argument - optimized
+# GOOD: Define the literal inside the closure
+function make_circuit_fn()
+    return (G, b) -> begin
+        R = 1000.0  # Defined here - CAN be optimized
+        stamp!(G, R)
+    end
 end
 ```
 
-This is why MNASim passes `(params, spec)` as arguments rather than capturing them.
-
-### Type Specialization Strategy
-
-The parameterization system uses several techniques to enable constant folding:
-
-#### 1. Concrete NamedTuple Types
-
-Parameters are stored in NamedTuples with concrete field types:
-
-```julia
-params = (R=1000.0, C=1e-6)  # typeof: NamedTuple{(:R,:C), Tuple{Float64,Float64}}
-```
-
-Each unique set of parameter **names** creates a new type. The JIT specializes
-the circuit function for each parameter set, enabling field access optimization.
-
-#### 2. Immutable Structs for Spec
-
-MNASpec is an immutable struct:
-
-```julia
-struct MNASpec
-    temp::Float64
-    mode::Symbol
-end
-```
-
-When passed to a function, the fields can be inlined. Mode checks like
-`spec.mode == :dcop` can be eliminated if the mode is known.
-
-#### 3. SSA-Style Parameter Updates
+### SSA-Style Parameter Updates
 
 Using Accessors.jl `@set` creates new bindings rather than mutating:
 
 ```julia
 spec1 = MNASpec(temp=27.0, mode=:tran)
 spec2 = @set spec1.temp = 50.0  # New binding, spec1 unchanged
-# After this, spec2.temp is known to be 50.0
 ```
 
-This maintains SSA (Static Single Assignment) form, which compilers optimize well.
+This maintains SSA (Static Single Assignment) form. Combined with inlining,
+the compiler can propagate these values through the code.
 
 ### ParamLens Integration
 
@@ -302,9 +300,11 @@ end
 To verify that parameters are being constant-folded, use `@code_llvm` or `@code_native`:
 
 ```julia
-function stamp_test(params)
+# This version has the literal in the function - WILL be constant-folded
+function stamp_test_constant()
     G = zeros(2, 2)
-    g = 1.0 / params.R
+    R = 1000.0  # Literal in function body
+    g = 1.0 / R
     G[1,1] = g
     G[1,2] = -g
     G[2,1] = -g
@@ -312,36 +312,47 @@ function stamp_test(params)
     return G
 end
 
-# Check that R=1000.0 is inlined:
-@code_llvm stamp_test((R=1000.0,))
-# Should show: 0.001 (1/1000) as a constant, no division at runtime
+@code_llvm stamp_test_constant()
+# Should show: 0.001 as a constant, no division at runtime
+
+# This version takes R as argument - will NOT be constant-folded
+function stamp_test_arg(R)
+    G = zeros(2, 2)
+    g = 1.0 / R  # R is an argument, not a constant
+    G[1,1] = g
+    # ...
+    return G
+end
+
+@code_llvm stamp_test_arg(1000.0)
+# Will show: fdiv instruction (division happens at runtime)
 ```
 
 ### What Gets Optimized vs. What Doesn't
 
 | Category | Optimized? | Reason |
 |----------|------------|--------|
-| Resistor value `params.R` | ✅ Yes | Immutable NamedTuple field |
-| Temperature `spec.temp` | ✅ Yes | Immutable struct field |
-| Mode check `spec.mode == :dcop` | ✅ Yes | Symbol comparison, branch eliminated |
+| Literal `R = 1000.0` in function | ✅ Yes | Compiler sees the literal |
+| `lens(; R=1000.0)` when lens doesn't override R | ✅ Yes | Falls through to literal |
+| `lens(; R=1000.0)` when lens overrides R | ❌ No | Value comes from lens |
+| Any value passed as function argument | ❌ No | Julia specializes on types, not values |
 | Time `t` | ❌ No | Changes each ODE step |
 | Solution `u` | ❌ No | Changes each Newton iteration |
-| PWL interpolation | ❌ No | Depends on runtime `t` |
 
 ### MNASim vs ParamSim
 
 | Feature | MNASim | ParamSim |
 |---------|--------|----------|
-| Parameter passing | Explicit `(params, spec)` | Via `ParamLens` + `ScopedValue` |
-| Spec access | `spec.temp` | `spec[].temp` (ScopedValue) |
-| Mode access | `spec.mode` | `sim_mode[]` (ScopedValue) |
-| Constant folding | Via JIT on arguments | Via DAECompiler magic |
-| Closure safety | ✅ No boxing | Requires DAECompiler |
+| Default params | Literals in builder function | Literals in builder function |
+| Override params | Via NamedTuple argument | Via `ParamLens` |
+| Spec access | `spec.temp` argument | `spec[].temp` (ScopedValue) |
+| Mode access | `spec.mode` argument | `sim_mode[]` (ScopedValue) |
+| Constant folding | In-function literals only | DAECompiler treats ScopedValue as constant |
 | Hierarchical params | Manual lens passing | Automatic via ParamLens |
 
-MNASim is designed for the non-DAECompiler path where we rely purely on Julia's
-JIT for optimization. ParamSim uses DAECompiler's ability to treat ScopedValue
-reads as constants during compilation.
+Both approaches rely on defaults being literals in the function body.
+ParamSim additionally uses DAECompiler's ability to treat ScopedValue
+reads as constants during compilation, which MNASim cannot do.
 
 ## Comparison with OpenVAF/OSDI
 
