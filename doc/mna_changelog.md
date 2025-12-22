@@ -749,6 +749,29 @@ end
 | Transient source types | 🔲 |
 | Current-controlled sources | 🔲 |
 
+### Test Suite Updates
+
+**`test/common.jl`**
+- Added MNA-based solve helpers:
+  - `solve_mna_spice_code(code)` - Parse SPICE and solve DC with MNA
+  - `solve_mna_circuit(builder)` - Solve MNA builder function
+  - `tran_mna_circuit(builder, tspan)` - Transient analysis with MNA
+
+**`test/basic.jl`** (complete rewrite)
+- All tests now use MNA backend instead of DAECompiler
+- Tests include:
+  - Simple VR/IR/VRC circuits
+  - Voltage divider
+  - SPICE parsing with parameters
+  - Subcircuit instantiation
+  - Multiplicities
+  - Units and magnitudes
+  - Conditional (.if/.else) parameters
+  - RL transient analysis
+
+**`test/runtests.jl`**
+- basic.jl now runs in Phase 0/1 (no DAECompiler required)
+
 ### Usage Example
 
 ```julia
