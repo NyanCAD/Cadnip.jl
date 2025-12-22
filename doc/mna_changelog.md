@@ -654,6 +654,12 @@ Added `sema_nets` methods for controlled sources:
 Added high-level MNA functions:
 - `parse_spice_to_mna(code; circuit_name)` - Parse and return MNA builder code
 - `solve_spice_mna(code; temp)` - Parse, build, and solve DC
+- Updated `sp_str` macro to generate MNA builder functions instead of SpCircuit
+
+4. **Subcircuit Support:**
+   - `codegen_mna_subcircuit(sema, name)` - Generate subcircuit builder function
+   - Subcircuit builders have signature: `name_mna_builder(params, spec, ctx, ports...)`
+   - Main `make_mna_circuit` generates all subcircuit builders before main circuit
 
 **`src/CedarSim.jl`**
 
@@ -722,7 +728,6 @@ end
 
 ### What's Pending
 
-- Subcircuit support (`.SUBCKT` / `.ENDS`)
 - Model statements (`.MODEL`)
 - Transient sources (PWL, PULSE, SIN)
 - CCVS/CCCS (current-controlled sources - require reference to V source)
@@ -738,7 +743,9 @@ end
 | Unit suffix parsing | ✅ |
 | DC analysis of parsed circuits | ✅ |
 | Test infrastructure | ✅ |
-| Subcircuit support | 🔲 |
+| Subcircuit support | ✅ |
+| High-level sp_str macro | ✅ |
+| CircuitSweep with SPICE circuits | ✅ |
 | Transient source types | 🔲 |
 | Current-controlled sources | 🔲 |
 

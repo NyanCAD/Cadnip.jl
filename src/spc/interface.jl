@@ -235,49 +235,38 @@ function solve_spice_mna(spice_code::String; temp::Real=27.0)
     return sys, sol
 end
 
+"""
+    sp"..."
+
+Parse SPICE code and generate an MNA builder function.
+
+The result is a callable that takes (params, spec) and returns an MNAContext.
+
+# Example
+```julia
+circuit = sp\"\"\"
+V1 vcc 0 DC 5
+R1 vcc out 1k
+R2 out 0 1k
+\"\"\"
+ctx = circuit((;), MNASpec())
+sol = solve_dc(ctx)
+voltage(sol, :out)  # Returns 2.5
+```
+"""
 macro sp_str(str, flag="")
-    include_paths = [dirname(String(__source__.file)), pwd()]
     enable_julia_escape = 'e' in flag
     inline = 'i' in flag
     sa = SpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
         implicit_title = !inline, fname=String(__source__.file), line_offset=__source__.line-1)
-    imports, hdl_imports, includes, pkg_hdl_imports, pkg_spc_import = analyze_imports!(sa, nothing)
-    if isempty(imports) && isempty(hdl_imports) && isempty(includes)
-        # No imports or includes at all, can avoid all the caching complexity
-        return sema_assign_ids(sema(sa))
-    end
-    # See if we have a cache already. TODO: Concurrent import.
-    new_cache = false
-    if isdefined(__module__, :var"#cedar_parse_cache#")
-        cache = __module__.var"#cedar_parse_cache#"
-    else
-        cache = CedarParseCache(__module__)
-        new_cache = true
-    end
 
-    for include in includes
-        analyze_imports!(parse_and_cache_spc!(parse_cache, str), cache; imports, hdl_imports, includes, thispath=include)
-    end
+    # Generate MNA builder function
+    circuit_name = gensym(:circuit)
+    code = make_mna_circuit(sa; circuit_name)
 
-    t = Expr(:toplevel)
-    if new_cache
-        push!(t.args, esc(:(const var"#cedar_parse_cache#" = $cache)))
-    end
-    hdls = Expr[]
-    kws = Expr[]
-    # Codegen top-level HDL imports
-    push!(t.args, Expr(:call, codegen_hdl_imports!, __module__, hdl_imports))
-    for imp in imports
-        s = gensym()
-        imp = Symbol(imp)
-        push!(t.args, :(import $imp as $s))
-        push!(kws, Expr(:kw, imp, s))
-    end
-    push!(t.args, esc(quote
-        let imps=(;$(kws...))
-            $(codegen_missing_imports!)($(__module__), imps, $(pkg_hdl_imports), $(pkg_spc_import))
-            eval($(sema_assign_ids)($(sema)($sa; imps, parse_cache=var"#cedar_parse_cache#")))
-        end
-    end))
-    return t
+    # Return the builder function
+    return esc(quote
+        $code
+        $circuit_name
+    end)
 end

@@ -784,6 +784,11 @@ function cg_mna_instance!(state::CodegenState, instance)
     return :(nothing)  # Skip unimplemented devices
 end
 
+# Version without subckt_builders dict - just use default naming
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall})
+    return cg_mna_instance!(state, instance, Dict{Symbol, Symbol}())
+end
+
 # Disambiguate Voltage/Current source calls
 function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltage, SP.Current}})
     p = cg_net_name!(state, instance.pos)
@@ -915,6 +920,39 @@ function codegen_mna(scope::SemaResult)
 end
 
 """
+    codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+
+Generate an MNA subcircuit builder function from semantic analysis.
+
+The generated function has signature:
+    function subckt_name_mna_builder(params, spec, ctx, port1, port2, ...) -> nothing
+
+It stamps devices directly into the passed context.
+"""
+function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+    state = CodegenState(sema)
+    body = codegen_mna!(state)
+
+    # Build port arguments - subcircuit ports become function parameters
+    port_args = [Symbol("port_", i) for i in 1:length(sema.ports)]
+
+    # Map internal port names to function parameters
+    port_mappings = Expr[:($internal_name = $arg)
+        for (internal_name, arg) in zip(sema.ports, port_args)]
+
+    builder_name = Symbol(subckt_name, "_mna_builder")
+
+    return quote
+        function $(builder_name)(params, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...))
+            # Map ports to internal names
+            $(port_mappings...)
+            $body
+            return nothing
+        end
+    end
+end
+
+"""
     make_mna_circuit(ast; circuit_name=:circuit)
 
 Generate an MNA builder function from a SPICE/Spectre AST.
@@ -937,11 +975,26 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
     sema = sema_file(ast)
     state = CodegenState(sema)
 
+    # Generate subcircuit builders first
+    subckt_defs = Expr[]
+    for (name, subckt_list) in sema.subckts
+        if !isempty(subckt_list)
+            # Take the first (non-conditional) subcircuit definition
+            _, subckt_sema = first(subckt_list)
+            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name)
+            push!(subckt_defs, subckt_def)
+        end
+    end
+
     # Generate the body
     body = codegen_mna!(state)
 
     # Wrap in function definition
     return quote
+        # Subcircuit builders
+        $(subckt_defs...)
+
+        # Main circuit builder
         function $(circuit_name)(params, spec::$(MNASpec)=$(MNASpec)())
             ctx = $(MNAContext)()
             $body

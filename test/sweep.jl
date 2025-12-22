@@ -428,6 +428,49 @@ end
     @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
 end
 
+@testset "dc! sweep on SPICE-generated circuit" begin
+    using CedarSim.MNA: voltage, current
+
+    # SPICE circuit with parameters - uses the MNA backend now
+    spice_code = """
+        * Parameter scoping test
+
+        .subckt subcircuit1 vss gnd
+        .param r_load=1
+        r1 vss gnd 'r_load'
+        .ends
+
+        .param v_in=1
+        x1 vss 0 subcircuit1
+        v1 vss 0 'v_in'
+    """
+
+    # Parse and generate MNA builder
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = CedarSim.make_mna_circuit(ast)
+
+    # Evaluate in temporary module
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    circuit_fn = Base.eval(m, circuit_code)
+
+    # Create sweep over parameters
+    cs = CircuitSweep(circuit_fn, ProductSweep(v_in = 1.0:10.0, var"x1.r_load" = 1.0:10.0))
+
+    # Run DC analysis on all sweep points
+    solutions = dc!(cs)
+
+    # Verify Ohm's law: I = V/R at each point
+    for (sol, sim) in zip(solutions, cs)
+        v_in = sim.params.v_in
+        r_load = sim.params.x1.r_load
+        # Current through V source should be -V/R (negative = sourcing)
+        expected_current = -v_in / r_load
+        @test isapprox(current(sol, :I_v1), expected_current; atol=deftol)
+    end
+end
+
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration
     params = ProductSweep(
