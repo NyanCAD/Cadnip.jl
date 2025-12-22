@@ -17,14 +17,19 @@ using CedarSim.MNA: voltage, current, DCSolution
 #
 # We'll vary `R1` and `R2` with parameter sweeps,
 # then verify that the current out of `V` is correct.
+# Default values are R1=1000.0, R2=1000.0 (matching the old @kwdef struct)
 function build_two_resistor(params, spec)
+    # Merge with defaults (like @kwdef did for the struct)
+    defaults = (R1=1000.0, R2=1000.0)
+    p = merge(defaults, params)
+
     ctx = MNAContext()
     vcc = get_node!(ctx, :vcc)
     out = get_node!(ctx, :out)
 
     stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-    stamp!(Resistor(params.R1), ctx, vcc, out)
-    stamp!(Resistor(params.R2), ctx, out, 0)
+    stamp!(Resistor(p.R1), ctx, vcc, out)
+    stamp!(Resistor(p.R2), ctx, out, 0)
 
     return ctx
 end
@@ -257,14 +262,13 @@ end
 
 @testset "CircuitSweep" begin
     # Test construction of the `CircuitSweep` object
-    cs = CircuitSweep(build_two_resistor, Sweep(R1 = 1.0:10.0); R2=1000.0)
+    cs = CircuitSweep(build_two_resistor, Sweep(R1 = 1.0:10.0))
     @test length(cs) == 10
     @test size(cs) == (10,)
     @test size(cs, 1) == 10
 
     # Show that it generates a simulation with the parameters as we expect
     @test first(cs).params.R1 == 1.0
-    @test first(cs).params.R2 == 1000.0
 
     # Test that a two-dimensional sweep is represented two-dimensionally
     cs = CircuitSweep(build_two_resistor, ProductSweep(R1 = 1.0:10.0, R2 = 1.0:10.0))
