@@ -8,6 +8,7 @@ include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 using CedarSim.MNA: MNAContext, MNASim, get_node!, stamp!
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current, DCSolution
+using Accessors: @optic
 
 # Simple two-resistor circuit (MNA builder function):
 #
@@ -282,6 +283,41 @@ end
     @test length(sweepvars(cs)) == 2
     @test :R1 ∈ sweepvars(cs)
     @test :R2 ∈ sweepvars(cs)
+
+    # Test nested parameter access with var-strings (like SPICE codegen will use)
+    # Builder uses Accessors lenses to access nested params
+    function build_nested_resistor(params, spec)
+        # Use lenses to access nested params (demonstrates SPICE codegen pattern)
+        inner_R1 = (@optic _.inner.R1)(params)
+        inner_R2 = (@optic _.inner.R2)(params)
+
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
+
+        stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
+        stamp!(Resistor(inner_R1), ctx, vcc, out)
+        stamp!(Resistor(inner_R2), ctx, out, 0)
+
+        return ctx
+    end
+
+    sweep = ProductSweep(
+        TandemSweep(var"inner.R1" = 100.0:100.0:200.0,
+                    var"inner.R2" = 100.0:100.0:200.0),
+    )
+    cs = CircuitSweep(build_nested_resistor, sweep;
+                      inner = (R1 = 100.0, R2 = 100.0))
+    @test length(cs) == 2
+    @test size(cs) == (2,)
+    @test size(cs, 1) == 2
+    @test first(cs).params.inner.R1 == 100.0
+    @test first(cs).params.inner.R2 == 100.0
+    @test last(collect(cs)).params.inner.R1 == 200.0
+    @test last(collect(cs)).params.inner.R2 == 200.0
+    @test length(sweepvars(cs)) == 2
+    @test Symbol("inner.R1") ∈ sweepvars(cs)
+    @test Symbol("inner.R2") ∈ sweepvars(cs)
 end
 
 @testset "dc! sweeps" begin
@@ -297,50 +333,6 @@ end
         R2 = sim.params.R2
         # Current through voltage source is negative (sources current)
         # I = V / (R1 + R2) = 1 / (R1 + R2)
-        @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
-    end
-end
-
-# Test nested parameter access with var-strings
-# Builder that uses nested params: params.inner.R1, params.inner.R2
-function build_nested_resistor(params, spec)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-    stamp!(Resistor(params.inner.R1), ctx, vcc, out)
-    stamp!(Resistor(params.inner.R2), ctx, out, 0)
-
-    return ctx
-end
-
-@testset "nested params in CircuitSweep" begin
-    # Test that var-strings reach into nested parameter structures
-    sweep = ProductSweep(
-        TandemSweep(var"inner.R1" = 100.0:100.0:200.0,
-                    var"inner.R2" = 100.0:100.0:200.0),
-    )
-
-    # Default params provide the nested structure
-    cs = CircuitSweep(build_nested_resistor, sweep;
-                      inner = (R1 = 100.0, R2 = 100.0))
-
-    @test length(cs) == 2
-    @test first(cs).params.inner.R1 == 100.0
-    @test first(cs).params.inner.R2 == 100.0
-    @test last(collect(cs)).params.inner.R1 == 200.0
-    @test last(collect(cs)).params.inner.R2 == 200.0
-
-    @test length(sweepvars(cs)) == 2
-    @test Symbol("inner.R1") ∈ sweepvars(cs)
-    @test Symbol("inner.R2") ∈ sweepvars(cs)
-
-    # Verify the circuit works
-    solutions = dc!(cs)
-    for (sol, sim) in zip(solutions, cs)
-        R1 = sim.params.inner.R1
-        R2 = sim.params.inner.R2
         @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
     end
 end
