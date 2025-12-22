@@ -4,30 +4,35 @@ module test_sweep
 using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
-# Phase 0: Check if simulation is available
-const HAS_SIMULATION = CedarSim.USE_DAECOMPILER
+# MNA imports for sweep tests
+using CedarSim.MNA: MNAContext, MNASim, get_node!, stamp!
+using CedarSim.MNA: Resistor, VoltageSource
+using CedarSim.MNA: voltage, current, DCSolution
+using CedarSim: ParamLens
 
-# Simple two-resistor circuit:
+# Simple two-resistor circuit (MNA builder function):
 #
 #  ┌─R1─┬── +
 #  V    R2
 #  └────┴── -
 #
-# We'll vary `R1` and `R2` with our CircuitSweep API,
+# We'll vary `R1` and `R2` with parameter sweeps,
 # then verify that the current out of `V` is correct.
-@kwdef struct TwoResistorCircuit
-    R1::Float64 = 1000.0
-    R2::Float64 = 1000.0
-end
+# Default values are R1=1000.0, R2=1000.0 (matching the old @kwdef struct)
+function build_two_resistor(params, spec)
+    # Merge with defaults (like @kwdef did for the struct)
+    defaults = (R1=1000.0, R2=1000.0)
+    p = merge(defaults, params)
 
-function (self::TwoResistorCircuit)()
-    vcc = Named(net, "vcc")()
-    gnd = Named(net, "gnd")()
-    out = Named(net, "out")()
-    Named(V(1.), "V")(vcc, gnd)
-    Named(R(self.R1), "R1")(vcc, out)
-    Named(R(self.R2), "R2")(out, gnd)
-    Named(Gnd(), "G")(gnd)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
+    stamp!(Resistor(p.R1), ctx, vcc, out)
+    stamp!(Resistor(p.R2), ctx, out, 0)
+
+    return ctx
 end
 
 using CedarSim: nest_param_list, flatten_param_list
@@ -244,23 +249,30 @@ end
 
 end
 
-# Phase 0: Simulation-dependent tests - require DAECompiler
-if HAS_SIMULATION
+#==============================================================================#
+# MNA-based simulation tests
+#==============================================================================#
+
+@testset "simple dc!" begin
+    sim = MNASim(build_two_resistor; R1=100.0, R2=100.0)
+    sol = dc!(sim)
+    @test sol isa DCSolution
+    @test voltage(sol, :vcc) ≈ 1.0
+    @test voltage(sol, :out) ≈ 0.5  # Voltage divider: 1V * 100/(100+100)
+end
 
 @testset "CircuitSweep" begin
     # Test construction of the `CircuitSweep` object
-    cs = CircuitSweep(TwoResistorCircuit, Sweep(R1 = 1.0:10.0))
+    cs = CircuitSweep(build_two_resistor, Sweep(R1 = 1.0:10.0))
     @test length(cs) == 10
     @test size(cs) == (10,)
     @test size(cs, 1) == 10
 
-    # Show that it generates a circuit struct with the parameters as we expect
+    # Show that it generates a simulation with the parameters as we expect
     @test first(cs).params.R1 == 1.0
-    # TODO: Add a better way to get the "full" parameterization from a ParamSim
-    #@test first(cs).params.R2 == 1000.0
 
     # Test that a two-dimensional sweep is represented two-dimensionally
-    cs = CircuitSweep(TwoResistorCircuit, ProductSweep(R1 = 1.0:10.0, R2 = 1.0:10.0))
+    cs = CircuitSweep(build_two_resistor, ProductSweep(R1 = 1.0:10.0, R2 = 1.0:10.0))
     @test length(cs) == 100
     @test size(cs) == (10,10)
     @test size(cs, 1) == 10
@@ -272,113 +284,90 @@ if HAS_SIMULATION
     @test :R1 ∈ sweepvars(cs)
     @test :R2 ∈ sweepvars(cs)
 
-    # If we try to construct a `CircuitSweep` that sets an invalid property name,
-    # ensure we get an appropriate error:
-    #@test_throws KeyError CircuitSweep(TwoResistorCircuit,
-    #    ProductSweep(R1 = 100.:100.:2000.,
-    #                 R3 = 100.:100.:2000.),
-    #)
+    # Test nested parameter access with var-strings (like SPICE codegen will use)
+    # Builder uses ParamLens for hierarchical params with defaults
+    function build_nested_resistor(params, spec)
+        # Convert params to ParamLens for SPICE-style hierarchical access
+        lens = ParamLens(params)
+        # lens.inner(; defaults...) returns params merged with lens overrides
+        p = lens.inner(; R1=1000.0, R2=1000.0)
 
-    # If we try to collect a `CircuitSweep` that sets an invalid property value,
-    # ensure we get an appropriate error:
-    #@test_throws MethodError collect(CircuitSweep(TwoResistorCircuit, Sweep(R1 = ["a", "b", "c"])))
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+        out = get_node!(ctx, :out)
 
-    # Test that we can use var-strings to reach into deeply-nested types
-    struct NestedCircuitParams{A,B}
-        a::A
-        b::B
+        stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
+        stamp!(Resistor(p.R1), ctx, vcc, out)
+        stamp!(Resistor(p.R2), ctx, out, 0)
+
+        return ctx
     end
-    NestedCircuitParams() = NestedCircuitParams(
-        NestedCircuitParams(1.0, 2.0),
-        NestedCircuitParams(3.0, NestedCircuitParams(4.0, 5.0)),
-    )
-    function (self::NestedCircuitParams)()
-        vcc = Named(net, "vcc")()
-        gnd = Named(net, "gnd")()
-        Named(V(1.), "V")(vcc, gnd)
-        Named(Gnd(), "G")(gnd)
-    end
+
     sweep = ProductSweep(
-        TandemSweep(var"a.a" = 1.0:2.0,
-                    var"a.b" = 1.0:2.0),
-        SerialSweep(var"b.a" = 1.0:2.0,
-                    var"b.b.a" = 2.0:3.0),
+        TandemSweep(var"inner.params.R1" = 100.0:100.0:200.0,
+                    var"inner.params.R2" = 100.0:100.0:200.0),
     )
-    @test isa(repr(sweep), String)
-    cs = CircuitSweep(NestedCircuitParams, sweep)
-    @test length(cs) == 8
-    @test size(cs) == (2,4)
+    # ParamLens expects (inner=(params=(...),)) structure for hierarchical override
+    cs = CircuitSweep(build_nested_resistor, sweep;
+                      inner = (params = (R1 = 100.0, R2 = 100.0),))
+    @test length(cs) == 2
+    @test size(cs) == (2,)
     @test size(cs, 1) == 2
-    @test size(cs, 2) == 4
-    @test first(cs).params.a.a == 1
-    @test first(cs).params.a.b == 1
-    @test first(cs).params.b.a == 1
-    # TODO: wait until we can get the fully concrete result
-    #@test first(cs).params.b.b.a == 4
-    #@test last(cs).params.b.a == 3
-    @test last(collect(cs)).params.b.b.a == 3
-    @test length(sweepvars(cs)) == 4
-    @test Symbol("a.a") ∈ sweepvars(cs)
-    @test Symbol("a.b") ∈ sweepvars(cs)
-    @test Symbol("b.a") ∈ sweepvars(cs)
-    @test Symbol("b.b.a") ∈ sweepvars(cs)
-end
-
-@testset "simple dc!" begin
-    dc!(TwoResistorCircuit(100., 100.))
-    dc!(ParamSim(TwoResistorCircuit; R1=100., R2=100.))
+    @test first(cs).params.inner.params.R1 == 100.0
+    @test first(cs).params.inner.params.R2 == 100.0
+    @test last(collect(cs)).params.inner.params.R1 == 200.0
+    @test last(collect(cs)).params.inner.params.R2 == 200.0
+    @test length(sweepvars(cs)) == 2
+    @test Symbol("inner.params.R1") ∈ sweepvars(cs)
+    @test Symbol("inner.params.R2") ∈ sweepvars(cs)
 end
 
 @testset "dc! sweeps" begin
-    # Construct `CircuitSweep` object, which can be broadcast over with `dc!`, etc...
-    cs = CircuitSweep(TwoResistorCircuit, ProductSweep(R1 = 100.:100.:2000., R2 = 100.:100.:2000.))
+    # Construct `CircuitSweep` object and run dc! on it
+    cs = CircuitSweep(build_two_resistor, ProductSweep(R1 = 100.0:100.0:2000.0, R2 = 100.0:100.0:2000.0))
 
-    # Perform the solve; `dc!` contains a custom broadcasting override to save work
-    # so make sure you use it when possible, otherwise you'll have to manage the
-    # `DAEProblem` and other details yourself.
-    solutions = dc!(cs; abstol=deftol, reltol=deftol)
+    # Perform the solve - dc! on CircuitSweep returns vector of solutions
+    solutions = dc!(cs)
 
-    # Note the unpacking of the named tuple from each `s in cs` into `R1` and `R2`.
-    for (sol, (;R1, R2)) in zip(solutions, [s.params for s in cs])
-        # Ensure that the current is inversely proportional to the overall resistance:
-        @test isapprox_deftol(-1/(R1 + R2), sol[cs.sys.V.I])
+    # Verify results for each simulation in the sweep
+    for (sol, sim) in zip(solutions, cs)
+        R1 = sim.params.R1
+        R2 = sim.params.R2
+        # Current through voltage source is negative (sources current)
+        # I = V / (R1 + R2) = 1 / (R1 + R2)
+        @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
     end
 end
 
-@testset "dc! sweep on spice code" begin
-    spice_code =
-    """
-        * Parameter scoping test
-
-        .subckt subcircuit1 vss gnd
-        .param r_load=1
-        r1 vss gnd 'r_load'
-        .ends
-
-        .param v_in=1
-        x1 vss 0 subcircuit1
-        v1 vss 0 'v_in'
-    """
-    circuit_code = CedarSim.make_spectre_circuit(
-        CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
-    );
-    circuit = eval(circuit_code);
-    cs = CircuitSweep(circuit, ProductSweep(v_in = 1.0:10.0, var"x1.r_load" = 1.0:10.0))
-    solutions = dc!(cs; abstol=deftol, reltol=deftol)
-
-    for sol in solutions
-        params = sol.prob.p.params
-        v_in = params.params.v_in
-        r_load = params.x1.params.r_load
-        # Ensure that the current is V/R:
-        # TODO: get `dc!()` to return a scalar here!
-        @test isapprox_deftol(v_in/r_load, sol[cs.sys.x1.r1.I][end])
-    end
-end
-
-else
-    @info "Skipping CircuitSweep and dc! tests (Phase 0: simulation not available)"
-end  # if HAS_SIMULATION
+# TODO: Re-enable when SPICE codegen is ported to MNA backend
+# @testset "dc! sweep on spice code" begin
+#     spice_code =
+#     """
+#         * Parameter scoping test
+#
+#         .subckt subcircuit1 vss gnd
+#         .param r_load=1
+#         r1 vss gnd 'r_load'
+#         .ends
+#
+#         .param v_in=1
+#         x1 vss 0 subcircuit1
+#         v1 vss 0 'v_in'
+#     """
+#     circuit_code = CedarSim.make_spectre_circuit(
+#         CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
+#     );
+#     circuit = eval(circuit_code);
+#     cs = CircuitSweep(circuit, ProductSweep(v_in = 1.0:10.0, var"x1.r_load" = 1.0:10.0))
+#     solutions = dc!(cs; abstol=deftol, reltol=deftol)
+#
+#     for sol in solutions
+#         params = sol.prob.p.params
+#         v_in = params.params.v_in
+#         r_load = params.x1.params.r_load
+#         @test isapprox_deftol(v_in/r_load, sol[cs.sys.x1.r1.I][end])
+#     end
+# end
 
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration

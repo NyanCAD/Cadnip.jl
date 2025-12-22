@@ -361,155 +361,127 @@ sweepify(x::SweepLike) = x
 sweepify(x) = Sweep(x)
 
 
+using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_dc_initialized_ode_problem
+
 """
     CircuitSweep
 
 Provides a multi-dimensional sweep over sets of variables defined within a
-circuit.  Can take in either a circuit struct type, or an `IRODESystem`.  When
-iterated over, returns the altered circuit object.  Parameter specification can
-be done with simple `Symbol`'s, or with more complex `@optic` values from the
-`Accessors` package.
+circuit.  When iterated over, returns the altered simulation object (MNASim).
+Parameter specification can be done with simple `Symbol`'s, or with more complex
+`@optic` values from the `Accessors` package.
 
 Examples:
 
-    # You can construct the CircuitSweep object off of either a circuit
-    # or an `IRODESystem` that was constructed off of a circuit:
-    cs = CircuitSweep(RCCircuit, ProductSweep(:R1 => 0.1:0.1:1.0, :R2 => [1.0, 10.0, 100.0]))
+    # Create a sweep over circuit parameters:
+    cs = CircuitSweep(build_circuit, ProductSweep(R1 = 0.1:0.1:1.0); R2 = 100.0)
 
-    # You can also use your own `sys` object:
-    sys = CircuitIRODESystem(RCCircuit)
-    cs = CircuitSweep(RCCircuit, sys, ProductSweep(R1 = 0.1:0.1:1.0, R2 = [1.0, 10.0, 100.0]))
-
-    # Once you have the `CircuitSweep` object, you can iterate over it:
-    for circuit in cs
-        @show circuit
+    # Iterate over the sweep:
+    for sim in cs
+        sol = dc!(sim)
         ...
     end
 
-    # You can also pass it off to `dc!.()`:
-    sols = dc!.(cs)
-
-    # Note that if you want to index into the solution objects, you should
-    # use the `cs.sys` property, as you need to use the same `sys` as was
-    # used to run the actual simulations:
-    Vout = sols[1][cs.sys.Vout]
+    # Or use dc!/tran! directly on the sweep:
+    sols = dc!(cs)
 """
-struct CircuitSweep{T}
-    circuit::T
-    sys::IRODESystem
+struct CircuitSweep{T<:Function}
+    builder::T       # Builder function that takes (params, spec) and returns MNAContext
+    sim::MNASim      # Base simulation for alter()
     iterator::SweepLike
 
-    function CircuitSweep(circuit::T, sys::IRODESystem, iterator::SweepLike) where {T}
-        # Verify that the given `iterator` object works:
+    function CircuitSweep(builder::T, sim::MNASim, iterator::SweepLike) where {T<:Function}
         if !applicable(iterate, iterator)
             throw(ArgumentError("Must give some kind of iterator!"))
         end
-
-        # TODO: Add ability to verify that all optics are applicable to the given circuit
-        # We used to do this via `hasproperty(circuit_inst, optic)`, but that doesn't
-        # work for general ParamSim objects now that they can be applied to functions
-        # via that lens parameter.
-        return new{T}(
-            circuit,
-            sys,
-            iterator,
-        )
+        return new{T}(builder, sim, iterator)
     end
 end
 
-# Convenience function to compile a circuit to a ParamSim IRODESystem
-function CircuitSweep(circuit, iterator::SweepLike; debug_config = (;))
-    sys = CircuitIRODESystem(ParamSim(circuit; sweep_example(iterator)...); debug_config)
-    return CircuitSweep(circuit, sys, iterator)
+# Convenience constructor: create an MNASim from a builder function with default params
+function CircuitSweep(builder::Function, iterator::SweepLike; default_params...)
+    first_params = sweep_example(iterator)
+    merged_params = merge(NamedTuple(default_params), NamedTuple(first_params))
+    sim = MNASim(builder; merged_params...)
+    return CircuitSweep(builder, sim, iterator)
 end
 
 Base.length(cs::CircuitSweep) = length(cs.iterator)
 Base.size(cs::CircuitSweep) = size(cs.iterator)
 Base.size(cs::CircuitSweep, d::Integer) = get(size(cs), d, 1)
 Base.IteratorSize(cs::CircuitSweep) = Base.IteratorSize(cs.iterator)
-function _iterate_alter(cs::CircuitSweep, next)
+sweepvars(cs::CircuitSweep) = sweepvars(cs.iterator)
+
+# Iteration returns MNASim objects via alter()
+function Base.iterate(cs::CircuitSweep, state...)
+    next = iterate(cs.iterator, state...)
     if next === nothing
         return nothing
     end
-
-    # Apply the parameters to our circuit
-    new_circuit = ParamSim(cs.circuit; next[1]...)
-
-    # Return the circuit and the state for future iteration
-    return (new_circuit, next[2])
+    new_sim = MNA.alter(cs.sim; next[1]...)
+    return (new_sim, next[2])
 end
-Base.iterate(cs::CircuitSweep, state...) = _iterate_alter(cs, iterate(cs.iterator, state...))
-sweepvars(cs::CircuitSweep) = sweepvars(cs.iterator)
 
-function dc!(circ; debug_config = (;), kwargs...)
-    if !isa(circ, AbstractSim)
-        circ = CedarSim.DefaultSim(circ)
+"""
+    dc!(sim::MNASim)
+
+DC operating point analysis for MNA circuits.
+Returns a `DCSolution` with voltage/current accessors.
+"""
+function dc!(sim::MNASim)
+    return MNA.solve_dc(sim)
+end
+
+"""
+    dc!(cs::CircuitSweep)
+
+DC operating point analysis for a circuit sweep.
+Returns a vector of `DCSolution` objects.
+"""
+function dc!(cs::CircuitSweep; kwargs...)
+    return [dc!(sim; kwargs...) for sim in cs]
+end
+
+"""
+    tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
+
+Transient analysis for MNA circuits.
+Returns an ODESolution that can be indexed by time.
+
+# Example
+```julia
+sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
+sol = tran!(sim, (0.0, 1e-3))
+sol(0.5e-3)  # State at t=0.5ms
+```
+"""
+function tran!(sim::MNASim, tspan::Tuple{Real,Real};
+               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+    sys = MNA.assemble!(sim)
+    ode_data = MNA.make_dc_initialized_ode_problem(sys, tspan)
+
+    f = ODEFunction(ode_data.f;
+                    mass_matrix = ode_data.mass_matrix,
+                    jac = ode_data.jac,
+                    jac_prototype = ode_data.jac_prototype)
+    prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
+
+    if solver === nothing
+        solver = Rodas5P()
     end
-    dc!(CircuitIRODESystem(circ; debug_config), circ; kwargs...)
-end
-# Phase 0: Use stub reference
-function dc!(sys::IRODESystem, circ=arg1_from_sys(sys); kwargs...)
-    prob = DAEProblem(sys, nothing, nothing, (0., 1.), circ, initializealg=CedarDCOp())
-    dc!(prob; kwargs...)
-end
-dc!(prob::DAEProblem; kwargs...) = init(prob, DFBDF(autodiff=false); kwargs...)
-dc!(cs::CircuitSweep; kwargs...) = dc!.(cs.sys, cs; kwargs...)
 
-function tran!(circ, tspan, du=nothing, u=nothing; debug_config = (;), kwargs...)
-    sim = CedarSim.DefaultSim(circ)
-    sys = CircuitIRODESystem(circ; debug_config)
-    prob = DAEProblem(sys, du, u, tspan, sim, initializealg=CedarDCOp())
-    tran!(prob; kwargs...)
-end
-tran!(prob::DAEProblem; kwargs...) = solve(prob, IDA(); kwargs...)
-tran!(cs::CircuitSweep; kwargs...) = tran!.(cs.sys, cs; kwargs...)
-function tran!(circ::ParsedCircuit, tspan=find_default_tspan(circ); debug_config=(;), kwargs...)
-    sim = CedarSim.DefaultSim(circ)
-    sys = CircuitIRODESystem(circ; debug_config)
-    prob = DAEProblem(sys, nothing, nothing, tspan, sim, initializealg=CedarDCOp())
-    tran!(prob; kwargs...)
+    return solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
 end
 
-DiffEqBase.solve(ps::ParsedCircuit) = tran!(ps)
+"""
+    tran!(cs::CircuitSweep, tspan; kwargs...)
 
-# Helper function of `first()` that passes through `nothing`
-first_or_nothing(x) = first(x)
-first_or_nothing(::Nothing) = nothing
-
-function Base.Broadcast.broadcasted_kwsyntax(::typeof(dc!), sys::IRODESystem, sims, du0=nothing, u0=nothing; kwargs...)
-    prob = DAEProblem(sys, first_or_nothing(du0), first_or_nothing(u0), (0., 1.), first(sims), initializealg=CedarDCOp())
-    broadcast(sims, du0, u0) do sim, this_du0, this_u0
-        if u0 !== nothing || du0 !== nothing
-            @assert du0 !== nothing && u0 !== nothing
-            prob′ = remake(prob, p=sim, u0=this_u0, du0=this_du0)
-        else
-            prob′ = remake(prob, p=sim)
-        end
-        dc!(prob′; kwargs...)
-    end
+Transient analysis for a circuit sweep.
+Returns a vector of ODESolution objects.
+"""
+function tran!(cs::CircuitSweep, tspan::Tuple{Real,Real}; kwargs...)
+    return [tran!(sim, tspan; kwargs...) for sim in cs]
 end
-
-function Base.Broadcast.broadcasted(::typeof(dc!), sys::IRODESystem, circs, du0=nothing, u0=nothing; kwargs...)
-    return Base.Broadcast.broadcasted_kwsyntax(dc!, sys, circs, du0, u0; kwargs...)
-end
-
-function Base.Broadcast.broadcasted_kwsyntax(::typeof(tran!), sys::IRODESystem, tspan, circs, du0=nothing, u0=nothing; kwargs...)
-    prob = DAEProblem(sys, first_or_nothing(du0), first_or_nothing(u0), tspan, DefaultSim(first(circs)), initializealg=CedarDCOp())
-    broadcast(circs, du0, u0) do circ, this_du0, this_u0
-        if u0 !== nothing || du0 !== nothing
-            @assert du0 !== nothing && u0 !== nothing
-            prob′ = remake(prob, p=DefaultSim(circ), u0=this_u0, du0=this_du0)
-        else
-            prob′ = remake(prob, p=DefaultSim(circ))
-        end
-        tran!(prob′; kwargs...)
-    end
-end
-function Base.Broadcast.broadcasted(::typeof(tran!), sys::IRODESystem, circs, du0=nothing, u0=nothing; kwargs...)
-    return Base.Broadcast.broadcasted_kwsyntax(tran!, tspan, sys, circs, du0, u0; kwargs...)
-end
-
-
 
 # Base case; a single parameter mapped on certain values:
 function find_param_ranges(it::CedarSim.Sweep, param_ranges)
