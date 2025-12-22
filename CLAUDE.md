@@ -78,6 +78,5 @@ cs = CircuitSweep(builder, sweep; inner=(params=(R1=100.0,),))
 The SPICE codegen test in `test/sweep.jl` is commented out - re-enable after Phase 4 ports SPICE codegen to emit `stamp!` calls instead of DAECompiler primitives.
 
 Key files for Phase 4:
-- `src/spectre.jl` - Circuit codegen (look for `make_spectre_circuit`)
-- `src/spc/*.jl` - SPICE-specific codegen
+- `src/spc/*.jl` - SPICE codegen (**focus here**, not spectre.jl which is the old backend)
 - The goal is to emit `stamp!(Device(...), ctx, node1, node2)` calls

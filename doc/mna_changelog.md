@@ -522,7 +522,7 @@ with_mode(sim, mode) -> MNASim  # Convenience
 ### Next Steps
 
 Phase 4 (SPICE Codegen) will:
-- Modify `spc/codegen.jl` to emit `stamp!` calls
+- Modify `src/spc/*.jl` to emit `stamp!` calls (NOT spectre.jl which is the old backend)
 - Connect parsed netlists to MNA stamping
 - Enable end-to-end SPICE simulation
 
