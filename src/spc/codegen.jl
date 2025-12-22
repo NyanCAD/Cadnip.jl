@@ -794,24 +794,150 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
     p = cg_net_name!(state, instance.pos)
     n = cg_net_name!(state, instance.neg)
     name = LString(instance.name)
+    is_voltage = instance isa SNode{SP.Voltage}
 
-    # Parse source values
-    dc_val = 0.0
+    # Parse source values - check for DC, AC, and transient
+    dc_val = nothing
+    tran_source = nothing
+
     for val in instance.vals
         if val isa SNode{SP.DCSource}
             dc_val = cg_expr!(state, val.dcval)
+        elseif val isa SNode{SP.TranSource}
+            tran_source = val
+        end
+        # AC sources not handled in MNA transient (yet)
+    end
+
+    # If we have a transient source, generate appropriate device
+    if tran_source !== nothing
+        fname = LSymbol(tran_source.kw)
+
+        if fname == :pwl
+            # PWL source: values are interleaved time-value pairs
+            # PWL(t1 v1 t2 v2 ...)
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+
+            if is_voltage
+                return quote
+                    let vals = [$(vals...)]
+                        n_points = div(length(vals), 2)
+                        times = vals[1:2:end]
+                        values = vals[2:2:end]
+                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let vals = [$(vals...)]
+                        n_points = div(length(vals), 2)
+                        times = vals[1:2:end]
+                        values = vals[2:2:end]
+                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        elseif fname == :sin
+            # SIN source: SIN(vo va freq [td theta phase])
+            # SPICE order: vo, va, freq, td, theta, phase
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+            n_vals = length(vals)
+
+            vo_expr = n_vals >= 1 ? vals[1] : 0.0
+            va_expr = n_vals >= 2 ? vals[2] : 0.0
+            freq_expr = n_vals >= 3 ? vals[3] : 1.0
+            td_expr = n_vals >= 4 ? vals[4] : 0.0
+            theta_expr = n_vals >= 5 ? vals[5] : 0.0
+            phase_expr = n_vals >= 6 ? vals[6] : 0.0
+
+            if is_voltage
+                return quote
+                    let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
+                                                name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
+                                                name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        elseif fname == :pulse
+            # PULSE source: pulse(v1 v2 td tr tf pw period)
+            # For now, implement as PWL approximation
+            vals = [cg_expr!(state, v) for v in tran_source.values]
+            n_vals = length(vals)
+
+            v1_expr = n_vals >= 1 ? vals[1] : 0.0
+            v2_expr = n_vals >= 2 ? vals[2] : 1.0
+            td_expr = n_vals >= 3 ? vals[3] : 0.0
+            tr_expr = n_vals >= 4 ? vals[4] : 1e-9
+            tf_expr = n_vals >= 5 ? vals[5] : 1e-9
+            pw_expr = n_vals >= 6 ? vals[6] : 1e-3
+            per_expr = n_vals >= 7 ? vals[7] : 2e-3
+
+            if is_voltage
+                # Generate pulse as PWL for one period
+                return quote
+                    let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                        # PWL approximation of pulse for first period
+                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                        values = [v1, v1, v2, v2, v1, v1]
+                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            else
+                return quote
+                    let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                        values = [i1, i1, i2, i2, i1, i1]
+                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                    end
+                end
+            end
+
+        else
+            # Unknown transient source type - fall back to DC
+            @warn "Unknown transient source type: $fname, using DC value"
+            dc_val_actual = dc_val !== nothing ? dc_val : 0.0
+            if is_voltage
+                return quote
+                    stamp!(VoltageSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                end
+            else
+                return quote
+                    stamp!(CurrentSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                end
+            end
         end
     end
 
-    if instance isa SNode{SP.Voltage}
+    # No transient source - use DC value
+    dc_val_actual = dc_val !== nothing ? dc_val : 0.0
+    if is_voltage
         return quote
-            let v = $dc_val
+            let v = $dc_val_actual
                 stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
             end
         end
     else
         return quote
-            let i = $dc_val
+            let i = $dc_val_actual
                 stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
             end
         end

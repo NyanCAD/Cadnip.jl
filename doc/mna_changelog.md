@@ -733,6 +733,91 @@ end
 - CCVS/CCCS (current-controlled sources - require reference to V source)
 - More comprehensive test coverage
 
+### Time-Dependent Sources (PWL/SIN) - 2024-12-22
+
+Added support for time-dependent transient sources (PWL, SIN, PULSE).
+
+#### New Device Types (`src/mna/devices.jl`)
+
+Added ~150 LOC for new time-dependent source types:
+
+```julia
+# Sinusoidal Voltage Source
+struct SinVoltageSource
+    vo::Float64      # DC offset
+    va::Float64      # Amplitude
+    freq::Float64    # Frequency (Hz)
+    td::Float64      # Delay
+    theta::Float64   # Damping factor
+    phase::Float64   # Phase (degrees)
+    name::Symbol
+end
+
+# Sinusoidal Current Source
+struct SinCurrentSource  # Same fields as SinVoltageSource
+
+# PWL Current Source (complementing existing PWLVoltageSource)
+struct PWLCurrentSource
+    times::Vector{Float64}
+    values::Vector{Float64}
+    name::Symbol
+end
+```
+
+Key functions:
+- `sin_value(src, t)` - Evaluate sinusoidal source at time t
+- `get_source_value(src, t, mode)` - Mode-aware value (DC vs transient)
+- `stamp!(src, ctx, p, n; t=0.0, mode=:dcop)` - Time-parameterized stamping
+
+#### Solver Updates (`src/mna/solve.jl`)
+
+Added ~90 LOC for time-dependent ODE support:
+
+```julia
+# MNASpec now includes time
+struct MNASpec
+    temp::Float64   # Temperature
+    mode::Symbol    # :dcop, :tran
+    time::Float64   # Current simulation time
+end
+
+# Time-dependent ODE function
+make_ode_function_timed(builder, params, base_spec)
+# Rebuilds b(t) at each timestep by calling builder with updated spec
+
+# Complete ODE problem for time-dependent circuits
+make_ode_problem_timed(builder, params, tspan; temp=27.0)
+```
+
+#### SPICE Codegen Updates (`src/spc/codegen.jl`)
+
+Updated `cg_mna_instance!` for Voltage/Current sources (~120 LOC):
+
+- **PWL sources:** Parse time-value pairs, emit `PWLVoltageSource`/`PWLCurrentSource`
+- **SIN sources:** Parse vo, va, freq, td, theta, phase; emit `SinVoltageSource`/`SinCurrentSource`
+- **PULSE sources:** Convert to PWL approximation for first period
+
+Generated code pattern:
+```julia
+# PWL(1m 0 9m 5)
+let vals = [1e-3, 0.0, 9e-3, 5.0]
+    times = vals[1:2:end]
+    values = vals[2:2:end]
+    stamp!(PWLVoltageSource(times, values; name=:V1),
+           ctx, vcc, 0; t=spec.time, mode=spec.mode)
+end
+```
+
+#### Test Coverage (`test/mna/core.jl`)
+
+Added ~180 LOC of tests:
+
+1. **SinVoltageSource evaluation** - Validates against analytical sine formula
+2. **PWLVoltageSource evaluation** - Validates interpolation and DC mode
+3. **PWL/SIN stamp! methods** - Validates time-parameterized stamping
+4. **Time-dependent ODE with builder** - PWL ramp → RC circuit
+5. **SIN transient simulation** - RC low-pass with sinusoidal source, validates attenuation
+
 ### Exit Criteria Status
 
 | Criterion | Status |
@@ -746,7 +831,10 @@ end
 | Subcircuit support | ✅ |
 | High-level sp_str macro | ✅ |
 | CircuitSweep with SPICE circuits | ✅ |
-| Transient source types | 🔲 |
+| PWL transient sources | ✅ |
+| SIN transient sources | ✅ |
+| PULSE transient sources (PWL approx) | ✅ |
+| Time-dependent ODE solver | ✅ |
 | Current-controlled sources | 🔲 |
 
 ### Test Suite Updates
