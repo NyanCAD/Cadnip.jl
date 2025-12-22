@@ -12,6 +12,13 @@
 using LinearAlgebra
 using SparseArrays
 using Accessors
+using ForwardDiff: Dual, value
+
+# Extract real value from ForwardDiff.Dual (for tgrad compatibility)
+# When ODE solvers compute time gradients, t is passed as a Dual number.
+# We need to extract the real value to build circuits with Float64 vectors.
+real_time(t::Real) = Float64(t)
+real_time(t::Dual) = Float64(value(t))
 
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
@@ -24,7 +31,7 @@ export voltage, current, magnitude_db, phase_deg
 #==============================================================================#
 
 """
-    MNASpec
+    MNASpec{T}
 
 Simulation specification for MNA analysis.
 
@@ -34,7 +41,10 @@ Passed explicitly to circuit builders (not via ScopedValue) to enable JIT optimi
 # Fields
 - `temp::Float64`: Temperature in Celsius (default: 27.0)
 - `mode::Symbol`: Analysis mode - `:dcop`, `:tran`, `:tranop`, `:ac` (default: :tran)
-- `time::Float64`: Current simulation time for transient sources (default: 0.0)
+- `time::T`: Current simulation time for transient sources (default: 0.0)
+
+The time field is parameterized to support ForwardDiff automatic differentiation
+during transient analysis with Rosenbrock ODE solvers.
 
 # Example
 ```julia
@@ -47,10 +57,10 @@ Unlike CedarSim's ScopedValue-based SimSpec, MNASpec is passed explicitly.
 This enables full JIT optimization since Julia's closure boxing issue
 prevents optimization of captured ScopedValue accesses.
 """
-Base.@kwdef struct MNASpec
+Base.@kwdef struct MNASpec{T<:Real}
     temp::Float64 = 27.0
     mode::Symbol = :tran
-    time::Float64 = 0.0
+    time::T = 0.0
 end
 
 export MNASpec
@@ -73,8 +83,9 @@ with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time
     with_time(spec::MNASpec, t::Real) -> MNASpec
 
 Create new spec with different time.
+Note: time type is preserved to support ForwardDiff Dual numbers.
 """
-with_time(spec::MNASpec, t::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=Float64(t))
+with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t)
 
 export with_temp, with_mode, with_time
 
@@ -447,9 +458,13 @@ function make_ode_function_timed(builder::F, params::P, base_spec::MNASpec) wher
 
     # RHS function: C * du/dt = b(t) - G*u
     # Rebuilds b(t) at each timestep
+    # Note: We use real_time(t) to extract Float64 from ForwardDiff.Dual
+    # This is needed because MNAContext uses Vector{Float64} for b.
+    # Time gradients will be computed via finite differences by the solver.
     function rhs!(du, u, p, t)
         # Build circuit at current time to get b(t)
-        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=t)
+        t_real = real_time(t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=t_real)
         ctx_t = builder(params, spec_t)
         sys_t = assemble!(ctx_t)
 
