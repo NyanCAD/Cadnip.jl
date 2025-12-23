@@ -1285,7 +1285,7 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
 end
 
 """
-Collect contribution statements from analog block for MNA stamping.
+Collect contribution statements and regular statements from analog block for MNA stamping.
 """
 function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
     if stmt isa VANode{ContributionStatement}
@@ -1300,6 +1300,9 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
         # For conditional blocks, we need to handle them specially
         # For now, add the whole translated block
         push!(contributions, (kind=:conditional, expr=to_julia(stmt)))
+    elseif stmt isa VANode{AnalogVariableAssignment}
+        # Regular assignments (e.g., cdrain = R*V(g,s)**2)
+        push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
     end
 end
 
@@ -1397,23 +1400,137 @@ end
 
 """
 Generate stamp! method for n-terminal device (generic).
+
+For n-terminal devices, we use a vector-valued dual approach:
+1. Create duals with partials for each node voltage
+2. Evaluate the contribution expression
+3. Extract ∂I/∂V_k for each node k and stamp into G matrix
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia)
-    # For multi-terminal devices, we need to handle each branch contribution separately
-    # This is more complex and requires tracking which branches are used
+    n_ports = length(port_args)
 
+    # Create unique node parameter names (prefixed to avoid conflict with voltage vars)
+    node_params = [Symbol("_node_", p) for p in port_args]
+
+    # Build the contribution evaluation body - includes local vars and expressions
+    # that compute the current contributions
+    contrib_eval = Expr(:block)
+    # For n-terminal devices, DON'T use type annotations since we need duals
+    # Just declare as `local name = zero(Float64)` to allow reassignment to Dual
+    for decl in local_var_decls
+        # Convert `local name::T = zero(T)` to `local name = zero(Float64)`
+        if decl.head == :local
+            inner = decl.args[1]
+            if inner isa Expr && inner.head == :(::)
+                name = inner.args[1]
+                push!(contrib_eval.args, :(local $name = zero(Float64)))
+            else
+                push!(contrib_eval.args, decl)
+            end
+        else
+            push!(contrib_eval.args, decl)
+        end
+    end
+
+    # Collect current contributions by branch, and add assignments to contrib_eval
+    branch_contribs = Dict{Tuple{Symbol,Symbol}, Vector{Any}}()
+    for c in contributions
+        if c.kind == :current
+            branch = (c.p, c.n)
+            if !haskey(branch_contribs, branch)
+                branch_contribs[branch] = Any[]
+            end
+            push!(branch_contribs[branch], c.expr)
+        elseif c.kind == :conditional
+            push!(contrib_eval.args, c.expr)
+        elseif c.kind == :assignment
+            # Regular assignment (e.g., cdrain = R*V(g,s)**2)
+            push!(contrib_eval.args, c.expr)
+        end
+    end
+
+    # Generate stamping code for each unique branch - UNROLL loops at codegen time
+    stamp_code = Expr(:block)
+    for ((p_sym, n_sym), exprs) in branch_contribs
+        p_idx = findfirst(==(p_sym), port_args)
+        n_idx = findfirst(==(n_sym), port_args)
+        p_node = node_params[p_idx]
+        n_node = node_params[n_idx]
+
+        # Sum all contributions to this branch
+        sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
+
+        # Generate unrolled stamping code
+        branch_stamp = quote
+            # Evaluate the branch current
+            I_branch = $sum_expr
+            I_val = ForwardDiff.value(I_branch)
+        end
+
+        # Unroll Jacobian stamping for each port k
+        for k in 1:n_ports
+            k_node = node_params[k]
+            push!(branch_stamp.args, quote
+                let dI_dVk = ForwardDiff.partials(I_branch, $k)
+                    # G[p,k] -= dI/dVk, G[n,k] += dI/dVk
+                    if $p_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, -dI_dVk)
+                    end
+                    if $n_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, dI_dVk)
+                    end
+                end
+            end)
+        end
+
+        # Unroll RHS computation: Ieq = I_val - sum(dI/dVk * Vk)
+        ieq_expr = :(I_val)
+        for k in 1:n_ports
+            ieq_expr = :($ieq_expr - ForwardDiff.partials(I_branch, $k) * $(Symbol("V_", k)))
+        end
+
+        push!(branch_stamp.args, quote
+            let Ieq = $ieq_expr
+                if $p_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $p_node, Ieq)
+                end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $n_node, -Ieq)
+                end
+            end
+        end)
+
+        push!(stamp_code.args, branch_stamp)
+    end
+
+    # Generate voltage variable names for RHS computation (V_1, V_2, etc.)
+    # These are Float64 values, not duals
+
+    # Build the stamp method
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
-                                     $(port_args...);
+                                     $([:($np::Int) for np in node_params]...);
                                      t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
             $(params_to_locals...)
             $(function_defs...)
-            $(local_var_decls...)
 
-            # TODO: Handle multi-terminal devices
-            error("Multi-terminal VA devices not yet supported in MNA backend")
+            # Get operating point voltages (Float64) - used for RHS linearization
+            $([:($(Symbol("V_", i)) = $(node_params[i]) == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$(node_params[i])]))
+               for i in 1:n_ports]...)
+
+            # Create duals with partials for each node voltage
+            # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
+            $([:($(port_args[i]) = Dual{Nothing}($(Symbol("V_", i)),
+                    $(Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_ports]...))...))
+               for i in 1:n_ports]...)
+
+            # Evaluate contribution expressions with duals
+            $contrib_eval
+
+            # Stamp each branch contribution
+            $stamp_code
 
             return nothing
         end
@@ -1429,11 +1546,12 @@ function make_mna_module(va::VANode)
     vamod = va.stmts[end]
     s = Symbol(String(vamod.id), "_module")
     Expr(:toplevel, :(baremodule $s
-        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros
+        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
         using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
-        using ForwardDiff: Dual
+        using ForwardDiff: Dual, value, partials
+        import ForwardDiff  # For n-terminal device stamp methods
         export $(Symbol(vamod.id))
         $(CedarSim.make_mna_device(vamod))
     end), :(using .$s))
@@ -1466,7 +1584,7 @@ function parse_and_eval_vafile(mod::Module, file::VAFile)
     if va.ps.errored
         cedarthrow(LoadError(file.file, 0, VAParseError(va)))
     else
-        Core.eval(mod, make_module(va))
+        Core.eval(mod, make_mna_module(va))
     end
     return va.ps.srcfiles
 end
