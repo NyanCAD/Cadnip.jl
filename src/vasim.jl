@@ -1134,21 +1134,26 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         # Time derivative - use va_ddt
         return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
     elseif fname == :ddx
-        # Partial derivative
+        # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
+        # For n-terminal MNA devices, duals are indexed by node_order (port positions)
         item = stmt.args[2].item
         @assert formof(item) == FunctionCall
         @assert Symbol(item.id) == :V
         if length(item.args) == 1
             probe = Symbol(item.args[1].item)
-            id_idx = findfirst(==(probe), to_julia.ddx_order)
+            # Use node_order for partial index (duals indexed by port position)
+            id_idx = findfirst(==(probe), to_julia.node_order)
             return :(let x = $(to_julia(stmt.args[1].item))
                 isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
             end)
         else
             probe1 = Symbol(item.args[1].item)
-            id1_idx = findfirst(==(probe1), to_julia.ddx_order)
+            id1_idx = findfirst(==(probe1), to_julia.node_order)
             probe2 = Symbol(item.args[2].item)
-            id2_idx = findfirst(==(probe2), to_julia.ddx_order)
+            id2_idx = findfirst(==(probe2), to_julia.node_order)
+            # ∂expr/∂V(a,b) = (∂expr/∂V_a - ∂expr/∂V_b) / 2
+            # This works because V(a,b) = V_a - V_b, so:
+            # ∂expr/∂V_a = ∂expr/∂V(a,b) and ∂expr/∂V_b = -∂expr/∂V(a,b)
             return :(let x = $(to_julia(stmt.args[1].item)),
                         dx1 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
                         dx2 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
@@ -1303,6 +1308,9 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
     elseif stmt isa VANode{AnalogVariableAssignment}
         # Regular assignments (e.g., cdrain = R*V(g,s)**2)
         push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
+    elseif stmt isa VANode{AnalogProceduralAssignment}
+        # Procedural assignments in analog block (e.g., cdrain = R*V(g,s)**2;)
+        push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
     end
 end
 
@@ -1417,17 +1425,32 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     # Build the contribution evaluation body - includes local vars and expressions
     # that compute the current contributions
     contrib_eval = Expr(:block)
-    # For n-terminal devices, DON'T use type annotations since we need duals
-    # Just declare as `local name = zero(Float64)` to allow reassignment to Dual
+    # For n-terminal devices, DON'T use `local` or type annotations since:
+    # 1. Type annotations prevent Dual assignment
+    # 2. `local` scopes variables to this block, making them invisible to stamp_code
+    # Just use plain assignment: `name = zero(Float64)` to allow reassignment to Dual
     for decl in local_var_decls
-        # Convert `local name::T = zero(T)` to `local name = zero(Float64)`
+        # Convert `local name::T = zero(T)` to just `name = zero(Float64)`
+        # The structure is: Expr(:local, Expr(:(=), Expr(:(::), name, T), zero_expr))
         if decl.head == :local
             inner = decl.args[1]
-            if inner isa Expr && inner.head == :(::)
+            if inner isa Expr && inner.head == :(=)
+                lhs = inner.args[1]
+                if lhs isa Expr && lhs.head == :(::)
+                    name = lhs.args[1]
+                    # Don't use `local` - variable needs to be visible in outer scope
+                    push!(contrib_eval.args, :($name = zero(Float64)))
+                else
+                    # If no type annotation, still strip `local`
+                    push!(contrib_eval.args, inner)
+                end
+            elseif inner isa Expr && inner.head == :(::)
+                # Just type annotation, no initialization
                 name = inner.args[1]
-                push!(contrib_eval.args, :(local $name = zero(Float64)))
+                push!(contrib_eval.args, :($name = zero(Float64)))
             else
-                push!(contrib_eval.args, decl)
+                # Plain assignment inside local - just use the assignment
+                push!(contrib_eval.args, inner)
             end
         else
             push!(contrib_eval.args, decl)
