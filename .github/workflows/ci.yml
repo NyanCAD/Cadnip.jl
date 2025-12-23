@@ -38,8 +38,16 @@ jobs:
           # For non-1.12, delete manifest to force fresh resolution
           if [ "${{ matrix.version }}" != "1.12" ]; then
             rm -f Manifest.toml
-            # Use Pkg.update() to generate fresh manifest from Project.toml
-            julia --project=. -e 'using Pkg; Pkg.update()'
+            # Develop local packages first, then update to generate fresh manifest
+            julia --project=. -e '
+              using Pkg
+              Pkg.develop([
+                PackageSpec(path="Lexers.jl"),
+                PackageSpec(path="SpectreNetlistParser.jl"),
+                PackageSpec(path="VerilogAParser.jl")
+              ])
+              Pkg.update()
+            '
           else
             julia --project=. -e 'using Pkg; Pkg.instantiate()'
           fi
