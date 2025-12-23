@@ -19,6 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         version:
+          - '1.11'
           - '1.12'
         os:
           - ubuntu-latest
@@ -36,6 +37,8 @@ jobs:
         run: |
           julia --project=. -e '
             using Pkg
+            # Resolve to regenerate manifest for this Julia version
+            Pkg.resolve()
             Pkg.instantiate()
           '
 
@@ -43,6 +46,7 @@ jobs:
         run: |
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
+            Pkg.resolve()
             Pkg.instantiate()
             Pkg.test()
           '
@@ -51,6 +55,7 @@ jobs:
         run: |
           julia --project=VerilogAParser.jl -e '
             using Pkg
+            Pkg.resolve()
             Pkg.instantiate()
             Pkg.test()
           '
