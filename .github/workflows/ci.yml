@@ -35,9 +35,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # For non-1.12, delete manifest to force fresh resolution
+          if [ "${{ matrix.version }}" != "1.12" ]; then
+            rm -f Manifest.toml
+          fi
           julia --project=. -e '
             using Pkg
-            # Resolve to regenerate manifest for this Julia version
             Pkg.resolve()
             Pkg.instantiate()
           '
