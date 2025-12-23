@@ -197,10 +197,8 @@ end
     @test isapprox_deftol(current(sol, :I_v1), -0.5e-3)  # 1V / 2kΩ
 end
 
-#=
-# TODO: .LIB include handling needs to be implemented for MNA codegen
 @testset "SPICE include .LIB" begin
-    # Test .LIB definition and include
+    # Test .LIB definition and include (self-referential)
     mktempdir() do dir
         spice_file = joinpath(dir, "selfinclude.cir")
         open(spice_file; write=true) do io
@@ -216,7 +214,7 @@ end
         end
 
         # Parse and solve using MNA
-        ast = SpectreNetlistParser.parse(spice_file; start_lang=:spice)
+        ast = SpectreNetlistParser.parsefile(spice_file; start_lang=:spice)
         code = CedarSim.make_mna_circuit(ast)
         m = Module()
         Base.eval(m, :(using CedarSim.MNA))
@@ -228,11 +226,10 @@ end
         sys = CedarSim.MNA.assemble!(ctx)
         sol = CedarSim.MNA.solve_dc(sys)
 
-        # Original: @test isapprox_deftol(sol[sys.r1.I][end], 1/1337)
+        # I = V / R = 1V / 1337Ω
         @test isapprox_deftol(current(sol, :I_v1), -1/1337)
     end
 end
-=#
 
 @testset "SPICE parameter scope" begin
     # Same SPICE code as original

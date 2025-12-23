@@ -478,19 +478,38 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                     push!(scope.imported_hdl_modules, vm[2])
                 end
             else
-                if parse_cache !== nothing
-                    includee = parse_and_cache_spc!(parse_cache, path)
+                # Handle self-referential includes: when a file includes a .LIB section from itself
+                this_path = scope.ast.ps.srcfile.path
+                is_self_include = this_path !== nothing && ispath(path) &&
+                    realpath(path) == realpath(this_path)
+
+                if is_self_include && isa(stmt, SNode{SP.LibInclude})
+                    # Self-include: use the current scope's library definitions
+                    lib_name = LSymbol(stmt.name)
+                    lib_section = get_section!(scope, lib_name)
+                    if lib_section !== nothing
+                        sema_include!(scope, lib_section)
+                    else
+                        error("Library section '$lib_name' not found in current file")
+                    end
                 else
-                    includee = SpectreNetlistParser.parsefile(path; implicit_title=false)
+                    # Regular include: parse the included file
+                    if parse_cache !== nothing
+                        includee = parse_and_cache_spc!(parse_cache, path)
+                    else
+                        includee = SpectreNetlistParser.parsefile(path; implicit_title=false)
+                    end
+                    if !isa(includee, SemaResult)
+                        includee = sema_file_or_section(includee; imps=imps, parse_cache=parse_cache, imported_hdl_modules)
+                        if parse_cache !== nothing
+                            recache_spc!(parse_cache.thismod, path, includee)
+                        end
+                    end
+                    if isa(stmt, SNode{SP.LibInclude})
+                        includee = get_section!(includee, LSymbol(stmt.name))
+                    end
+                    sema_include!(scope, includee)
                 end
-                if !isa(includee, SemaResult)
-                    includee = sema_file_or_section(includee; imps=imps, parse_cache=parse_cache, imported_hdl_modules)
-                    recache_spc!(parse_cache.thismod, path, includee)
-                end
-                if isa(stmt, SNode{SP.LibInclude})
-                    includee = get_section!(includee, LSymbol(stmt.name))
-                end
-                sema_include!(scope, includee)
             end
         elseif isa(stmt, SNode{SP.Tran}) || isa(stmt, SNode{SP.EndStatement})
             # Ignore for Sema purposes

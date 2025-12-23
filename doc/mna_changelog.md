@@ -1035,12 +1035,9 @@ end
 
 ### Remaining Work (Phase 4)
 
-**High Priority:**
-1. **.LIB include handling** - Library file includes not implemented (requires sema caching for self-referential includes)
-
 **Low Priority:**
-2. **Spectre subcircuit codegen** - Native Spectre subcircuits (`subckt`/`ends`) not yet supported
-3. **Edge case testing** - Verify all device types and parameter combinations work correctly
+1. **Spectre subcircuit codegen** - Native Spectre subcircuits (`subckt`/`ends`) not yet supported
+2. **Edge case testing** - Verify all device types and parameter combinations work correctly
 
 **Completed:**
 - ~~Subcircuit port handling~~ ✅
@@ -1050,9 +1047,9 @@ end
 - ~~Unit suffix parsing~~ ✅ (mAmp, MegQux, Mil, etc. - implemented in `cg_expr!` for `SP.NumberLiteral`)
 - ~~SPICE functions~~ ✅ (int, nint, floor, ceil, pow, ln - implemented in `SpectreEnvironment`)
 - ~~Spectre basic device codegen~~ ✅ (resistor, capacitor, inductor, vsource, isource, vcvs, vccs)
+- ~~.LIB include handling~~ ✅ (self-referential includes via path comparison in sema)
 
 **Next Steps:**
-- .LIB handling requires sema caching for self-referential includes
 - Phase 5 (VA Contribution Functions) can begin in parallel
 
 ---
