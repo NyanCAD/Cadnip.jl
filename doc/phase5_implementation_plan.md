@@ -1,5 +1,7 @@
 # Phase 5: VA Contribution Functions - Implementation Plan
 
+**Status: COMPLETE** (2024-12-23)
+
 ## Overview
 
 Phase 5 updates `vasim.jl` to emit MNA-compatible contribution functions using the s-dual approach for automatic resistive/reactive separation, replacing the DAECompiler `branch!/kcl!/equation!` primitives.
@@ -7,6 +9,30 @@ Phase 5 updates `vasim.jl` to emit MNA-compatible contribution functions using t
 **Goal:** Simple VA models (resistor, capacitor, diode, VCCS) work with the MNA backend.
 
 **Target LOC:** ~400
+
+**Actual LOC:** ~400 (implementation) + ~350 (tests)
+
+---
+
+## Completion Summary (2024-12-23)
+
+All planned features are implemented and working:
+
+| Feature | Status |
+|---------|--------|
+| S-dual approach (`va_ddt`) | ✅ |
+| `stamp_current_contribution!` | ✅ |
+| `evaluate_contribution` | ✅ |
+| MNA device generation | ✅ |
+| `va_str` macro integration | ✅ |
+| VA→MNA tests (49 tests) | ✅ |
+
+Key implementation notes:
+- Disciplines (electrical, V(), I()) are **implicit** - don't use `include "disciplines.vams"`
+- Port variable scoping fixed to use actual VA port names
+- DAECompiler conditional path removed from `@va_str` macro
+
+See `doc/mna_changelog.md` for detailed changelog.
 
 ---
 

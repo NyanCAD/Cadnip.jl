@@ -27,6 +27,11 @@ if PHASE0_MINIMAL
         @testset "mna/core.jl" include("mna/core.jl")
     end
 
+    # Phase 5: VA integration tests (s-dual contribution stamping)
+    @testset "Phase 5: MNA VA Integration" begin
+        @testset "mna/va.jl" include("mna/va.jl")
+    end
+
     # Phase 4: Basic tests using MNA backend
     @testset "Phase 4: MNA Basic Tests" begin
         @testset "basic.jl" include("basic.jl")

@@ -12,8 +12,8 @@ This document tracks progress on the MNA (Modified Nodal Analysis) migration as 
 | 1 | MNA Core | **Complete** | ~200 |
 | 2 | Simple Device Stamps | **Complete** (merged into Phase 1) | ~200 |
 | 3 | DC & Transient Solvers | **Complete** (merged into Phase 1) | ~300 |
-| 4 | SPICE Codegen | **In Progress** | ~300 |
-| 5 | VA Contribution Functions | **Core Complete** | ~400 |
+| 4 | SPICE Codegen | **Complete** | ~300 |
+| 5 | VA Contribution Functions | **Complete** | ~400 |
 | 6 | Complex VA & DAE | Not Started | ~400 |
 | 7 | Advanced Features | Not Started | ~300 |
 | 8 | Cleanup | Not Started | - |
@@ -604,8 +604,8 @@ See Phase 1 for solver implementations.
 
 ## Phase 4: SPICE Codegen
 
-**Status:** In Progress
-**Date Started:** 2024-12-22
+**Status:** Complete
+**Date:** 2024-12-22
 **Branch:** `claude/integrate-mna-code-generation-yOpfg`
 **LOC:** ~350 (implementation) + ~100 (tests)
 
@@ -1056,10 +1056,10 @@ end
 
 ## Phase 5: VA Contribution Functions
 
-**Status:** Core Implementation Complete
+**Status:** Complete
 **Date:** 2024-12-23
 **Branch:** `claude/study-mna-backend-M0fjM`
-**LOC:** ~350 (implementation) + ~220 (tests)
+**LOC:** ~400 (implementation) + ~350 (tests)
 **Design Document:** `doc/phase5_implementation_plan.md`
 
 ### Goal
@@ -1175,17 +1175,80 @@ end
 | Nested dual handling | ✅ |
 | stamp_current_contribution! works | ✅ |
 | Core MNA tests still pass (297) | ✅ |
+| VA→MNA integration via va_str | ✅ |
+| VA integration tests (49 tests) | ✅ |
+
+### VA→MNA Integration (2024-12-23)
+
+Completed full VA→MNA integration via the `va_str` macro:
+
+#### Changes Made
+
+**`src/vasim.jl`:**
+
+1. **Removed DAECompiler conditional path:**
+   ```julia
+   macro va_str(str)
+       va = VerilogAParser.parse(IOBuffer(str))
+       if va.ps.errored
+           cedarthrow(LoadError("va_str", 0, VAParseError(va)))
+       else
+           esc(make_mna_module(va))  # Always use MNA now
+       end
+   end
+   ```
+
+2. **Fixed port variable scoping bug:**
+   - Problem: `port_args` generated generic names (`:port_1`, `:port_2`) but
+     `V(p,n)` translated to `:(p - n)` using actual VA port names
+   - Solution: Use actual port names from VA module (`pins(vm)` returns `[:p, :n]`)
+   - Added unique prefixes for node index parameters (`_node_p`, `_node_n`)
+     to avoid collision with voltage variables in `contrib_fn`
+
+3. **Fixed baremodule imports:**
+   ```julia
+   baremodule VAResistor_module
+       using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros
+       import ..CedarSim
+       using ..CedarSim.VerilogAEnvironment
+       using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+       using ForwardDiff: Dual
+       # ...
+   end
+   ```
+
+**`test/mna/va.jl`:**
+- Added explicit MNA imports to avoid ambiguity
+- Added VA→MNA integration tests (resistor, capacitor, parallel RC)
+
+#### Key Discovery: Disciplines Are Implicit
+
+The `include "disciplines.vams"` directive is NOT needed - disciplines (electrical,
+V(), I(), etc.) are implicit in VerilogAParser. Using the include causes a parser
+bug when parsing from IOBuffer sources (`InexactError: trunc(UInt32, -1)`).
+
+Working pattern:
+```julia
+va"""
+module VAResistor(p, n);
+    parameter real R = 1000.0;
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n)/R;
+endmodule
+"""
+```
 
 ### Known Limitations
 
 1. **VA string parsing with includes:**
-   - `va_str` macro with `include "disciplines.vams"` doesn't work from IOBuffer
-   - Full VA→MNA pipeline requires loading .va files, not inline strings
-   - Contribution primitives work independently (tested)
+   - `include "disciplines.vams"` doesn't work from IOBuffer (parser bug)
+   - Workaround: disciplines are implicit, don't use the include directive
+   - File-based VA parsing works correctly with includes
 
-2. **VA codegen not fully integrated:**
-   - `make_mna_device()` generates device structs but full integration pending
-   - Translation of complex VA statements (conditionals, loops) not complete
+2. **Complex VA statements:**
+   - Translation of conditionals, loops in VA code may need more work
+   - Simple contribution statements work well
 
 ### Usage Example
 
