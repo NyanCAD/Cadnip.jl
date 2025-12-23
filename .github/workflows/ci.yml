@@ -20,7 +20,6 @@ jobs:
       matrix:
         version:
           - '1.11'
-          - '1.12'
         os:
           - ubuntu-latest
 
@@ -34,40 +33,20 @@ jobs:
       - uses: julia-actions/cache@v2
 
       - name: Install dependencies
-        run: |
-          # For non-1.12, delete manifest to force fresh resolution
-          if [ "${{ matrix.version }}" != "1.12" ]; then
-            rm -f Manifest.toml
-            # Develop local packages first, then update to generate fresh manifest
-            julia --project=. -e '
-              using Pkg
-              Pkg.develop([
-                PackageSpec(path="Lexers.jl"),
-                PackageSpec(path="SpectreNetlistParser.jl"),
-                PackageSpec(path="VerilogAParser.jl")
-              ])
-              Pkg.update()
-            '
-          else
-            julia --project=. -e 'using Pkg; Pkg.instantiate()'
-          fi
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
       - name: Run SpectreNetlistParser tests
         run: |
-          # Lexers.jl is a local dependency not in registry
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '
 
       - name: Run VerilogAParser tests
         run: |
-          # Lexers.jl is a local dependency not in registry
           julia --project=VerilogAParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '
@@ -76,7 +55,6 @@ jobs:
         run: |
           julia --project=test -e '
             using Pkg
-            # Develop the main package and subpackages in test environment
             Pkg.develop([
               PackageSpec(path="."),
               PackageSpec(path="SpectreNetlistParser.jl"),

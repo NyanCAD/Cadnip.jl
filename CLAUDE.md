@@ -5,28 +5,11 @@
 - **Julia is NOT pre-installed** - install juliaup first:
   - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
   - Then source the profile: `. ~/.bashrc`
+  - Set Julia 1.11 as default: `~/.juliaup/bin/juliaup default 1.11`
   - Use `~/.juliaup/bin/julia` to run Julia
-- **Use Julia 1.12** (default from juliaup) - this is what CI uses
+- **Use Julia 1.11** - this is what CI uses and what the Manifest.toml is locked to
+  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
   - Don't add compatibility hacks for older Julia versions
-
-### Critical: Julia 1.12 Threading Bug
-
-**Julia 1.12 segfaults during multi-threaded artifact downloads.** This affects `Pkg.instantiate()` and similar operations. Always use single-threaded mode:
-
-```bash
-# For package operations (instantiate, precompile, test)
-JULIA_NUM_THREADS=1 ~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.instantiate()'
-
-# Or set for entire session
-export JULIA_NUM_THREADS=1
-~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
-```
-
-The segfault occurs in `ijl_task_get_next` during concurrent artifact downloads. CI works because GitHub Actions handles threading differently.
-
-### Enzyme.jl on Julia 1.12
-
-Enzyme.jl has limited support for Julia 1.12 and warns that it recommends Julia 1.11 or 1.10. However, the MNA backend does not require Enzyme - MNA tests pass without it. You can safely ignore Enzyme precompilation warnings when working on MNA functionality.
 
 ## Development Guidelines
 
@@ -58,18 +41,16 @@ Read these files in `doc/` for detailed design information:
 
 ## Testing
 
-Run MNA tests directly (use single-threaded mode to avoid segfaults):
+Run MNA tests directly:
 ```bash
-JULIA_NUM_THREADS=1 ~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
+~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
 ```
 
 Or run specific test files directly:
 ```bash
-JULIA_NUM_THREADS=1 ~/.juliaup/bin/julia --project=. test/mna/core.jl
-JULIA_NUM_THREADS=1 ~/.juliaup/bin/julia --project=. test/sweep.jl
+~/.juliaup/bin/julia --project=. test/mna/core.jl
+~/.juliaup/bin/julia --project=. test/sweep.jl
 ```
-
-**Note:** Setting `JULIA_NUM_THREADS=1` is required to prevent segfaults during Julia 1.12 package operations. Once packages are precompiled, you can run actual tests with multiple threads if needed.
 
 ## Gotchas and Patterns
 
