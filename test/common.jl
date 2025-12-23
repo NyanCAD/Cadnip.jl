@@ -8,14 +8,7 @@ using Random
 using OrdinaryDiffEq
 using SciMLBase
 
-# Sundials is optional - needed for DAE solvers but artifacts may fail to download
-const HAS_SUNDIALS = try
-    @eval using Sundials
-    true
-catch e
-    @warn "Sundials not available (artifact download may have failed)" exception=e
-    false
-end
+using Sundials
 
 # Phase 0: DAECompiler may not be available
 const HAS_DAECOMPILER = CedarSim.USE_DAECOMPILER
