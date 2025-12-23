@@ -1043,9 +1043,8 @@ function make_mna_device(vm::VANode{VerilogModule})
     # Generate stamp method
     # For simplicity, assume 2-terminal device (p, n)
     # More complex devices with internal nodes would need additional handling
-    port_args = map(enumerate(ps)) do (i, p)
-        Symbol("port_", i)
-    end
+    # Use actual port names from VA module (ps already contains :p, :n, etc.)
+    port_args = ps
 
     if length(ps) == 2
         # Two-terminal device
@@ -1361,16 +1360,21 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
         end
     end
 
+    # Use unique names for node indices to avoid conflict with port names
+    # (port_args are :p, :n which are also used as voltage values in the contrib body)
+    node_p = Symbol("_node_", port_args[1])
+    node_n = Symbol("_node_", port_args[2])
+
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
-                                     $(port_args[1])::Int, $(port_args[2])::Int;
+                                     $node_p::Int, $node_n::Int;
                                      t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
             $(params_to_locals...)
             $(function_defs...)
 
             # Get operating point voltages
-            Vp = $(port_args[1]) == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$(port_args[1])])
-            Vn = $(port_args[2]) == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$(port_args[2])])
+            Vp = $node_p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$node_p])
+            Vn = $node_n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$node_n])
 
             # For the contribution function, we replace V(p,n) with the argument
             function contrib_fn(Vpn)
@@ -1384,8 +1388,8 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
             end
 
             # Use AD-based contribution stamping
-            CedarSim.MNA.stamp_current_contribution!(ctx, $(port_args[1]), $(port_args[2]),
-                                                      contrib_fn, isempty(x) ? zeros(max($(port_args[1]), $(port_args[2]), 1)) : x)
+            CedarSim.MNA.stamp_current_contribution!(ctx, $node_p, $node_n,
+                                                      contrib_fn, isempty(x) ? zeros(max($node_p, $node_n, 1)) : x)
             return nothing
         end
     end
@@ -1425,8 +1429,10 @@ function make_mna_module(va::VANode)
     vamod = va.stmts[end]
     s = Symbol(String(vamod.id), "_module")
     Expr(:toplevel, :(baremodule $s
+        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros
+        import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
         using ForwardDiff: Dual
         export $(Symbol(vamod.id))
         $(CedarSim.make_mna_device(vamod))
@@ -1475,11 +1481,7 @@ macro va_str(str)
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
-        @static if CedarSim.USE_DAECOMPILER
-            esc(make_module(va))
-        else
-            esc(make_mna_module(va))
-        end
+        esc(make_mna_module(va))
     end
 end
 

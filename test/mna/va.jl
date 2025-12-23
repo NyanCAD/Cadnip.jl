@@ -10,6 +10,7 @@ using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, ContributionTag
+using CedarSim.MNA: VoltageSource, Resistor  # Use MNA versions explicitly
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
 
@@ -211,12 +212,132 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test isapprox(sys.b[p], -expected_I; rtol=1e-6)
     end
 
-    # Note: The va_str integration tests require the VerilogA preprocessor to
-    # resolve `include "disciplines.vams"`. This works when loading .va files
-    # but not with inline va_str from IOBuffer. Those tests are skipped here
-    # but should be tested via loading actual .va files.
-    #
-    # TODO: Test full VA→MNA pipeline by loading test .va files instead of
-    # inline va_str strings.
+    # VA→MNA integration tests using va_str macro
+    # Note: Don't use `include "disciplines.vams"` - disciplines are implicit
+    # and the include causes a parser bug with IOBuffer sources.
+
+    @testset "VA resistor via va_str" begin
+        # Define a simple VA resistor
+        va"""
+        module VAResistor(p, n);
+            parameter real R = 1000.0;
+            inout p, n;
+            electrical p, n;
+            analog I(p,n) <+ V(p,n)/R;
+        endmodule
+        """
+
+        # Build circuit: VoltageSource + VA Resistor
+        function va_resistor_circuit(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAResistor(R=2000.0), ctx, vcc, 0)
+
+            return ctx
+        end
+
+        ctx = va_resistor_circuit((;), MNASpec())
+        sys = assemble!(ctx)
+        sol = solve_dc(sys)
+
+        # V = 5V, R = 2000Ω, I = 2.5mA
+        # Voltage source current = -2.5mA (negative = sourcing)
+        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+        @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)
+    end
+
+    @testset "VA capacitor transient" begin
+        # Define a VA capacitor
+        va"""
+        module VACapacitor(p, n);
+            parameter real C = 1e-6;
+            inout p, n;
+            electrical p, n;
+            analog I(p,n) <+ C*ddt(V(p,n));
+        endmodule
+        """
+
+        # RC circuit: V -> R -> C -> GND
+        R_val = 1000.0
+        C_val = 1e-6
+        V_val = 5.0
+
+        function va_rc_circuit(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            cap = get_node!(ctx, :cap)
+
+            stamp!(VoltageSource(V_val; name=:V1), ctx, vcc, 0)
+            stamp!(Resistor(R_val; name=:R1), ctx, vcc, cap)
+            stamp!(VACapacitor(C=C_val), ctx, cap, 0)
+
+            return ctx
+        end
+
+        ctx = va_rc_circuit((;), MNASpec(mode=:tran))
+        sys = assemble!(ctx)
+
+        # Set up transient simulation
+        tau = R_val * C_val  # Time constant
+        tspan = (0.0, 5 * tau)
+        prob_data = make_ode_problem(sys, tspan)
+
+        # Start with capacitor uncharged
+        u0 = copy(prob_data.u0)
+        cap_idx = findfirst(n -> n == :cap, sys.node_names)
+        u0[cap_idx] = 0.0
+
+        f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
+                        jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
+        prob = ODEProblem(f, u0, prob_data.tspan)
+        sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+
+        # Check RC charging behavior
+        # At t=0: V_cap = 0
+        # At t=5τ: V_cap ≈ V_val * (1 - exp(-5)) ≈ 0.993 * V_val
+        @test isapprox(sol.u[1][cap_idx], 0.0; atol=1e-6)
+        expected_final = V_val * (1 - exp(-5))
+        @test isapprox(sol.u[end][cap_idx], expected_final; rtol=0.01)
+    end
+
+    @testset "VA parallel RC" begin
+        # Test a device with both resistive and reactive parts
+        va"""
+        module VAParallelRC(p, n);
+            parameter real R = 1000.0;
+            parameter real C = 1e-6;
+            inout p, n;
+            electrical p, n;
+            analog I(p,n) <+ V(p,n)/R + C*ddt(V(p,n));
+        endmodule
+        """
+
+        function va_parallel_rc_circuit(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAParallelRC(R=1000.0, C=1e-6), ctx, vcc, 0)
+
+            return ctx
+        end
+
+        ctx = va_parallel_rc_circuit((;), MNASpec())
+        sys = assemble!(ctx)
+
+        # G matrix should have 1/R = 0.001
+        vcc_idx = findfirst(n -> n == :vcc, sys.node_names)
+        @test isapprox(sys.G[vcc_idx, vcc_idx], 0.001; atol=1e-6)
+
+        # C matrix should have C = 1e-6
+        @test isapprox(sys.C[vcc_idx, vcc_idx], 1e-6; atol=1e-9)
+
+        # DC solution: I = V/R = 5/1000 = 5mA
+        sol = solve_dc(sys)
+        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+        @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
+    end
 
 end
