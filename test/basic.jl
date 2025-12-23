@@ -314,6 +314,62 @@ end
     @test isapprox(voltage(sol, :vcc), 1.0; atol=deftol)
 end
 
+@testset "device == param (ParamObserver)" begin
+    # Test ParamObserver integration with MNA codegen
+    # ParamObserver records which parameters are used and their values
+    using CedarSim: ParamObserver, @param
+
+    # Use explicit parameter passing (factor is a formal parameter of subcircuit)
+    spice_code = """
+    * device == param
+    .subckt myres p n factor=1
+        .param rload=1k
+        r1 p n 'rload*factor'
+    .ends
+    i1 vcc 0 DC -1
+    x1 vcc 0 myres factor=2
+    """
+
+    # Parse and generate MNA circuit
+    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = CedarSim.make_mna_circuit(ast)
+
+    # Evaluate in temp module
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens, AbstractParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    circuit_fn = Base.eval(m, code)
+
+    # Use ParamObserver to record parameters
+    observer = ParamObserver(:top, nothing)
+    spec = MNASpec(temp=27.0, mode=:dcop)
+    ctx = Base.invokelatest(circuit_fn, observer, spec)
+
+    # Test that ParamObserver recorded the parameter hierarchy
+    # The subcircuit x1 should have rload and factor parameters
+    @test haskey(getfield(observer, :params), :x1)
+    x1_obs = getfield(observer, :params)[:x1]
+    @test x1_obs isa ParamObserver
+    @test haskey(getfield(x1_obs, :params), :params)
+    x1_params = getfield(x1_obs, :params)[:params]
+    @test haskey(x1_params, :rload)
+    @test x1_params[:rload] == 1000.0  # default value recorded
+
+    # Test @param macro works
+    @test @param(observer.x1.rload) == 1000.0
+
+    # Test that the parameter was applied by solving
+    sys = assemble!(ctx)
+    sol = solve_dc(sys)
+
+    # With factor=2, R = rload * factor = 1000 * 2 = 2000Ω
+    # I = 1A (from current source), V = I*R
+    # Current source I1: -1A means extracting 1A from vcc, injecting into 0
+    # V_vcc = I * R = 1 * 2000 = 2000V
+    @test isapprox(voltage(sol, :vcc), 2000.0; rtol=1e-6)
+end
+
 #=
 # TODO: .if/.else/.endif conditional handling needs work for MNA codegen
 @testset "ifelse" begin

@@ -850,6 +850,10 @@ end
 
 """
 Generate MNA subcircuit call.
+
+For ParamObserver support, we navigate the lens hierarchy using getproperty
+to get the subcircuit's portion of the lens. Explicit parameters from the
+subcircuit call are wrapped in ParamLens structure for merging.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
     ssema = resolve_subckt(state.sema, LSymbol(instance.model))
@@ -857,7 +861,6 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     callee_codegen = CodegenState(ssema)
 
     # Build params NamedTuple from explicit parameters passed to the subcircuit call
-    # We don't try to pass "implicit" params from parent scope - subcircuit uses its defaults
     params = Expr[]
 
     # Find Parameter children in the AST (SubcktCall exposes params as children)
@@ -869,18 +872,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         end
     end
 
-    params_expr = Expr(:tuple, Expr(:parameters, params...))
-
     # Port expressions
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
     subckt_name = LSymbol(instance.model)
+    instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
 
+    # Wrap explicit params in (params=(...),) for ParamLens compatibility
+    inner_params = Expr(:tuple, Expr(:parameters, params...))
+    explicit_params_expr = :((params = $inner_params,))
+
+    # Generate code that:
+    # 1. Gets subcircuit's portion of the lens via getproperty (for ParamObserver)
+    # 2. Creates a ParamLens with explicit params that wraps the subcircuit lens
+    # The MergedLens pattern: explicit params take precedence, fallback to subcircuit lens
     return quote
-        let subckt_params = $params_expr
-            # Call subcircuit builder with inherited context
-            $builder_name(subckt_params, spec, ctx, $(port_exprs...))
+        let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
+            # Create merged lens: explicit params + subcircuit lens hierarchy
+            # The subcircuit builder will use this lens for parameter access
+            merged_params = $(MergedLens)($(ParamLens)($explicit_params_expr), subckt_lens)
+            $builder_name(merged_params, spec, ctx, $(port_exprs...))
         end
     end
 end
@@ -1085,10 +1097,16 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
         push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
     end
 
-    # Parameters from lens/params - set up var"*params#" for param lookup
-    if !isempty(state.sema.formal_parameters) || !isempty(state.sema.exposed_parameters) || !isempty(state.sema.params)
-        push!(block.args, :(var"*params#" = params isa ParamLens ? getfield(params, :nt) : params))
-        push!(block.args, :(var"*params#" = hasfield(typeof(var"*params#"), :params) ? getfield(var"*params#", :params) : var"*params#"))
+    # Parameters from lens/params - set up lens for parameter access
+    # This supports ParamLens, ParamObserver, and plain NamedTuples
+    # Also needed if there are subcircuit calls (for lens navigation)
+    has_subcircuit_calls = any(state.sema.instances) do (name, insts)
+        any(inst -> inst[2].val isa SNode{SP.SubcktCall}, insts)
+    end
+    needs_lens = !isempty(state.sema.formal_parameters) || !isempty(state.sema.exposed_parameters) ||
+                 !isempty(state.sema.params) || has_subcircuit_calls
+    if needs_lens
+        push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
     end
 
     # NOTE: Don't pre-initialize exposed_parameters to 0.0!
@@ -1114,8 +1132,9 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
                 def_expr = cg_expr!(state, cd.val.val)
                 # Allow override for both formal_parameters and exposed_parameters
                 # In SPICE, any .param can be overridden from outside the subcircuit
+                # Use lens callable interface for ParamObserver support
                 if name in state.sema.formal_parameters || name in state.sema.exposed_parameters
-                    expr = :($name = hasfield(typeof(var"*params#"), $(QuoteNode(name))) ? getfield(var"*params#", $(QuoteNode(name))) : $def_expr)
+                    expr = :($name = var"*lens#"(; $(Expr(:kw, name, def_expr))).$name)
                 else
                     expr = :($name = $def_expr)
                 end
