@@ -309,9 +309,6 @@ using NonlinearSolve
 using SciMLBase
 using ADTypes
 
-# Export solve_dc_nonlinear as alias for backwards compatibility
-export solve_dc_nonlinear
-
 """
     solve_dc(builder, params, spec::MNASpec;
              abstol=1e-10, maxiters=100) -> DCSolution
@@ -411,9 +408,6 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 
     return DCSolution(sys_final, sol.u)
 end
-
-# Alias for backwards compatibility
-solve_dc_nonlinear(args...; kwargs...) = solve_dc(args...; kwargs...)
 
 #==============================================================================#
 # AC Analysis
