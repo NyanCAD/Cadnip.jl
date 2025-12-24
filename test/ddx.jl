@@ -27,14 +27,6 @@ end
 endmodule
 """
 
-# NOTE: This test requires Newton iteration for nonlinear devices.
-# The NLVCR model has a bilinear relationship I = 2*R*V(d,s)*V(g,s) which
-# is nonlinear. The current MNA backend assumes linear stamps (G*x = b)
-# without iteration, so the linearization at x=0 gives zero conductances.
-#
-# TODO: Implement Newton iteration in solve_dc for nonlinear devices.
-# For now, this test is marked as broken.
-
 @testset "ddx() 3-terminal VA device" begin
     # Circuit:
     # V1(5V) between vcc and gnd
@@ -45,31 +37,32 @@ endmodule
     # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A
     # V1 sources this current, so I_V1 = -60A
 
-    function VRcircuit(params, spec)
+    # Builder accepts x keyword for Newton iteration
+    function VRcircuit(params, spec; x=Float64[])
         ctx = MNAContext()
         vcc = get_node!(ctx, :vcc)
         vg = get_node!(ctx, :vg)
 
         stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
         stamp!(VoltageSource(3.0; name=:V2), ctx, vg, 0)
-        stamp!(NLVCR(R=2.0), ctx, vcc, vg, 0)
+        # Pass x to the nonlinear device stamp
+        stamp!(NLVCR(R=2.0), ctx, vcc, vg, 0; x=x)
 
         return ctx
     end
 
-    ctx = VRcircuit((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    # Use builder-based solve_dc (handles nonlinear via Newton iteration)
+    sol = solve_dc(VRcircuit, (;), MNASpec(mode=:dcop))
 
-    # Verify voltages (these work because voltage sources are linear)
+    # Verify voltages
     @test isapprox(voltage(sol, :vcc), 5.0; atol=1e-10)
     @test isapprox(voltage(sol, :vg), 3.0; atol=1e-10)
 
-    # Verify current: V1 sources 60A, so I_V1 = -60A
-    # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A
-    expected_I = -5.0 * 2.0 * 2.0 * 3.0
-    # NOTE: This test is marked broken - requires Newton iteration for nonlinear devices
-    @test_broken isapprox(current(sol, :I_V1), expected_I; atol=1e-6)
+    # Verify current:
+    # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from d(vcc) to s(gnd)
+    # V1 supplies this current, so I_V1 = +60A (current into V1's positive terminal)
+    expected_I = 5.0 * 2.0 * 2.0 * 3.0
+    @test isapprox(current(sol, :I_V1), expected_I; atol=1e-6)
 end
 
 end # module ddx_tests
