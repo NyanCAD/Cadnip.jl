@@ -1350,3 +1350,425 @@ Create a scoped view of the system for hierarchical node access.
 scope(sys::MNASystem) = ScopedSystem(sys)
 
 export scope
+
+#==============================================================================#
+# MNACircuitProblem: Phase 6 SciML DAE Integration
+#==============================================================================#
+
+"""
+    MNACircuitProblem{F,P,S}
+
+SciML-compatible problem wrapper for MNA circuits with nonlinear devices.
+
+This is the Phase 6 drop-in replacement for `CircuitIRODESystem`, providing
+the same interface while using the MNA backend instead of DAECompiler.
+
+# Architecture
+- `builder`: Function `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Base simulation spec (MNASpec)
+- `tspan`: Time span for transient
+
+# DAE Formulation
+The MNA system G*x + C*dx/dt = b is converted to implicit DAE form:
+    F(du, u, p, t) = C*du + G*u - b = 0
+
+For nonlinear devices, G, C, and b are recomputed at each evaluation
+by calling the builder with the current operating point.
+
+# Usage
+```julia
+# Define circuit builder
+function build_inverter(params, spec; x=Float64[])
+    ctx = MNAContext()
+    # ... stamp devices, passing x for nonlinear devices ...
+    return ctx
+end
+
+# Create problem
+prob = MNACircuitProblem(build_inverter, (Vdd=1.0,), MNASpec(), (0.0, 1e-6))
+
+# Convert to SciML DAEProblem
+using DifferentialEquations
+dae_prob = DAEProblem(prob)
+sol = solve(dae_prob, IDA())
+```
+
+# See Also
+- `make_dae_problem`: Lower-level DAE problem creation
+- `CircuitIRODESystem`: DAECompiler equivalent (legacy)
+"""
+struct MNACircuitProblem{F,P,S}
+    builder::F
+    params::P
+    spec::S
+    tspan::Tuple{Float64,Float64}
+end
+
+export MNACircuitProblem
+
+"""
+    MNACircuitProblem(builder, params, spec, tspan)
+
+Create an MNA circuit problem for SciML DAE solvers.
+
+# Arguments
+- `builder`: Circuit builder `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters
+- `spec`: Base simulation spec
+- `tspan`: Time span `(t0, tf)`
+"""
+function MNACircuitProblem(builder::F, params::P, spec::S, tspan::Tuple{<:Real,<:Real}) where {F,P,S}
+    MNACircuitProblem{F,P,S}(builder, params, spec, Float64.(tspan))
+end
+
+"""
+    system_size(prob::MNACircuitProblem) -> Int
+
+Get the system size (number of unknowns) for the circuit problem.
+"""
+function system_size(prob::MNACircuitProblem)
+    ctx0 = prob.builder(prob.params, prob.spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    return system_size(sys0)
+end
+
+"""
+    make_dae_residual(prob::MNACircuitProblem) -> Function
+
+Create the DAE residual function for the circuit problem.
+
+For nonlinear circuits, this rebuilds G, C, b at each evaluation.
+For linear circuits, the matrices are constant but b(t) may vary.
+
+Returns `(resid, du, u, p, t) -> nothing` suitable for DAEProblem.
+"""
+function make_dae_residual(prob::MNACircuitProblem)
+    builder = prob.builder
+    params = prob.params
+    base_spec = prob.spec
+
+    function dae_residual!(resid, du, u, p, t)
+        # Build circuit at current operating point and time
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        # F(du, u) = C*du + G*u - b = 0
+        mul!(resid, sys.C, du)
+        mul!(resid, sys.G, u, 1.0, 1.0)
+        resid .-= sys.b
+
+        return nothing
+    end
+
+    return dae_residual!
+end
+
+"""
+    make_dae_jacobian(prob::MNACircuitProblem) -> Function
+
+Create the combined Jacobian function J = γ*C + G for DAE solvers.
+
+For Sundials IDA, the Jacobian is ∂F/∂u + γ*∂F/∂(du) = G + γ*C.
+"""
+function make_dae_jacobian(prob::MNACircuitProblem)
+    builder = prob.builder
+    params = prob.params
+    base_spec = prob.spec
+
+    function dae_jac!(J, du, u, p, gamma, t)
+        # Build circuit at current operating point
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        # J = G + γ*C
+        copyto!(J, sys.G)
+        J .+= gamma .* sys.C
+
+        return nothing
+    end
+
+    return dae_jac!
+end
+
+"""
+    detect_differential_vars(prob::MNACircuitProblem) -> BitVector
+
+Determine which variables are differential (have du terms in C*du).
+
+Variables with nonzero rows in the C matrix are differential.
+Variables with zero rows are algebraic (no time derivatives).
+"""
+function detect_differential_vars(prob::MNACircuitProblem)
+    ctx0 = prob.builder(prob.params, prob.spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    return detect_differential_vars(sys0)
+end
+
+"""
+    detect_differential_vars(sys::MNASystem) -> BitVector
+
+Determine which variables are differential from the C matrix structure.
+"""
+function detect_differential_vars(sys::MNASystem)
+    n = system_size(sys)
+    C = sys.C
+    diff_vars = falses(n)
+
+    for j in 1:n
+        for k in nzrange(C, j)
+            i = rowvals(C)[k]
+            diff_vars[i] = true
+        end
+    end
+
+    return diff_vars
+end
+
+"""
+    compute_initial_conditions(prob::MNACircuitProblem) -> (u0, du0)
+
+Compute consistent initial conditions via DC operating point.
+
+1. Solves DC problem (du=0) to get u0
+2. Computes du0 to satisfy F(du0, u0, 0) = 0
+
+This is equivalent to CedarDCOp initialization.
+"""
+function compute_initial_conditions(prob::MNACircuitProblem)
+    # DC solve for u0
+    dc_spec = MNASpec(temp=prob.spec.temp, mode=:dcop, time=0.0)
+    u0 = solve_dc(prob.builder, prob.params, dc_spec).x
+
+    n = length(u0)
+    du0 = zeros(n)
+
+    # At t=0, need F(du0, u0) = C*du0 + G*u0 - b = 0
+    # So: C*du0 = b - G*u0
+    # For singular C (algebraic vars), du0 components are 0
+
+    ctx0 = prob.builder(prob.params, prob.spec; x=u0)
+    sys0 = assemble!(ctx0)
+
+    rhs = sys0.b - sys0.G * u0
+    diff_vars = detect_differential_vars(sys0)
+
+    # Compute du0 for differential variables
+    # Simple diagonal approximation (works for typical MNA)
+    C_dense = Matrix(sys0.C)
+    for i in 1:n
+        if diff_vars[i]
+            c_ii = C_dense[i, i]
+            if abs(c_ii) > 1e-15
+                du0[i] = rhs[i] / c_ii
+            end
+        end
+    end
+
+    return u0, du0
+end
+
+"""
+    SciMLBase.DAEProblem(prob::MNACircuitProblem; kwargs...)
+
+Convert MNACircuitProblem to SciML DAEProblem.
+
+# Keyword Arguments
+- `u0`: Initial state (default: DC solution)
+- `du0`: Initial derivatives (default: computed for consistency)
+- `abstol`: Solver tolerance
+
+# Example
+```julia
+prob = MNACircuitProblem(builder, params, spec, tspan)
+dae_prob = DAEProblem(prob)
+sol = solve(dae_prob, IDA())
+```
+"""
+function SciMLBase.DAEProblem(prob::MNACircuitProblem;
+                               u0=nothing, du0=nothing, kwargs...)
+    # Get initial conditions
+    if u0 === nothing || du0 === nothing
+        u0_computed, du0_computed = compute_initial_conditions(prob)
+        u0 = u0 === nothing ? u0_computed : u0
+        du0 = du0 === nothing ? du0_computed : du0
+    end
+
+    # Create residual function
+    residual! = make_dae_residual(prob)
+
+    # Detect differential variables
+    diff_vars = detect_differential_vars(prob)
+
+    return SciMLBase.DAEProblem(
+        residual!,
+        du0,
+        u0,
+        prob.tspan;
+        differential_vars = diff_vars,
+        kwargs...
+    )
+end
+
+#==============================================================================#
+# Nonlinear DAE with Operating Point Rebuild (Phase 6)
+#==============================================================================#
+
+"""
+    make_nonlinear_dae_function(builder, params, base_spec::MNASpec) -> NamedTuple
+
+Create DAE function that rebuilds matrices at each Newton step.
+
+This is for circuits with nonlinear devices where G, C depend on the
+operating point. The builder is called with x=u to get the linearized
+system at the current state.
+
+# Returns
+NamedTuple with:
+- `f!`: DAE residual function
+- `jac!`: Jacobian function (optional, for direct solvers)
+- `jac_prototype`: Sparsity pattern
+
+# Usage
+```julia
+dae_funcs = make_nonlinear_dae_function(builder, params, spec)
+
+prob = DAEProblem(
+    dae_funcs.f!,
+    du0, u0, tspan;
+    differential_vars = diff_vars,
+    jac = dae_funcs.jac!,
+    jac_prototype = dae_funcs.jac_prototype
+)
+```
+"""
+function make_nonlinear_dae_function(builder::F, params::P, base_spec::MNASpec) where {F,P}
+    # Get initial system for size and sparsity pattern
+    ctx0 = builder(params, base_spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    n = system_size(sys0)
+
+    # DAE residual: F(du, u, p, t) = C(u)*du + G(u)*u - b(u,t) = 0
+    function dae_residual!(resid, du, u, p, t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        mul!(resid, sys.C, du)
+        mul!(resid, sys.G, u, 1.0, 1.0)
+        resid .-= sys.b
+
+        return nothing
+    end
+
+    # Jacobian: J = ∂F/∂u + γ*∂F/∂(du) = G + γ*C
+    function dae_jac!(J, du, u, p, gamma, t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        copyto!(J, sys.G)
+        J .+= gamma .* sys.C
+
+        return nothing
+    end
+
+    # Sparsity pattern (union of G and C patterns)
+    jac_prototype = sys0.G + sys0.C
+
+    return (
+        f! = dae_residual!,
+        jac! = dae_jac!,
+        jac_prototype = jac_prototype,
+        sys0 = sys0
+    )
+end
+
+export make_nonlinear_dae_function
+
+"""
+    make_nonlinear_dae_problem(builder, params, tspan;
+                                temp=27.0, abstol=1e-10, maxiters=100) -> DAEProblem
+
+High-level API to create a DAE problem for nonlinear MNA circuits.
+
+This is the recommended entry point for Phase 6 transient analysis with
+nonlinear devices (diodes, MOSFETs, VA devices).
+
+# Arguments
+- `builder`: Circuit builder `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters
+- `tspan`: Time span
+- `temp`: Temperature in Celsius (default: 27.0)
+- `abstol`: DC initialization tolerance
+- `maxiters`: DC initialization max iterations
+
+# Returns
+SciMLBase.DAEProblem ready for solve()
+
+# Example
+```julia
+function build_diode_ckt(params, spec; x=Float64[])
+    ctx = MNAContext()
+    vin = get_node!(ctx, :vin)
+    out = get_node!(ctx, :out)
+
+    # Time-dependent source
+    stamp!(PWLVoltageSource([0, 1e-6], [0, 5]), ctx, vin, 0;
+           t=spec.time, mode=spec.mode)
+
+    # Nonlinear diode with junction capacitance
+    stamp!(DiodeWithCap(Is=1e-14, Cj0=1e-12), ctx, vin, out; x=x)
+
+    stamp!(Resistor(1000.0), ctx, out, 0)
+    return ctx
+end
+
+prob = make_nonlinear_dae_problem(build_diode_ckt, (;), (0.0, 10e-6))
+sol = solve(prob, IDA())
+```
+"""
+function make_nonlinear_dae_problem(builder::F, params::P, tspan::Tuple{<:Real,<:Real};
+                                     temp::Real=27.0,
+                                     abstol::Real=1e-10,
+                                     maxiters::Int=100) where {F,P}
+    base_spec = MNASpec(temp=Float64(temp), mode=:tran, time=0.0)
+
+    # DC initialization
+    dc_spec = MNASpec(temp=Float64(temp), mode=:dcop, time=0.0)
+    dc_sol = solve_dc(builder, params, dc_spec; abstol=abstol, maxiters=maxiters)
+    u0 = dc_sol.x
+    n = length(u0)
+
+    # Get DAE functions
+    dae_funcs = make_nonlinear_dae_function(builder, params, base_spec)
+
+    # Compute consistent du0
+    du0 = zeros(n)
+    rhs = dae_funcs.sys0.b - dae_funcs.sys0.G * u0
+    diff_vars = detect_differential_vars(dae_funcs.sys0)
+
+    C_dense = Matrix(dae_funcs.sys0.C)
+    for i in 1:n
+        if diff_vars[i]
+            c_ii = C_dense[i, i]
+            if abs(c_ii) > 1e-15
+                du0[i] = rhs[i] / c_ii
+            end
+        end
+    end
+
+    return SciMLBase.DAEProblem(
+        dae_funcs.f!,
+        du0,
+        u0,
+        Float64.(tspan);
+        differential_vars = diff_vars,
+        jac = dae_funcs.jac!,
+        jac_prototype = dae_funcs.jac_prototype
+    )
+end
+
+export make_nonlinear_dae_problem
