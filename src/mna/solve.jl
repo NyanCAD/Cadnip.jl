@@ -302,6 +302,114 @@ function solve_dc(ctx::MNAContext)
 end
 
 #==============================================================================#
+# Builder-Based DC Analysis (with Newton Iteration)
+#==============================================================================#
+
+using NonlinearSolve
+using SciMLBase
+using ADTypes
+
+"""
+    solve_dc(builder, params, spec::MNASpec;
+             abstol=1e-10, maxiters=100) -> DCSolution
+
+Solve DC operating point using a circuit builder function.
+
+This is the recommended API for DC analysis. It supports both linear and
+nonlinear devices. For linear circuits, it converges in one iteration.
+For nonlinear devices (diodes, MOSFETs, VA devices with V*V terms), it uses
+Newton iteration via NonlinearSolve.jl.
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
+- `abstol`: Convergence tolerance (default: 1e-10)
+- `maxiters`: Maximum Newton iterations (default: 100)
+
+# How It Works
+1. Builds circuit at initial guess to get system size and structure
+2. Solves linear system G*x = b as initial guess
+3. Checks residual - if converged, returns immediately (linear case)
+4. Otherwise, creates NonlinearProblem and iterates until ||F(u)|| < abstol
+
+# Example
+```julia
+function build_circuit(params, spec; x=Float64[])
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+    stamp!(Resistor(1000.0), ctx, vcc, out)
+    # For nonlinear devices, pass x to stamp:
+    stamp!(MyNonlinearDevice(), ctx, out, 0; x=x)
+
+    return ctx
+end
+
+sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
+```
+
+# See Also
+- `solve_dc(sys::MNASystem)`: Direct linear solve on pre-assembled system
+- `solve_dc(ctx::MNAContext)`: Assemble and solve in one step
+"""
+function solve_dc(builder::F, params::P, spec::MNASpec;
+                  abstol::Real=1e-10, maxiters::Int=100) where {F,P}
+    # Build at x=0 to get system size and initial structure
+    ctx0 = builder(params, spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    n = system_size(sys0)
+
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
+    # Try linear solve first - if it satisfies tolerance, we're done
+    x0 = sys0.G \ sys0.b
+
+    # Check if linear solution is good enough
+    ctx_check = builder(params, spec; x=x0)
+    sys_check = assemble!(ctx_check)
+    resid0 = sys_check.G * x0 - sys_check.b
+    if norm(resid0) < abstol
+        return DCSolution(sys_check, x0)
+    end
+
+    # Need Newton iteration - create NonlinearProblem
+    # Residual function: F(u) = G(u)*u - b(u)
+    function residual!(F, u, p)
+        # Rebuild circuit at current operating point
+        ctx = builder(params, spec; x=u)
+        sys = assemble!(ctx)
+
+        # F(u) = G(u)*u - b(u)
+        mul!(F, sys.G, u)
+        F .-= sys.b
+        return nothing
+    end
+
+    # Create and solve NonlinearProblem
+    nlprob = NonlinearProblem(residual!, x0)
+
+    # Use RobustMultiNewton with finite differences (like dcop.jl)
+    nlsolver = RobustMultiNewton(autodiff=AutoFiniteDiff())
+
+    sol = solve(nlprob, nlsolver; abstol=abstol, maxiters=maxiters)
+
+    if sol.retcode != SciMLBase.ReturnCode.Success
+        @warn "Nonlinear DC solve did not converge: $(sol.retcode)"
+    end
+
+    # Get final system for node names
+    ctx_final = builder(params, spec; x=sol.u)
+    sys_final = assemble!(ctx_final)
+
+    return DCSolution(sys_final, sol.u)
+end
+
+#==============================================================================#
 # AC Analysis
 #==============================================================================#
 

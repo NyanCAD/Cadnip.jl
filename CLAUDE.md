@@ -48,7 +48,8 @@ Run MNA tests directly:
 
 Or run specific test files directly:
 ```bash
-~/.juliaup/bin/julia --project=. test/mna/core.jl
+~/.juliaup/bin/julia --project=. test/mna/core.jl    # 297 core MNA tests
+~/.juliaup/bin/julia --project=. test/mna/va.jl      # 49 VA integration tests
 ~/.juliaup/bin/julia --project=. test/sweep.jl
 ```
 
@@ -79,11 +80,28 @@ sweep = ProductSweep(var"inner.params.R1" = 100.0:200.0)
 cs = CircuitSweep(builder, sweep; inner=(params=(R1=100.0,),))
 ```
 
-### Phase 4 Status
+### Phase 4 Status (Complete)
 SPICE codegen now emits MNA `stamp!` calls. Key files:
 - `src/spc/codegen.jl` - Main codegen with `make_mna_circuit()`, `cg_mna_instance!()`
 - `src/spc/interface.jl` - High-level `sp_str` macro generates MNA builders
 - `src/mna/devices.jl` - Device types including time-dependent sources (PWL, SIN)
 
-Remaining work:
-- Current-controlled sources (CCVS, CCCS) - require tracking voltage source currents
+### Phase 5 Status (Complete)
+VA→MNA integration via `va_str` macro. Key files:
+- `src/vasim.jl` - `make_mna_device()`, `make_mna_module()`, s-dual stamping
+- `src/mna/contrib.jl` - `va_ddt()`, `stamp_current_contribution!()`, `evaluate_contribution()`
+
+**Important:** Disciplines (electrical, V(), I()) are IMPLICIT in VerilogAParser.
+Do NOT use `include "disciplines.vams"` - it causes parser bugs with IOBuffer sources.
+
+Working VA pattern:
+```julia
+va"""
+module VAResistor(p, n);
+    parameter real R = 1000.0;
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n)/R;
+endmodule
+"""
+```

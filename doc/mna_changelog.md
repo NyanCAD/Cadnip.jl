@@ -12,8 +12,8 @@ This document tracks progress on the MNA (Modified Nodal Analysis) migration as 
 | 1 | MNA Core | **Complete** | ~200 |
 | 2 | Simple Device Stamps | **Complete** (merged into Phase 1) | ~200 |
 | 3 | DC & Transient Solvers | **Complete** (merged into Phase 1) | ~300 |
-| 4 | SPICE Codegen | **In Progress** | ~300 |
-| 5 | VA Contribution Functions | Not Started | ~400 |
+| 4 | SPICE Codegen | **Complete** | ~300 |
+| 5 | VA Contribution Functions | **Complete** | ~400 |
 | 6 | Complex VA & DAE | Not Started | ~400 |
 | 7 | Advanced Features | Not Started | ~300 |
 | 8 | Cleanup | Not Started | - |
@@ -604,8 +604,8 @@ See Phase 1 for solver implementations.
 
 ## Phase 4: SPICE Codegen
 
-**Status:** In Progress
-**Date Started:** 2024-12-22
+**Status:** Complete
+**Date:** 2024-12-22
 **Branch:** `claude/integrate-mna-code-generation-yOpfg`
 **LOC:** ~350 (implementation) + ~100 (tests)
 
@@ -1056,11 +1056,239 @@ end
 
 ## Phase 5: VA Contribution Functions
 
-**Status:** Not Started
-**LOC Target:** ~400
+**Status:** Complete
+**Date:** 2024-12-23
+**Branch:** `claude/study-mna-backend-M0fjM`
+**LOC:** ~400 (implementation) + ~350 (tests)
+**Design Document:** `doc/phase5_implementation_plan.md`
 
 ### Goal
-Update vasim.jl to emit contribution functions with s-dual ddt().
+Implement s-dual contribution stamping for VA-style contributions.
+
+### Implementation Summary
+
+The s-dual approach uses ForwardDiff to automatically separate resistive and reactive contributions:
+
+1. **S-Dual Representation:**
+   - Laplace variable `s` represented as `Dual{ContributionTag}(0, 1)`
+   - `va_ddt(x) = s * x` transforms time derivatives to frequency domain
+   - `value(result)` → resistive current (stamps into G)
+   - `partials(result, 1)` → charge (stamps into C via capacitance)
+
+2. **Nested Dual Structure:**
+   - Voltage dual (`Dual{Nothing}`) for ∂I/∂V Jacobian extraction
+   - ContributionTag dual for resist/react separation
+   - Tag ordering defined: ContributionTag < other tags
+
+3. **Three Result Structures Handled:**
+   - Pure resistive: `Dual{Nothing}(I, dI/dVp, dI/dVn)`
+   - Pure reactive: `Dual{ContributionTag}(Dual{Nothing}(0,...), Dual{Nothing}(q,...))`
+   - Mixed: `Dual{Nothing}(Dual{ContributionTag}(...), ...)`
+
+### New Files
+
+#### `src/mna/contrib.jl` (~110 LOC)
+
+Core contribution stamping primitives:
+
+```julia
+# Tag for s-dual
+struct ContributionTag end
+
+# Laplace domain ddt
+@inline function va_ddt(x::Real)
+    return Dual{ContributionTag}(zero(x), x)
+end
+
+# Evaluate contribution and extract all derivatives
+function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real) -> NamedTuple
+    # Returns: I, dI_dVp, dI_dVn, q, dq_dVp, dq_dVn
+end
+
+# Main stamping entry point
+function stamp_current_contribution!(ctx, p, n, contrib_fn, x)
+    # Evaluates contrib_fn at operating point
+    # Stamps G (conductance) and C (capacitance) matrices
+end
+```
+
+Key features:
+- ForwardDiff tag ordering to handle nested duals
+- Automatic Jacobian extraction for nonlinear devices
+- Handles pure resistive, pure reactive, and mixed contributions
+
+### Modified Files
+
+#### `src/mna/MNA.jl`
+Added `include("contrib.jl")` after solve.jl.
+
+#### `src/vasim.jl` (~550 LOC added)
+Added MNA device generation alongside existing DAECompiler codegen:
+
+- `make_mna_device(vm)` - Generate MNA-compatible device struct
+- `MNAScope` struct for MNA-specific code generation
+- Translation methods for expressions (BinaryExpression, FunctionCall, etc.)
+- `mna_collect_contributions!()` - Extract contribution statements
+- `generate_mna_stamp_method_2term()` - Two-terminal device stamp method
+- `generate_mna_stamp_method_nterm()` - N-terminal device stamp method
+- `make_mna_module(va)` - Generate complete VA module
+
+Updated `@va_str` macro:
+```julia
+macro va_str(str)
+    @static if CedarSim.USE_DAECOMPILER
+        esc(make_module(va))
+    else
+        esc(make_mna_module(va))
+    end
+end
+```
+
+### Test Coverage
+
+#### `test/mna/va.jl` (~220 LOC, 41 tests)
+
+1. **va_ddt s-dual basics** (5 tests)
+   - Dual structure validation
+   - Nested dual handling
+
+2. **evaluate_contribution** (20 tests)
+   - Resistor: `V/R` → correct I and dI/dV
+   - Capacitor: `C*ddt(V)` → correct q and dq/dV
+   - Parallel RC: `V/R + C*ddt(V)` → mixed contributions
+   - Diode: `Is*(exp(V/Vt)-1)` → nonlinear conductance
+
+3. **stamp_current_contribution!** (16 tests)
+   - Matrix structure validation
+   - Ground node handling
+   - Nonlinear operating point stamping
+
+### Exit Criteria Status
+
+| Criterion | Status |
+|-----------|--------|
+| va_ddt creates s-dual | ✅ |
+| Resistor contribution (V/R) | ✅ |
+| Capacitor contribution (C*ddt) | ✅ |
+| Mixed RC contribution | ✅ |
+| Nonlinear diode contribution | ✅ |
+| Nested dual handling | ✅ |
+| stamp_current_contribution! works | ✅ |
+| Core MNA tests still pass (297) | ✅ |
+| VA→MNA integration via va_str | ✅ |
+| VA integration tests (49 tests) | ✅ |
+
+### VA→MNA Integration (2024-12-23)
+
+Completed full VA→MNA integration via the `va_str` macro:
+
+#### Changes Made
+
+**`src/vasim.jl`:**
+
+1. **Removed DAECompiler conditional path:**
+   ```julia
+   macro va_str(str)
+       va = VerilogAParser.parse(IOBuffer(str))
+       if va.ps.errored
+           cedarthrow(LoadError("va_str", 0, VAParseError(va)))
+       else
+           esc(make_mna_module(va))  # Always use MNA now
+       end
+   end
+   ```
+
+2. **Fixed port variable scoping bug:**
+   - Problem: `port_args` generated generic names (`:port_1`, `:port_2`) but
+     `V(p,n)` translated to `:(p - n)` using actual VA port names
+   - Solution: Use actual port names from VA module (`pins(vm)` returns `[:p, :n]`)
+   - Added unique prefixes for node index parameters (`_node_p`, `_node_n`)
+     to avoid collision with voltage variables in `contrib_fn`
+
+3. **Fixed baremodule imports:**
+   ```julia
+   baremodule VAResistor_module
+       using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros
+       import ..CedarSim
+       using ..CedarSim.VerilogAEnvironment
+       using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+       using ForwardDiff: Dual
+       # ...
+   end
+   ```
+
+**`test/mna/va.jl`:**
+- Added explicit MNA imports to avoid ambiguity
+- Added VA→MNA integration tests (resistor, capacitor, parallel RC)
+
+#### Key Discovery: Disciplines Are Implicit
+
+The `include "disciplines.vams"` directive is NOT needed - disciplines (electrical,
+V(), I(), etc.) are implicit in VerilogAParser. Using the include causes a parser
+bug when parsing from IOBuffer sources (`InexactError: trunc(UInt32, -1)`).
+
+Working pattern:
+```julia
+va"""
+module VAResistor(p, n);
+    parameter real R = 1000.0;
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n)/R;
+endmodule
+"""
+```
+
+### Known Limitations
+
+1. **VA string parsing with includes:**
+   - `include "disciplines.vams"` doesn't work from IOBuffer (parser bug)
+   - Workaround: disciplines are implicit, don't use the include directive
+   - File-based VA parsing works correctly with includes
+
+2. **Complex VA statements:**
+   - Translation of conditionals, loops in VA code may need more work
+   - Simple contribution statements work well
+
+### Usage Example
+
+```julia
+using CedarSim.MNA
+using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
+
+# Define a parallel RC contribution function
+R, C = 1000.0, 1e-6
+contrib_fn(V) = V/R + C * va_ddt(V)
+
+# Evaluate at operating point
+result = evaluate_contribution(contrib_fn, 5.0, 0.0)
+# result.I ≈ 0.005 (current)
+# result.dI_dVp ≈ 0.001 (conductance)
+# result.q ≈ 5e-6 (charge)
+# result.dq_dVp ≈ 1e-6 (capacitance)
+
+# Or stamp directly into MNA context
+ctx = MNAContext()
+p = get_node!(ctx, :p)
+n = get_node!(ctx, :n)
+stamp_current_contribution!(ctx, p, n, contrib_fn, [5.0, 0.0])
+sys = assemble!(ctx)
+# sys.G has conductance, sys.C has capacitance
+```
+
+### Architecture Notes
+
+The s-dual approach is inspired by:
+- **OpenVAF OSDI interface**: Separate resist/react loading functions
+- **ForwardDiff dual numbers**: Automatic differentiation for Jacobians
+- **Laplace domain**: `ddt(x) = s*x` in frequency domain
+
+Key insight: By representing `s` as a ForwardDiff dual with `value=0, partials=1`,
+evaluating a contribution function naturally separates:
+- `value(result)` = contribution at s=0 = DC/resistive
+- `partials(result)` = coefficient of s = charge (capacitive)
+
+This avoids AST analysis to determine which branches are resistive vs reactive.
 
 ---
 

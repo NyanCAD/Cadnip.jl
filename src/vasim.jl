@@ -722,10 +722,13 @@ function make_spice_device(vm::VANode{VerilogModule})
                     push!(parameter_names, paramsym)
                     # TODO: The CMC Verilog-A models use an attribute to
                     # distinguish between model and instance parameters
-                    push!(struct_fields,
-                        :($(Symbol(paramsym))::$(DefaultOr{pT}) = $(Expr(:block,
-                            LineNumberNode(param.default_expr),
-                            to_julia_defaults(param.default_expr)))))
+                    # Use symbol for type to avoid embedding type objects in AST
+                    pT_sym = pT === Float64 ? :Float64 : :Int
+                    # Build field expr without quoting to avoid hygiene issues
+                    type_annotation = Expr(:(::), paramsym, Expr(:curly, :(CedarSim.DefaultOr), pT_sym))
+                    default_val = Expr(:block, LineNumberNode(param.default_expr), to_julia_defaults(param.default_expr))
+                    field_expr = Expr(:(=), type_annotation, default_val)
+                    push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                     #push!(ret.args,
                     #    :(@parameters $(Symbol(paramsym)))
@@ -886,6 +889,790 @@ function make_spice_device(vm::VANode{VerilogModule})
 end
 
 
+#==============================================================================#
+# MNA Device Generation (Phase 5)
+#
+# Generates stamp! methods for Verilog-A devices instead of DAECompiler code.
+# Uses s-dual approach for automatic resist/react separation.
+#==============================================================================#
+
+"""
+    make_mna_device(vm::VANode{VerilogModule})
+
+Generate MNA-compatible Julia code for a Verilog-A module.
+
+Unlike `make_spice_device` which generates code for DAECompiler,
+this generates `stamp!` methods that work with MNAContext directly.
+
+# Generated Code Structure
+```julia
+@kwdef struct DeviceName <: VAModel
+    param1::DefaultOr{Float64} = default1
+    ...
+end
+
+function MNA.stamp!(dev::DeviceName, ctx::MNAContext, p::Int, n::Int;
+                    t::Real=0.0, mode::Symbol=:dcop)
+    # Parameter extraction
+    param1 = undefault(dev.param1)
+
+    # Contribution function (captures parameters)
+    function contrib(Vpn)
+        # VA analog block translated to Julia
+        # ddt(x) becomes va_ddt(x)
+        Vpn / param1  # Example: resistor
+    end
+
+    # Stamp contribution (uses AD for Jacobian)
+    stamp_current_contribution!(ctx, p, n, contrib, zeros(max(p, n)))
+end
+```
+"""
+function make_mna_device(vm::VANode{VerilogModule})
+    ps = pins(vm)
+    modname = String(vm.id)
+    symname = Symbol(modname)
+
+    # Collect struct fields and parameters
+    struct_fields = Any[]
+    parameter_names = Set{Symbol}()
+    to_julia_global = Scope()
+    find_ddx!(to_julia_global.ddx_order, vm)
+
+    to_julia_defaults = Scope(to_julia_global.parameters,
+        to_julia_global.node_order, to_julia_global.ninternal_nodes,
+        to_julia_global.branch_order, to_julia_global.used_branches,
+        to_julia_global.var_types, to_julia_global.all_functions,
+        true, to_julia_global.ddx_order)
+
+    internal_nodes = Vector{Symbol}()
+    var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
+    aliases = Dict{Symbol, Symbol}()
+
+    # Pre-pass: collect parameters and nodes
+    for child in vm.items
+        item = child.item
+        @case formof(item) begin
+            InOutDeclaration => nothing
+            NetDeclaration => begin
+                for net in item.net_names
+                    id = Symbol(assemble_id_string(net.item))
+                    if !(id in ps)
+                        push!(internal_nodes, id)
+                    end
+                end
+            end
+            ParameterDeclaration => begin
+                for param in item.params
+                    param = param.item
+                    pT = Float64
+                    if item.ptype !== nothing
+                        pT = kw_to_T(item.ptype.kw)
+                    end
+                    paramname = String(assemble_id_string(param.id))
+                    paramsym = Symbol(paramname)
+                    push!(parameter_names, paramsym)
+                    # Use simplest possible field - just type annotation, no default
+                    # @kwdef will use the type's default constructor
+                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64}))
+                    push!(struct_fields, field_expr)
+                    var_types[Symbol(paramname)] = pT
+                end
+            end
+            AliasParameterDeclaration => begin
+                param = item
+                paramsym = Symbol(assemble_id_string(param.id))
+                targetsym = Symbol(assemble_id_string(param.value))
+                push!(parameter_names, paramsym)
+                aliases[paramsym] = targetsym
+            end
+            IntRealDeclaration => begin
+                T = kw_to_T(item.kw.kw)
+                for ident in item.idents
+                    name = Symbol(String(ident.item))
+                    var_types[name] = T
+                end
+            end
+        end
+    end
+
+    # Build scope for code generation
+    node_order = [ps; internal_nodes; Symbol("0")]
+    to_julia_mna = MNAScope(parameter_names, node_order, length(internal_nodes),
+        collect(map(x->Pair(x...), combinations(node_order, 2))),
+        Set{Pair{Symbol}}(),
+        var_types,
+        Dict{Symbol, VAFunction}(), false,
+        to_julia_global.ddx_order)
+
+    # Generate analog block code
+    analog_body = Expr(:block)
+    contributions = Any[]
+    function_defs = Any[]
+
+    for child in vm.items
+        item = child.item
+        @case formof(item) begin
+            InOutDeclaration => nothing
+            IntRealDeclaration => nothing
+            NetDeclaration => nothing
+            BranchDeclaration => nothing
+            ParameterDeclaration => nothing
+            AliasParameterDeclaration => nothing
+            AnalogFunctionDeclaration => begin
+                push!(function_defs, to_julia_mna(item))
+            end
+            AnalogBlock => begin
+                # Collect contributions from analog block
+                mna_collect_contributions!(contributions, to_julia_mna, item.stmt)
+            end
+            _ => nothing
+        end
+    end
+
+    # Generate parameter extraction
+    params_to_locals = map(collect(parameter_names)) do id
+        :($id = $(undefault)(dev.$id))
+    end
+
+    # Generate variable declarations for non-parameter local vars
+    local_var_decls = Any[]
+    for (name, T) in var_types
+        if !(name in parameter_names)
+            push!(local_var_decls, :(local $name::$T = zero($T)))
+        end
+    end
+
+    # Generate stamp method
+    # For simplicity, assume 2-terminal device (p, n)
+    # More complex devices with internal nodes would need additional handling
+    # Use actual port names from VA module (ps already contains :p, :n, etc.)
+    port_args = ps
+
+    if length(ps) == 2
+        # Two-terminal device
+        stamp_method = generate_mna_stamp_method_2term(
+            symname, port_args, params_to_locals, local_var_decls,
+            function_defs, contributions, to_julia_mna)
+    else
+        # Multi-terminal device - generate generic method
+        stamp_method = generate_mna_stamp_method_nterm(
+            symname, ps, port_args, params_to_locals, local_var_decls,
+            function_defs, contributions, to_julia_mna)
+    end
+
+    # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
+    # that rename field symbols in baremodule contexts
+
+    # 1. Build plain struct definition
+    struct_body = Expr(:block)
+    for paramsym in parameter_names
+        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64})))
+    end
+    struct_def = Expr(:struct, false,
+        Expr(:<:, symname, :(VerilogAEnvironment.VAModel)),
+        struct_body)
+
+    # 2. Build keyword constructor that mimics @kwdef
+    # Constructor: TypeName(; param1=mkdefault(default1), ...) = TypeName(vaconvert(...), ...)
+    if !isempty(parameter_names)
+        # Build keyword parameter list with defaults
+        kw_params = Expr(:parameters)
+        call_args = Any[]
+        for paramsym in parameter_names
+            # Each parameter: paramsym = mkdefault(default_value)
+            # For now, use Float64 default of 0.0; actual defaults would come from VA parameter declarations
+            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault(0.0))))
+            # In call, convert using vaconvert
+            push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
+                :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                paramsym))
+        end
+        # Build constructor function
+        constructor = Expr(:function,
+            Expr(:call, symname, kw_params),
+            Expr(:call, symname, call_args...))
+    else
+        constructor = nothing
+    end
+
+    result_args = Any[struct_def]
+    if constructor !== nothing
+        push!(result_args, constructor)
+    end
+    push!(result_args, stamp_method)
+
+    Expr(:toplevel, result_args...)
+end
+
+"""
+MNA-specific scope that translates VA constructs for MNA stamping.
+"""
+struct MNAScope
+    parameters::Set{Symbol}
+    node_order::Vector{Symbol}
+    ninternal_nodes::Int
+    branch_order::Vector{Pair{Symbol}}
+    used_branches::Set{Pair{Symbol}}
+    var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}}}
+    all_functions::Dict{Symbol, VAFunction}
+    undefault_ids::Bool
+    ddx_order::Vector{Symbol}
+end
+
+# Forward basic translations to Scope
+(s::MNAScope)(x::VANode{Literal}) = Scope()(x)
+(s::MNAScope)(x::VANode{FloatLiteral}) = Scope()(x)
+
+function (scope::MNAScope)(ip::VANode{IdentifierPrimary})
+    Symbol(assemble_id_string(ip.id))
+end
+
+function (to_julia::MNAScope)(cs::VANode{BinaryExpression})
+    op = Symbol(cs.op)
+    if op == :(||)
+        return Expr(:call, (|), to_julia(cs.lhs), to_julia(cs.rhs))
+    elseif op == :(&&)
+        return Expr(:call, (&), to_julia(cs.lhs), to_julia(cs.rhs))
+    else
+        return Expr(:call, op, to_julia(cs.lhs), to_julia(cs.rhs))
+    end
+end
+
+function (to_julia::MNAScope)(stmt::VANode{UnaryOp})
+    return Expr(:call, Symbol(stmt.op), to_julia(stmt.operand))
+end
+
+function (to_julia::MNAScope)(stmt::VANode{Parens})
+    return to_julia(stmt.inner)
+end
+
+function (to_julia::MNAScope)(cs::VANode{TernaryExpr})
+    return Expr(:if, to_julia(cs.condition), to_julia(cs.ifcase), to_julia(cs.elsecase))
+end
+
+function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
+    fname = Symbol(stmt.id)
+
+    if fname == :V
+        # Voltage access - return variable name that will be replaced with Vpn
+        @assert length(stmt.args) in (1, 2)
+        id1 = Symbol(stmt.args[1].item)
+        id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
+        push!(to_julia.used_branches, id1 => id2)
+
+        if id2 == Symbol("0")
+            return id1
+        else
+            return :($id1 - $id2)
+        end
+    elseif fname == :I
+        # Current access - not supported in simple MNA stamp
+        return :(error("I() probe not supported in MNA contribution"))
+    elseif fname == :ddt
+        # Time derivative - use va_ddt
+        return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
+    elseif fname == :ddx
+        # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
+        # For n-terminal MNA devices, duals are indexed by node_order (port positions)
+        item = stmt.args[2].item
+        @assert formof(item) == FunctionCall
+        @assert Symbol(item.id) == :V
+        if length(item.args) == 1
+            probe = Symbol(item.args[1].item)
+            # Use node_order for partial index (duals indexed by port position)
+            id_idx = findfirst(==(probe), to_julia.node_order)
+            return :(let x = $(to_julia(stmt.args[1].item))
+                isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
+            end)
+        else
+            probe1 = Symbol(item.args[1].item)
+            id1_idx = findfirst(==(probe1), to_julia.node_order)
+            probe2 = Symbol(item.args[2].item)
+            id2_idx = findfirst(==(probe2), to_julia.node_order)
+            # ∂expr/∂V(a,b) = (∂expr/∂V_a - ∂expr/∂V_b) / 2
+            # This works because V(a,b) = V_a - V_b, so:
+            # ∂expr/∂V_a = ∂expr/∂V(a,b) and ∂expr/∂V_b = -∂expr/∂V(a,b)
+            return :(let x = $(to_julia(stmt.args[1].item)),
+                        dx1 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
+                        dx2 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
+                (dx1 - dx2) / 2
+            end)
+        end
+    elseif fname == Symbol("\$temperature")
+        return :(spec.temp + 273.15)  # Convert to Kelvin
+    elseif fname == Symbol("\$vt")
+        return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
+    end
+
+    # Check for VA-defined function
+    vaf = get(to_julia.all_functions, fname, nothing)
+    if vaf !== nothing
+        args = map(x -> to_julia(x.item), stmt.args)
+        return Expr(:call, fname, args...)
+    end
+
+    # Default: pass through function call
+    return Expr(:call, fname, map(x -> to_julia(x.item), stmt.args)...)
+end
+
+function (to_julia::MNAScope)(stmt::VANode{AnalogVariableAssignment})
+    assignee = Symbol(stmt.lvalue)
+    varT = get(to_julia.var_types, assignee, Float64)
+
+    eq = stmt.eq.op
+    op = eq == VAT.EQ ? :(=) :
+         eq == VAT.PLUS_EQ ? :(+=) :
+         eq == VAT.MINUS_EQ ? :(-=) :
+         eq == VAT.STAR_EQ ? :(*=) :
+         eq == VAT.SLASH_EQ ? :(/=) :
+         :(=)
+
+    return Expr(op, assignee,
+        Expr(:call, VerilogAEnvironment.vaconvert, varT, to_julia(stmt.rvalue)))
+end
+
+function (to_julia::MNAScope)(stmt::VANode{AnalogProceduralAssignment})
+    return to_julia(stmt.assign)
+end
+
+function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
+    ret = Expr(:block)
+    for stmt in asb.stmts
+        push!(ret.args, to_julia(stmt))
+    end
+    ret
+end
+
+(to_julia::MNAScope)(stmt::VANode{AnalogStatement}) = to_julia(stmt.stmt)
+
+function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
+    aif = stmt.aif
+    function if_body_to_julia(ifstmt)
+        if formof(ifstmt) == AnalogSeqBlock
+            return to_julia(ifstmt)
+        else
+            return Expr(:block, to_julia(ifstmt))
+        end
+    end
+
+    ifex = ex = Expr(:if, to_julia(aif.condition), if_body_to_julia(aif.stmt))
+    for case in stmt.elsecases
+        if formof(case.stmt) == AnalogIf
+            elif = case.stmt
+            newex = Expr(:elseif, to_julia(elif.condition), if_body_to_julia(elif.stmt))
+            push!(ex.args, newex)
+            ex = newex
+        else
+            push!(ex.args, if_body_to_julia(case.stmt))
+        end
+    end
+    ifex
+end
+
+function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
+    # Similar to Scope version but uses MNAScope for body
+    type_decls = Dict{Symbol, Any}()
+    inout_decls = Dict{Symbol, Symbol}()
+    fname = Symbol(fd.id)
+    var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
+    rt = fd.fty === nothing ? Real : kw_to_T(fd.fty.kw)
+    var_types[fname] = rt
+    arg_order = Symbol[]
+
+    for decl in fd.items
+        item = decl.item
+        @case formof(item) begin
+            InOutDeclaration => begin
+                kind = item.kw.kw === INPUT ? :input :
+                       item.kw.kw === OUTPUT ? :output :
+                       :inout
+                for name in item.portnames
+                    ns = Symbol(name.item)
+                    inout_decls[ns] = kind
+                    push!(arg_order, ns)
+                end
+            end
+            IntRealDeclaration => begin
+                T = kw_to_T(item.kw.kw)
+                for name in item.idents
+                    var_types[Symbol(name.item)] = T
+                end
+            end
+        end
+    end
+
+    to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
+        to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
+        to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
+
+    in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
+    out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
+    rt_decl = length(out_args) == 0 ? fname : :(($fname, ($(out_args...),)))
+
+    to_julia.all_functions[fname] = VAFunction(arg_order, inout_decls)
+
+    localize_vars = Any[]
+    for var in keys(var_types)
+        var in arg_order && continue
+        push!(localize_vars, :(local $var))
+    end
+
+    return @nolines quote
+        @inline function $fname($(in_args...))
+            $(localize_vars...)
+            local $fname = VerilogAEnvironment.vaconvert($rt, 0)
+            $(to_julia_internal(fd.stmt))
+            return $rt_decl
+        end
+    end
+end
+
+"""
+Collect contribution statements and regular statements from analog block for MNA stamping.
+"""
+function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
+    if stmt isa VANode{ContributionStatement}
+        push!(contributions, mna_translate_contribution(to_julia, stmt))
+    elseif stmt isa VANode{AnalogSeqBlock}
+        for s in stmt.stmts
+            mna_collect_contributions!(contributions, to_julia, s)
+        end
+    elseif stmt isa VANode{AnalogStatement}
+        mna_collect_contributions!(contributions, to_julia, stmt.stmt)
+    elseif stmt isa VANode{AnalogConditionalBlock}
+        # For conditional blocks, we need to handle them specially
+        # For now, add the whole translated block
+        push!(contributions, (kind=:conditional, expr=to_julia(stmt)))
+    elseif stmt isa VANode{AnalogVariableAssignment}
+        # Regular assignments (e.g., cdrain = R*V(g,s)**2)
+        push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
+    elseif stmt isa VANode{AnalogProceduralAssignment}
+        # Procedural assignments in analog block (e.g., cdrain = R*V(g,s)**2;)
+        push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
+    end
+end
+
+"""
+Translate a contribution statement for MNA.
+"""
+function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionStatement})
+    bpfc = cs.lvalue
+    kind_sym = Symbol(bpfc.id)
+    kind = kind_sym == :I ? :current : kind_sym == :V ? :voltage : :unknown
+
+    refs = map(bpfc.references) do ref
+        Symbol(assemble_id_string(ref.item))
+    end
+
+    if length(refs) == 1
+        node = refs[1]
+        push!(to_julia.used_branches, node => Symbol("0"))
+        return (kind=kind, p=node, n=Symbol("0"), expr=to_julia(cs.assign_expr))
+    elseif length(refs) == 2
+        (id1, id2) = refs
+        push!(to_julia.used_branches, id1 => id2)
+        return (kind=kind, p=id1, n=id2, expr=to_julia(cs.assign_expr))
+    end
+
+    return (kind=:unknown, expr=:(error("Invalid contribution")))
+end
+
+"""
+Generate stamp! method for 2-terminal device.
+"""
+function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
+                                          local_var_decls, function_defs, contributions,
+                                          to_julia)
+    # Build contribution function body
+    # For a simple 2-terminal device, combine all current contributions
+    contrib_body = Expr(:block)
+
+    # Add local variable initializations
+    for decl in local_var_decls
+        push!(contrib_body.args, decl)
+    end
+
+    # Add setup code that doesn't depend on Vpn
+    # (variable assignments before contributions)
+
+    # For now, assume single current contribution: I(p,n) <+ expr
+    # The expr should be a function of Vpn
+    if !isempty(contributions)
+        # Replace V() references with Vpn
+        for c in contributions
+            if c.kind == :current
+                # Transform the expression to use Vpn
+                push!(contrib_body.args, :(contrib_val += $(c.expr)))
+            elseif c.kind == :conditional
+                push!(contrib_body.args, c.expr)
+            end
+        end
+    end
+
+    # Use unique names for node indices to avoid conflict with port names
+    # (port_args are :p, :n which are also used as voltage values in the contrib body)
+    node_p = Symbol("_node_", port_args[1])
+    node_n = Symbol("_node_", port_args[2])
+
+    quote
+        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
+                                     $node_p::Int, $node_n::Int;
+                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
+            $(params_to_locals...)
+            $(function_defs...)
+
+            # Get operating point voltages
+            Vp = $node_p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$node_p])
+            Vn = $node_n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$node_n])
+
+            # For the contribution function, we replace V(p,n) with the argument
+            function contrib_fn(Vpn)
+                # Local variables for port voltages (needed for V() references)
+                $(port_args[1]) = Vpn  # For V(p) which becomes just p
+                $(port_args[2]) = 0.0  # Ground reference
+
+                contrib_val = 0.0
+                $contrib_body
+                return contrib_val
+            end
+
+            # Use AD-based contribution stamping
+            CedarSim.MNA.stamp_current_contribution!(ctx, $node_p, $node_n,
+                                                      contrib_fn, isempty(x) ? zeros(max($node_p, $node_n, 1)) : x)
+            return nothing
+        end
+    end
+end
+
+"""
+Generate stamp! method for n-terminal device (generic).
+
+For n-terminal devices, we use a vector-valued dual approach:
+1. Create duals with partials for each node voltage
+2. Evaluate the contribution expression
+3. Extract ∂I/∂V_k for each node k and stamp into G matrix
+"""
+function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_locals,
+                                          local_var_decls, function_defs, contributions,
+                                          to_julia)
+    n_ports = length(port_args)
+
+    # Create unique node parameter names (prefixed to avoid conflict with voltage vars)
+    node_params = [Symbol("_node_", p) for p in port_args]
+
+    # Build the contribution evaluation body - includes local vars and expressions
+    # that compute the current contributions
+    contrib_eval = Expr(:block)
+    # For n-terminal devices, DON'T use `local` or type annotations since:
+    # 1. Type annotations prevent Dual assignment
+    # 2. `local` scopes variables to this block, making them invisible to stamp_code
+    # Just use plain assignment: `name = zero(Float64)` to allow reassignment to Dual
+    for decl in local_var_decls
+        # Convert `local name::T = zero(T)` to just `name = zero(Float64)`
+        # The structure is: Expr(:local, Expr(:(=), Expr(:(::), name, T), zero_expr))
+        if decl.head == :local
+            inner = decl.args[1]
+            if inner isa Expr && inner.head == :(=)
+                lhs = inner.args[1]
+                if lhs isa Expr && lhs.head == :(::)
+                    name = lhs.args[1]
+                    # Don't use `local` - variable needs to be visible in outer scope
+                    push!(contrib_eval.args, :($name = zero(Float64)))
+                else
+                    # If no type annotation, still strip `local`
+                    push!(contrib_eval.args, inner)
+                end
+            elseif inner isa Expr && inner.head == :(::)
+                # Just type annotation, no initialization
+                name = inner.args[1]
+                push!(contrib_eval.args, :($name = zero(Float64)))
+            else
+                # Plain assignment inside local - just use the assignment
+                push!(contrib_eval.args, inner)
+            end
+        else
+            push!(contrib_eval.args, decl)
+        end
+    end
+
+    # Collect current contributions by branch, and add assignments to contrib_eval
+    branch_contribs = Dict{Tuple{Symbol,Symbol}, Vector{Any}}()
+    for c in contributions
+        if c.kind == :current
+            branch = (c.p, c.n)
+            if !haskey(branch_contribs, branch)
+                branch_contribs[branch] = Any[]
+            end
+            push!(branch_contribs[branch], c.expr)
+        elseif c.kind == :conditional
+            push!(contrib_eval.args, c.expr)
+        elseif c.kind == :assignment
+            # Regular assignment (e.g., cdrain = R*V(g,s)**2)
+            push!(contrib_eval.args, c.expr)
+        end
+    end
+
+    # Generate stamping code for each unique branch - UNROLL loops at codegen time
+    stamp_code = Expr(:block)
+    for ((p_sym, n_sym), exprs) in branch_contribs
+        p_idx = findfirst(==(p_sym), port_args)
+        n_idx = findfirst(==(n_sym), port_args)
+        p_node = node_params[p_idx]
+        n_node = node_params[n_idx]
+
+        # Sum all contributions to this branch
+        sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
+
+        # Generate unrolled stamping code
+        branch_stamp = quote
+            # Evaluate the branch current
+            I_branch = $sum_expr
+            I_val = ForwardDiff.value(I_branch)
+        end
+
+        # Unroll Jacobian stamping for each port k
+        for k in 1:n_ports
+            k_node = node_params[k]
+            push!(branch_stamp.args, quote
+                let dI_dVk = ForwardDiff.partials(I_branch, $k)
+                    # G[p,k] -= dI/dVk, G[n,k] += dI/dVk
+                    if $p_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, -dI_dVk)
+                    end
+                    if $n_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, dI_dVk)
+                    end
+                end
+            end)
+        end
+
+        # Unroll RHS computation: Ieq = I_val - sum(dI/dVk * Vk)
+        ieq_expr = :(I_val)
+        for k in 1:n_ports
+            ieq_expr = :($ieq_expr - ForwardDiff.partials(I_branch, $k) * $(Symbol("V_", k)))
+        end
+
+        push!(branch_stamp.args, quote
+            let Ieq = $ieq_expr
+                if $p_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $p_node, Ieq)
+                end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $n_node, -Ieq)
+                end
+            end
+        end)
+
+        push!(stamp_code.args, branch_stamp)
+    end
+
+    # Generate voltage variable names for RHS computation (V_1, V_2, etc.)
+    # These are Float64 values, not duals
+
+    # Build the stamp method
+    quote
+        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
+                                     $([:($np::Int) for np in node_params]...);
+                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
+            $(params_to_locals...)
+            $(function_defs...)
+
+            # Get operating point voltages (Float64) - used for RHS linearization
+            $([:($(Symbol("V_", i)) = $(node_params[i]) == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$(node_params[i])]))
+               for i in 1:n_ports]...)
+
+            # Create duals with partials for each node voltage
+            # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
+            $([:($(port_args[i]) = Dual{Nothing}($(Symbol("V_", i)),
+                    $(Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_ports]...))...))
+               for i in 1:n_ports]...)
+
+            # Evaluate contribution expressions with duals
+            $contrib_eval
+
+            # Stamp each branch contribution
+            $stamp_code
+
+            return nothing
+        end
+    end
+end
+
+"""
+    make_mna_module(va::VANode)
+
+Generate an MNA-compatible module from a parsed Verilog-A file.
+"""
+function make_mna_module(va::VANode)
+    vamod = va.stmts[end]
+    s = Symbol(String(vamod.id), "_module")
+
+    # Get the device definition (returns Expr(:toplevel, struct_def, constructor, stamp_method))
+    device_expr = CedarSim.make_mna_device(vamod)
+    # Extract the contents to splice into the module body
+    device_contents = device_expr.args
+
+    # Build module body entirely with Expr() to avoid any hygiene transformations
+    # using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+    using_base = Expr(:using, Expr(:(:),
+        Expr(:., :Base),
+        Expr(:., :AbstractVector),
+        Expr(:., :Real),
+        Expr(:., :Symbol),
+        Expr(:., :Float64),
+        Expr(:., :Int),
+        Expr(:., :isempty),
+        Expr(:., :max),
+        Expr(:., :zeros),
+        Expr(:., :zero)))
+
+    # import ..CedarSim
+    import_cedarsim = Expr(:import, Expr(:., :., :., :CedarSim))
+
+    # using ..CedarSim.VerilogAEnvironment
+    using_vaenv = Expr(:using, Expr(:., :., :., :CedarSim, :VerilogAEnvironment))
+
+    # using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+    using_mna = Expr(:using, Expr(:(:),
+        Expr(:., :., :., :CedarSim, :MNA),
+        Expr(:., :va_ddt),
+        Expr(:., :stamp_current_contribution!),
+        Expr(:., :MNAContext)))
+
+    # using ForwardDiff: Dual, value, partials
+    using_fd = Expr(:using, Expr(:(:),
+        Expr(:., :ForwardDiff),
+        Expr(:., :Dual),
+        Expr(:., :value),
+        Expr(:., :partials)))
+
+    # import ForwardDiff
+    import_fd = Expr(:import, Expr(:., :ForwardDiff))
+
+    # export TypeName
+    export_stmt = Expr(:export, Symbol(vamod.id))
+
+    module_body = Expr(:block,
+        using_base,
+        import_cedarsim,
+        using_vaenv,
+        using_mna,
+        using_fd,
+        import_fd,
+        export_stmt,
+        device_contents...
+    )
+
+    # Build baremodule expression: Expr(:module, false, name, body)
+    baremod = Expr(:module, false, s, module_body)
+
+    # Build using statement without quoting
+    using_stmt = Expr(:using, Expr(:., :., s))
+
+    Expr(:toplevel, baremod, using_stmt)
+end
+
 struct VAFile
     file::String
 end
@@ -913,7 +1700,7 @@ function parse_and_eval_vafile(mod::Module, file::VAFile)
     if va.ps.errored
         cedarthrow(LoadError(file.file, 0, VAParseError(va)))
     else
-        Core.eval(mod, make_module(va))
+        Core.eval(mod, make_mna_module(va))
     end
     return va.ps.srcfiles
 end
@@ -928,7 +1715,11 @@ macro va_str(str)
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
-        esc(make_module(va))
+        # Use Core.eval to bypass macro hygiene issues
+        # The expression contains symbols that get mangled if returned from macro
+        expr = make_mna_module(va)
+        Core.eval(__module__, expr)
+        nothing
     end
 end
 
