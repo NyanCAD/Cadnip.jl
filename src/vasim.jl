@@ -724,10 +724,11 @@ function make_spice_device(vm::VANode{VerilogModule})
                     # distinguish between model and instance parameters
                     # Use symbol for type to avoid embedding type objects in AST
                     pT_sym = pT === Float64 ? :Float64 : :Int
-                    push!(struct_fields,
-                        :($(Symbol(paramsym))::CedarSim.DefaultOr{$pT_sym} = $(Expr(:block,
-                            LineNumberNode(param.default_expr),
-                            to_julia_defaults(param.default_expr)))))
+                    # Build field expr without quoting to avoid hygiene issues
+                    type_annotation = Expr(:(::), paramsym, Expr(:curly, :(CedarSim.DefaultOr), pT_sym))
+                    default_val = Expr(:block, LineNumberNode(param.default_expr), to_julia_defaults(param.default_expr))
+                    field_expr = Expr(:(=), type_annotation, default_val)
+                    push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                     #push!(ret.args,
                     #    :(@parameters $(Symbol(paramsym)))
@@ -971,12 +972,10 @@ function make_mna_device(vm::VANode{VerilogModule})
                     paramname = String(assemble_id_string(param.id))
                     paramsym = Symbol(paramname)
                     push!(parameter_names, paramsym)
-                    # Use symbol for type to avoid embedding type objects in AST
-                    pT_sym = pT === Float64 ? :Float64 : :Int
-                    push!(struct_fields,
-                        :($(Symbol(paramsym))::CedarSim.DefaultOr{$pT_sym} = $(Expr(:block,
-                            LineNumberNode(param.default_expr),
-                            to_julia_defaults(param.default_expr)))))
+                    # Use simplest possible field - just type annotation, no default
+                    # @kwdef will use the type's default constructor
+                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64}))
+                    push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                 end
             end
@@ -1062,12 +1061,48 @@ function make_mna_device(vm::VANode{VerilogModule})
             function_defs, contributions, to_julia_mna)
     end
 
-    Expr(:toplevel,
-        :(VerilogAEnvironment.CedarSim.@kwdef struct $symname <: VerilogAEnvironment.VAModel
-            $(struct_fields...)
-        end),
-        stamp_method,
-    )
+    # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
+    # that rename field symbols in baremodule contexts
+
+    # 1. Build plain struct definition
+    struct_body = Expr(:block)
+    for paramsym in parameter_names
+        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64})))
+    end
+    struct_def = Expr(:struct, false,
+        Expr(:<:, symname, :(VerilogAEnvironment.VAModel)),
+        struct_body)
+
+    # 2. Build keyword constructor that mimics @kwdef
+    # Constructor: TypeName(; param1=mkdefault(default1), ...) = TypeName(vaconvert(...), ...)
+    if !isempty(parameter_names)
+        # Build keyword parameter list with defaults
+        kw_params = Expr(:parameters)
+        call_args = Any[]
+        for paramsym in parameter_names
+            # Each parameter: paramsym = mkdefault(default_value)
+            # For now, use Float64 default of 0.0; actual defaults would come from VA parameter declarations
+            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault(0.0))))
+            # In call, convert using vaconvert
+            push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
+                :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                paramsym))
+        end
+        # Build constructor function
+        constructor = Expr(:function,
+            Expr(:call, symname, kw_params),
+            Expr(:call, symname, call_args...))
+    else
+        constructor = nothing
+    end
+
+    result_args = Any[struct_def]
+    if constructor !== nothing
+        push!(result_args, constructor)
+    end
+    push!(result_args, stamp_method)
+
+    Expr(:toplevel, result_args...)
 end
 
 """
@@ -1572,16 +1607,70 @@ Generate an MNA-compatible module from a parsed Verilog-A file.
 function make_mna_module(va::VANode)
     vamod = va.stmts[end]
     s = Symbol(String(vamod.id), "_module")
-    Expr(:toplevel, :(baremodule $s
-        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
-        import ..CedarSim
-        using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
-        using ForwardDiff: Dual, value, partials
-        import ForwardDiff  # For n-terminal device stamp methods
-        export $(Symbol(vamod.id))
-        $(CedarSim.make_mna_device(vamod))
-    end), :(using .$s))
+
+    # Get the device definition (returns Expr(:toplevel, struct_def, constructor, stamp_method))
+    device_expr = CedarSim.make_mna_device(vamod)
+    # Extract the contents to splice into the module body
+    device_contents = device_expr.args
+
+    # Build module body entirely with Expr() to avoid any hygiene transformations
+    # using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+    using_base = Expr(:using, Expr(:(:),
+        Expr(:., :Base),
+        Expr(:., :AbstractVector),
+        Expr(:., :Real),
+        Expr(:., :Symbol),
+        Expr(:., :Float64),
+        Expr(:., :Int),
+        Expr(:., :isempty),
+        Expr(:., :max),
+        Expr(:., :zeros),
+        Expr(:., :zero)))
+
+    # import ..CedarSim
+    import_cedarsim = Expr(:import, Expr(:., :., :., :CedarSim))
+
+    # using ..CedarSim.VerilogAEnvironment
+    using_vaenv = Expr(:using, Expr(:., :., :., :CedarSim, :VerilogAEnvironment))
+
+    # using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+    using_mna = Expr(:using, Expr(:(:),
+        Expr(:., :., :., :CedarSim, :MNA),
+        Expr(:., :va_ddt),
+        Expr(:., :stamp_current_contribution!),
+        Expr(:., :MNAContext)))
+
+    # using ForwardDiff: Dual, value, partials
+    using_fd = Expr(:using, Expr(:(:),
+        Expr(:., :ForwardDiff),
+        Expr(:., :Dual),
+        Expr(:., :value),
+        Expr(:., :partials)))
+
+    # import ForwardDiff
+    import_fd = Expr(:import, Expr(:., :ForwardDiff))
+
+    # export TypeName
+    export_stmt = Expr(:export, Symbol(vamod.id))
+
+    module_body = Expr(:block,
+        using_base,
+        import_cedarsim,
+        using_vaenv,
+        using_mna,
+        using_fd,
+        import_fd,
+        export_stmt,
+        device_contents...
+    )
+
+    # Build baremodule expression: Expr(:module, false, name, body)
+    baremod = Expr(:module, false, s, module_body)
+
+    # Build using statement without quoting
+    using_stmt = Expr(:using, Expr(:., :., s))
+
+    Expr(:toplevel, baremod, using_stmt)
 end
 
 struct VAFile
@@ -1626,7 +1715,11 @@ macro va_str(str)
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
-        esc(make_mna_module(va))
+        # Use Core.eval to bypass macro hygiene issues
+        # The expression contains symbols that get mangled if returned from macro
+        expr = make_mna_module(va)
+        Core.eval(__module__, expr)
+        nothing
     end
 end
 
