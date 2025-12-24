@@ -107,9 +107,31 @@ macro nolines(ex)
 end
 
 macro kwdef(expr)
+    # Debug: show input expression BEFORE macroexpand
+    if expr isa Expr && expr.head === :struct
+        @info "kwdef input is struct with $(length(expr.args)) args"
+        # Check struct body for problematic elements
+        body = expr.args[3]
+        if body isa Expr
+            for (i, arg) in enumerate(body.args)
+                if !(arg isa LineNumberNode || arg isa Symbol || (arg isa Expr && arg.head in (:call, :(=), :(::))))
+                    @warn "Unexpected arg type in struct body" i typeof(arg) arg
+                end
+                # Check for function objects embedded in expressions
+                if arg isa Expr
+                    for sub in arg.args
+                        if sub isa Function
+                            @error "Function object found in struct body!" typeof(sub) sub
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     expr = macroexpand(__module__, expr) # to expand @static
     if !(expr isa Expr && expr.head === :struct)
-        @error "Invalid @kwdef expression" typeof(expr) expr_head=(expr isa Expr ? expr.head : nothing) expr
+        @error "Invalid @kwdef expression AFTER macroexpand" typeof(expr) expr_head=(expr isa Expr ? expr.head : nothing) expr
         error("Invalid usage of @kwdef")
     end
     expr = expr::Expr
