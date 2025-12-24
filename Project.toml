@@ -94,7 +94,7 @@ SymbolicIndexingInterface = "≥ 0.3.15"
 VT100 = "≥ 0.3.4"
 VectorPrisms = "≥ 1.1.1"
 VerilogAParser = "≥ 0.2.1"
-julia = "1.10"
+julia = "1.11"
 
 [preferences.LinearSolve]
 LoadMKL_JLL = false

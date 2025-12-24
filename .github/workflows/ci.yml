@@ -19,7 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.10'
           - '1.11'
           - '1.12'
         os:
@@ -38,13 +37,6 @@ jobs:
         run: |
           julia --project=. -e '
             using Pkg
-            # Develop local packages explicitly (required for Julia 1.10 which
-            # does not support [sources] in Project.toml)
-            Pkg.develop([
-              PackageSpec(path="Lexers.jl"),
-              PackageSpec(path="SpectreNetlistParser.jl"),
-              PackageSpec(path="VerilogAParser.jl")
-            ])
             Pkg.instantiate()
           '
 
@@ -52,7 +44,6 @@ jobs:
         run: |
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path=abspath("Lexers.jl")))
             Pkg.instantiate()
             Pkg.test()
           '
@@ -61,7 +52,6 @@ jobs:
         run: |
           julia --project=VerilogAParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path=abspath("Lexers.jl")))
             Pkg.instantiate()
             Pkg.test()
           '
