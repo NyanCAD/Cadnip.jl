@@ -295,28 +295,29 @@ function stamp_charge_contribution!(ctx, p, n, q_fn, x)
 end
 ```
 
-#### 4. MNACircuitProblem
+#### 4. MNACircuit (SciML System → Problem Pattern)
 
-New type that wraps builder for SciML integration:
+Following SciML's convention (System → Problem → Solution), we define:
 
 ```julia
-struct MNACircuitProblem
+# MNACircuit is the "System" - defines circuit structure
+struct MNACircuit
     builder::Function  # (params, spec; x) -> MNAContext
     params::NamedTuple
     spec::MNASpec
     tspan::Tuple{Float64, Float64}
 end
 
-# Convert to DAEProblem
-function SciMLBase.DAEProblem(mna::MNACircuitProblem)
+# Convert to DAEProblem (the "Problem")
+function SciMLBase.DAEProblem(circuit::MNACircuit)
     # Build initial system
-    ctx0 = mna.builder(mna.params, mna.spec; x=Float64[])
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
     sys0 = assemble!(ctx0)
     n = system_size(sys0)
 
     # Create residual function
     function residual!(resid, du, u, p, t)
-        ctx = mna.builder(mna.params, with_time(mna.spec, t); x=u)
+        ctx = circuit.builder(circuit.params, with_time(circuit.spec, t); x=u)
         sys = assemble!(ctx)
         mul!(resid, sys.C, du)
         mul!(resid, sys.G, u, 1.0, 1.0)
@@ -327,12 +328,17 @@ function SciMLBase.DAEProblem(mna::MNACircuitProblem)
     diff_vars = detect_differential_vars(sys0)
 
     # DC initialization
-    u0 = solve_dc(mna.builder, mna.params, mna.spec).x
+    u0 = solve_dc(circuit.builder, circuit.params, circuit.spec).x
     du0 = zeros(n)
 
-    return DAEProblem(residual!, du0, u0, mna.tspan;
+    return DAEProblem(residual!, du0, u0, circuit.tspan;
                       differential_vars=diff_vars)
 end
+
+# Usage: System → Problem → Solution
+circuit = MNACircuit(build_inverter, params, spec, tspan)  # System
+prob = DAEProblem(circuit)                                   # Problem
+sol = solve(prob, IDA())                                     # Solution
 ```
 
 ### Test Strategy
@@ -354,7 +360,7 @@ Testing approach:
 
 1. **Extend vasim.jl**: Handle multi-port modules and internal nodes
 2. **Implement charge stamping**: Voltage-dependent capacitance via AD
-3. **Create MNACircuitProblem**: SciML-compatible problem wrapper
+3. **Create MNACircuit**: SciML-compatible circuit system wrapper
 4. **Add BSIM4 model**: Either VA→MNA translation or native implementation
 5. **Write validation tests**: Compare against ngspice reference
 

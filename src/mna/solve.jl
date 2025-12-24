@@ -1352,16 +1352,19 @@ scope(sys::MNASystem) = ScopedSystem(sys)
 export scope
 
 #==============================================================================#
-# MNACircuitProblem: Phase 6 SciML DAE Integration
+# MNACircuit: Phase 6 SciML DAE Integration
 #==============================================================================#
 
 """
-    MNACircuitProblem{F,P,S}
+    MNACircuit{F,P,S}
 
-SciML-compatible problem wrapper for MNA circuits with nonlinear devices.
+Circuit definition for SciML DAE integration, following the System → Problem → Solution pattern.
 
-This is the Phase 6 drop-in replacement for `CircuitIRODESystem`, providing
+This is the Phase 6 replacement for `CircuitIRODESystem`, providing
 the same interface while using the MNA backend instead of DAECompiler.
+
+# SciML Pattern
+    MNACircuit (System) → DAEProblem (Problem) → solve() → Solution
 
 # Architecture
 - `builder`: Function `(params, spec; x=Float64[]) -> MNAContext`
@@ -1385,32 +1388,36 @@ function build_inverter(params, spec; x=Float64[])
     return ctx
 end
 
-# Create problem
-prob = MNACircuitProblem(build_inverter, (Vdd=1.0,), MNASpec(), (0.0, 1e-6))
+# Create circuit system
+circuit = MNACircuit(build_inverter, (Vdd=1.0,), MNASpec(), (0.0, 1e-6))
 
 # Convert to SciML DAEProblem
 using DifferentialEquations
-dae_prob = DAEProblem(prob)
-sol = solve(dae_prob, IDA())
+prob = DAEProblem(circuit)
+sol = solve(prob, IDA())
 ```
 
 # See Also
 - `make_dae_problem`: Lower-level DAE problem creation
 - `CircuitIRODESystem`: DAECompiler equivalent (legacy)
 """
-struct MNACircuitProblem{F,P,S}
+struct MNACircuit{F,P,S}
     builder::F
     params::P
     spec::S
     tspan::Tuple{Float64,Float64}
 end
 
+export MNACircuit
+
+# Keep deprecated alias for backwards compatibility
+const MNACircuitProblem = MNACircuit
 export MNACircuitProblem
 
 """
-    MNACircuitProblem(builder, params, spec, tspan)
+    MNACircuit(builder, params, spec, tspan)
 
-Create an MNA circuit problem for SciML DAE solvers.
+Create an MNA circuit system for SciML DAE solvers.
 
 # Arguments
 - `builder`: Circuit builder `(params, spec; x=Float64[]) -> MNAContext`
@@ -1418,35 +1425,35 @@ Create an MNA circuit problem for SciML DAE solvers.
 - `spec`: Base simulation spec
 - `tspan`: Time span `(t0, tf)`
 """
-function MNACircuitProblem(builder::F, params::P, spec::S, tspan::Tuple{<:Real,<:Real}) where {F,P,S}
-    MNACircuitProblem{F,P,S}(builder, params, spec, Float64.(tspan))
+function MNACircuit(builder::F, params::P, spec::S, tspan::Tuple{<:Real,<:Real}) where {F,P,S}
+    MNACircuit{F,P,S}(builder, params, spec, Float64.(tspan))
 end
 
 """
-    system_size(prob::MNACircuitProblem) -> Int
+    system_size(circuit::MNACircuit) -> Int
 
-Get the system size (number of unknowns) for the circuit problem.
+Get the system size (number of unknowns) for the circuit.
 """
-function system_size(prob::MNACircuitProblem)
-    ctx0 = prob.builder(prob.params, prob.spec; x=Float64[])
+function system_size(circuit::MNACircuit)
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
     sys0 = assemble!(ctx0)
     return system_size(sys0)
 end
 
 """
-    make_dae_residual(prob::MNACircuitProblem) -> Function
+    make_dae_residual(circuit::MNACircuit) -> Function
 
-Create the DAE residual function for the circuit problem.
+Create the DAE residual function for the circuit.
 
 For nonlinear circuits, this rebuilds G, C, b at each evaluation.
 For linear circuits, the matrices are constant but b(t) may vary.
 
 Returns `(resid, du, u, p, t) -> nothing` suitable for DAEProblem.
 """
-function make_dae_residual(prob::MNACircuitProblem)
-    builder = prob.builder
-    params = prob.params
-    base_spec = prob.spec
+function make_dae_residual(circuit::MNACircuit)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
 
     function dae_residual!(resid, du, u, p, t)
         # Build circuit at current operating point and time
@@ -1466,16 +1473,16 @@ function make_dae_residual(prob::MNACircuitProblem)
 end
 
 """
-    make_dae_jacobian(prob::MNACircuitProblem) -> Function
+    make_dae_jacobian(circuit::MNACircuit) -> Function
 
 Create the combined Jacobian function J = γ*C + G for DAE solvers.
 
 For Sundials IDA, the Jacobian is ∂F/∂u + γ*∂F/∂(du) = G + γ*C.
 """
-function make_dae_jacobian(prob::MNACircuitProblem)
-    builder = prob.builder
-    params = prob.params
-    base_spec = prob.spec
+function make_dae_jacobian(circuit::MNACircuit)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
 
     function dae_jac!(J, du, u, p, gamma, t)
         # Build circuit at current operating point
@@ -1494,15 +1501,15 @@ function make_dae_jacobian(prob::MNACircuitProblem)
 end
 
 """
-    detect_differential_vars(prob::MNACircuitProblem) -> BitVector
+    detect_differential_vars(circuit::MNACircuit) -> BitVector
 
 Determine which variables are differential (have du terms in C*du).
 
 Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
 """
-function detect_differential_vars(prob::MNACircuitProblem)
-    ctx0 = prob.builder(prob.params, prob.spec; x=Float64[])
+function detect_differential_vars(circuit::MNACircuit)
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1528,7 +1535,7 @@ function detect_differential_vars(sys::MNASystem)
 end
 
 """
-    compute_initial_conditions(prob::MNACircuitProblem) -> (u0, du0)
+    compute_initial_conditions(circuit::MNACircuit) -> (u0, du0)
 
 Compute consistent initial conditions via DC operating point.
 
@@ -1537,10 +1544,10 @@ Compute consistent initial conditions via DC operating point.
 
 This is equivalent to CedarDCOp initialization.
 """
-function compute_initial_conditions(prob::MNACircuitProblem)
+function compute_initial_conditions(circuit::MNACircuit)
     # DC solve for u0
-    dc_spec = MNASpec(temp=prob.spec.temp, mode=:dcop, time=0.0)
-    u0 = solve_dc(prob.builder, prob.params, dc_spec).x
+    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
+    u0 = solve_dc(circuit.builder, circuit.params, dc_spec).x
 
     n = length(u0)
     du0 = zeros(n)
@@ -1549,7 +1556,7 @@ function compute_initial_conditions(prob::MNACircuitProblem)
     # So: C*du0 = b - G*u0
     # For singular C (algebraic vars), du0 components are 0
 
-    ctx0 = prob.builder(prob.params, prob.spec; x=u0)
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=u0)
     sys0 = assemble!(ctx0)
 
     rhs = sys0.b - sys0.G * u0
@@ -1571,9 +1578,9 @@ function compute_initial_conditions(prob::MNACircuitProblem)
 end
 
 """
-    SciMLBase.DAEProblem(prob::MNACircuitProblem; kwargs...)
+    SciMLBase.DAEProblem(circuit::MNACircuit; kwargs...)
 
-Convert MNACircuitProblem to SciML DAEProblem.
+Convert MNACircuit to SciML DAEProblem.
 
 # Keyword Arguments
 - `u0`: Initial state (default: DC solution)
@@ -1582,31 +1589,31 @@ Convert MNACircuitProblem to SciML DAEProblem.
 
 # Example
 ```julia
-prob = MNACircuitProblem(builder, params, spec, tspan)
-dae_prob = DAEProblem(prob)
-sol = solve(dae_prob, IDA())
+circuit = MNACircuit(builder, params, spec, tspan)
+prob = DAEProblem(circuit)
+sol = solve(prob, IDA())
 ```
 """
-function SciMLBase.DAEProblem(prob::MNACircuitProblem;
+function SciMLBase.DAEProblem(circuit::MNACircuit;
                                u0=nothing, du0=nothing, kwargs...)
     # Get initial conditions
     if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(prob)
+        u0_computed, du0_computed = compute_initial_conditions(circuit)
         u0 = u0 === nothing ? u0_computed : u0
         du0 = du0 === nothing ? du0_computed : du0
     end
 
     # Create residual function
-    residual! = make_dae_residual(prob)
+    residual! = make_dae_residual(circuit)
 
     # Detect differential variables
-    diff_vars = detect_differential_vars(prob)
+    diff_vars = detect_differential_vars(circuit)
 
     return SciMLBase.DAEProblem(
         residual!,
         du0,
         u0,
-        prob.tspan;
+        circuit.tspan;
         differential_vars = diff_vars,
         kwargs...
     )
