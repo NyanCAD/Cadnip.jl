@@ -722,8 +722,10 @@ function make_spice_device(vm::VANode{VerilogModule})
                     push!(parameter_names, paramsym)
                     # TODO: The CMC Verilog-A models use an attribute to
                     # distinguish between model and instance parameters
+                    # Use symbolic type reference instead of embedding type object directly
+                    type_expr = :(CedarSim.DefaultOr{$pT})
                     push!(struct_fields,
-                        :($(Symbol(paramsym))::$(DefaultOr{pT}) = $(Expr(:block,
+                        :($(Symbol(paramsym))::$type_expr = $(Expr(:block,
                             LineNumberNode(param.default_expr),
                             to_julia_defaults(param.default_expr)))))
                     var_types[Symbol(paramname)] = pT
@@ -969,8 +971,11 @@ function make_mna_device(vm::VANode{VerilogModule})
                     paramname = String(assemble_id_string(param.id))
                     paramsym = Symbol(paramname)
                     push!(parameter_names, paramsym)
+                    # Use symbolic type reference instead of embedding type object directly
+                    # This avoids potential issues with type objects in AST during macroexpand
+                    type_expr = :(CedarSim.DefaultOr{$pT})
                     push!(struct_fields,
-                        :($(Symbol(paramsym))::$(DefaultOr{pT}) = $(Expr(:block,
+                        :($(Symbol(paramsym))::$type_expr = $(Expr(:block,
                             LineNumberNode(param.default_expr),
                             to_julia_defaults(param.default_expr)))))
                     var_types[Symbol(paramname)] = pT
