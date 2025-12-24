@@ -7,6 +7,11 @@ ir/
 docs/Manifest.toml
 docs/build
 test/Manifest.toml
+
+# Manifest files - let each Julia version resolve fresh
+Manifest.toml
+*/Manifest.toml
+*/*/Manifest.toml
 refs/
 
 # Downloaded reference documentation (not committed due to copyright)

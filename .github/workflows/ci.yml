@@ -20,6 +20,7 @@ jobs:
       matrix:
         version:
           - '1.11'
+          - '1.12'
         os:
           - ubuntu-latest
 
@@ -33,7 +34,11 @@ jobs:
       - uses: julia-actions/cache@v2
 
       - name: Install dependencies
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+          '
 
       - name: Run SpectreNetlistParser tests
         run: |
