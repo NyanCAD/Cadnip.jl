@@ -16,7 +16,7 @@
 import ForwardDiff
 using ForwardDiff: Dual, value, partials, Tag
 
-export va_ddt, stamp_contribution!, ContributionTag
+export va_ddt, stamp_contribution!, ContributionTag, sanitize_dual
 
 #==============================================================================#
 # S-Dual for ddt() (time derivative in Laplace domain)
@@ -40,6 +40,124 @@ ForwardDiff.:≺(::Type{ContributionTag}, ::Type) = true
 ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = false
 ForwardDiff.:≺(::Type{ContributionTag}, ::Type{ContributionTag}) = false
 
+#==============================================================================#
+# Arithmetic for mixing Dual{Nothing} (voltage duals) with Dual{ContributionTag}
+#==============================================================================#
+
+# When adding resistive (Dual{Nothing}) + capacitive (Dual{ContributionTag}):
+# - The resistive part becomes the value of the ContributionTag
+# - The capacitive part remains in the partials
+#
+# Result: Dual{ContributionTag}(resistive_dual + value(cap_dual), partials(cap_dual))
+#
+# This preserves the structure needed for stamp extraction:
+# - value(result) = resistive part (Dual{Nothing} with voltage partials)
+# - partials(result, 1) = reactive part (Dual{Nothing} with charge partials)
+
+import Base: +, -, *
+
+# Dual{Nothing} + Dual{ContributionTag} → Dual{ContributionTag}
+@inline function +(a::Dual{Nothing,T,N}, b::Dual{ContributionTag,V,M}) where {T,V,N,M}
+    # a is resistive: Dual{Nothing}(I, dI/dV1, ..., dI/dVN)
+    # b is capacitive: Dual{ContributionTag}(Dual{Nothing}(0, ...), Dual{Nothing}(q, ...))
+    # Result: Dual{ContributionTag}(a + value(b), partials(b))
+    new_val = a + value(b)
+    Dual{ContributionTag}(new_val, partials(b))
+end
+
+@inline function +(a::Dual{ContributionTag,V,M}, b::Dual{Nothing,T,N}) where {T,V,N,M}
+    b + a
+end
+
+# Real + Dual{ContributionTag} → Dual{ContributionTag}
+# Use specific types to avoid ambiguity with ForwardDiff's definitions
+@inline function +(a::AbstractFloat, b::Dual{ContributionTag,V,M}) where {V,M}
+    new_val = a + value(b)
+    Dual{ContributionTag}(new_val, partials(b))
+end
+
+@inline function +(a::Dual{ContributionTag,V,M}, b::AbstractFloat) where {V,M}
+    b + a
+end
+
+@inline function +(a::Integer, b::Dual{ContributionTag,V,M}) where {V,M}
+    new_val = a + value(b)
+    Dual{ContributionTag}(new_val, partials(b))
+end
+
+@inline function +(a::Dual{ContributionTag,V,M}, b::Integer) where {V,M}
+    b + a
+end
+
+# Subtraction
+@inline function -(a::Dual{Nothing,T,N}, b::Dual{ContributionTag,V,M}) where {T,V,N,M}
+    new_val = a - value(b)
+    Dual{ContributionTag}(new_val, -partials(b))
+end
+
+@inline function -(a::Dual{ContributionTag,V,M}, b::Dual{Nothing,T,N}) where {T,V,N,M}
+    new_val = value(a) - b
+    Dual{ContributionTag}(new_val, partials(a))
+end
+
+# Scalar - ContributionTag
+@inline function -(a::AbstractFloat, b::Dual{ContributionTag,V,M}) where {V,M}
+    new_val = a - value(b)
+    Dual{ContributionTag}(new_val, -partials(b))
+end
+
+@inline function -(a::Dual{ContributionTag,V,M}, b::AbstractFloat) where {V,M}
+    new_val = value(a) - b
+    Dual{ContributionTag}(new_val, partials(a))
+end
+
+@inline function -(a::Integer, b::Dual{ContributionTag,V,M}) where {V,M}
+    new_val = a - value(b)
+    Dual{ContributionTag}(new_val, -partials(b))
+end
+
+@inline function -(a::Dual{ContributionTag,V,M}, b::Integer) where {V,M}
+    new_val = value(a) - b
+    Dual{ContributionTag}(new_val, partials(a))
+end
+
+# Unary minus
+@inline function -(a::Dual{ContributionTag,V,M}) where {V,M}
+    Dual{ContributionTag}(-value(a), -partials(a))
+end
+
+# Multiplication (scalar * ContributionTag)
+# Use more specific types to avoid ambiguity with ForwardDiff's definitions
+@inline function *(a::AbstractFloat, b::Dual{ContributionTag,V,M}) where {V,M}
+    Dual{ContributionTag}(a * value(b), a * partials(b))
+end
+
+@inline function *(a::Dual{ContributionTag,V,M}, b::AbstractFloat) where {V,M}
+    b * a
+end
+
+@inline function *(a::Integer, b::Dual{ContributionTag,V,M}) where {V,M}
+    Dual{ContributionTag}(a * value(b), a * partials(b))
+end
+
+@inline function *(a::Dual{ContributionTag,V,M}, b::Integer) where {V,M}
+    b * a
+end
+
+# Dual{Nothing} * Dual{ContributionTag} - for expressions like (voltage_dual) * va_ddt(x)
+@inline function *(a::Dual{Nothing,T,N}, b::Dual{ContributionTag,V,M}) where {T,V,N,M}
+    # (I + dI*s) * (q*s) = q*I*s + q*dI*s² ≈ q*I*s (ignoring s² terms)
+    # For our purposes: a * b where b = Dual{ContributionTag}(0, q)
+    # Result: Dual{ContributionTag}(a * value(b), a * partials(b, 1))
+    new_val = a * value(b)
+    new_partial = a * partials(b, 1)
+    Dual{ContributionTag}(new_val, ForwardDiff.Partials((new_partial,)))
+end
+
+@inline function *(a::Dual{ContributionTag,V,M}, b::Dual{Nothing,T,N}) where {T,V,N,M}
+    b * a
+end
+
 """
     va_ddt(x)
 
@@ -61,10 +179,28 @@ When evaluating a contribution like `I(p,n) <+ V/R + C*ddt(V)`:
 # - partials = C*V (charge, whose derivative w.r.t. V gives C)
 ```
 """
+# Helper to sanitize NaN/Inf values from duals for numerical stability
+@inline function sanitize_dual(x::ForwardDiff.Dual{T,V,N}) where {T,V,N}
+    v = value(x)
+    p = partials(x)
+    # Sanitize value
+    safe_v = isnan(v) || isinf(v) ? zero(V) : v
+    # Sanitize partials - replace NaN/Inf with 0
+    safe_p_vals = ntuple(N) do i
+        pi = p[i]
+        isnan(pi) || isinf(pi) ? zero(pi) : pi
+    end
+    return ForwardDiff.Dual{T}(safe_v, ForwardDiff.Partials(safe_p_vals))
+end
+
+@inline sanitize_dual(x::Real) = isnan(x) || isinf(x) ? zero(x) : x
+
 @inline function va_ddt(x::Real)
     # s * x where s = Dual(0, 1)
     # Result: Dual(0*x, 1*x) = Dual(0, x)
-    return Dual{ContributionTag}(zero(x), x)
+    # Sanitize input to prevent NaN propagation
+    safe_x = sanitize_dual(x)
+    return Dual{ContributionTag}(zero(safe_x), safe_x)
 end
 
 @inline function va_ddt(x::Dual{ContributionTag,T,N}) where {T,N}
@@ -72,14 +208,17 @@ end
     # s = Dual(0, 1), so s*x = Dual(0*value(x), 1*value(x) + 0*partials(x))
     # = Dual(0, value(x))
     # But we need to preserve the nested structure for Jacobian extraction
-    return Dual{ContributionTag}(zero(T), value(x))
+    safe_v = sanitize_dual(value(x))
+    return Dual{ContributionTag}(zero(T), safe_v)
 end
 
 # Handle nested duals (for Jacobian computation)
 @inline function va_ddt(x::Dual{T,V,N}) where {T,V,N}
     # When x has a different tag (voltage dual for Jacobian)
     # We wrap in ContributionTag dual
-    return Dual{ContributionTag}(zero(x), x)
+    # Sanitize input to prevent NaN propagation
+    safe_x = sanitize_dual(x)
+    return Dual{ContributionTag}(zero(safe_x), safe_x)
 end
 
 #==============================================================================#

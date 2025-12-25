@@ -236,6 +236,11 @@ function (to_julia::Scope)(cs::VANode{BinaryExpression})
         return Expr(:call, (|), to_julia(cs.lhs), to_julia(cs.rhs))
     elseif op == :(&&)
         return Expr(:call, (&), to_julia(cs.lhs), to_julia(cs.rhs))
+    elseif op == :(/)
+        # Use safe division from VerilogAEnvironment to prevent NaN from 0/0
+        # This is critical for compact models where charge calculations can have
+        # expressions like dqi/idscv that go to 0/0 as Vds→0
+        return Expr(:call, GlobalRef(VerilogAEnvironment, :/), to_julia(cs.lhs), to_julia(cs.rhs))
     else
         return Expr(:call, op, to_julia(cs.lhs), to_julia(cs.rhs))
     end
@@ -582,20 +587,47 @@ function (to_julia::Scope)(stmt::VANode{StringLiteral})
     return String(stmt)[2:end-1]
 end
 
-const systemtaskenablemap = Dict{Symbol, Function}(
-    Symbol("\$ln")=>Base.log, Symbol("\$log10")=>log10, Symbol("\$exp")=>exp, Symbol("\$sqrt")=>sqrt,
-    Symbol("\$sin")=>sin, Symbol("\$cos")=>cos, Symbol("\$tan")=>tan,
-    Symbol("\$asin")=>asin, Symbol("\$acos")=>acos, Symbol("\$atan")=>atan, Symbol("\$atan2")=>atan,
-    Symbol("\$sinh")=>sinh, Symbol("\$cos")=>cosh, Symbol("\$tan")=>tanh,
-    Symbol("\$asinh")=>asinh, Symbol("\$acosh")=>acosh, Symbol("\$atanh")=>atanh,
+# Map for system task function calls (VA $ln, $sqrt, etc.)
+# Use symbols for functions that need safe versions - these get resolved to GlobalRef at usage time
+const systemtaskenablemap = Dict{Symbol, Any}(
+    Symbol("\$ln")=>:va_ln,      # Use safe version
+    Symbol("\$log10")=>log10,
+    Symbol("\$exp")=>exp,
+    Symbol("\$sqrt")=>:va_sqrt,  # Use safe version
+    Symbol("\$sin")=>sin,
+    Symbol("\$cos")=>cos,
+    Symbol("\$tan")=>tan,
+    Symbol("\$asin")=>asin,
+    Symbol("\$acos")=>acos,
+    Symbol("\$atan")=>atan,
+    Symbol("\$atan2")=>atan,
+    Symbol("\$sinh")=>sinh,
+    Symbol("\$cosh")=>cosh,
+    Symbol("\$tanh")=>tanh,
+    Symbol("\$asinh")=>asinh,
+    Symbol("\$acosh")=>acosh,
+    Symbol("\$atanh")=>atanh,
     Symbol("\$error")=>error)
+
+# Helper to get the actual function reference (creates GlobalRef for VA functions)
+function get_safe_func(f)
+    if f == :va_ln
+        return GlobalRef(VerilogAEnvironment, :ln)
+    elseif f == :va_sqrt
+        return GlobalRef(VerilogAEnvironment, :sqrt)
+    elseif f == :va_pow
+        return GlobalRef(VerilogAEnvironment, :pow)
+    else
+        return f
+    end
+end
 function (to_julia::Scope)(stmt::VANode{AnalogSystemTaskEnable})
     if formof(stmt.task) == FunctionCall
         fc = stmt.task
         fname = Symbol(fc.id)
         args = map(x->to_julia(x.item), fc.args)
         if fname in keys(systemtaskenablemap)
-            return Expr(:call, systemtaskenablemap[fname], args...)
+            return Expr(:call, get_safe_func(systemtaskenablemap[fname]), args...)
         elseif fname == Symbol("\$strobe")
             # TODO: Need to guard this with convergence conditions
             return nothing # Expr(:call, println, args...)
@@ -1138,6 +1170,11 @@ function (to_julia::MNAScope)(cs::VANode{BinaryExpression})
         return Expr(:call, (|), to_julia(cs.lhs), to_julia(cs.rhs))
     elseif op == :(&&)
         return Expr(:call, (&), to_julia(cs.lhs), to_julia(cs.rhs))
+    elseif op == :(/)
+        # Use safe division from VerilogAEnvironment to prevent NaN from 0/0
+        # This is critical for compact models where charge calculations can have
+        # expressions like dqi/idscv that go to 0/0 as Vds→0
+        return Expr(:call, GlobalRef(VerilogAEnvironment, :/), to_julia(cs.lhs), to_julia(cs.rhs))
     else
         return Expr(:call, op, to_julia(cs.lhs), to_julia(cs.rhs))
     end
@@ -1221,6 +1258,20 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     if vaf !== nothing
         args = map(x -> to_julia(x.item), stmt.args)
         return Expr(:call, fname, args...)
+    end
+
+    # Use GlobalRef for math functions that need safe versions from VerilogAEnvironment
+    # This ensures division, sqrt, pow, ln handle edge cases without NaN
+    safe_func_map = Dict{Symbol, Any}(
+        :pow => GlobalRef(VerilogAEnvironment, :pow),
+        :sqrt => GlobalRef(VerilogAEnvironment, :sqrt),
+        :ln => GlobalRef(VerilogAEnvironment, :ln),
+        :exp => GlobalRef(VerilogAEnvironment, :exp),
+        :abs => GlobalRef(VerilogAEnvironment, :abs),
+    )
+    sfunc = get(safe_func_map, fname, nothing)
+    if sfunc !== nothing
+        return Expr(:call, sfunc, map(x -> to_julia(x.item), stmt.args)...)
     end
 
     # Default: pass through function call
@@ -1328,7 +1379,7 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogSystemTaskEnable})
         fname = Symbol(fc.id)
         args = map(x->to_julia(x.item), fc.args)
         if fname in keys(systemtaskenablemap)
-            return Expr(:call, systemtaskenablemap[fname], args...)
+            return Expr(:call, get_safe_func(systemtaskenablemap[fname]), args...)
         elseif fname == Symbol("\$strobe") || fname == Symbol("\$display")
             # Ignore display/strobe - debugging output
             return nothing
@@ -1715,6 +1766,28 @@ function generate_mna_stamp_method_nterm(symname, ps, internal_nodes, port_args,
                 # Compute branch current (with duals)
                 $I_branch_var = $sum_expr
 
+                # DEBUG: Check for NaN in branch current
+                if CedarSim.MNA._NAN_DEBUG[] && !CedarSim.MNA._FIRST_NAN_FOUND[]
+                    if $I_branch_var isa ForwardDiff.Dual && any(isnan, ForwardDiff.partials($I_branch_var).values)
+                        CedarSim.MNA._FIRST_NAN_FOUND[] = true
+                        println("DEBUG: NaN in branch current ", $(string(p_sym)), " -> ", $(string(n_sym)))
+                        println("  I_branch = ", $I_branch_var)
+                        println("  type = ", typeof($I_branch_var))
+                    elseif $I_branch_var isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                        resist = ForwardDiff.value($I_branch_var)
+                        react = ForwardDiff.partials($I_branch_var, 1)
+                        if resist isa ForwardDiff.Dual && any(isnan, ForwardDiff.partials(resist).values)
+                            CedarSim.MNA._FIRST_NAN_FOUND[] = true
+                            println("DEBUG: NaN in resist_dual of branch ", $(string(p_sym)), " -> ", $(string(n_sym)))
+                            println("  resist_dual = ", resist)
+                        elseif react isa ForwardDiff.Dual && any(isnan, ForwardDiff.partials(react).values)
+                            CedarSim.MNA._FIRST_NAN_FOUND[] = true
+                            println("DEBUG: NaN in react_dual of branch ", $(string(p_sym)), " -> ", $(string(n_sym)))
+                            println("  react_dual = ", react)
+                        end
+                    end
+                end
+
                 # Handle different dual structures:
                 # 1. Dual{ContributionTag} - has both resistive and reactive parts
                 # 2. Dual{Nothing} - pure resistive
@@ -1727,6 +1800,14 @@ function generate_mna_stamp_method_nterm(symname, ps, internal_nodes, port_args,
 
                     resist_dual = ForwardDiff.value($I_branch_var)
                     react_dual = ForwardDiff.partials($I_branch_var, 1)
+
+                    # Sanitize NaN/Inf values from nested duals before stamping
+                    if resist_dual isa ForwardDiff.Dual
+                        resist_dual = CedarSim.MNA.sanitize_dual(resist_dual)
+                    end
+                    if react_dual isa ForwardDiff.Dual
+                        react_dual = CedarSim.MNA.sanitize_dual(react_dual)
+                    end
 
                     # Stamp resistive part into G and b
                     if resist_dual isa ForwardDiff.Dual
@@ -1780,6 +1861,8 @@ function generate_mna_stamp_method_nterm(symname, ps, internal_nodes, port_args,
 
                 elseif $I_branch_var isa ForwardDiff.Dual
                     # Pure resistive (Dual{Nothing} with voltage partials)
+                    # Sanitize NaN/Inf values before stamping
+                    $I_branch_var = CedarSim.MNA.sanitize_dual($I_branch_var)
                     I_val = ForwardDiff.value($I_branch_var)
                     # Stamp conductance matrix G
                     $([quote
@@ -1865,7 +1948,7 @@ function make_mna_module(va::VANode)
         using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, length, max, zeros, zero, any, isnan, println
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, ContributionTag
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, ContributionTag, sanitize_dual
         using ..CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!
         using ForwardDiff: Dual, value, partials
         import ForwardDiff

@@ -13,6 +13,7 @@ using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: VoltageSource, Resistor
 using Test
+using LinearAlgebra
 
 # Load BSIMCMG model once for all tests
 const bsimcmg_path = joinpath(dirname(pathof(VerilogAParser)), "..", "cmc_models", "bsimcmg107", "bsimcmg.va")
