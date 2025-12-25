@@ -1201,6 +1201,31 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return :(spec.temp + 273.15)  # Convert to Kelvin
     elseif fname == Symbol("\$vt")
         return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
+    elseif fname == Symbol("\$param_given")
+        # Check if a parameter was explicitly specified (not using default)
+        id = Symbol(stmt.args[1].item)
+        return Expr(:call, :!, Expr(:call, CedarSim.isdefault,
+            Expr(:., :dev, QuoteNode(id))))
+    elseif fname == Symbol("\$simparam")
+        # Simulator parameter access - $simparam("name") or $simparam("name", default)
+        if stmt.args[1].item isa VANode{StringLiteral}
+            param_str = String(stmt.args[1].item)[2:end-1]  # Strip quotes
+        else
+            param_str = String(stmt.args[1].item)
+        end
+        param_sym = Symbol(param_str)
+        if length(stmt.args) == 1
+            # No default - error if not found
+            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
+                     getproperty(spec, $(QuoteNode(param_sym))) :
+                     error("Unknown simparam: " * $param_str))
+        else
+            # With default value
+            default_expr = to_julia(stmt.args[2].item)
+            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
+                     getproperty(spec, $(QuoteNode(param_sym))) :
+                     $default_expr)
+        end
     end
 
     # Check for VA-defined function
@@ -1589,7 +1614,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
+                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[],
+                                     spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
             $(params_to_locals...)
             $(function_defs...)
 
@@ -1629,9 +1655,10 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+        using Base: hasproperty, getproperty, error
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename
