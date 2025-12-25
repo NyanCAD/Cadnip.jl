@@ -311,6 +311,15 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
             return GlobalRef(CedarSim.SpectreEnvironment, :Switch)
         end
     end
+
+    # Search for this model in the imported HDL modules (Verilog-A)
+    # This allows VA modules to be used as device types via .hdl includes
+    for hdl_mod in sema.imported_hdl_modules
+        if isdefined(hdl_mod, devkind)
+            return GlobalRef(hdl_mod, devkind)
+        end
+    end
+
     # Search for this model in the HDL Imports
     if sema.parse_cache !== nothing
         # Might be an import instead, which we will resolve later
