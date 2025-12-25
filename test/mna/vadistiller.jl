@@ -453,13 +453,51 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
     # Feature Tests: Parser Extensions Still Needed
     #==========================================================================#
 
-    @testset "Feature: Parser Extensions Needed" begin
+    @testset "Feature: aliasparam" begin
+        # Test aliasparam declaration - allows parameter aliases
+        va_code = raw"""
+        module VAAliasTest(p, n);
+            parameter real tnom = 27.0;
+            aliasparam tref = tnom;
+            inout p, n;
+            electrical p, n;
+            analog begin
+                I(p,n) <+ V(p,n) / (1000.0 * (1.0 + 0.001 * (tnom - 27.0)));
+            end
+        endmodule
+        """
+        va = VerilogAParser.parse(IOBuffer(va_code))
+        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-        @testset "aliasparam declaration" begin
-            # VADistiller uses aliasparam tref = tnom; etc.
-            # Currently broken: parser doesn't handle aliasparam
-            @test_broken false
-        end
+        # Test 1: Using the real parameter name (tnom)
+        sol_tnom = solve_dc((p,s; x=Float64[]) -> begin
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; x=x, spec=s)
+            return ctx
+        end, (;), MNASpec())
+        # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
+        # I = 5V / 1073Ω ≈ 0.00466A
+        @test isapprox(current(sol_tnom, :I_V1), -0.00466; atol=1e-4)
+
+        # Test 2: Using the alias (tref) - should have same effect as tnom
+        sol_tref = solve_dc((p,s; x=Float64[]) -> begin
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; x=x, spec=s)
+            return ctx
+        end, (;), MNASpec())
+        # Same result - alias forwards to tnom
+        @test isapprox(current(sol_tref, :I_V1), -0.00466; atol=1e-4)
+
+        # Test 3: Verify property access - dev.tref should return dev.tnom
+        dev = VAAliasTest(tnom=50.0)
+        @test dev.tnom == dev.tref  # Alias returns target value
+    end
+
+    @testset "Feature: Parser Extensions Needed" begin
 
         @testset "Real variable with initialization" begin
             # VADistiller uses `real G = 0.0;` at module scope
@@ -495,11 +533,11 @@ end
 # ✅ $simparam("name", default) - simulator parameter queries (gmin, tnom, etc.)
 # ✅ $param_given(param) - check if parameter was specified
 # ✅ $vt() - thermal voltage (kT/q)
+# ✅ aliasparam - parameter aliases (aliasparam tref = tnom;)
 #
 # MISSING PARSER FEATURES (needed for full VADistiller models):
 # ❌ $mfactor - device multiplicity
 # ❌ $limit() - voltage limiting for Newton convergence
-# ❌ aliasparam - parameter aliases
 # ❌ Real variable initialization at module scope (real x = 0.0;)
 # ❌ @(initial_step) - initialization event handling
 # ❌ analog function definitions (used for reusable computations)
