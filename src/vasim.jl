@@ -1203,29 +1203,6 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return :(spec.temp + 273.15)  # Convert to Kelvin
     elseif fname == Symbol("\$vt")
         return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
-    elseif fname == Symbol("\$pow")
-        # $pow(a, b) -> pow(a, b) from VerilogAEnvironment
-        return Expr(:call, :pow, map(x -> to_julia(x.item), stmt.args)...)
-    elseif fname == Symbol("\$ln")
-        return Expr(:call, :ln, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$log10")
-        return Expr(:call, :log10, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$exp")
-        return Expr(:call, :exp, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$sqrt")
-        return Expr(:call, :sqrt, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$sin")
-        return Expr(:call, :sin, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$cos")
-        return Expr(:call, :cos, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$tan")
-        return Expr(:call, :tan, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$atan")
-        return Expr(:call, :atan, to_julia(stmt.args[1].item))
-    elseif fname == Symbol("\$atan2")
-        return Expr(:call, :atan, to_julia(stmt.args[1].item), to_julia(stmt.args[2].item))
-    elseif fname == Symbol("\$abs")
-        return Expr(:call, :abs, to_julia(stmt.args[1].item))
     end
 
     # Check for VA-defined function
@@ -1236,6 +1213,11 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     end
 
     # Default: pass through function call
+    # Strip $ prefix for system functions (e.g., $pow -> pow, $ln -> ln)
+    fname_str = String(fname)
+    if startswith(fname_str, "\$")
+        fname = Symbol(fname_str[2:end])
+    end
     return Expr(:call, fname, map(x -> to_julia(x.item), stmt.args)...)
 end
 

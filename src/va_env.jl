@@ -37,7 +37,7 @@ using Base: @inbounds, @inline, @noinline
 using Base.Experimental: @overlay
 export @inbounds, @inline, @overlay, var"$temperature"
 
-export pow, ln, ddt, flicker_noise, white_noise, atan2, log
+export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10
 
 @noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
@@ -52,6 +52,7 @@ var"**"(a, b) = pow(a, b)
 @noinline Base.@assume_effects :total sin(x) = NaNMath.sin(x)
 @noinline Base.@assume_effects :total cos(x) = NaNMath.cos(x)
 @noinline Base.@assume_effects :total tan(x) = Base.tan(x)
+log10(x) = NaNMath.log10(x)
 
 function ChainRules.frule((_, Δx), ::typeof(sqrt), x)
     Ω = sqrt(x)
