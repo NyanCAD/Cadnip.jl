@@ -948,6 +948,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
     aliases = Dict{Symbol, Symbol}()
+    parameter_defaults = Dict{Symbol, Any}()  # Store default values for stamp! method
 
     # Pre-pass: collect parameters and nodes
     for child in vm.items
@@ -972,9 +973,19 @@ function make_mna_device(vm::VANode{VerilogModule})
                     paramname = String(assemble_id_string(param.id))
                     paramsym = Symbol(paramname)
                     push!(parameter_names, paramsym)
-                    # Use simplest possible field - just type annotation, no default
-                    # @kwdef will use the type's default constructor
-                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64}))
+                    # Store default value from VA source (like DAECompiler version)
+                    # Build struct field with default, and store default for constructor
+                    pT_sym = pT === Float64 ? :Float64 : :Int
+                    type_annotation = Expr(:(::), paramsym, Expr(:curly, :(CedarSim.DefaultOr), pT_sym))
+                    if param.default_expr !== nothing
+                        default_val = to_julia_defaults(param.default_expr)
+                        parameter_defaults[paramsym] = default_val
+                        # Build field with default (like DAECompiler: PARAM::DefaultOr{T} = default_expr)
+                        field_expr = Expr(:(=), type_annotation, default_val)
+                    else
+                        parameter_defaults[paramsym] = pT === Int ? 0 : 0.0
+                        field_expr = Expr(:(=), type_annotation, parameter_defaults[paramsym])
+                    end
                     push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                 end
@@ -1036,10 +1047,12 @@ function make_mna_device(vm::VANode{VerilogModule})
     end
 
     # Generate variable declarations for non-parameter local vars
+    # IMPORTANT: Do NOT use type annotations - variables must accept ForwardDiff duals
     local_var_decls = Any[]
     for (name, T) in var_types
         if !(name in parameter_names)
-            push!(local_var_decls, :(local $name::$T = zero($T)))
+            # Initialize to zero but don't constrain type - duals need to flow through
+            push!(local_var_decls, :(local $name = zero($T)))
         end
     end
 
@@ -1061,48 +1074,13 @@ function make_mna_device(vm::VANode{VerilogModule})
             function_defs, contributions, to_julia_mna)
     end
 
-    # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
-    # that rename field symbols in baremodule contexts
+    # Use @kwdef like DAECompiler version - it properly handles parameter defaults
+    # that reference other parameters by evaluating them in declaration order
+    struct_def = :(CedarSim.@kwdef struct $symname <: VerilogAEnvironment.VAModel
+        $(struct_fields...)
+    end)
 
-    # 1. Build plain struct definition
-    struct_body = Expr(:block)
-    for paramsym in parameter_names
-        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64})))
-    end
-    struct_def = Expr(:struct, false,
-        Expr(:<:, symname, :(VerilogAEnvironment.VAModel)),
-        struct_body)
-
-    # 2. Build keyword constructor that mimics @kwdef
-    # Constructor: TypeName(; param1=mkdefault(default1), ...) = TypeName(vaconvert(...), ...)
-    if !isempty(parameter_names)
-        # Build keyword parameter list with defaults
-        kw_params = Expr(:parameters)
-        call_args = Any[]
-        for paramsym in parameter_names
-            # Each parameter: paramsym = mkdefault(default_value)
-            # For now, use Float64 default of 0.0; actual defaults would come from VA parameter declarations
-            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault(0.0))))
-            # In call, convert using vaconvert
-            push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
-                :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
-                paramsym))
-        end
-        # Build constructor function
-        constructor = Expr(:function,
-            Expr(:call, symname, kw_params),
-            Expr(:call, symname, call_args...))
-    else
-        constructor = nothing
-    end
-
-    result_args = Any[struct_def]
-    if constructor !== nothing
-        push!(result_args, constructor)
-    end
-    push!(result_args, stamp_method)
-
-    Expr(:toplevel, result_args...)
+    Expr(:toplevel, struct_def, stamp_method)
 end
 
 """
@@ -1528,15 +1506,17 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
     # Add setup code that doesn't depend on Vpn
     # (variable assignments before contributions)
 
-    # For now, assume single current contribution: I(p,n) <+ expr
-    # The expr should be a function of Vpn
+    # Process contributions: assignments, conditionals, and current contributions
     if !isempty(contributions)
-        # Replace V() references with Vpn
         for c in contributions
             if c.kind == :current
-                # Transform the expression to use Vpn
+                # Current contribution: I(p,n) <+ expr
                 push!(contrib_body.args, :(contrib_val += $(c.expr)))
             elseif c.kind == :conditional
+                # Conditional block
+                push!(contrib_body.args, c.expr)
+            elseif c.kind == :assignment
+                # Variable assignment (e.g., Vbr = V(p,n))
                 push!(contrib_body.args, c.expr)
             end
         end
@@ -1691,7 +1671,8 @@ function generate_mna_stamp_method_nterm(symname, ps, internal_nodes, port_args,
     for (i, node) in enumerate(all_nodes)
         node_var = i <= n_ports ? node_params[i] : Symbol("_inode_", node)
         volt_var = Symbol("V_float_", node)
-        push!(voltage_setup.args, :($volt_var = $node_var == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$node_var])))
+        # For internal nodes not in x, use 0.001V to avoid numerical issues with log/sqrt
+        push!(voltage_setup.args, :($volt_var = $node_var == 0 ? 0.0 : ($node_var > length(x) ? 0.001 : x[$node_var])))
     end
     # Ground is always 0
     push!(voltage_setup.args, :(V_float_0 = 0.0))
@@ -1881,7 +1862,7 @@ function make_mna_module(va::VANode)
     device_expr = CedarSim.make_mna_device(vamod)
 
     Expr(:toplevel, :(baremodule $s
-        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, length, max, zeros, zero, any, isnan, println
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
         using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, ContributionTag
