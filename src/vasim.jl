@@ -936,6 +936,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     # Collect struct fields and parameters
     struct_fields = Any[]
     parameter_names = Set{Symbol}()
+    param_defaults = Dict{Symbol, Any}()  # Store parameter default expressions
     to_julia_global = Scope()
     find_ddx!(to_julia_global.ddx_order, vm)
 
@@ -972,6 +973,13 @@ function make_mna_device(vm::VANode{VerilogModule})
                     paramname = String(assemble_id_string(param.id))
                     paramsym = Symbol(paramname)
                     push!(parameter_names, paramsym)
+                    # Extract default value from param.default_expr
+                    if param.default_expr !== nothing
+                        # Parse the default expression using the scope
+                        param_defaults[paramsym] = to_julia_defaults(param.default_expr)
+                    else
+                        param_defaults[paramsym] = 0.0  # Fallback
+                    end
                     # Use simplest possible field - just type annotation, no default
                     # @kwdef will use the type's default constructor
                     field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64}))
@@ -1081,8 +1089,9 @@ function make_mna_device(vm::VANode{VerilogModule})
         call_args = Any[]
         for paramsym in parameter_names
             # Each parameter: paramsym = mkdefault(default_value)
-            # For now, use Float64 default of 0.0; actual defaults would come from VA parameter declarations
-            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault(0.0))))
+            # Use the actual default value from the VA parameter declaration
+            default_val = get(param_defaults, paramsym, 0.0)
+            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault($default_val))))
             # In call, convert using vaconvert
             push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
                 :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
