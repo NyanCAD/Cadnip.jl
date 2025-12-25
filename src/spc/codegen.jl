@@ -1168,7 +1168,45 @@ kwargs to the builder call. The builder then passes these to the lens,
 which merges them with any sweep overrides.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
-    ssema = resolve_subckt(state.sema, LSymbol(instance.model))
+    subckt_name = LSymbol(instance.model)
+
+    # Check if this is a VA module from imported_hdl_modules
+    # VA modules can be instantiated like subcircuits: X1 a b vamodule params...
+    va_module_ref = nothing
+    for hdl_mod in state.sema.imported_hdl_modules
+        if isdefined(hdl_mod, subckt_name)
+            va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            break
+        end
+    end
+
+    if va_module_ref !== nothing
+        # This is a VA module instance, not a subcircuit
+        # Build kwargs from explicit parameters
+        explicit_kwargs = Expr[]
+        for child in SpectreNetlistParser.RedTree.children(instance)
+            if child !== nothing && isa(child, SNode{SP.Parameter})
+                name = LSymbol(child.name)
+                def = cg_expr!(state, child.val)
+                push!(explicit_kwargs, Expr(:kw, name, def))
+            end
+        end
+
+        # Port expressions
+        port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
+        name = LString(instance.name)
+
+        # Generate stamp! call for VA module
+        return quote
+            let dev = $va_module_ref(; $(explicit_kwargs...))
+                $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                    t = spec.time, mode = spec.mode, x = x)
+            end
+        end
+    end
+
+    # Regular subcircuit handling
+    ssema = resolve_subckt(state.sema, subckt_name)
 
     callee_codegen = CodegenState(ssema)
 
@@ -1187,7 +1225,6 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Port expressions
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
-    subckt_name = LSymbol(instance.model)
     instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
 
@@ -1204,7 +1241,40 @@ end
 
 # Version for use in subcircuit context (lens is named `lens`)
 function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
-    ssema = resolve_subckt(state.sema, LSymbol(instance.model))
+    subckt_name = LSymbol(instance.model)
+
+    # Check if this is a VA module from imported_hdl_modules
+    va_module_ref = nothing
+    for hdl_mod in state.sema.imported_hdl_modules
+        if isdefined(hdl_mod, subckt_name)
+            va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            break
+        end
+    end
+
+    if va_module_ref !== nothing
+        # This is a VA module instance
+        explicit_kwargs = Expr[]
+        for child in SpectreNetlistParser.RedTree.children(instance)
+            if child !== nothing && isa(child, SNode{SP.Parameter})
+                name = LSymbol(child.name)
+                def = cg_expr!(state, child.val)
+                push!(explicit_kwargs, Expr(:kw, name, def))
+            end
+        end
+
+        port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
+
+        return quote
+            let dev = $va_module_ref(; $(explicit_kwargs...))
+                $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                    t = spec.time, mode = spec.mode, x = x)
+            end
+        end
+    end
+
+    # Regular subcircuit handling
+    ssema = resolve_subckt(state.sema, subckt_name)
 
     callee_codegen = CodegenState(ssema)
 
@@ -1221,7 +1291,6 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
-    subckt_name = LSymbol(instance.model)
     instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
 
@@ -1404,7 +1473,41 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
     else
         # Check if this is a user-defined subcircuit
         master_sym = Symbol(lowercase(String(instance.master)))
-        if haskey(state.sema.subckts, master_sym)
+
+        # First, check if this is a VA module from imported_hdl_modules
+        va_module_ref = nothing
+        for hdl_mod in state.sema.imported_hdl_modules
+            # Try both lowercase and original case
+            if isdefined(hdl_mod, master_sym)
+                va_module_ref = GlobalRef(hdl_mod, master_sym)
+                break
+            end
+            master_orig = Symbol(String(instance.master))
+            if isdefined(hdl_mod, master_orig)
+                va_module_ref = GlobalRef(hdl_mod, master_orig)
+                break
+            end
+        end
+
+        if va_module_ref !== nothing
+            # This is a VA module instance
+            port_exprs = [cg_net_name!(state, net) for net in nets]
+
+            # Extract explicit parameters from instance
+            explicit_kwargs = Expr[]
+            for p in instance.params
+                param_name = LSymbol(p.name)
+                param_val = cg_expr!(state, p.val)
+                push!(explicit_kwargs, Expr(:kw, param_name, param_val))
+            end
+
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                        t = spec.time, mode = spec.mode, x = x)
+                end
+            end
+        elseif haskey(state.sema.subckts, master_sym)
             # User-defined subcircuit - generate call to subcircuit builder
             instance_name = Symbol(LString(instance.name))
             builder_name = Symbol(master_sym, "_mna_builder")
@@ -1780,7 +1883,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     end
 
     # Codegen model definitions for MNA
-    # For each model, extract parameters and create a NamedTuple
+    # For each model, extract parameters and create a NamedTuple or VA model wrapper
     for (model_name, defs) in state.sema.models
         if !isempty(defs)
             (_, def) = last(defs)  # Use most recent definition
@@ -1811,8 +1914,31 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 end
                 model_var = cg_model_name!(state, model_name)
                 push!(block.args, :($model_var = ($(model_params...),)))
+            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                # VA model from imported HDL module or external package
+                # Create a model wrapper that combines model params with instance params
+                model_params = Expr[]
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Skip meta-parameters
+                    if pname in (:level, :version, :type)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    push!(model_params, Expr(:kw, pname, pval))
+                end
+                model_var = cg_model_name!(state, model_name)
+                # Create a callable that returns a VA device with merged parameters
+                # model_name(; instance_params...) = VAType(; model_params..., instance_params...)
+                push!(block.args, quote
+                    $model_var = let base_type = $model_ref
+                        # Create a callable that merges model params with instance params
+                        function(; kwargs...)
+                            base_type(; $(model_params...), kwargs...)
+                        end
+                    end
+                end)
             end
-            # TODO: Add support for other model types (capacitor, etc.)
         end
     end
 
@@ -1962,9 +2088,9 @@ sys = MNA.assemble!(ctx)
 sol = MNA.solve_dc(sys)
 ```
 """
-function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
+function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modules::Vector{Module}=Module[])
     # Run semantic analysis (use sema() not sema_file_or_section to get parameter_order)
-    sema_result = sema(ast)
+    sema_result = sema(ast; imported_hdl_modules)
     state = CodegenState(sema_result)
 
     # Generate subcircuit builders first
