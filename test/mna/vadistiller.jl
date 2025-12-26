@@ -994,8 +994,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(ind_va))
             @test !va.ps.errored  # Parsing should succeed
 
-            # The full simulation is broken until branch support is added
-            @test_broken begin
+            # Branch support has been added - test the full simulation
+            @test begin
                 Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
                 function sp_inductor_circuit(params, spec)
@@ -1014,6 +1014,41 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 sys = assemble!(ctx)
                 sol = solve_dc(sys)
                 isapprox(voltage(sol, :mid), 0.0; atol=0.01)
+            end
+        end
+
+        @testset "VADistiller sp_diode" begin
+            # The diode model uses:
+            # - analysis() function for checking analysis type (now parsed!)
+            # - $limit() for Newton convergence (returns voltage unchanged)
+            # - Internal node a_int (already supported)
+            # - Complex conditional logic and helper functions
+            # - User-defined analog functions (initialize_limiting, DEVpnjlim, etc.)
+            diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
+            va = VerilogAParser.parse(IOBuffer(diode_va))
+            @test !va.ps.errored  # Parsing now succeeds with analysis() support
+
+            # Full simulation is broken - model runs but gives wrong voltage (~1.0V instead of ~0.6V)
+            # Core MNA stamping verified working with simplified test models.
+            # Issue is likely in complex helper functions (DEVpnjlim, etc.) or initialization.
+            @test_broken begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                function sp_diode_circuit(params, spec)
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    diode_a = get_node!(ctx, :diode_a)
+                    stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
+                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=Float64[])
+                    return ctx
+                end
+
+                ctx = sp_diode_circuit((;), MNASpec())
+                sys = assemble!(ctx)
+                sol = solve_dc(sys)
+                v_diode = voltage(sol, :diode_a)
+                v_diode > 0.3 && v_diode < 0.9
             end
         end
 
@@ -1055,22 +1090,29 @@ end
 # ✅ Ground node (Symbol("0")) handling in branch contributions
 # ✅ Noise function calls return 0 (appropriate for DC/transient)
 #
-# MISSING PARSER FEATURES (needed for some VADistiller models):
-# ❌ analysis() - check analysis type (used in diode for $limit)
-# ❌ $limit() - voltage limiting for Newton convergence
-# ❌ @(initial_step) - initialization event handling
+# WORKING MNA FEATURES (added):
+# ✅ analysis() - check analysis type (parser + MNAScope support)
+# ✅ $limit() - voltage limiting (returns voltage unchanged, model works but may converge slower)
+# ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
 #
-# MISSING MNA FEATURES (needed for complex models):
-# ❌ Branch-based stamping (branch declaration with named branches)
+# MISSING PARSER FEATURES (VerilogAParser needs extension):
+# ❌ @(initial_step) - initialization event handling
 #
 # FULLY WORKING VADISTILLER MODELS:
 # ✅ resistor.va: Parses and simulates correctly (2-terminal passive)
 # ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
+# ✅ inductor.va: Parses and simulates correctly (branch-based with I(br), V(br))
+#
+# WORKING CORE FEATURES (verified with simplified test models):
+# ✅ Single-node contributions (I(a) <+ expr) - stamps at node and ground correctly
+# ✅ Internal node allocation for VA modules
+# ✅ User-defined function output parameter handling (inout params return tuples)
 #
 # PARTIALLY WORKING VADISTILLER MODELS:
-# ⚠️ inductor.va: Parses but needs branch-based stamping (I(br), V(br) <+ ...)
-# ❌ diode.va: Parser error on analysis() function call
-# ❌ bjt.va: Needs internal nodes + analysis() for $limit
-# ❌ mos1.va: Needs internal nodes + analysis() for $limit
-# ❌ bsim4v8.va: Very complex - needs all features above
+# ⚠️ diode.va: Parses correctly, but simulation gives wrong results
+#    - Core single-node stamping verified working with simplified test
+#    - Issue is likely in complex helper functions (DEVpnjlim) or initialization
+# ⚠️ bjt.va: May parse now with analysis() support - needs testing
+# ⚠️ mos1.va: May parse now with analysis() support - needs testing
+# ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
 #==============================================================================#

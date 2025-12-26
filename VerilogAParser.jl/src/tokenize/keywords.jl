@@ -9,7 +9,7 @@ const reserved_words = Dict{String, Kind}(
     "aliasparam" => ALIASPARAM,
     "always" => RESERVED,
     "analog" => ANALOG,
-    "analysis" => RESERVED,
+    # "analysis" removed - treated as normal function identifier
     "and" => RESERVED,
     "assert" => RESERVED,
     "assign" => RESERVED,
