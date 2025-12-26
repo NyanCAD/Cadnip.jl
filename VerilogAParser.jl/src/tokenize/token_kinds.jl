@@ -190,7 +190,6 @@ end
         SLEW, # slew
         LAST_CROSSING, # last_crossing
         LIMEXP, # limexp
-        ANALYSIS, # analysis - query current analysis type
     end_filter_functions,
 
     begin_small_signal_functions,
