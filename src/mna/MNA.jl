@@ -59,4 +59,7 @@ include("solve.jl")
 # VA contribution function support (Phase 5)
 include("contrib.jl")
 
+# Precompiled circuit optimization (Phase 7)
+include("precompile.jl")
+
 end # module MNA
