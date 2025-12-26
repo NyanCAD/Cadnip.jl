@@ -927,15 +927,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
     #==========================================================================#
 
     @testset "Tier 6: Full VADistiller Models (from file)" begin
-        vadistiller_path = "/home/user/VADistiller/models"
+        # Use local copy of VADistiller models in test/vadistiller/models
+        vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         @testset "VADistiller sp_resistor" begin
-            # Skip if VADistiller not cloned
-            if !isdir(vadistiller_path)
-                @test_skip "VADistiller not found at $vadistiller_path"
-                return
-            end
-
             resistor_va = read(joinpath(vadistiller_path, "resistor.va"), String)
             va = VerilogAParser.parse(IOBuffer(resistor_va))
             Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
@@ -962,12 +957,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         @testset "VADistiller sp_capacitor" begin
-            # Skip if VADistiller not cloned
-            if !isdir(vadistiller_path)
-                @test_skip "VADistiller not found at $vadistiller_path"
-                return
-            end
-
             cap_va = read(joinpath(vadistiller_path, "capacitor.va"), String)
             va = VerilogAParser.parse(IOBuffer(cap_va))
             Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
@@ -994,36 +983,38 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         @testset "VADistiller sp_inductor" begin
-            # Skip if VADistiller not cloned
-            if !isdir(vadistiller_path)
-                @test_skip "VADistiller not found at $vadistiller_path"
-                return
-            end
-
+            # NOTE: The inductor model uses branch-based stamping (branch declaration + I(br))
+            # which is not yet implemented. The model parses correctly but stamp! fails.
+            # This requires implementing:
+            # 1. Branch declarations: branch (pos, neg) br;
+            # 2. I(br) probe: current through named branch
+            # 3. V(br) <+ ... : voltage contribution to branch
+            # For now, we just verify parsing works
             ind_va = read(joinpath(vadistiller_path, "inductor.va"), String)
             va = VerilogAParser.parse(IOBuffer(ind_va))
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+            @test !va.ps.errored  # Parsing should succeed
 
-            # Test in RL circuit (DC - inductor is short circuit)
-            function sp_inductor_circuit(params, spec)
-                ctx = MNAContext()
-                vcc = get_node!(ctx, :vcc)
-                mid = get_node!(ctx, :mid)
+            # The full simulation is broken until branch support is added
+            @test_broken begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-                stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; spec=spec, x=Float64[])
+                function sp_inductor_circuit(params, spec)
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    mid = get_node!(ctx, :mid)
 
-                return ctx
+                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
+                    stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; spec=spec, x=Float64[])
+
+                    return ctx
+                end
+
+                ctx = sp_inductor_circuit((;), MNASpec())
+                sys = assemble!(ctx)
+                sol = solve_dc(sys)
+                isapprox(voltage(sol, :mid), 0.0; atol=0.01)
             end
-
-            ctx = sp_inductor_circuit((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
-
-            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-            # At DC, inductor is short, so mid should be at ground
-            @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
         end
 
     end
@@ -1075,9 +1066,9 @@ end
 # FULLY WORKING VADISTILLER MODELS:
 # ✅ resistor.va: Parses and simulates correctly (2-terminal passive)
 # ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
-# ✅ inductor.va: Parses and simulates correctly (2-terminal reactive)
 #
 # PARTIALLY WORKING VADISTILLER MODELS:
+# ⚠️ inductor.va: Parses but needs branch-based stamping (I(br), V(br) <+ ...)
 # ❌ diode.va: Parser error on analysis() function call
 # ❌ bjt.va: Needs internal nodes + analysis() for $limit
 # ❌ mos1.va: Needs internal nodes + analysis() for $limit
