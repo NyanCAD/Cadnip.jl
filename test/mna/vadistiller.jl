@@ -1019,19 +1019,37 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "VADistiller sp_diode" begin
             # The diode model uses:
-            # - analysis() function for checking analysis type
-            # - $limit() for Newton convergence
+            # - analysis() function for checking analysis type (now parsed!)
+            # - $limit() for Newton convergence (returns voltage unchanged)
             # - Internal node a_int (already supported)
             # - Complex conditional logic and helper functions
-            #
-            # NOTE: The VerilogAParser doesn't support the analysis() built-in function,
-            # so the parsing fails. MNAScope has analysis() support, but the parser
-            # needs to be extended to recognize it as a valid function call.
+            # - User-defined analog functions (initialize_limiting, DEVpnjlim, etc.)
             diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
             va = VerilogAParser.parse(IOBuffer(diode_va))
+            @test !va.ps.errored  # Parsing now succeeds with analysis() support
 
-            # Parser fails on analysis() - this is a parser limitation
-            @test_broken !va.ps.errored
+            # Full simulation is broken due to complex analog function handling
+            # The model has user-defined functions with output parameters that need
+            # proper handling in MNAScope function call translation
+            @test_broken begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                function sp_diode_circuit(params, spec)
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    diode_a = get_node!(ctx, :diode_a)
+                    stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
+                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=Float64[])
+                    return ctx
+                end
+
+                ctx = sp_diode_circuit((;), MNASpec())
+                sys = assemble!(ctx)
+                sol = solve_dc(sys)
+                v_diode = voltage(sol, :diode_a)
+                v_diode > 0.3 && v_diode < 0.9
+            end
         end
 
     end
@@ -1073,12 +1091,11 @@ end
 # ✅ Noise function calls return 0 (appropriate for DC/transient)
 #
 # WORKING MNA FEATURES (added):
-# ✅ analysis() - check analysis type in MNAScope (maps to spec.mode)
+# ✅ analysis() - check analysis type (parser + MNAScope support)
 # ✅ $limit() - voltage limiting (returns voltage unchanged, model works but may converge slower)
 # ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
 #
 # MISSING PARSER FEATURES (VerilogAParser needs extension):
-# ❌ analysis() - parser doesn't recognize as built-in function (MNAScope support ready)
 # ❌ @(initial_step) - initialization event handling
 #
 # FULLY WORKING VADISTILLER MODELS:
@@ -1086,9 +1103,9 @@ end
 # ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
 # ✅ inductor.va: Parses and simulates correctly (branch-based with I(br), V(br))
 #
-# BLOCKED BY PARSER LIMITATIONS:
-# ❌ diode.va: Parser fails on analysis() function call (MNAScope ready when parser is fixed)
-# ❌ bjt.va: Parser fails on analysis() function call
-# ❌ mos1.va: Parser fails on analysis() function call
-# ❌ bsim4v8.va: Very complex - needs all features above
+# PARTIALLY WORKING VADISTILLER MODELS:
+# ⚠️ diode.va: Parses correctly (analysis() works!), simulation blocked by function translation
+# ⚠️ bjt.va: May parse now with analysis() support - needs testing
+# ⚠️ mos1.va: May parse now with analysis() support - needs testing
+# ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
 #==============================================================================#
