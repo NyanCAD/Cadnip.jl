@@ -1084,118 +1084,93 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
         end
 
-        @testset "VADistiller sp_bjt 4-port" begin
+        @testset "VADistiller sp_bjt" begin
             # BJT model: 4-terminal (c, b, e, sub)
-            # This tests the standard 4-port configuration with substrate grounded
+            # Test various substrate configurations
             bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
             va = VerilogAParser.parse(IOBuffer(bjt_va))
             @test !va.ps.errored  # Parsing should succeed
 
-            # Test that MNA module generation works
-            @test begin
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+            # Generate and eval module once for all BJT tests
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-                # Simple common-emitter circuit with substrate grounded
-                function sp_bjt_circuit_4port(params, spec; x=Float64[])
-                    ctx = MNAContext()
-                    vcc = get_node!(ctx, :vcc)
-                    vb = get_node!(ctx, :vb)
-                    collector = get_node!(ctx, :collector)
-                    base = get_node!(ctx, :base)
+            @testset "4-port (substrate grounded)" begin
+                # Standard 4-port configuration with substrate grounded
+                @test begin
+                    function sp_bjt_circuit_4port(params, spec; x=Float64[])
+                        ctx = MNAContext()
+                        vcc = get_node!(ctx, :vcc)
+                        vb = get_node!(ctx, :vb)
+                        collector = get_node!(ctx, :collector)
+                        base = get_node!(ctx, :base)
 
-                    # Power supply
-                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    # Base bias
-                    stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
-                    stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
-                    # Collector load
-                    stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
-                    # BJT (NPN default) - 4-port with substrate grounded (0)
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; spec=spec, x=x)
+                        stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                        stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
+                        stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
+                        stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
+                        # BJT with substrate grounded (0)
+                        stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; spec=spec, x=x)
 
-                    return ctx
+                        return ctx
+                    end
+
+                    sol = solve_dc(sp_bjt_circuit_4port, (;), MNASpec())
+                    true
                 end
-
-                # Use Newton-based solve for nonlinear BJT
-                sol = solve_dc(sp_bjt_circuit_4port, (;), MNASpec())
-                # Should converge without error
-                true
             end
-        end
 
-        @testset "VADistiller sp_bjt 3-port (substrate tied to emitter)" begin
-            # BJT as 3-terminal device: substrate tied to emitter
-            # This is a common configuration for discrete NPN transistors
-            bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
-            va = VerilogAParser.parse(IOBuffer(bjt_va))
-            @test !va.ps.errored
+            @testset "3-port (substrate tied to emitter)" begin
+                # BJT as 3-terminal device: substrate tied to emitter
+                # Common configuration for discrete NPN transistors
+                @test begin
+                    function sp_bjt_circuit_3port(params, spec; x=Float64[])
+                        ctx = MNAContext()
+                        vcc = get_node!(ctx, :vcc)
+                        vb = get_node!(ctx, :vb)
+                        collector = get_node!(ctx, :collector)
+                        base = get_node!(ctx, :base)
 
-            @test begin
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                        stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                        stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
+                        stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
+                        stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
+                        # BJT - pass same node (0) for emitter and substrate
+                        stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; spec=spec, x=x)
 
-                # Common-emitter circuit with substrate tied to emitter (both grounded)
-                function sp_bjt_circuit_3port(params, spec; x=Float64[])
-                    ctx = MNAContext()
-                    vcc = get_node!(ctx, :vcc)
-                    vb = get_node!(ctx, :vb)
-                    collector = get_node!(ctx, :collector)
-                    base = get_node!(ctx, :base)
+                        return ctx
+                    end
 
-                    # Power supply
-                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    # Base bias
-                    stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
-                    stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
-                    # Collector load
-                    stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
-                    # BJT - 3-port: pass same node (0) for emitter and substrate
-                    # This effectively ties substrate to emitter (common for NPN)
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; spec=spec, x=x)
-
-                    return ctx
+                    sol = solve_dc(sp_bjt_circuit_3port, (;), MNASpec())
+                    true
                 end
-
-                sol = solve_dc(sp_bjt_circuit_3port, (;), MNASpec())
-                true
             end
-        end
 
-        @testset "VADistiller sp_bjt separate substrate" begin
-            # BJT with substrate connected to a separate node (not ground)
-            # This tests proper substrate handling in the model
-            bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
-            va = VerilogAParser.parse(IOBuffer(bjt_va))
-            @test !va.ps.errored
+            @testset "separate substrate" begin
+                # BJT with substrate connected to a separate node (not ground)
+                # Tests proper substrate handling in the model
+                @test begin
+                    function sp_bjt_circuit_separate_sub(params, spec; x=Float64[])
+                        ctx = MNAContext()
+                        vcc = get_node!(ctx, :vcc)
+                        vb = get_node!(ctx, :vb)
+                        collector = get_node!(ctx, :collector)
+                        base = get_node!(ctx, :base)
+                        substrate = get_node!(ctx, :substrate)
 
-            @test begin
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                        stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                        stamp!(VoltageSource(5.0; name=:Vsub), ctx, substrate, 0)
+                        stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
+                        stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
+                        stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
+                        # BJT with separate substrate node at Vcc
+                        stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, substrate; spec=spec, x=x)
 
-                # Circuit with substrate at a different potential (e.g., Vcc for isolation)
-                function sp_bjt_circuit_separate_sub(params, spec; x=Float64[])
-                    ctx = MNAContext()
-                    vcc = get_node!(ctx, :vcc)
-                    vb = get_node!(ctx, :vb)
-                    collector = get_node!(ctx, :collector)
-                    base = get_node!(ctx, :base)
-                    substrate = get_node!(ctx, :substrate)
+                        return ctx
+                    end
 
-                    # Power supply
-                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    # Substrate tied to Vcc (common for substrate isolation)
-                    stamp!(VoltageSource(5.0; name=:Vsub), ctx, substrate, 0)
-                    # Base bias
-                    stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
-                    stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
-                    # Collector load
-                    stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
-                    # BJT with separate substrate node
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, substrate; spec=spec, x=x)
-
-                    return ctx
+                    sol = solve_dc(sp_bjt_circuit_separate_sub, (;), MNASpec())
+                    true
                 end
-
-                sol = solve_dc(sp_bjt_circuit_separate_sub, (;), MNASpec())
-                true
             end
         end
 
