@@ -1028,27 +1028,59 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(diode_va))
             @test !va.ps.errored  # Parsing now succeeds with analysis() support
 
-            # Full simulation is broken - model runs but gives wrong voltage (~1.0V instead of ~0.6V)
-            # Core MNA stamping verified working with simplified test models.
-            # Issue is likely in complex helper functions (DEVpnjlim, etc.) or initialization.
-            @test_broken begin
+            # Full simulation now works - uses Newton-based DC solve with proper short circuit handling
+            @test begin
                 Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-                function sp_diode_circuit(params, spec)
+                function sp_diode_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vcc = get_node!(ctx, :vcc)
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
-                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=Float64[])
+                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=x)
                     return ctx
                 end
 
-                ctx = sp_diode_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
-                v_diode = voltage(sol, :diode_a)
-                v_diode > 0.3 && v_diode < 0.9
+                # Use Newton-based solve for nonlinear diode
+                sol = solve_dc(sp_diode_circuit, (;), MNASpec())
+                v_diode = sol.x[2]  # diode_a is node 2
+                v_diode > 0.6 && v_diode < 0.7  # Should be ~0.63V
+            end
+
+            # Test with non-zero series resistance (rs=10Ω)
+            # This uses the full model with internal node (not aliased)
+            @test begin
+                function sp_diode_rs_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    diode_a = get_node!(ctx, :diode_a)
+                    stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
+                    # Use rs=10Ω - this activates the internal node and series resistance
+                    stamp!(sp_diode(; rs=10.0), ctx, diode_a, 0; spec=spec, x=x)
+                    return ctx
+                end
+
+                sol = solve_dc(sp_diode_rs_circuit, (;), MNASpec())
+
+                # With rs=10Ω, the internal node should be allocated (not aliased)
+                # System should have: vcc, diode_a, sp_diode_a_int + I_V1 = 4 states
+                sys = assemble!(sp_diode_rs_circuit((;), MNASpec(); x=sol.x))
+                has_internal_node = :sp_diode_a_int in sys.node_names
+
+                # Voltage at diode_a should be slightly higher than internal junction
+                # due to voltage drop across series resistance: V_a = V_a_int + I*rs
+                # With I ≈ 0.37mA and rs=10Ω, drop ≈ 3.7mV
+                v_diode_a = sol.x[2]
+                v_a_int = sol.x[3]  # Internal junction node
+
+                # Check voltages are reasonable
+                junction_ok = v_a_int > 0.6 && v_a_int < 0.7  # Junction ~0.63V
+                drop_ok = v_diode_a > v_a_int  # Should have voltage drop across rs
+                drop_reasonable = (v_diode_a - v_a_int) < 0.01  # Drop should be small (few mV)
+
+                has_internal_node && junction_ok && drop_ok && drop_reasonable
             end
         end
 
