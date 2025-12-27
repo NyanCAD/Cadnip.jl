@@ -1605,26 +1605,34 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     p_node = p_idx === nothing ? 0 : Symbol("_node_", p_sym)
     n_node = n_idx === nothing ? 0 : Symbol("_node_", n_sym)
 
-    # For voltage contributions (V(a,b) <+ expr), we need different handling
+    # For voltage contributions (V(a,b) <+ expr), we need proper MNA stamping
+    # with a branch current variable to carry DC current (essential for short circuits)
     if kind == :voltage
         # Voltage contribution: V(p,n) <+ value means we enforce V_p - V_n = value
-        # This is typically done with a voltage source pattern
-        # For now, generate inline stamping (simplified)
+        # This requires a branch current variable for proper DC current flow
         expr = to_julia(cs.assign_expr)
+        # Create a unique name for this voltage contribution's current variable
+        I_alloc_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
-            let v_contrib = Float64($expr)
-                # For V <+ 0, this is a short circuit - stamp high conductance
-                # This is a simplified implementation; proper handling needs voltage source stamping
-                if abs(v_contrib) < 1e-15
-                    # Short circuit: stamp high conductance
-                    let G_short = 1e12
-                        CedarSim.MNA.stamp_G!(ctx, $p_node, $p_node, G_short)
-                        CedarSim.MNA.stamp_G!(ctx, $p_node, $n_node, -G_short)
-                        CedarSim.MNA.stamp_G!(ctx, $n_node, $p_node, -G_short)
-                        CedarSim.MNA.stamp_G!(ctx, $n_node, $n_node, G_short)
-                    end
+            # Allocate branch current (idempotent - returns existing index if already allocated)
+            let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_name)
+                v_contrib_raw = $expr
+                v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
+
+                # Stamp proper MNA voltage source:
+                # - KCL at p: current I flows out → G[p, I] = 1
+                # - KCL at n: current I flows in → G[n, I] = -1
+                # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
+                if $p_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
+                    CedarSim.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
                 end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
+                    CedarSim.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
+                end
+                CedarSim.MNA.stamp_b!(ctx, I_var, v_val)
             end
         end
     end
@@ -1922,6 +1930,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Collect current contributions by branch, and voltage contributions for named branches
     branch_contribs = Dict{Tuple{Symbol,Symbol}, Vector{Any}}()
     voltage_branch_contribs = Dict{Symbol, NamedTuple}()  # branch_name -> (p, n, exprs)
+    # Two-node voltage contributions V(p,n) <+ expr (not named branches) - needs branch current
+    twonode_voltage_contribs = Dict{Tuple{Symbol,Symbol}, Vector{Any}}()  # (p,n) -> exprs
 
     for c in contributions
         if c.kind == :current
@@ -1937,6 +1947,15 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 voltage_branch_contribs[branch_name] = (p=c.p, n=c.n, exprs=Any[])
             end
             push!(voltage_branch_contribs[branch_name].exprs, c.expr)
+        elseif c.kind == :voltage && (!hasproperty(c, :is_branch) || !c.is_branch)
+            # Two-node voltage contribution V(p,n) <+ expr (not a named branch)
+            # Collect these to be stamped with proper branch current variables later
+            # This is essential for short circuits (V(p,n) <+ 0) to carry DC current
+            branch = (c.p, c.n)
+            if !haskey(twonode_voltage_contribs, branch)
+                twonode_voltage_contribs[branch] = Any[]
+            end
+            push!(twonode_voltage_contribs[branch], c.expr)
         elseif c.kind == :conditional
             push!(contrib_eval.args, c.expr)
         elseif c.kind == :assignment
@@ -1954,6 +1973,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(branch_current_alloc.args,
             :($I_var = CedarSim.MNA.alloc_current!(ctx, $(QuoteNode(alloc_name)))))
         branch_current_vars[branch_name] = I_var
+    end
+
+    # Allocate current variables for two-node voltage contributions (e.g., V(a,b) <+ 0)
+    # These need branch currents to carry DC current through short circuits
+    twonode_voltage_vars = Dict{Tuple{Symbol,Symbol}, Symbol}()  # (p,n) -> current_var_name
+    for ((p_sym, n_sym), _) in twonode_voltage_contribs
+        I_var = Symbol("_I_V_", p_sym, "_", n_sym, "_idx")
+        alloc_name = Symbol(symname, "_I_V_", p_sym, "_", n_sym)
+        push!(branch_current_alloc.args,
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $(QuoteNode(alloc_name)))))
+        twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
@@ -2213,6 +2243,55 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(voltage_stamp_code.args, v_stamp)
     end
 
+    # Generate stamping code for two-node voltage contributions V(p,n) <+ expr
+    # These require branch current variables to carry DC current (especially for short circuits)
+    twonode_voltage_stamp_code = Expr(:block)
+    for ((p_sym, n_sym), exprs) in twonode_voltage_contribs
+        I_var = twonode_voltage_vars[(p_sym, n_sym)]
+
+        # Look up node indices
+        p_idx = p_sym == Symbol("0") ? nothing : findfirst(==(p_sym), all_node_syms)
+        n_idx = n_sym == Symbol("0") ? nothing : findfirst(==(n_sym), all_node_syms)
+        p_node = p_idx === nothing ? 0 : all_node_params[p_idx]
+        n_node = n_idx === nothing ? 0 : all_node_params[n_idx]
+
+        # Sum all voltage contributions
+        sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
+
+        # Generate stamping code for two-node voltage contribution
+        # V(p,n) <+ expr means V_p - V_n = expr
+        # With current variable I:
+        # - KCL at p: current I flows out of p → G[p, I] = 1
+        # - KCL at n: current I flows into n → G[n, I] = -1
+        # - Voltage constraint: V_p - V_n = expr → G[I, p] = 1, G[I, n] = -1, b[I] = expr
+        v_stamp = quote
+            # Evaluate voltage contribution
+            V_contrib = $sum_expr
+
+            # Extract scalar value from dual if needed
+            V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
+
+            # Stamp KCL: current I flows from p to n
+            if $p_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
+            end
+            if $n_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
+            end
+
+            # Voltage constraint: V_p - V_n = V_val
+            if $p_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+            end
+            if $n_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
+            end
+            CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
+        end
+
+        push!(twonode_voltage_stamp_code.args, v_stamp)
+    end
+
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     quote
@@ -2247,6 +2326,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
             # Stamp voltage contributions for named branches (e.g., inductor V = L*dI/dt)
             $voltage_stamp_code
+
+            # Stamp two-node voltage contributions (e.g., V(a,b) <+ 0 for short circuit)
+            $twonode_voltage_stamp_code
 
             return nothing
         end

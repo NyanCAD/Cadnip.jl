@@ -1028,27 +1028,24 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(diode_va))
             @test !va.ps.errored  # Parsing now succeeds with analysis() support
 
-            # Full simulation is broken - model runs but gives wrong voltage (~1.0V instead of ~0.6V)
-            # Core MNA stamping verified working with simplified test models.
-            # Issue is likely in complex helper functions (DEVpnjlim, etc.) or initialization.
-            @test_broken begin
+            # Full simulation now works - uses Newton-based DC solve with proper short circuit handling
+            @test begin
                 Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-                function sp_diode_circuit(params, spec)
+                function sp_diode_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vcc = get_node!(ctx, :vcc)
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
-                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=Float64[])
+                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=x)
                     return ctx
                 end
 
-                ctx = sp_diode_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
-                v_diode = voltage(sol, :diode_a)
-                v_diode > 0.3 && v_diode < 0.9
+                # Use Newton-based solve for nonlinear diode
+                sol = solve_dc(sp_diode_circuit, (;), MNASpec())
+                v_diode = sol.x[2]  # diode_a is node 2
+                v_diode > 0.6 && v_diode < 0.7  # Should be ~0.63V
             end
         end
 
