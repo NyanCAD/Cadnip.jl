@@ -1,11 +1,8 @@
 using ChainRulesCore, StaticArrays
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler: time_periodic_singularity!
-else
-    using ..DAECompilerStubs: time_periodic_singularity!
-end
+# Event notification stub (DAECompiler used this for adaptive timestepping)
+# TODO: Implement MNA-compatible event system for efficient time-dependent sources
+time_periodic_singularity!(args...) = nothing  # No-op - events not yet implemented
 
 # This gets imported by all generated Spectre code. The function names
 # exported here should correspond to what is made available by Spectre

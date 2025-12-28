@@ -1,32 +1,35 @@
 module CedarSim
 
-# Phase 0: MNA Migration - DAECompiler is disabled, parsing/codegen works
-# Set to true to enable DAECompiler (requires DAECompiler package)
-const USE_DAECOMPILER = false
+# MNA Backend - DAECompiler has been removed
+# AC analysis and some other features are kept for future porting
 
 using DiffEqBase
 using DynamicScope
 using VectorPrisms
 
-# MNA stubs for DAECompiler primitives (Phase 0)
-include("mna/stubs.jl")
-using .DAECompilerStubs
-
-# MNA Phase 1: Core MNA engine (replaces DAECompiler for simulation)
+# MNA engine (the simulation backend)
 include("mna/MNA.jl")
 using .MNA
 export MNA
 
-# Conditionally use DAECompiler or stubs
-@static if USE_DAECOMPILER
-    using DAECompiler
-    using DAECompiler: IRODESystem
-    const DScope = DAECompiler.Intrinsics.Scope
-else
-    # Use stubs - simulation will error but parsing/codegen works
-    const IRODESystem = DAECompilerStubs.IRODESystem
-    const DScope = DAECompilerStubs.Scope
+# Minimal type stubs for legacy code paths (AC analysis, etc.)
+# These are placeholder types for code that hasn't been ported to MNA yet
+# Note: vasim.jl defines its own Scope struct for VA parsing, so we use DebugScope here
+abstract type AbstractScope end
+struct DebugScope <: AbstractScope
+    parent::Union{DebugScope, Nothing}
+    name::Symbol
+    DebugScope() = new(nothing, :root)
+    DebugScope(parent::DebugScope, name::Symbol) = new(parent, name)
 end
+const DScope = DebugScope
+struct GenScope <: AbstractScope
+    parent::AbstractScope
+    name::Symbol
+end
+GenScope(parent, name::Symbol) = GenScope(parent, name)
+GenScope(parent, name::String) = GenScope(parent, Symbol(name))
+struct IRODESystem end  # Stub type for AC analysis
 
 # re-exports
 export DAEProblem
@@ -40,7 +43,9 @@ export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
 include("util.jl")
 include("vasim.jl")
 include("simulate_ir.jl")
-include("simpledevices.jl")
+# simpledevices.jl removed - DAECompiler-only devices replaced by MNA.devices
+# Stub types for backwards compatibility with DAECompiler code paths
+include("simpledevices_stubs.jl")
 include("spectre_env.jl")
 include("circuitodesystem.jl")
 include("spectre.jl")
@@ -54,16 +59,11 @@ include("spc/query.jl")
 include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
-# Phase 0: dcop.jl and ac.jl require DAECompiler simulation machinery
-# They use internal OrdinaryDiffEq functions that may not be available
-@static if USE_DAECOMPILER
-    include("dcop.jl")
-    include("ac.jl")
-end
+# AC/noise analysis not loaded - requires DAECompiler porting to MNA
+# See ac.jl for reference implementation
 include("ModelLoader.jl")
 include("aliasextract.jl")
 include("netlist_utils.jl")
-include("deprecated.jl")
 include("circsummary.jl")
 
 import .ModelLoader: load_VA_model
@@ -101,18 +101,12 @@ using PrecompileTools
     l1 n1 n2 1m
     c1 n2 0 1u
     """
-    spectre = """
-    c1 (Y 0) capacitor c=100f
-    r2 (Y VDD) BasicVAResistor R=10k
-    v1 (VDD 0) vsource type=dc dc=0.7_V
-    """
     @compile_workload @time begin
+        # MNA-based SPICE parsing and codegen
         sa1 = VerilogAParser.parsefile(joinpath(@__DIR__, "../VerilogAParser.jl/test/inputs/resistor.va"))
-        code1 = CedarSim.make_module(sa1)
-        sa2 = SpectreNetlistParser.parse(IOBuffer(spectre))
-        code2 = CedarSim.make_spectre_circuit(sa2)
+        code1 = CedarSim.make_mna_module(sa1)
         sa3 = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
-        code3 = CedarSim.make_spectre_circuit(sa3)
+        code3 = CedarSim.make_mna_circuit(sa3)
     end
 end
 
@@ -138,8 +132,7 @@ then delete all the voltage/current sources and declare that the places they wer
 
 
 
-This is a higher level version of the `DAECompiler.@declare_MTKConnector`
-and does, in the end, return a subtype of `MTKConnector`.
+This returns a connector type for use with ModelingToolkit.
 
 This means it is struct with a constructor that you can override the parameters to by keyword argument.
 You can check what parameters are available by using `parameternames` on an instance of the type.

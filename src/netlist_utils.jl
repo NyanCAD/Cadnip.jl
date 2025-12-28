@@ -1,12 +1,12 @@
 # This file contains utility functions when writing netlists using the operadic
 # julia embedding.
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler.Intrinsics: _compute_new_nt_type
-else
-    using ..DAECompilerStubs.Intrinsics: _compute_new_nt_type
+# Inlined utility from DAECompiler - computes new NamedTuple type with additional field
+@generated function _compute_new_nt_type(::NamedTuple{names}, ::Val{s}) where {names, s}
+    new_names = (names..., s)
+    :(NamedTuple{$new_names})
 end
+_compute_new_nt_type(nt, s::Symbol) = _compute_new_nt_type(nt, Val(s))
 
 export ∥, ⋯, parallel, series, nets
 

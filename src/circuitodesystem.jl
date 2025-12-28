@@ -1,23 +1,15 @@
 using DiffEqBase
 import Random
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler: sim_time, default_parameters
-else
-    using ..DAECompilerStubs: sim_time, default_parameters
-end
+# DAECompiler stubs (kept for AC analysis reference)
+sim_time() = error("sim_time() requires DAECompiler")
+default_parameters(args...) = error("default_parameters() requires DAECompiler")
 
 export CircuitIRODESystem, CircuitDynODESystem, DefaultSim, ParamSim
 
 abstract type AbstractSim{C} <: AbstractRecordVector{Float64} end
 
-# Phase 0: Guard DAECompiler method extension
-@static if CedarSim.USE_DAECOMPILER
-    function DAECompiler.default_parameters(::Type{T}) where {C, T<:AbstractSim{C}}
-        return T(DAECompiler.default_parameters(C))
-    end
-end
+# DAECompiler.default_parameters method extension removed (DAECompiler not used)
 
 struct DefaultSim{T} <: AbstractSim{T}
     circuit::T

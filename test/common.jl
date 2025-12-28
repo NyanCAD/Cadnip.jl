@@ -4,34 +4,23 @@ using SpectreNetlistParser
 using Test
 using Random
 
-# Phase 0: Conditional imports - simulation packages only if available
+# Simulation packages
 using OrdinaryDiffEq
 using SciMLBase
-
 using Sundials
 
-# Phase 0: DAECompiler may not be available
-const HAS_DAECOMPILER = CedarSim.USE_DAECOMPILER
+# DAECompiler has been removed - MNA is the only backend
+const HAS_DAECOMPILER = false
 
-if HAS_DAECOMPILER
-    using DAECompiler
-end
-
-# These must be top-level `const` values, otherwise `DAECompiler` doesn't know
-# that we're not about to redefine it halfway through the model, and some of our
-# static assumptions break.  We have a test asserting this in `test/compilation.jl`.
+# Legacy device type aliases (stub types that error when called)
 const R = CedarSim.SimpleResistor
 const C = CedarSim.SimpleCapacitor
 const L = CedarSim.SimpleInductor
 const V(v) = CedarSim.VoltageSource(dc=v)
 const I(i) = CedarSim.CurrentSource(dc=i)
 
-# Phase 0: sim_time comes from stubs when DAECompiler not available
-const sim_time = if HAS_DAECOMPILER
-    CedarSim.DAECompiler.sim_time
-else
-    CedarSim.DAECompilerStubs.sim_time
-end
+# sim_time stub - use MNA time parameter in actual circuits
+sim_time() = error("sim_time() requires DAECompiler - use MNA spec.mode for time-dependent simulation")
 
 const deftol = 1e-8
 

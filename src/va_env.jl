@@ -10,14 +10,8 @@ import Compat
 import NaNMath
 import ChainRules
 
-# Phase 0: Use stubs instead of DAECompiler
-if CedarSim.USE_DAECOMPILER
-    import DAECompiler
-    import DAECompiler: ddt
-else
-    import ..CedarSim.DAECompilerStubs: ddt, observed!, epsilon
-    const DAECompiler = CedarSim.DAECompilerStubs
-end
+# ddt stub - MNA uses va_ddt() from MNA.contrib instead
+ddt(x) = Base.error("ddt() requires DAECompiler - use MNA.va_ddt() for time derivatives")
 
 import Base:
     +, *, -, ==, !=, /, >, <,  <=, >=,
@@ -82,19 +76,13 @@ end
 
 ChainRules.@scalar_rule tan(x) 1 + Ω * Ω
 
-# Branch voltagesa
-#function V(V₊, V₋)
-#    return V₊.V - V₋.V
-#end
-#V(node) = node.V
+# Noise functions - require DAECompiler porting to MNA
+# TODO: Implement noise analysis in MNA backend
 function white_noise(dscope, pwr, name)
-    DAECompiler.observed!(pwr, CedarSim.DScope(dscope, Symbol(name, :pwr)))
-    DAECompiler.epsilon(CedarSim.DScope(dscope, Symbol(name)))
+    Base.error("white_noise() requires DAECompiler - noise analysis needs porting to MNA")
 end
 function flicker_noise(dscope, pwr, exp, name)
-    DAECompiler.observed!(pwr, CedarSim.DScope(dscope, Symbol(name, :pwr)))
-    DAECompiler.observed!(exp, CedarSim.DScope(dscope, Symbol(name, :exp)))
-    DAECompiler.epsilon(CedarSim.DScope(dscope, Symbol(name)))
+    Base.error("flicker_noise() requires DAECompiler - noise analysis needs porting to MNA")
 end
 
 vaconvert(T::Type{<:Number}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))

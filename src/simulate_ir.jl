@@ -1,16 +1,12 @@
 using ForwardDiff
 using ForwardDiff: Dual
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler
-    using DAECompiler: variable, equation, equation!
-    using DAECompiler.Intrinsics: AbstractScope
-    const DScope = DAECompiler.Intrinsics.Scope
-else
-    using ..DAECompilerStubs: variable, equation, equation!, AbstractScope, observed!
-    const DScope = DAECompilerStubs.Scope  # Note: Scope accessed via module, not exported
-end
+# Use stubs from vasim.jl (loaded earlier)
+# variable(), equation!(), observed!() are already defined there
+struct equation end  # Type stub for Net
+
+const AbstractScope = CedarSim.AbstractScope
+const DScope = CedarSim.DebugScope
 
 using Base.ScopedValues
 using Base.Experimental: @MethodTable, @overlay
@@ -147,21 +143,4 @@ function branch!(f, scope::Union{Nothing, AbstractScope}, net₊::AbstractNet, n
     equation!(f(branch!(scope, net₊, net₋)...))
 end
 
-# Phase 0: Guard DAECompiler method extensions
-@static if CedarSim.USE_DAECOMPILER
-    @inline function DAECompiler.equation!(val::Dual{SimTag, <:Number, 1}, scope)
-        DAECompiler.equation!(ForwardDiff.value(SimTag, val), scope)
-    end
-
-    @inline function DAECompiler.equation!(val::Dual{SimTag, <:Number, 1})
-        DAECompiler.equation!(ForwardDiff.value(SimTag, val))
-    end
-
-    @inline function DAECompiler.observed!(val::Dual{SimTag, <:Number, 1}, name)
-        DAECompiler.observed!(ForwardDiff.value(SimTag, val), name)
-    end
-
-    @inline function DAECompiler.observed!(val::Dual{SimTag, <:Number, 1})
-        DAECompiler.observed!(ForwardDiff.value(SimTag, val))
-    end
-end
+# DAECompiler.equation!/observed! method extensions removed (DAECompiler not used)

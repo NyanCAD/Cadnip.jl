@@ -3,12 +3,8 @@ using AxisKeys
 using OrdinaryDiffEq, SciMLBase, Sundials
 using Base.Iterators
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler: arg1_from_sys
-else
-    using ..DAECompilerStubs: arg1_from_sys
-end
+# DAECompiler stub (kept for legacy sweep code paths)
+arg1_from_sys(args...) = error("arg1_from_sys() requires DAECompiler")
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
 

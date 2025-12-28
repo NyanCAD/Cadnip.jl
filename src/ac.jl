@@ -1,13 +1,16 @@
+# AC Analysis (legacy - requires DAECompiler porting to MNA)
+# TODO: Port AC analysis to use MNA backend
+#
+# This file is kept as a reference for future porting. The functions here
+# will error when called since DAECompiler is not available.
+
 using DescriptorSystems
 using OrdinaryDiffEq
 using LinearAlgebra
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    import DAECompiler: get_transformed_sys, IRODESystem
-else
-    using ..DAECompilerStubs: get_transformed_sys, IRODESystem
-end
+# DAECompiler stubs (AC analysis needs porting to MNA)
+get_transformed_sys(args...) = error("get_transformed_sys() requires DAECompiler - AC analysis needs porting to MNA")
+const IRODESystem = CedarSim.IRODESystem
 
 export ac!, acdec, freqresp, noise!
 
@@ -25,13 +28,7 @@ struct NoiseSol <: FreqSol
     sol::SciMLBase.AbstractODESolution
 end
 
-# Convenience function to get our tsys from an `ACSol` object
-# this will also make `DAECompiler.get_sys` work to get the IRODESystem
-# Phase 0: Guard DAECompiler method extensions
-@static if CedarSim.USE_DAECOMPILER
-    DAECompiler.get_transformed_sys(ac::ACSol) = ac.sol.prob.f.sys
-    DAECompiler.get_transformed_sys(ac::NoiseSol) = ac.sol.prob.f.sys
-end
+# DAECompiler.get_transformed_sys method extensions removed (DAECompiler not used)
 
 
 
