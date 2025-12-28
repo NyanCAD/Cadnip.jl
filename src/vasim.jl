@@ -1032,7 +1032,7 @@ function make_mna_device(vm::VANode{VerilogModule})
         end
     end
 
-    # Second pre-pass: collect named branches (branch declarations like "branch (pos, neg) br;")
+    # Second pre-pass: collect named branches (branch declarations like "branch (pos, neg) br;" or "branch (node) br;")
     named_branches = Dict{Symbol, Pair{Symbol,Symbol}}()
     for child in vm.items
         item = child.item
@@ -1043,8 +1043,14 @@ function make_mna_device(vm::VANode{VerilogModule})
                 for ref in item.references
                     push!(refs, Symbol(assemble_id_string(ref.item)))
                 end
-                @assert length(refs) == 2 "Branch declaration must have exactly 2 nodes"
-                pos_node, neg_node = refs[1], refs[2]
+                # Support both two-node branches (pos, neg) and single-node branches (node) to ground
+                @assert length(refs) in (1, 2) "Branch declaration must have 1 or 2 nodes, got $(length(refs))"
+                if length(refs) == 2
+                    pos_node, neg_node = refs[1], refs[2]
+                else
+                    # Single-node branch: branch (node) name; - connected to ground
+                    pos_node, neg_node = refs[1], Symbol("0")
+                end
 
                 # Extract branch identifiers
                 for bid in item.ids
@@ -2305,8 +2311,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
+        # Check for valid positive index within bounds
         push!(branch_current_extraction.args,
-            :($I_sym = isempty(x) || $I_var > length(x) ? 0.0 : x[$I_var]))
+            :($I_sym = isempty(x) || $I_var < 1 || $I_var > length(x) ? 0.0 : x[$I_var]))
     end
 
     # Generate voltage contribution stamping for named branches

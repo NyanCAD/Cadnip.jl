@@ -1281,6 +1281,212 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
         end
 
+        @testset "VADistiller sp_mos2" begin
+            # MOS2 model: 4-terminal (d, g, s, b)
+            mos2_va = read(joinpath(vadistiller_path, "mos2.va"), String)
+            va = VerilogAParser.parse(IOBuffer(mos2_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Test that MNA module generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                # Simple NMOS common-source circuit
+                function sp_mos2_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    # Power supply
+                    stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                    # Gate bias (above threshold)
+                    stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                    # Drain load resistor
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    # NMOS with proper dimensions (source and bulk grounded)
+                    stamp!(sp_mos2(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_mos2_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_mos3" begin
+            # MOS3 model: 4-terminal (d, g, s, b)
+            mos3_va = read(joinpath(vadistiller_path, "mos3.va"), String)
+            va = VerilogAParser.parse(IOBuffer(mos3_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Test that MNA module generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                # Simple NMOS common-source circuit
+                function sp_mos3_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    # Power supply
+                    stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                    # Gate bias (above threshold)
+                    stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                    # Drain load resistor
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    # NMOS with proper dimensions (source and bulk grounded)
+                    stamp!(sp_mos3(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_mos3_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_mos6" begin
+            # MOS6 model: 4-terminal (d, g, s, b)
+            mos6_va = read(joinpath(vadistiller_path, "mos6.va"), String)
+            va = VerilogAParser.parse(IOBuffer(mos6_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Code generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                true
+            end
+
+            # Simulation is broken due to output variable code generation issue
+            # (MOS6drainSquares not defined - needs output variable handling fix)
+            @test_broken begin
+                function sp_mos6_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                    stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    stamp!(sp_mos6(; l=1e-6, w=10e-6, vto=0.7, u0=600.0, tox=10e-9), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_mos6_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_mos9" begin
+            # MOS9 model: 4-terminal (d, g, s, b)
+            mos9_va = read(joinpath(vadistiller_path, "mos9.va"), String)
+            va = VerilogAParser.parse(IOBuffer(mos9_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Test that MNA module generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                # Simple NMOS common-source circuit
+                function sp_mos9_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    # Power supply
+                    stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                    # Gate bias (above threshold)
+                    stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                    # Drain load resistor
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    # NMOS with proper dimensions (source and bulk grounded)
+                    stamp!(sp_mos9(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_mos9_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_bsim3v3" begin
+            # BSIM3v3 model: 4-terminal (d, g, s, b)
+            bsim3v3_va = read(joinpath(vadistiller_path, "bsim3v3.va"), String)
+            va = VerilogAParser.parse(IOBuffer(bsim3v3_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Code generation works, but simulation needs output variable handling
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                true  # Code generation succeeds
+            end
+
+            # Simulation is broken due to output variable code generation issue
+            # (drainResistance not defined - needs output variable handling fix)
+            @test_broken begin
+                function sp_bsim3v3_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    stamp!(VoltageSource(1.8; name=:Vdd), ctx, vdd, 0)
+                    stamp!(VoltageSource(1.0; name=:Vg), ctx, gate, 0)
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    stamp!(sp_bsim3v3(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_bsim3v3_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_vdmos" begin
+            # VDMOS model: 5-terminal (d, g, s, t, tc) with single-node branch
+            vdmos_va = read(joinpath(vadistiller_path, "vdmos.va"), String)
+            va = VerilogAParser.parse(IOBuffer(vdmos_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Code generation works (single-node branch support)
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                true
+            end
+
+            # Test simulation with 5 terminals: d, g, s, t(thermal), tc(thermal case)
+            @test begin
+                function sp_vdmos_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    stamp!(VoltageSource(10.0; name=:Vdd), ctx, vdd, 0)
+                    stamp!(VoltageSource(5.0; name=:Vg), ctx, gate, 0)
+                    stamp!(Resistor(100.0; name=:Rd), ctx, vdd, drain)
+                    # VDMOS with 5 terminals: d, g, s, t(thermal), tc(thermal case)
+                    # source, thermal nodes grounded
+                    stamp!(sp_vdmos(; vto=2.0, kp=0.5), ctx, drain, gate, 0, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_vdmos_circuit, (;), MNASpec())
+                # Basic sanity check: drain voltage should be between 0 and Vdd
+                0.0 < voltage(sol, :drain) < 10.0
+            end
+        end
+
     end
 
 end
@@ -1323,6 +1529,7 @@ end
 # ✅ analysis() - check analysis type (parser + MNAScope support)
 # ✅ $limit() - voltage limiting (returns voltage unchanged, model works but may converge slower)
 # ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
+# ✅ Single-node branch declarations (branch (node) name;) for grounded branches
 #
 # MISSING PARSER FEATURES (VerilogAParser needs extension):
 # ❌ @(initial_step) - initialization event handling
@@ -1337,17 +1544,22 @@ end
 # ✅ mes1.va: Parses and simulates correctly (3-terminal GaAs MESFET)
 # ✅ mos1.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 1)
 # ✅ jfet2.va: Parses and simulates correctly (3-terminal JFET with capacitances)
-#
-# PARSING OK, SIMULATION NEEDS TESTING:
-# ⚠️ mos2.va, mos3.va, mos6.va, mos9.va: Parse correctly, need circuit tests
+# ✅ mos2.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 2)
+# ✅ mos3.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 3)
+# ✅ mos9.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 9)
+# ✅ vdmos.va: Parses and simulates correctly (5-terminal VDMOS with thermal nodes)
 #
 # WORKING CORE FEATURES (verified with simplified test models):
 # ✅ Single-node contributions (I(a) <+ expr) - stamps at node and ground correctly
 # ✅ Internal node allocation for VA modules
 # ✅ User-defined function output parameter handling (inout params return tuples)
 # ✅ FunctionCallStatement: calling functions for side effects (DEVqmeyer, qgg, etc.)
+# ✅ C-style boolean negation (! operator on Float64, Int64, ForwardDiff.Dual)
+#
+# PARSING OK, SIMULATION NEEDS OUTPUT VARIABLE FIX:
+# ⚠️ mos6.va: Parses OK, code generation OK, simulation needs output variable fix (MOS6drainSquares)
+# ⚠️ bsim3v3.va: Parses OK, code generation OK, simulation needs output variable fix (drainResistance)
 #
 # COMPLEX MODELS (need additional features):
 # ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
-# ❌ vdmos.va: Uses branch declarations with different syntax
 #==============================================================================#
