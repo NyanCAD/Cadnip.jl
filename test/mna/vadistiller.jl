@@ -1451,6 +1451,42 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
         end
 
+        @testset "VADistiller sp_vdmos" begin
+            # VDMOS model: 5-terminal (d, g, s, t, tc) with single-node branch
+            vdmos_va = read(joinpath(vadistiller_path, "vdmos.va"), String)
+            va = VerilogAParser.parse(IOBuffer(vdmos_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Code generation works (single-node branch support)
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                true
+            end
+
+            # Test simulation with 5 terminals: d, g, s, t(thermal), tc(thermal case)
+            @test begin
+                function sp_vdmos_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    stamp!(VoltageSource(10.0; name=:Vdd), ctx, vdd, 0)
+                    stamp!(VoltageSource(5.0; name=:Vg), ctx, gate, 0)
+                    stamp!(Resistor(100.0; name=:Rd), ctx, vdd, drain)
+                    # VDMOS with 5 terminals: d, g, s, t(thermal), tc(thermal case)
+                    # source, thermal nodes grounded
+                    stamp!(sp_vdmos(; vto=2.0, kp=0.5), ctx, drain, gate, 0, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_vdmos_circuit, (;), MNASpec())
+                # Basic sanity check: drain voltage should be between 0 and Vdd
+                0.0 < voltage(sol, :drain) < 10.0
+            end
+        end
+
     end
 
 end
@@ -1493,6 +1529,7 @@ end
 # ✅ analysis() - check analysis type (parser + MNAScope support)
 # ✅ $limit() - voltage limiting (returns voltage unchanged, model works but may converge slower)
 # ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
+# ✅ Single-node branch declarations (branch (node) name;) for grounded branches
 #
 # MISSING PARSER FEATURES (VerilogAParser needs extension):
 # ❌ @(initial_step) - initialization event handling
@@ -1510,6 +1547,7 @@ end
 # ✅ mos2.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 2)
 # ✅ mos3.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 3)
 # ✅ mos9.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 9)
+# ✅ vdmos.va: Parses and simulates correctly (5-terminal VDMOS with thermal nodes)
 #
 # WORKING CORE FEATURES (verified with simplified test models):
 # ✅ Single-node contributions (I(a) <+ expr) - stamps at node and ground correctly
@@ -1524,5 +1562,4 @@ end
 #
 # COMPLEX MODELS (need additional features):
 # ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
-# ❌ vdmos.va: Uses single-node branch declarations (branch (node) name;) not yet supported
 #==============================================================================#
