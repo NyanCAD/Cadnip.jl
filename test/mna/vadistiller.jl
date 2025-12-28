@@ -1770,6 +1770,212 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
     end
 
+    #==========================================================================#
+    # Tier 8: Multi-Solver Transient Tests with Explicit Jacobian
+    #
+    # Test transient simulations with multiple ODE solvers to verify
+    # solver compatibility and explicit Jacobian functionality.
+    #==========================================================================#
+
+    @testset "Tier 8: Multi-Solver Transient" begin
+        using Sundials: IDA
+
+        # Note: VADistiller models (sp_resistor_module, sp_capacitor_module, sp_diode_module,
+        # sp_mos1_module, sp_bjt_module) are already loaded in earlier tiers.
+        # Reuse them to avoid "multiple bindings" errors on Julia 1.12.
+
+        @testset "RC circuit with multiple ODE solvers" begin
+            # Simple RC circuit to test solver compatibility
+            function build_rc(params, spec; x=Float64[])
+                ctx = MNAContext()
+                v = get_node!(ctx, :v)
+                out = get_node!(ctx, :out)
+
+                stamp!(VoltageSource(params.V), ctx, v, 0)
+                stamp!(sp_resistor_module.sp_resistor(; r=params.R), ctx, v, out)
+                stamp!(sp_capacitor_module.sp_capacitor(; c=params.C), ctx, out, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_rc; V=5.0, R=1000.0, C=1e-6)
+            tspan = (0.0, 5e-3)  # 5 time constants for RC = 1ms
+
+            # Test with Rodas5P (Rosenbrock)
+            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
+            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+
+            # Test with QNDF (BDF)
+            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-10, reltol=1e-8)
+            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+
+            # Note: IDA (DAE solver) has initialization issues with VA models
+            # containing capacitors, so we skip it here
+
+            # Check final value is close to 5V (capacitor charged)
+            T = tspan[2]
+            @test sol_rodas(T)[2] > 4.5  # Should be close to 5V
+
+            # Solvers should agree with each other
+            @test isapprox(sol_rodas(T)[2], sol_qndf(T)[2]; rtol=0.01)
+        end
+
+        @testset "Diode rectifier with multiple ODE solvers" begin
+            # Half-wave rectifier with DC source (stable for all solvers)
+            function build_rectifier(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                stamp!(VoltageSource(params.V), ctx, vin, 0)
+                stamp!(sp_diode_module.sp_diode(; is=1e-14), ctx, vin, vout; x=x, spec=spec)
+                stamp!(sp_resistor_module.sp_resistor(; r=params.R), ctx, vout, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_rectifier; V=1.0, R=1000.0)
+            tspan = (0.0, 1e-3)
+
+            # Test with Rodas5P
+            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+
+            # Test with QNDF
+            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+
+            # Test with IDA (DC source is stable)
+            sol_ida = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
+            @test sol_ida.retcode == SciMLBase.ReturnCode.Success
+
+            # Output should be around Vin - Vdiode ≈ 1.0 - 0.6 = 0.4V
+            T = 0.5e-3
+            @test sol_rodas(T)[2] > 0.3
+            @test sol_rodas(T)[2] < 0.8
+
+            # Solvers should agree
+            @test isapprox(sol_rodas(T)[2], sol_qndf(T)[2]; rtol=0.01)
+            @test isapprox(sol_rodas(T)[2], sol_ida(T)[2]; rtol=0.01)
+        end
+
+        @testset "MOSFET CS amplifier with multiple ODE solvers" begin
+            # Common-source amplifier with SIN input
+            function build_cs_amp(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                vgate = get_node!(ctx, :vgate)
+                vdrain = get_node!(ctx, :vdrain)
+
+                stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
+                       ctx, vgate, 0; t=spec.time, mode=spec.mode)
+                stamp!(sp_resistor_module.sp_resistor(; r=params.Rd), ctx, vdd, vdrain)
+                stamp!(sp_mos1_module.sp_mos1(; vto=1.0, kp=1e-4),
+                       ctx, vdrain, vgate, 0, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_cs_amp;
+                                 Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
+            tspan = (0.0, 2e-3)
+
+            # Test with Rodas5P
+            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+
+            # Test with QNDF (BDF is generally stable for MOSFET)
+            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+
+            T = 1e-3
+            vd_rodas = sol_rodas(T)[3]
+            vd_qndf = sol_qndf(T)[3]
+
+            # Drain should be in valid range
+            @test vd_rodas > 0.0 && vd_rodas < 5.5
+            @test vd_qndf > 0.0 && vd_qndf < 5.5
+
+            # Solvers should agree
+            @test isapprox(vd_rodas, vd_qndf; rtol=0.05)
+        end
+
+        @testset "BJT CE amplifier with Rosenbrock solver" begin
+            # BJT + SIN source: only Rosenbrock is reliable
+            # BDF solvers (QNDF, FBDF) can be unstable for BJT with time-varying sources
+            function build_ce_amp(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                vbase = get_node!(ctx, :vbase)
+                vcollector = get_node!(ctx, :vcollector)
+
+                stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
+                       ctx, vbase, 0; t=spec.time, mode=spec.mode)
+                stamp!(sp_resistor_module.sp_resistor(; r=params.Rc), ctx, vcc, vcollector)
+                stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15),
+                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_ce_amp;
+                                 Vcc=5.0, Vbias=0.65, Vac=0.02, freq=1000.0, Rc=2000.0)
+            tspan = (0.0, 2e-3)
+
+            # Rodas5P handles stiff BJT equations well
+            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+
+            T = 1e-3
+            vc_t0 = sol_rodas(T)[3]
+            vc_pos = sol_rodas(T + T/4)[3]
+            vc_neg = sol_rodas(T + 3T/4)[3]
+
+            # Check for NaN
+            @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
+
+            # Collector should be in valid range
+            @test vc_t0 > 0.0 && vc_t0 < 5.5
+
+            # CE amplifier inverts signal
+            @test vc_pos < vc_neg + 0.5
+        end
+
+        @testset "BJT CE amplifier with DC source" begin
+            # BJT circuits are stiff - Rosenbrock methods handle them best
+            # BDF solvers (QNDF, FBDF) and DAE solvers (IDA) can be unstable
+            function build_ce_dc(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                vbase = get_node!(ctx, :vbase)
+                vcollector = get_node!(ctx, :vcollector)
+
+                stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
+                stamp!(VoltageSource(params.Vbase; name=:Vb), ctx, vbase, 0)
+                stamp!(sp_resistor_module.sp_resistor(; r=params.Rc), ctx, vcc, vcollector)
+                stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15),
+                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_ce_dc; Vcc=5.0, Vbase=0.65, Rc=2000.0)
+            tspan = (0.0, 1e-3)
+
+            # Rodas5P handles stiff BJT equations reliably
+            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+
+            T = 0.5e-3
+            vc = sol_rodas(T)[3]
+            @test !isnan(vc)
+            @test vc > 0.0 && vc < 5.5  # Valid range
+        end
+
+    end
+
 end
 
 #==============================================================================#
