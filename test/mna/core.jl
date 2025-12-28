@@ -2286,7 +2286,131 @@ using VerilogAParser
             @test isapprox(-I_explicit, I_expected; rtol=0.1)
         end
 
-        # Test 5: Jacobian sparsity with VADistiller models
+        # Test 5: MOSFET common-source amplifier with VADistiller mos1.va
+        @testset "MOSFET CS amplifier transient (VADistiller mos1)" begin
+            # Load mos1.va
+            mos1_va = read(joinpath(vadistiller_path, "mos1.va"), String)
+            va_mos1 = VerilogAParser.parse(IOBuffer(mos1_va))
+            @test !va_mos1.ps.errored
+            Core.eval(Main, CedarSim.make_mna_module(va_mos1))
+
+            function build_cs_amp(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                vgate = get_node!(ctx, :vgate)
+                vdrain = get_node!(ctx, :vdrain)
+
+                # DC supply
+                stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
+
+                # Gate bias + AC signal
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
+                       ctx, vgate, 0; t=spec.time, mode=spec.mode)
+
+                # Drain resistor
+                stamp!(Main.sp_resistor(; r=params.Rd), ctx, vdd, vdrain)
+
+                # NMOS: drain, gate, source, bulk
+                stamp!(Main.sp_mos1(; vto=1.0, kp=1e-4),
+                       ctx, vdrain, vgate, 0, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            # Bias in active region: Vgs = 1.5V > Vth = 1.0V
+            circuit = MNACircuit(build_cs_amp;
+                                 Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
+            tspan = (0.0, 2e-3)
+
+            # Test with Rodas5P
+            sol_rodas = tran!(circuit, tspan;
+                              solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == ReturnCode.Success
+
+            # Test with QNDF
+            sol_qndf = tran!(circuit, tspan;
+                             solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol_qndf.retcode == ReturnCode.Success
+
+            T = 1e-3
+
+            # Get drain voltages at different phases
+            vd_t0 = sol_rodas(T)[3]  # vdrain is node 3
+            vd_pos = sol_rodas(T + T/4)[3]
+            vd_neg = sol_rodas(T + 3T/4)[3]
+
+            # Check for NaN (indicates solver instability)
+            @test !isnan(vd_t0) && !isnan(vd_pos) && !isnan(vd_neg)
+
+            # Drain should stay in reasonable range
+            @test vd_t0 > 0.0  # Positive voltage
+            @test vd_t0 < 5.5  # Not above Vdd
+
+            # Solvers should agree
+            @test isapprox(sol_rodas(T)[3], sol_qndf(T)[3]; rtol=0.05)
+        end
+
+        # Test 6: BJT common-emitter amplifier with VADistiller bjt.va
+        @testset "BJT CE amplifier transient (VADistiller bjt)" begin
+            # Load bjt.va
+            bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
+            va_bjt = VerilogAParser.parse(IOBuffer(bjt_va))
+            @test !va_bjt.ps.errored
+            Core.eval(Main, CedarSim.make_mna_module(va_bjt))
+
+            function build_ce_amp(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                vbase = get_node!(ctx, :vbase)
+                vcollector = get_node!(ctx, :vcollector)
+
+                # DC supply
+                stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
+
+                # Base bias + AC signal
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
+                       ctx, vbase, 0; t=spec.time, mode=spec.mode)
+
+                # Collector resistor
+                stamp!(Main.sp_resistor(; r=params.Rc), ctx, vcc, vcollector)
+
+                # BJT: collector, base, emitter, substrate
+                stamp!(Main.sp_bjt(; bf=100.0, is=1e-15),
+                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            # Bias at ~0.65V to be in active region
+            circuit = MNACircuit(build_ce_amp;
+                                 Vcc=5.0, Vbias=0.65, Vac=0.02, freq=1000.0, Rc=2000.0)
+            tspan = (0.0, 2e-3)
+
+            # Test with Rodas5P (Rosenbrock handles stiff BJT well)
+            # Note: BDF solvers (QNDF, FBDF) can be unstable for BJT+SIN
+            sol_rodas = tran!(circuit, tspan;
+                              solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == ReturnCode.Success
+
+            T = 1e-3
+
+            # Get collector voltages at different phases
+            vc_t0 = sol_rodas(T)[3]  # vcollector is node 3
+            vc_pos = sol_rodas(T + T/4)[3]
+            vc_neg = sol_rodas(T + 3T/4)[3]
+
+            # Check for NaN (indicates solver instability)
+            @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
+
+            # Only test if values are valid
+            if !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
+                # Collector should be in reasonable range
+                @test vc_t0 > 0.0  # Positive voltage
+                @test vc_t0 < 5.5  # Not above Vcc
+            end
+        end
+
+        # Test 7: Jacobian sparsity with VADistiller models
         @testset "Jacobian sparsity pattern (VADistiller)" begin
             function build_vadist_ladder(params, spec; x=Float64[])
                 ctx = MNAContext()
