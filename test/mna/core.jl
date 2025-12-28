@@ -33,6 +33,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 # Import CedarSim for tran! and solver comparison tests
 using CedarSim
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+using VerilogAParser
 
 @testset "MNA Core Tests" begin
 
@@ -2049,6 +2050,276 @@ using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
             @test isapprox(V_ida, V_rodas; rtol=0.01) || (t, V_ida, V_rodas)
             @test isapprox(V_ida, V_qndf; rtol=0.01) || (t, V_ida, V_qndf)
             @test isapprox(V_ida, V_fbdf; rtol=0.01) || (t, V_ida, V_fbdf)
+        end
+    end
+
+    #==========================================================================#
+    # Explicit Jacobian Tests with Full VADistiller Models
+    #==========================================================================#
+
+    @testset "Explicit Jacobian with VADistiller models" begin
+        using CedarSim.MNA: compile_circuit, make_compiled_dae_residual, make_compiled_dae_jacobian
+        using CedarSim.MNA: MNASpec, MNACircuit, SinVoltageSource
+        using Sundials: IDA
+        using OrdinaryDiffEq: DFBDF
+
+        # Load full VADistiller models from files
+        vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
+
+        # Load and create resistor module
+        resistor_va = read(joinpath(vadistiller_path, "resistor.va"), String)
+        va_resistor = VerilogAParser.parse(IOBuffer(resistor_va))
+        @test !va_resistor.ps.errored
+        Core.eval(Main, CedarSim.make_mna_module(va_resistor))
+
+        # Load and create capacitor module
+        capacitor_va = read(joinpath(vadistiller_path, "capacitor.va"), String)
+        va_capacitor = VerilogAParser.parse(IOBuffer(capacitor_va))
+        @test !va_capacitor.ps.errored
+        Core.eval(Main, CedarSim.make_mna_module(va_capacitor))
+
+        # Load and create diode module
+        diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
+        va_diode = VerilogAParser.parse(IOBuffer(diode_va))
+        @test !va_diode.ps.errored
+        Core.eval(Main, CedarSim.make_mna_module(va_diode))
+
+        # Test 1: Compiled DAE Jacobian with VADistiller capacitor
+        @testset "Compiled DAE Jacobian structure (VADistiller)" begin
+            function build_vadist_rc(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                out = get_node!(ctx, :out)
+
+                stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, vcc, out)
+                stamp!(Main.sp_capacitor(; c=params.C), ctx, out, 0)
+
+                return ctx
+            end
+
+            params = (Vcc=5.0, R=1000.0, C=1e-6)
+            spec = MNASpec()
+
+            # Compile the circuit
+            pc = compile_circuit(build_vadist_rc, params, spec)
+
+            # Verify compiled circuit structure
+            @test pc.n == 3  # vcc, out, I_Vsrc
+            @test pc.n_nodes == 2
+            @test pc.n_currents == 1
+
+            # Create residual and jacobian functions
+            residual! = make_compiled_dae_residual(pc)
+            jacobian! = make_compiled_dae_jacobian(pc)
+
+            # Test that functions are callable
+            n = pc.n
+            u = ones(n)
+            du = zeros(n)
+            resid = zeros(n)
+            J = zeros(n, n)
+
+            residual!(resid, du, u, nothing, 0.0)
+            @test !all(resid .== 0)  # Should have non-zero residual
+
+            # Test Jacobian computation: J = G + gamma*C
+            gamma = 1.0
+            jacobian!(J, du, u, nothing, gamma, 0.0)
+
+            # Jacobian should have expected structure
+            @test !all(J .== 0)  # Should have non-zero Jacobian
+            @test size(J) == (n, n)
+        end
+
+        # Test 2: Multi-solver comparison with VADistiller models and explicit Jacobian
+        @testset "Multi-solver explicit Jacobian comparison (VADistiller)" begin
+            # RC circuit with VADistiller models - step response
+            function build_vadist_rc_step(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                out = get_node!(ctx, :out)
+
+                stamp!(VoltageSource(params.V; name=:Vin), ctx, vin, 0)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, vin, out)
+                stamp!(Main.sp_capacitor(; c=params.C), ctx, out, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_vadist_rc_step; V=5.0, R=1000.0, C=1e-6)
+            tspan = (0.0, 5e-3)
+
+            # DAE solver (IDA) with explicit Jacobian
+            sol_ida_explicit = tran!(circuit, tspan;
+                                     solver=IDA(), explicit_jacobian=true,
+                                     abstol=1e-8, reltol=1e-6)
+            @test sol_ida_explicit.retcode == ReturnCode.Success
+
+            # DAE solver (IDA) with implicit Jacobian (finite diff)
+            sol_ida_implicit = tran!(circuit, tspan;
+                                     solver=IDA(), explicit_jacobian=false,
+                                     abstol=1e-8, reltol=1e-6)
+            @test sol_ida_implicit.retcode == ReturnCode.Success
+
+            # ODE solvers (already use explicit Jacobian via ODEProblem path)
+            sol_rodas = tran!(circuit, tspan;
+                              solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
+            @test sol_rodas.retcode == ReturnCode.Success
+
+            sol_qndf = tran!(circuit, tspan;
+                             solver=QNDF(), abstol=1e-10, reltol=1e-8)
+            @test sol_qndf.retcode == ReturnCode.Success
+
+            sol_fbdf = tran!(circuit, tspan;
+                             solver=FBDF(), abstol=1e-10, reltol=1e-8)
+            @test sol_fbdf.retcode == ReturnCode.Success
+
+            # All solvers should agree
+            test_times = [1e-3, 2e-3, 4e-3]
+            for t in test_times
+                V_ida_exp = sol_ida_explicit(t)[2]
+                V_ida_imp = sol_ida_implicit(t)[2]
+                V_rodas = sol_rodas(t)[2]
+                V_qndf = sol_qndf(t)[2]
+                V_fbdf = sol_fbdf(t)[2]
+
+                # Explicit vs implicit IDA should match
+                @test isapprox(V_ida_exp, V_ida_imp; rtol=0.01)
+
+                # DAE and ODE paths should match
+                @test isapprox(V_ida_exp, V_rodas; rtol=0.01)
+                @test isapprox(V_ida_exp, V_qndf; rtol=0.01)
+                @test isapprox(V_ida_exp, V_fbdf; rtol=0.01)
+            end
+
+            # Check steady-state (DC initialized to 5V)
+            @test isapprox(sol_ida_explicit(5e-3)[2], 5.0; rtol=0.01)
+        end
+
+        # Test 3: Nonlinear VADistiller diode with ODE solvers
+        @testset "Nonlinear VADistiller diode with explicit Jacobian" begin
+            # Half-wave rectifier with VADistiller diode
+            function build_vadist_rectifier(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
+                       ctx, vin, 0; t=spec.time, mode=spec.mode)
+                stamp!(Main.sp_diode(; is=1e-14, n=1.0), ctx, vin, vout; x=x, spec=spec)
+                stamp!(Main.sp_resistor(; r=params.Rload), ctx, vout, 0)
+                stamp!(Main.sp_capacitor(; c=params.Cload), ctx, vout, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_vadist_rectifier;
+                                 Vamp=2.0, freq=1000.0, Rload=1000.0, Cload=1e-6)
+            tspan = (0.0, 2e-3)
+
+            # Test with Rodas5P (ODE path - reliable for nonlinear)
+            sol_rodas = tran!(circuit, tspan;
+                              solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol_rodas.retcode == ReturnCode.Success
+
+            # Test with QNDF
+            sol_qndf = tran!(circuit, tspan;
+                             solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol_qndf.retcode == ReturnCode.Success
+
+            # Test with FBDF
+            sol_fbdf = tran!(circuit, tspan;
+                             solver=FBDF(), abstol=1e-8, reltol=1e-6)
+            @test sol_fbdf.retcode == ReturnCode.Success
+
+            # Check that output is positive (rectified)
+            T = 1e-3
+            for sol in [sol_rodas, sol_qndf, sol_fbdf]
+                vout_peak = sol(T/4)[2]  # Near positive peak
+                @test vout_peak > 0.3  # Should be positive
+
+                vout_neg = sol(3T/4)[2]  # Near negative input peak
+                @test vout_neg >= -0.1  # Should remain positive (capacitor holds)
+            end
+
+            # ODE solvers should agree
+            for t in [0.5e-3, 1e-3, 1.5e-3]
+                @test isapprox(sol_rodas(t)[2], sol_qndf(t)[2]; rtol=0.05)
+                @test isapprox(sol_rodas(t)[2], sol_fbdf(t)[2]; rtol=0.05)
+            end
+        end
+
+        # Test 4: DC solve with nonlinear VADistiller diode and explicit Jacobian
+        @testset "DC solve with VADistiller diode (explicit Jacobian)" begin
+            using CedarSim.MNA: solve_dc
+
+            function build_vadist_diode_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                anode = get_node!(ctx, :anode)
+
+                stamp!(VoltageSource(params.V; name=:Vs), ctx, anode, 0)
+                stamp!(Main.sp_diode(; is=1e-14, n=1.0), ctx, anode, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            params = (V=0.6,)
+            spec = MNASpec(mode=:dcop)
+
+            # Solve with explicit Jacobian
+            sol_explicit = solve_dc(build_vadist_diode_circuit, params, spec;
+                                    explicit_jacobian=true)
+            I_explicit = current(sol_explicit, :I_Vs)
+
+            # Solve with finite differences
+            sol_fd = solve_dc(build_vadist_diode_circuit, params, spec;
+                              explicit_jacobian=false)
+            I_fd = current(sol_fd, :I_Vs)
+
+            # Both should give same result
+            @test isapprox(I_explicit, I_fd; rtol=0.01)
+
+            # Check diode equation: I = Is*(exp(V/Vt) - 1)
+            Vt = 0.02585
+            I_expected = 1e-14 * (exp(0.6/Vt) - 1.0)
+            @test isapprox(-I_explicit, I_expected; rtol=0.1)
+        end
+
+        # Test 5: Jacobian sparsity with VADistiller models
+        @testset "Jacobian sparsity pattern (VADistiller)" begin
+            function build_vadist_ladder(params, spec; x=Float64[])
+                ctx = MNAContext()
+                v = get_node!(ctx, :v)
+                n1 = get_node!(ctx, :n1)
+                n2 = get_node!(ctx, :n2)
+                n3 = get_node!(ctx, :n3)
+
+                stamp!(VoltageSource(params.V), ctx, v, 0)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, v, n1)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, n1, n2)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, n2, n3)
+                stamp!(Main.sp_resistor(; r=params.R), ctx, n3, 0)
+                stamp!(Main.sp_capacitor(; c=params.C), ctx, n1, 0)
+                stamp!(Main.sp_capacitor(; c=params.C), ctx, n2, 0)
+                stamp!(Main.sp_capacitor(; c=params.C), ctx, n3, 0)
+
+                return ctx
+            end
+
+            params = (V=5.0, R=1000.0, C=1e-6)
+            spec = MNASpec()
+
+            pc = compile_circuit(build_vadist_ladder, params, spec)
+
+            # Check that G and C have the expected sparsity
+            @test nnz(pc.G) > 0
+            @test nnz(pc.C) > 0
+
+            # G + C should be the Jacobian prototype
+            jac_proto = pc.G + pc.C
+            @test nnz(jac_proto) >= nnz(pc.G)
+            @test nnz(jac_proto) >= nnz(pc.C)
         end
     end
 
