@@ -1,0 +1,74 @@
+9 stage ring oscillator
+
+load "spice/resistor.osdi"
+load "spice/capacitor.osdi"
+load "spice/sn/bjt.osdi"
+
+model t2n2222 sp_bjt (
+  type=1 subs=1 // npn, vertical
+  is=19f bf=150 vaf=100 ikf=0.18 ise=50p 
+  ne=2.5 br=7.5 var=6.4 ikr=12m isc=8.7p
+  nc=1.2 rb=50 re=0.4 rc=0.3 cje=26p tf=0.5n 
+  cjc=11p tr=7n xtb=1.5 kf=0.032f af=1
+)
+
+model vsource vsource
+model isource isource
+model r sp_resistor
+model c sp_capacitor
+
+subckt invcell (in out vcc vee)
+parameters r=0.5k c=0.5n
+  q1 (out b vee) t2n2222
+  rb (in b) r r=r
+  cb (b 0) c c=c
+  rc (vcc out) r r=1k
+ends
+
+x1 (9 1 vcc 0) invcell
+x2 (1 2 vcc 0) invcell
+x3 (2 3 vcc 0) invcell
+x4 (3 4 vcc 0) invcell
+x5 (4 5 vcc 0) invcell
+x6 (5 6 vcc 0) invcell
+x7 (6 7 vcc 0) invcell
+x8 (7 8 vcc 0) invcell
+x9 (8 9 vcc 0) invcell
+
+vcc (vcc 0) vsource dc=5
+i0 (0 1) isource type="pulse" val0=0 val1=10u delay=1n rise=1n fall=1n width=1n
+
+control
+  options tran_method="trap"  
+  options nr_contbypass=0 nr_residualcheck=0 
+  analysis tran1 tran step=1n stop=1000u maxstep=1n icmode="uic"
+  print stats
+  postprocess(PYTHON, "runme.py")
+endc
+
+
+embed "runme.py" <<<FILE
+from rawfile import rawread
+from runtest import *
+import numpy as np
+import sys
+
+tests=[]
+
+tran1 = rawread('tran1.raw').get()
+t = tran1["time"]
+v1 = tran1["1"]
+print("Points", t.size)
+
+# sys.exit(0)
+
+import matplotlib.pyplot as plt 
+
+fig1, ax1 = plt.subplots(1, 1)
+fig1.axes[0].set_title('Ring oscillator')
+fig1.axes[0].set_ylabel('V [V]')
+fig1.axes[0].set_xlabel('time [us]')
+fig1.axes[0].plot(t*1e6, v1, color="blue", label="v(1)")
+plt.show()
+
+>>>FILE

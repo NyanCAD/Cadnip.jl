@@ -1,0 +1,126 @@
+#!/usr/bin/env julia
+#==============================================================================#
+# VACASK Benchmark: Diode Voltage Multiplier
+#
+# A voltage multiplier (4 diodes, 4 capacitors) with a series resistor at its
+# input excited by a sinusoidal voltage.
+#
+# Benchmark target: ~500k timepoints
+#==============================================================================#
+
+using CedarSim
+using CedarSim.MNA
+using OrdinaryDiffEq
+using Printf
+using Statistics
+
+# Define simple diode model inline with transit time
+va"""
+module sp_diode(a, c);
+    parameter real is = 1e-14;
+    parameter real n = 1.0;
+    parameter real rs = 0.0;
+    parameter real cjo = 0.0;
+    parameter real vj = 1.0;
+    parameter real m = 0.5;
+    parameter real tt = 0.0;
+    inout a, c;
+    electrical a, c, a_int;
+    real Vd, Id, Cd, Vt, Qd;
+    analog begin
+        Vt = $temperature * 1.38e-23 / 1.602e-19;
+
+        if (rs > 0.0) begin
+            I(a, a_int) <+ V(a, a_int) / rs;
+            Vd = V(a_int, c);
+        end else begin
+            V(a, a_int) <+ 0;
+            Vd = V(a, c);
+        end
+
+        if (Vd > 40*n*Vt) begin
+            Id = is * exp(40.0) * (1.0 + Vd/(n*Vt) - 40.0);
+        end else if (Vd > -3*n*Vt) begin
+            Id = is * (exp(Vd / (n * Vt)) - 1.0);
+        end else begin
+            Id = -is;
+        end
+
+        Qd = tt * Id;
+        I(a_int, c) <+ Id;
+        I(a_int, c) <+ ddt(Qd);
+
+        if (cjo > 0.0) begin
+            if (Vd < vj) begin
+                Cd = cjo * pow(1.0 - Vd/vj, -m);
+            end else begin
+                Cd = cjo;
+            end
+            I(a_int, c) <+ Cd * ddt(Vd);
+        end
+    end
+endmodule
+"""
+
+# Load and parse the SPICE netlist from file
+const spice_file = joinpath(@__DIR__, "runme.sp")
+const spice_code = read(spice_file, String)
+
+# Parse SPICE to code, then evaluate to get the builder function
+# Pass sp_diode_module so the SPICE parser knows about our VA device
+const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:mul_circuit,
+                                         imported_hdl_modules=[sp_diode_module])
+eval(circuit_code)
+
+function run_benchmark(; warmup=true, dtmax=0.01e-6)
+    tspan = (0.0, 5e-3)  # 5ms simulation
+
+    # Warmup run
+    if warmup
+        println("Warmup run...")
+        try
+            sim = MNASim(mul_circuit)
+            tran!(sim, (0.0, 0.0001); dtmax=dtmax)
+        catch e
+            println("Warmup failed: ", e)
+            showerror(stdout, e, catch_backtrace())
+        end
+    end
+
+    # Benchmark runs
+    n_runs = 6
+    times = Float64[]
+    timepoints = Int[]
+
+    for i in 1:n_runs
+        sim = MNASim(mul_circuit)
+
+        t_start = time()
+        sol = tran!(sim, tspan; dtmax=dtmax)
+        t_elapsed = time() - t_start
+
+        if i > 1
+            push!(times, t_elapsed)
+            push!(timepoints, length(sol.t))
+        end
+
+        @printf("Run %d: %.3f s, %d timepoints\n", i, t_elapsed, length(sol.t))
+    end
+
+    if length(times) > 0
+        avg_time = mean(times)
+        avg_timepoints = mean(timepoints)
+
+        println("\n=== Results ===")
+        @printf("Average time: %.3f s\n", avg_time)
+        @printf("Average timepoints: %.0f\n", avg_timepoints)
+        if length(times) > 1
+            @printf("Std deviation: %.3f s (%.1f%%)\n", std(times), 100*std(times)/avg_time)
+        end
+    end
+end
+
+# Run if executed directly
+if abspath(PROGRAM_FILE) == @__FILE__
+    run_benchmark()
+end
