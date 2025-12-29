@@ -9,7 +9,7 @@ if isdefined(Revise, :is_same_file)
         if va.ps.errored
             throw(LoadError(file.file, 0, VAParseError(va)))
         end
-        ex = CedarSim.make_module(va)
+        ex = CedarSim.make_mna_module(va)
         Revise.process_source!(mod_exprs_sigs, ex, file, mod; kwargs...)
     end
     Revise.is_same_file(a::VAFile, b::String) = a.file == b
