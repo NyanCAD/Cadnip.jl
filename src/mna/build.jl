@@ -142,6 +142,12 @@ end
 Assemble the complete MNA system from the context.
 Returns an MNASystem ready for analysis.
 
+# Note on Explicit Zeros
+The assembled sparse matrices have explicit zeros removed via `dropzeros!`.
+This is important for correct detection of differential vs algebraic variables
+in DAE solvers like IDA. VA devices may stamp 0.0 values into matrices, which
+would otherwise cause false positives in differential variable detection.
+
 # Example
 ```julia
 ctx = MNAContext()
@@ -154,6 +160,11 @@ function assemble!(ctx::MNAContext)
     G = assemble_G(ctx)
     C = assemble_C(ctx)
     b = get_rhs(ctx)
+
+    # Remove explicit zeros from sparse matrices to ensure correct
+    # differential variable detection for DAE solvers
+    dropzeros!(G)
+    dropzeros!(C)
 
     ctx.finalized = true
 

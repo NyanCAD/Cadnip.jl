@@ -524,8 +524,16 @@ iteration, ensuring correct handling of nonlinear devices.
 # Arguments
 - `circuit`: The MNA circuit
 - `tspan`: Time span for simulation `(t0, tf)`
-- `solver`: Solver algorithm (default: IDA from Sundials.jl)
+- `solver`: Solver algorithm (default: IDA with tuned parameters for circuits)
 - `abstol`, `reltol`: Solver tolerances
+- `explicit_jacobian`: Use explicit Jacobian (default: false for DAE solvers)
+
+# Default IDA Configuration
+The default IDA solver is configured for circuit simulation with:
+- `max_error_test_failures=20`: More retries for difficult points (e.g., t=0 with
+  time-dependent sources). The standard default of 7 is often too low.
+- `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
+- `explicit_jacobian=false`: Safer for time-dependent sources.
 
 # Example
 ```julia
@@ -537,9 +545,13 @@ sol(1e-7)  # Get state at t=0.1μs
 """
 function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
-    # Default to IDA (DAE solver) for robustness with nonlinear circuits
+    # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
+    # Key settings:
+    # - max_error_test_failures=20: Allows more retries at difficult points (like t=0 with
+    #   time-dependent sources). Default of 7 is often too low for circuits.
+    # - max_nonlinear_iters=10: More Newton iterations for nonlinear devices
     if solver === nothing
-        solver = Sundials.IDA()
+        solver = Sundials.IDA(max_error_test_failures=20, max_nonlinear_iters=10)
     end
 
     # Dispatch based on solver type
@@ -547,11 +559,20 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
 end
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
+# Note: explicit_jacobian defaults to false for better robustness with time-dependent sources.
+# Time-dependent sources (SIN, PWL, etc.) cause the residual to change with t, which can
+# confuse IDA's initialization when using an explicit Jacobian computed at t=0.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, explicit_jacobian=true, kwargs...)
+                        abstol=1e-10, reltol=1e-8, explicit_jacobian=false,
+                        initializealg=nothing, kwargs...)
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
-    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+    # Use initializealg if provided, otherwise let the solver use its default
+    if initializealg !== nothing
+        return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
+    else
+        return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+    end
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
