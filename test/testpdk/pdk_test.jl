@@ -4,6 +4,7 @@ Test PDK and VA device precompilation with MNA.
 This tests:
 - `load_mna_modules()` for SPICE PDK files with subcircuits
 - `load_mna_va_module()` for Verilog-A device files
+- SPICE circuits that reference VA devices via `imported_hdl_modules`
 """
 
 using Test
@@ -13,6 +14,7 @@ using CedarSim: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
 const test_va_path = joinpath(@__DIR__, "test_resistor.va")
+const circuit_with_va_path = joinpath(@__DIR__, "circuit_with_va.spice")
 
 # Load PDK modules directly into this module (like a real PDK package would do)
 # This is the preferred API for precompilation - evals internally and returns modules
@@ -225,6 +227,89 @@ end
 
         @test v_100 > v_1000 > v_10000
         @test v_1000 ≈ 0.5 atol=1e-6
+    end
+
+end
+
+@testset "SPICE Circuit with VA Device" begin
+    # This demonstrates the typical use case where:
+    # 1. A VA device comes from a precompiled package (like BSIM4.jl)
+    # 2. A SPICE netlist references that device by name
+    # 3. The circuit is built using make_mna_circuit with imported_hdl_modules
+    #
+    # In a real PDK, the SPICE file would use:
+    #   .hdl "jlpkg://BSIM4/bsim4.va"
+    # to reference the package. Here we demonstrate the equivalent pattern
+    # by passing the module via imported_hdl_modules.
+
+    @testset "Build circuit from SPICE with VA device" begin
+        # Parse the SPICE circuit
+        using SpectreNetlistParser
+        ast = SpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
+        @test !ast.ps.errored
+
+        # Build the MNA circuit, passing the VA device module
+        # This is equivalent to what happens when SPICE uses .hdl "jlpkg://..."
+        builder_code = CedarSim.make_mna_circuit(ast;
+            circuit_name=:va_circuit,
+            imported_hdl_modules=[test_resistor_module])
+
+        # Eval the builder
+        builder = @eval $builder_code
+
+        # Build and solve
+        ctx = builder((;), MNASpec())
+        sys = assemble!(ctx)
+        sol = solve_dc(sys)
+
+        # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
+        out_idx = ctx.node_to_idx[:out]
+        @test sol.x[out_idx] ≈ 0.5 atol=1e-6
+    end
+
+    @testset "Compare SPICE-defined vs Julia-defined circuit" begin
+        # Build the same circuit in pure Julia for comparison
+        function build_julia_circuit(params, spec::MNASpec)
+            ctx = MNAContext()
+
+            vin = get_node!(ctx, :vin)
+            out = get_node!(ctx, :out)
+
+            # VA resistor
+            dev = test_resistor_module.test_resistor(R=500.0)
+            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+
+            # Regular resistor
+            stamp!(CedarSim.MNA.Resistor(500.0), ctx, out, 0)
+
+            # Voltage source
+            stamp!(VoltageSource(1.0), ctx, vin, 0)
+
+            return ctx
+        end
+
+        # Solve Julia-defined circuit
+        ctx_julia = build_julia_circuit((;), MNASpec())
+        sys_julia = assemble!(ctx_julia)
+        sol_julia = solve_dc(sys_julia)
+
+        # Solve SPICE-defined circuit
+        using SpectreNetlistParser
+        ast = SpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
+        builder_code = CedarSim.make_mna_circuit(ast;
+            circuit_name=:va_circuit2,
+            imported_hdl_modules=[test_resistor_module])
+        builder = @eval $builder_code
+        ctx_spice = builder((;), MNASpec())
+        sys_spice = assemble!(ctx_spice)
+        sol_spice = solve_dc(sys_spice)
+
+        # Both should give same output voltage
+        out_julia = sol_julia.x[ctx_julia.node_to_idx[:out]]
+        out_spice = sol_spice.x[ctx_spice.node_to_idx[:out]]
+
+        @test out_julia ≈ out_spice atol=1e-10
+        @test out_julia ≈ 0.5 atol=1e-6
     end
 
 end

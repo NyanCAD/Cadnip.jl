@@ -704,7 +704,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     return quote
         let r_val = $r_expr, m_val = $m_expr
             # Parallel resistors: R_eff = R / m
-            stamp!(Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            stamp!($(MNA).Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -1335,9 +1335,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Check if this is a VA module from imported_hdl_modules
     # VA modules can be instantiated like subcircuits: X1 a b vamodule params...
     va_module_ref = nothing
+    va_hdl_mod = nothing
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            va_hdl_mod = hdl_mod
             break
         end
     end
@@ -1345,12 +1347,18 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     if va_module_ref !== nothing
         # This is a VA module instance, not a subcircuit
         # Build kwargs from explicit parameters
+        # Need to adjust case since SPICE is case-insensitive but Julia is not
+        va_type = getfield(va_hdl_mod, subckt_name)
+        case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
+
         explicit_kwargs = Expr[]
         for child in SpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 name = LSymbol(child.name)
+                # Adjust case to match VA device fieldnames
+                adjusted_name = get(case_insensitive, name, name)
                 def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, name, def))
+                push!(explicit_kwargs, Expr(:kw, adjusted_name, def))
             end
         end
 
@@ -1359,10 +1367,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         name = LString(instance.name)
 
         # Generate stamp! call for VA module
+        # VA devices use _sim_mode_ instead of mode (see generate_mna_stamp_method_nterm)
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    t = spec.time, mode = spec.mode, x = x)
+                    t = spec.time, _sim_mode_ = spec.mode, x = x)
             end
         end
     end
