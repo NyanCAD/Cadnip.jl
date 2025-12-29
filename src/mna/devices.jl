@@ -942,7 +942,7 @@ end
 function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinVoltageSource,
                               PWLCurrentSource, SinCurrentSource},
                 ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, _sim_mode_::Symbol=:dcop)
-    stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, mode=mode)
+    stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, _sim_mode_=_sim_mode_)
 end
 
 #==============================================================================#
