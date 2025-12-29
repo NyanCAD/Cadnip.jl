@@ -1,8 +1,9 @@
 """
-Test PDK precompilation with MNA builder functions.
+Test PDK and VA device precompilation with MNA.
 
-This tests the `load_mna_modules()` function which generates precompilable
-MNA builder functions from PDK SPICE files.
+This tests:
+- `load_mna_modules()` for SPICE PDK files with subcircuits
+- `load_mna_va_module()` for Verilog-A device files
 """
 
 using Test
@@ -11,10 +12,14 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc,
 using CedarSim: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
+const test_va_path = joinpath(@__DIR__, "test_resistor.va")
 
 # Load PDK modules directly into this module (like a real PDK package would do)
 # This is the preferred API for precompilation - evals internally and returns modules
 const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
+
+# Load VA device module (like a device package would do)
+const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
 
 @testset "PDK MNA Module Generation" begin
 
@@ -135,6 +140,91 @@ const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
         # Slow should have lowest current (highest R)
         @test i_fast > i_typical
         @test i_typical > i_slow
+    end
+
+end
+
+@testset "VA Device Precompilation" begin
+
+    @testset "load_mna_va_module into module" begin
+        # Check that the module was created
+        @test va_device_mod isa Module
+        @test isdefined(@__MODULE__, :test_resistor_module)
+
+        # Check that device type is exported
+        @test isdefined(test_resistor_module, :test_resistor)
+    end
+
+    @testset "load_mna_va_module expression form" begin
+        # Test expression-returning form
+        expr = CedarSim.load_mna_va_module(test_va_path)
+        @test expr.head == :toplevel
+        @test length(expr.args) == 2  # module def + using statement
+    end
+
+    @testset "Use VA device in circuit" begin
+        # Build a simple circuit using the VA resistor
+        function build_va_resistor_test(params, spec::MNASpec)
+            ctx = MNAContext()
+
+            # Nodes
+            vin = get_node!(ctx, :vin)
+            out = get_node!(ctx, :out)
+
+            # Use the VA resistor device
+            dev = test_resistor_module.test_resistor(R=500.0)
+            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+
+            # Voltage source
+            stamp!(VoltageSource(1.0), ctx, vin, 0)
+
+            # Load resistor to ground (using built-in Resistor)
+            stamp!(CedarSim.MNA.Resistor(500.0), ctx, out, 0)
+
+            return ctx
+        end
+
+        # Solve DC
+        ctx = build_va_resistor_test((;), MNASpec())
+        sys = assemble!(ctx)
+        sol = solve_dc(sys)
+
+        # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
+        out_idx = ctx.node_to_idx[:out]
+        @test sol.x[out_idx] ≈ 0.5 atol=1e-6
+    end
+
+    @testset "VA device with different parameters" begin
+        # Test that parameter changes work
+        function get_output_voltage(R_value)
+            ctx = MNAContext()
+
+            vin = get_node!(ctx, :vin)
+            out = get_node!(ctx, :out)
+
+            # VA resistor with custom R
+            dev = test_resistor_module.test_resistor(R=R_value)
+            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+
+            # Voltage source
+            stamp!(VoltageSource(1.0), ctx, vin, 0)
+
+            # Fixed load
+            stamp!(CedarSim.MNA.Resistor(1000.0), ctx, out, 0)
+
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            return sol.x[ctx.node_to_idx[:out]]
+        end
+
+        # Lower R in divider means lower output voltage
+        v_100 = get_output_voltage(100.0)   # 1000/(100+1000) = 0.909
+        v_1000 = get_output_voltage(1000.0)  # 1000/(1000+1000) = 0.5
+        v_10000 = get_output_voltage(10000.0) # 1000/(10000+1000) = 0.091
+
+        @test v_100 > v_1000 > v_10000
+        @test v_1000 ≈ 0.5 atol=1e-6
     end
 
 end
