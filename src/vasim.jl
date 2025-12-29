@@ -899,20 +899,22 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     all_node_syms = to_julia.node_order
     n_nonground = length(all_node_syms) - 1  # Exclude ground at end
 
-    # Build the Jacobian extraction and stamping code
-    # We need to extract partials for each node and stamp both G matrix and RHS
+    # Build the Jacobian extraction code - extract from the INNER JacobianTag Dual
+    # When I_branch is Dual{ContributionTag, Dual{JacobianTag}}, we need value(I_branch) first
     jac_extract_code = Any[]
+    for k in 1:n_nonground
+        dI_dVk = Symbol("dI_dV", k)
+        push!(jac_extract_code, :($dI_dVk = I_resist isa ForwardDiff.Dual ? ForwardDiff.partials(I_resist, $k) : 0.0))
+    end
+
+    # Build Jacobian stamping code
     jac_stamp_code = Any[]
     rhs_terms = Any[:I_val]
-
     for k in 1:n_nonground
         node_sym = all_node_syms[k]
         k_node = Symbol("_node_", node_sym)
         dI_dVk = Symbol("dI_dV", k)
         V_k = Symbol("V_", k)
-
-        # Extract partial derivative
-        push!(jac_extract_code, :($dI_dVk = I_branch isa ForwardDiff.Dual ? ForwardDiff.partials(I_branch, $k) : 0.0))
 
         # Stamp Jacobian into G matrix
         push!(jac_stamp_code, quote
@@ -931,23 +933,28 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     rhs_expr = Expr(:call, :+, rhs_terms...)
 
     # For contributions inside conditionals, we evaluate and stamp inline with full Jacobian
-    # Tag ordering (ContributionTag ≺ Nothing) ensures ContributionTag is always outer
+    # Handle nested Duals: ContributionTag wraps JacobianTag when ddt() is used
     return quote
         # Contribution I($p_sym, $n_sym) <+ ...
         let I_branch = $expr
-            # Extract value and partials from dual
+            # Extract value and the resistive Dual (for Jacobian extraction)
+            # ContributionTag wraps the JacobianTag Dual - we need to unwrap it
+            local I_resist
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                # Has ddt: extract from ContributionTag wrapper
-                I_val = ForwardDiff.value(ForwardDiff.value(I_branch))
+                # Has ddt: ContributionTag outer, JacobianTag inner
+                I_resist = ForwardDiff.value(I_branch)  # Inner Dual{JacobianTag}
+                I_val = ForwardDiff.value(I_resist)
             elseif I_branch isa ForwardDiff.Dual
-                # Pure resistive: just voltage dual
+                # Pure resistive: just voltage dual (JacobianTag)
+                I_resist = I_branch
                 I_val = ForwardDiff.value(I_branch)
             else
                 # Scalar result
+                I_resist = I_branch
                 I_val = Float64(I_branch)
             end
 
-            # Extract Jacobian partials
+            # Extract Jacobian partials from the resistive Dual (JacobianTag)
             $(jac_extract_code...)
 
             # Stamp Jacobian into G matrix

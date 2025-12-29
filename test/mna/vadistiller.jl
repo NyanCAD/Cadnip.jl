@@ -1513,9 +1513,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 dev.version.val == "4.8.0" && !dev.version.is_default
             end
 
-            # Full simulation still has issues with nested Duals in complex models
-            # (many internal nodes cause Jacobian extraction bounds errors)
-            @test_broken begin
+            # Full simulation with BSIM4v8 - tests string parameter conditionals and complex model
+            @test begin
                 function sp_bsim4v8_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vdd = get_node!(ctx, :vdd)
@@ -1531,7 +1530,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
 
                 sol = solve_dc(sp_bsim4v8_circuit, (;), MNASpec())
-                true
+                # Drain should be close to Vdd (MOSFET in saturation acts like current source)
+                0.9 < voltage(sol, :drain) < 1.0
             end
         end
 
