@@ -797,7 +797,7 @@ end
 function sema_codegen_hdl(r::SemaResult)
     ret = Expr(:toplevel)
     for (_, (_, va)) in r.hdl_includes
-        push!(ret.args, CedarSim.make_module(va))
+        push!(ret.args, CedarSim.make_mna_module(va))
     end
     return ret
 end

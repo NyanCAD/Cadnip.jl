@@ -1412,7 +1412,7 @@ function source_body(n::SNode{<:SC.AbstractBlockASTNode},
             else
                 vamod = va.stmts[end]
                 name = Symbol(String(vamod.id))
-                kwargs[:ckts][name] = make_module(va)
+                kwargs[:ckts][name] = make_mna_module(va)
             end
         elseif isa(stmt, SNode{SC.Include})
             str = strip(unescape_string(String(stmt.filename)), '"') # verify??
@@ -1517,7 +1517,7 @@ function source_body(n::SNode{<:SP.AbstractBlockASTNode}, to_julia::SpcScope; in
                 macroname = Symbol("ckt_", lowercase(String(name)))
                 modname = Symbol(name, "_module")
                 kwargs[:ckts][name] = Expr(:toplevel,
-                    make_module(va),
+                    make_mna_module(va),
                     :(macro $macroname(🔍, nodes, args...)
                         dev = $modname.$name
                         esc(:(CedarSim.spicecall(CedarSim.ParsedModel($dev, (;)); $(args...))($nodes...)))

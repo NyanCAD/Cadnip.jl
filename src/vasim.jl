@@ -22,27 +22,12 @@ using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler
-    using DAECompiler: variable, equation!, observed!
-else
-    using ..DAECompilerStubs: ddt, variable, equation!, observed!
-end
-
 const VAT = VerilogAParser.VerilogATokenize
 
 const VANode = VerilogAParser.VerilogACSTParser.Node
 struct SimTag; end
 ForwardDiff.:(≺)(::Type{<:ForwardDiff.Tag}, ::Type{SimTag}) = true
 ForwardDiff.:(≺)(::Type{SimTag}, ::Type{<:ForwardDiff.Tag}) = false
-
-# Phase 0: Guard DAECompiler.ddt extension
-@static if CedarSim.USE_DAECOMPILER
-    function DAECompiler.ddt(dual::ForwardDiff.Dual{SimTag})
-        ForwardDiff.Dual{SimTag}(ddt(dual.value), map(ddt, dual.partials.values))
-    end
-end
 
 function eisa(e::VANode{S}, T::Type) where {S}
     S <: T
@@ -689,231 +674,11 @@ function find_ddx!(ddx_order::Vector{Symbol}, va::VANode)
     end
 end
 
-function make_spice_device(vm::VANode{VerilogModule})
-    ps = pins(vm)
-    modname = String(vm.id)
-    symname = Symbol(modname)
-    ret = Expr(:block,
-        #map(ps) do p
-        #    :(@named $p = Pin(analysis))
-        #end...
-    )
-    struct_fields = Any[]
-    defaults = Any[]
-    parameter_names = Set{Symbol}()
-    to_julia_global = Scope()
-    find_ddx!(to_julia_global.ddx_order, vm)
-    to_julia_defaults = Scope(to_julia_global.parameters,
-    to_julia_global.node_order, to_julia_global.ninternal_nodes,
-        to_julia_global.branch_order, to_julia_global.used_branches,
-        to_julia_global.var_types, to_julia_global.all_functions,
-        true, to_julia_global.ddx_order)
-    internal_nodes = Vector{Symbol}()
-    var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
-    aliases = Dict{Symbol, Symbol}()
-    observables = Dict{Symbol, Symbol}()
-
-    # First to a pre-pass to figure out the scope context
-    for child in vm.items
-        item = child.item
-        @case formof(item) begin
-            # Not represented on the julia side for now
-            InOutDeclaration => nothing
-            NetDeclaration => begin
-                for net in item.net_names
-                    id = Symbol(assemble_id_string(net.item))
-                    if !(id in ps)
-                        # Internal node
-                        push!(internal_nodes, id)
-                    end
-                end
-            end
-            ParameterDeclaration => begin
-                for param in item.params
-                    param = param.item
-                    pT = Float64
-                    if item.ptype !== nothing
-                        pT = kw_to_T(item.ptype.kw)
-                    end
-                    paramname = String(assemble_id_string(param.id))
-                    paramname_lc = lowercase(paramname)
-                    paramsym = Symbol(paramname)
-                    push!(parameter_names, paramsym)
-                    # TODO: The CMC Verilog-A models use an attribute to
-                    # distinguish between model and instance parameters
-                    # Use symbol for type to avoid embedding type objects in AST
-                    pT_sym = pT === Float64 ? :Float64 : :Int
-                    # Build field expr without quoting to avoid hygiene issues
-                    type_annotation = Expr(:(::), paramsym, Expr(:curly, :(CedarSim.DefaultOr), pT_sym))
-                    default_val = Expr(:block, LineNumberNode(param.default_expr), to_julia_defaults(param.default_expr))
-                    field_expr = Expr(:(=), type_annotation, default_val)
-                    push!(struct_fields, field_expr)
-                    var_types[Symbol(paramname)] = pT
-                    #push!(ret.args,
-                    #    :(@parameters $(Symbol(paramsym)))
-                    #)
-                    #push!(defaults,
-                    #    :($(Symbol(paramsym)) => instance.model.$(paramsym))
-                    #)
-                    #push!(parameter_names, paramsym)
-                    # TODO: SPICE likes these lowercase, so we generate both,
-                    # but in Verilog-A they're case sensitive, so shouldn't
-                    # interact.
-                    #if paramname != paramname_lc
-                    #    push!(ret.args, :($(Symbol(paramname)) = $(Symbol(paramname_lc))))
-                    #end
-                end
-            end
-            AliasParameterDeclaration => begin
-                param = item
-                paramsym = Symbol(assemble_id_string(param.id))
-                targetsym = Symbol(assemble_id_string(param.value))
-                push!(parameter_names, paramsym)
-                aliases[paramsym] = targetsym
-            end
-            IntRealDeclaration => begin
-                attr = child.attrs !== nothing && to_julia_global(child.attrs)
-                observe = attr isa Dict && length(attr) == 1 && haskey(attr, :desc)
-                T = kw_to_T(item.kw.kw)
-                for ident in item.idents
-                    # ident.item is IntRealVarDecl with id, eq, init fields
-                    vardecl = ident.item
-                    name = Symbol(assemble_id_string(vardecl.id))
-                    var_types[name] = T
-                    if observe
-                        observables[name] = Symbol(attr[:desc])
-                    end
-                end
-            end
-        end
-    end
-
-    node_order = [ps; internal_nodes; Symbol("0")]
-    to_julia = Scope(parameter_names,  node_order, length(internal_nodes),
-        collect(map(x->Pair(x...), combinations(node_order, 2))),
-        Set{Pair{Symbol}}(),
-        var_types,
-        Dict{Symbol, VAFunction}(), false,
-        to_julia_global.ddx_order)
-    lno = nothing
-    for child in vm.items
-        item = child.item
-        @case formof(item) begin
-            # Not represented on the julia side for now
-            InOutDeclaration => nothing
-            IntRealDeclaration => nothing
-            NetDeclaration => nothing # Handled above
-            BranchDeclaration => nothing
-            ParameterDeclaration => nothing # Handled above
-            AliasParameterDeclaration => nothing # Handled above
-            AnalogFunctionDeclaration => begin
-                push!(ret.args, to_julia(item))
-            end
-            AnalogBlock => begin
-                lno = LineNumberNode(item.stmt)
-                push!(ret.args, to_julia(item.stmt))
-            end
-            _ => cedarerror("Unrecognized statement $child")
-        end
-    end
-
-    # Phase 0: Use local variable/equation!/observed! references (stubs or DAECompiler)
-    internal_nodeset = map(enumerate(internal_nodes)) do (n, id)
-        @nolines quote
-            $id = $(variable)($DScope(dscope, $(QuoteNode(Symbol("V($id)")))))
-        end
-    end
-
-    all_branch_order = filter(branch->branch in to_julia.used_branches, to_julia.branch_order)
-    branch_state = map(all_branch_order) do (a, b)
-        svar = Symbol("branch_state_", a, "_", b)
-        eqvar = Symbol("branch_value_", a, "_", b)
-        @nolines quote
-            $svar = $(CURRENT)
-            $eqvar = 0.0
-        end
-    end
-
-    internal_currents = Any[(Symbol("I($a, $b)") for (a, b) in all_branch_order)...]
-
-    internal_currents_def = Expr(:block,
-        (@nolines quote
-            $v = $(variable)($DScope(dscope,$(QuoteNode(v))))
-        end for v in internal_currents)...
-    )
-
-    function current_sum(node)
-        Expr(:call, +, map(Iterators.filter(branch->node in branch[2], enumerate(all_branch_order))) do (n, (a,b))
-            ex = internal_currents[n]
-            # Positive currents flow out of devices, into nodes, so I(a, b)'s contribution to the a KCL
-            # is -I(a, b).
-            node == a ? :(-$ex) : ex
-        end...)
-    end
-
-    internal_node_kcls = map(enumerate(internal_nodes)) do (n, node)
-        @nolines :($(equation!)($(current_sum(node)),
-            $DScope(dscope, $(QuoteNode(Symbol("KCL($node)"))))))
-    end
-
-    internal_eqs = map(enumerate(all_branch_order)) do (n, (a,b))
-        svar = Symbol("branch_state_", a, "_", b)
-        eqvar = Symbol("branch_value_", a, "_", b)
-        if b == Symbol("0")
-            @nolines :($(equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : $a - $eqvar,
-                $DScope(dscope, $(QuoteNode(Symbol("Branch($a)"))))))
-        else
-            @nolines :($(equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : ($a - $b) - $eqvar,
-                $DScope(dscope, $(QuoteNode(Symbol("Branch($a, $b)"))))))
-        end
-    end
-
-    argnames = map(p->Symbol("#port_", p), ps)
-    external_eqs = map(argnames, map(current_sum, ps)) do a, c
-        :($(kcl!)($(a), $c))
-    end
-
-    obs_def = (:($o = 0.0) for o in keys(observables))
-    obs_expr = (:($(observed!)($var,
-            $DScope(dscope, $(QuoteNode(name))))) for (var, name) in observables)
-
-    arg_assign = map(ps, argnames) do p, a
-        :($p = $a.V)
-    end
-
-    params_to_locals = map(collect(to_julia.parameters)) do id
-        :($id = $(Expr(:call, undefault, Expr(:call, getfield, Symbol("#self#"), QuoteNode(id)))))
-    end
-
-    sim = @nolines :(function (var"#self#"::$symname)($(argnames...); dscope=$(GenScope)($(debug_scope)[], $(QuoteNode(symname))))
-        $(obs_def...)
-        $lno
-        $(arg_assign...)
-        $(internal_currents_def)
-        $(params_to_locals...)
-        $(internal_nodeset...)
-        $(branch_state...)
-        $ret
-        $(internal_node_kcls...)
-        $(external_eqs...)
-        $(internal_eqs...)
-        $(obs_expr...)
-        return ()
-    end)
-
-    Expr(:toplevel,
-        :(VerilogAEnvironment.CedarSim.@kwdef struct $symname <: VerilogAEnvironment.VAModel
-            $(struct_fields...)
-        end),
-        sim,
-    )
-end
-
 
 #==============================================================================#
-# MNA Device Generation (Phase 5)
+# MNA Device Generation
 #
-# Generates stamp! methods for Verilog-A devices instead of DAECompiler code.
+# Generates stamp! methods for Verilog-A devices.
 # Uses s-dual approach for automatic resist/react separation.
 #==============================================================================#
 
@@ -922,8 +687,7 @@ end
 
 Generate MNA-compatible Julia code for a Verilog-A module.
 
-Unlike `make_spice_device` which generates code for DAECompiler,
-this generates `stamp!` methods that work with MNAContext directly.
+Generates `stamp!` methods that work with MNAContext directly.
 
 # Generated Code Structure
 ```julia
@@ -2520,16 +2284,6 @@ Base.findfirst(str::String, file::VAFile) = Base.findfirst(str, file.file)
 Base.joinpath(str::String, file::VAFile) = VAFile(Base.joinpath(str, file.file))
 Base.normpath(file::VAFile) = VAFile(Base.normpath(file.file))
 export VAFile, @va_str
-
-function make_module(va::VANode)
-    vamod = va.stmts[end]
-    s = Symbol(String(vamod.id), "_module")
-    Expr(:toplevel, :(baremodule $s
-        using ..CedarSim.VerilogAEnvironment
-        export $(Symbol(vamod.id))
-        $(CedarSim.make_spice_device(vamod))
-    end), :(using .$s))
-end
 
 function parse_and_eval_vafile(mod::Module, file::VAFile)
     va = VerilogAParser.parsefile(file.file)
