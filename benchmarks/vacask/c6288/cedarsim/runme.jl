@@ -1,11 +1,10 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# VACASK Benchmark: Graetz Bridge (Full-wave Rectifier)
+# VACASK Benchmark: C6288 16x16 Multiplier
 #
-# A full wave rectifier (4 diodes) with a capacitor and a resistor as load
-# excited by a sinusoidal voltage.
+# A 16x16 bit multiplier circuit using PSP103 MOSFETs.
 #
-# Benchmark target: ~1 million timepoints, ~2 million iterations
+# Benchmark target: High complexity digital circuit
 #==============================================================================#
 
 using CedarSim
@@ -15,18 +14,20 @@ using Printf
 using Statistics
 using VerilogAParser
 
-# Load the vadistiller diode model
-const diode_va_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "diode.va")
+# Load the PSP103 model
+const psp103_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "psp103v4", "psp103.va")
 
-if isfile(diode_va_path)
-    va = VerilogAParser.parsefile(diode_va_path)
+if isfile(psp103_path)
+    println("Loading PSP103 from: ", psp103_path)
+    va = VerilogAParser.parsefile(psp103_path)
     if !va.ps.errored
         Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+        println("PSP103VA_module loaded successfully")
     else
-        error("Failed to parse diode VA model")
+        error("Failed to parse PSP103 VA model")
     end
 else
-    error("Diode VA model not found at $diode_va_path")
+    error("PSP103 VA model not found at $psp103_path")
 end
 
 # Load and parse the SPICE netlist from file
@@ -34,23 +35,24 @@ const spice_file = joinpath(@__DIR__, "runme.sp")
 const spice_code = read(spice_file, String)
 
 # Parse SPICE to code, then evaluate to get the builder function
-# Pass sp_diode_module so the SPICE parser knows about our VA device
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:graetz_circuit,
-                                         imported_hdl_modules=[sp_diode_module])
+const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:c6288_circuit,
+                                         imported_hdl_modules=[PSP103VA_module])
 eval(circuit_code)
 
-function run_benchmark(; warmup=true, dtmax=1e-6)
-    tspan = (0.0, 1.0)  # 1 second simulation
+function run_benchmark(; warmup=true, dtmax=2e-12)
+    tspan = (0.0, 2e-9)  # 2ns simulation (same as ngspice)
 
     # Warmup run
     if warmup
         println("Warmup run...")
         try
-            sim = MNASim(graetz_circuit)
-            tran!(sim, (0.0, 0.001); dtmax=dtmax)
+            sim = MNASim(c6288_circuit)
+            tran!(sim, (0.0, 10e-12); dtmax=dtmax)
+            println("Warmup completed")
         catch e
             println("Warmup failed: ", e)
             showerror(stdout, e, catch_backtrace())
+            return
         end
     end
 
@@ -60,7 +62,7 @@ function run_benchmark(; warmup=true, dtmax=1e-6)
     timepoints = Int[]
 
     for i in 1:n_runs
-        sim = MNASim(graetz_circuit)
+        sim = MNASim(c6288_circuit)
 
         t_start = time()
         sol = tran!(sim, tspan; dtmax=dtmax)

@@ -13,54 +13,21 @@ using CedarSim.MNA
 using OrdinaryDiffEq
 using Printf
 using Statistics
+using VerilogAParser
 
-# Define simple diode model inline with transit time
-va"""
-module sp_diode(a, c);
-    parameter real is = 1e-14;
-    parameter real n = 1.0;
-    parameter real rs = 0.0;
-    parameter real cjo = 0.0;
-    parameter real vj = 1.0;
-    parameter real m = 0.5;
-    parameter real tt = 0.0;
-    inout a, c;
-    electrical a, c, a_int;
-    real Vd, Id, Cd, Vt, Qd;
-    analog begin
-        Vt = $temperature * 1.38e-23 / 1.602e-19;
+# Load the vadistiller diode model
+const diode_va_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "diode.va")
 
-        if (rs > 0.0) begin
-            I(a, a_int) <+ V(a, a_int) / rs;
-            Vd = V(a_int, c);
-        end else begin
-            V(a, a_int) <+ 0;
-            Vd = V(a, c);
-        end
-
-        if (Vd > 40*n*Vt) begin
-            Id = is * exp(40.0) * (1.0 + Vd/(n*Vt) - 40.0);
-        end else if (Vd > -3*n*Vt) begin
-            Id = is * (exp(Vd / (n * Vt)) - 1.0);
-        end else begin
-            Id = -is;
-        end
-
-        Qd = tt * Id;
-        I(a_int, c) <+ Id;
-        I(a_int, c) <+ ddt(Qd);
-
-        if (cjo > 0.0) begin
-            if (Vd < vj) begin
-                Cd = cjo * pow(1.0 - Vd/vj, -m);
-            end else begin
-                Cd = cjo;
-            end
-            I(a_int, c) <+ Cd * ddt(Vd);
-        end
+if isfile(diode_va_path)
+    va = VerilogAParser.parsefile(diode_va_path)
+    if !va.ps.errored
+        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    else
+        error("Failed to parse diode VA model")
     end
-endmodule
-"""
+else
+    error("Diode VA model not found at $diode_va_path")
+end
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")
