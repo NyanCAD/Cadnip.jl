@@ -2383,3 +2383,194 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
     end
 end
+
+#==============================================================================#
+# PDK Module Generation for MNA
+#==============================================================================#
+
+"""
+    make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[])
+
+Generate an MNA PDK module from a parsed SPICE netlist.
+
+Returns a module expression that contains:
+- MNA builder functions for each subcircuit (named `<subckt>_mna_builder`)
+- Exported symbols for direct use in circuits
+
+# Example
+```julia
+ast = SpectreNetlistParser.parsefile("pdk.spice")
+mod_expr = make_mna_pdk_module(ast; name=:typical)
+eval(mod_expr)  # Defines the module
+using .typical: nfet_mna_builder, pfet_mna_builder
+```
+"""
+function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[],
+                             imported_hdl_modules::Vector{Module}=Module[])
+    # Run semantic analysis
+    sema_result = sema(ast; imported_hdl_modules)
+
+    # Build subckt_semas dictionary for cross-references
+    subckt_semas = Dict{Symbol, SemaResult}()
+    for (subckt_name, subckt_list) in sema_result.subckts
+        if !isempty(subckt_list)
+            _, subckt_sema = first(subckt_list)
+            subckt_semas[subckt_name] = subckt_sema.val
+        end
+    end
+
+    # Generate MNA builders for each subcircuit
+    builders = Expr[]
+    builder_exports = Symbol[]
+
+    for (subckt_name, subckt_list) in sema_result.subckts
+        if !isempty(subckt_list)
+            _, subckt_sema = first(subckt_list)
+            builder_name = Symbol(subckt_name, "_mna_builder")
+            push!(builder_exports, builder_name)
+
+            # Generate the builder function
+            builder_def = codegen_mna_subcircuit(subckt_sema.val, subckt_name, subckt_semas)
+            push!(builders, builder_def)
+        end
+    end
+
+    # Also export any explicitly requested symbols
+    all_exports = vcat(builder_exports, exports)
+
+    # Return the module expression directly (not wrapped in quote block)
+    # This allows eval(expr) to work at any level
+    return Expr(:module, true, name,
+        Expr(:block,
+            # Import MNA context and stamping functions
+            :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
+            # Import device types needed for stamping
+            :(using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
+            :(using CedarSim: ParamLens, IdentityLens),
+            :(using CedarSim.SpectreEnvironment),
+            builders...,
+            Expr(:export, all_exports...)
+        )
+    )
+end
+
+"""
+    load_mna_modules(file::String; names=nothing, pdk_include_paths=[], preload=[])
+
+Parse a PDK SPICE file and generate MNA builder modules.
+
+Returns a `:toplevel` expression containing module definitions for each
+library section. Each module exports `*_mna_builder` functions for its subcircuits.
+
+# Arguments
+- `file`: Path to the PDK SPICE file
+- `names`: Optional list of library section names to include (default: all)
+- `pdk_include_paths`: Paths to search for `.include` files
+- `preload`: Modules to add as `using` statements in generated code
+
+# Example
+```julia
+path = joinpath(@__DIR__, "pdk.spice")
+eval(load_mna_modules(path; names=["typical", "fast"]))
+# Now you can use: typical.nfet_03v3_mna_builder, fast.nfet_03v3_mna_builder, etc.
+```
+"""
+function load_mna_modules end  # Forward declaration for docstring
+
+"""
+    collect_lib_statements(node) -> Vector
+
+Recursively collect all LibStatement nodes from a parsed AST.
+Handles nested structures like SpectreNetlistSource containing SPICENetlistSource.
+"""
+function collect_lib_statements(node)
+    libs = SNode{SP.LibStatement}[]
+
+    function visit(n)
+        if isa(n, SNode{SP.LibStatement})
+            push!(libs, n)
+        else
+            # Try to access stmts - RedTree nodes have custom getproperty
+            # so hasproperty may return false but getproperty still works
+            try
+                for stmt in n.stmts
+                    visit(stmt)
+                end
+            catch
+                # No stmts property - leaf node
+            end
+        end
+    end
+
+    visit(node)
+    return libs
+end
+
+function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
+                          preload::Vector{Module}=Module[])
+    # Parse the file
+    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    if sa.ps.errored
+        throw(LoadError(file, 0, SpectreParseError(sa)))
+    end
+
+    res = Expr(:toplevel)
+
+    # Collect all LibStatements from the parsed tree
+    lib_stmts = collect_lib_statements(sa)
+
+    for node in lib_stmts
+        lib_name = String(node.name)
+        if names !== nothing && lib_name ∉ names
+            @info "Skipping library section: $lib_name"
+            continue
+        end
+
+        # Generate MNA module for this library section
+        mod_name = Symbol(lib_name)
+        mod_expr = make_mna_pdk_module(node; name=mod_name)
+
+        # Add preload usings if needed
+        if !isempty(preload)
+            usings = Expr[]
+            for pre in preload
+                push!(usings, Expr(:using, Expr(:., Base.fullname(pre)...)))
+            end
+
+            # mod_expr is now directly an :module expression
+            @assert mod_expr.head == :module
+            mod_body = mod_expr.args[3]  # The block inside the module
+
+            # Prepend usings to the module body
+            new_body = Expr(:block, usings..., mod_body.args...)
+            mod_expr.args[3] = new_body
+        end
+
+        push!(res.args, mod_expr)
+    end
+
+    return res
+end
+
+"""
+    load_mna_pdk(file::String; section::String, pdk_include_paths=[], preload=[])
+
+Load a single library section from a PDK file as an MNA module.
+
+Convenience function for loading just one section. Returns the module expression.
+
+# Example
+```julia
+mod_expr = load_mna_pdk("pdk.spice"; section="typical")
+eval(mod_expr)
+using .typical: nfet_mna_builder
+```
+"""
+function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{String}=String[],
+                      preload::Vector{Module}=Module[])
+    expr = load_mna_modules(file; names=[section], pdk_include_paths, preload)
+    if isempty(expr.args)
+        error("Section '$section' not found in $file")
+    end
+    return only(expr.args)
+end
