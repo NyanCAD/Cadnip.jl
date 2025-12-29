@@ -1361,9 +1361,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 true
             end
 
-            # Simulation is broken due to output variable code generation issue
-            # (MOS6drainSquares not defined - needs output variable handling fix)
-            @test_broken begin
+            # Simulation now works - local variable initialization fixed
+            @test begin
                 function sp_mos6_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vdd = get_node!(ctx, :vdd)
@@ -1429,9 +1428,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 true  # Code generation succeeds
             end
 
-            # Simulation is broken due to output variable code generation issue
-            # (drainResistance not defined - needs output variable handling fix)
-            @test_broken begin
+            # Simulation now works - local variable initialization fixed
+            @test begin
                 function sp_bsim3v3_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vdd = get_node!(ctx, :vdd)
@@ -1838,9 +1836,8 @@ end
 # ✅ FunctionCallStatement: calling functions for side effects (DEVqmeyer, qgg, etc.)
 # ✅ C-style boolean negation (! operator on Float64, Int64, ForwardDiff.Dual)
 #
-# PARSING OK, SIMULATION NEEDS OUTPUT VARIABLE FIX:
-# ⚠️ mos6.va: Parses OK, code generation OK, simulation needs output variable fix (MOS6drainSquares)
-# ⚠️ bsim3v3.va: Parses OK, code generation OK, simulation needs output variable fix (drainResistance)
+# ✅ mos6.va: Parses OK, code generation OK, simulation works (local var init fixed)
+# ✅ bsim3v3.va: Parses OK, code generation OK, simulation works (local var init fixed)
 #
 # COMPLEX MODELS (need additional features):
 # ⚠️ bsim4v8.va: Very complex - needs output variable handling and other features
