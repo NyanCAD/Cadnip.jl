@@ -1925,8 +1925,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test isapprox(vd_rodas, vd_qndf; rtol=0.05)
         end
 
-        @testset "BJT CE amplifier with Rosenbrock solver" begin
-            # BJT + SIN source: Rosenbrock methods are very reliable
+        @testset "BJT CE amplifier with SIN source" begin
+            # BJT + SIN source using IDA (pure algebraic - no capacitors)
             function build_ce_amp(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
@@ -1949,14 +1949,15 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
 
-            # Rodas5P handles stiff BJT equations well
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+            # Use default IDA solver (handles algebraic systems well)
+            # Note: explicit_jacobian=false for time-dependent sources
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6, explicit_jacobian=false)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
-            vc_t0 = sol_rodas(T)[3]
-            vc_pos = sol_rodas(T + T/4)[3]
-            vc_neg = sol_rodas(T + 3T/4)[3]
+            vc_t0 = sol(T)[3]
+            vc_pos = sol(T + T/4)[3]
+            vc_neg = sol(T + 3T/4)[3]
 
             # Check for NaN
             @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
@@ -1969,7 +1970,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         @testset "BJT CE amplifier with DC source" begin
-            # BJT circuits are stiff - Rosenbrock methods handle them well
+            # BJT circuit with DC source using IDA (pure algebraic - no capacitors)
             function build_ce_dc(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
@@ -1990,12 +1991,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(build_ce_dc; Vcc=12.0, Vbase=0.6, Rc=1000.0)
             tspan = (0.0, 1e-3)
 
-            # Rodas5P handles stiff BJT equations reliably
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+            # Use default IDA solver (handles algebraic systems well)
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 0.5e-3
-            vc = sol_rodas(T)[3]
+            vc = sol(T)[3]
             @test !isnan(vc)
             @test vc > 0.0 && vc < 12.5  # Valid range (Vcc=12V)
         end

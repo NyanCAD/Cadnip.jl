@@ -142,12 +142,12 @@ end
 Assemble the complete MNA system from the context.
 Returns an MNASystem ready for analysis.
 
-# Note on Explicit Zeros
-The assembled sparse matrices have explicit zeros removed via `dropzeros!`.
-This is a safety net for correct detection of differential vs algebraic variables
-in DAE solvers like IDA. The primary prevention is in `stamp_contribution!` which
-skips C matrix stamps for devices without reactive (ddt) components. The dropzeros!
-here catches any remaining edge cases.
+# Note on Zeros in Sparse Matrices
+Devices without reactive (ddt) components should NOT stamp into the C matrix.
+This is enforced by `stamp_contribution!` which skips C stamps when charge
+derivatives are zero. Voltage-dependent capacitors may have zero capacitance
+at certain operating points (e.g., q = C0*V² has dq/dV = 0 at V=0) - this is
+legitimate and handled by `detect_differential_vars` checking actual values.
 
 # Example
 ```julia
@@ -162,10 +162,16 @@ function assemble!(ctx::MNAContext)
     C = assemble_C(ctx)
     b = get_rhs(ctx)
 
-    # Remove explicit zeros from sparse matrices to ensure correct
-    # differential variable detection for DAE solvers
-    dropzeros!(G)
-    dropzeros!(C)
+    # Warn if C matrix has explicit zeros - this indicates a device is stamping
+    # into C when it shouldn't (devices without ddt() should skip C stamps)
+    if nnz(C) > 0
+        nzvals = nonzeros(C)
+        n_explicit_zeros = count(v -> v == 0.0, nzvals)
+        if n_explicit_zeros > 0
+            @warn "C matrix has $n_explicit_zeros explicit zero(s). " *
+                  "This may indicate a device is stamping into C without ddt() terms."
+        end
+    end
 
     ctx.finalized = true
 

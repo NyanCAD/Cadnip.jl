@@ -1413,14 +1413,18 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Stamp reactive Jacobians (capacitances) into C matrix
         # Same sign convention as G matrix
+        # Only stamp non-zero values to avoid polluting C with explicit zeros
         for k in 1:n_all_nodes
             k_node = all_node_params[k]
+            dq_sym = Symbol("dq_dV", k)
             push!(branch_stamp.args, quote
-                if $p_node != 0 && $k_node != 0
-                    CedarSim.MNA.stamp_C!(ctx, $p_node, $k_node, $(Symbol("dq_dV", k)))
-                end
-                if $n_node != 0 && $k_node != 0
-                    CedarSim.MNA.stamp_C!(ctx, $n_node, $k_node, -$(Symbol("dq_dV", k)))
+                if $dq_sym != 0.0
+                    if $p_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_C!(ctx, $p_node, $k_node, $dq_sym)
+                    end
+                    if $n_node != 0 && $k_node != 0
+                        CedarSim.MNA.stamp_C!(ctx, $n_node, $k_node, -$dq_sym)
+                    end
                 end
             end)
         end
@@ -1587,7 +1591,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Stamp C matrix for reactive part: V = L*dI/dt
                 # Voltage equation: V_p - V_n - L*dI/dt = 0
                 # This stamps -L into C[I_var, I_var]
-                CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
+                # Only stamp if non-zero to avoid polluting C with explicit zeros
+                if V_react_val != 0.0
+                    CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
+                end
             else
                 # Pure resistive voltage
                 V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)

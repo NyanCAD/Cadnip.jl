@@ -498,10 +498,13 @@ function stamp_charge_contribution!(
     result = evaluate_charge_contribution(q_fn, Vp, Vn)
 
     # Stamp capacitance (Jacobian of charge w.r.t. voltages)
-    stamp_C!(ctx, p, p,  result.dq_dVp)
-    stamp_C!(ctx, p, n,  result.dq_dVn)
-    stamp_C!(ctx, n, p, -result.dq_dVp)
-    stamp_C!(ctx, n, n, -result.dq_dVn)
+    # Only stamp non-zero values to avoid polluting C with explicit zeros
+    if result.dq_dVp != 0.0 || result.dq_dVn != 0.0
+        stamp_C!(ctx, p, p,  result.dq_dVp)
+        stamp_C!(ctx, p, n,  result.dq_dVn)
+        stamp_C!(ctx, n, p, -result.dq_dVp)
+        stamp_C!(ctx, n, n, -result.dq_dVn)
+    end
 
     # For Newton iteration on DAE, we also need to stamp the charge residual
     # into the RHS. This is handled in the DAE formulation as:
@@ -585,9 +588,11 @@ function stamp_multiport_charge!(
             for j in 1:N
                 node_j = nodes[j]
                 if node_j != 0
-                    # ∂qi/∂Vj
+                    # ∂qi/∂Vj - only stamp non-zero to avoid polluting C
                     dqi_dVj = Float64(partials(qi, j))
-                    stamp_C!(ctx, node_i, node_j, dqi_dVj)
+                    if dqi_dVj != 0.0
+                        stamp_C!(ctx, node_i, node_j, dqi_dVj)
+                    end
                 end
             end
         end
