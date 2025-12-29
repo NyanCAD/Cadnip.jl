@@ -549,8 +549,8 @@ end
 # DAE solver dispatch (IDA, DFBDF, etc.)
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, kwargs...)
-    prob = SciMLBase.DAEProblem(circuit, tspan)
+                        abstol=1e-10, reltol=1e-8, explicit_jacobian=true, kwargs...)
+    prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
 end
 

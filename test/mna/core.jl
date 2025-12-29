@@ -33,6 +33,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 # Import CedarSim for tran! and solver comparison tests
 using CedarSim
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+using VerilogAParser
 
 @testset "MNA Core Tests" begin
 

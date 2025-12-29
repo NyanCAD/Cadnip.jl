@@ -319,7 +319,7 @@ using ADTypes
 
 """
     solve_dc(builder, params, spec::MNASpec;
-             abstol=1e-10, maxiters=100) -> DCSolution
+             abstol=1e-10, maxiters=100, explicit_jacobian=true) -> DCSolution
 
 Solve DC operating point using a circuit builder function.
 
@@ -334,6 +334,8 @@ Newton iteration via NonlinearSolve.jl.
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
 - `maxiters`: Maximum Newton iterations (default: 100)
+- `explicit_jacobian`: Whether to provide explicit Jacobian (default: true).
+  Uses the G matrix from circuit assembly as the Jacobian, avoiding finite differencing.
 
 # How It Works
 1. Builds circuit at initial guess to get system size and structure
@@ -364,7 +366,8 @@ sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
 - `solve_dc(ctx::MNAContext)`: Assemble and solve in one step
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
-                  abstol::Real=1e-10, maxiters::Int=100) where {F,P}
+                  abstol::Real=1e-10, maxiters::Int=100,
+                  explicit_jacobian::Bool=true) where {F,P}
     # Build at x=0 to get system size and initial structure
     ctx0 = builder(params, spec; x=Float64[])
     sys0 = assemble!(ctx0)
@@ -398,11 +401,34 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
         return nothing
     end
 
-    # Create and solve NonlinearProblem
-    nlprob = NonlinearProblem(residual!, x0)
+    # Create NonlinearProblem with or without explicit Jacobian
+    if explicit_jacobian
+        # Jacobian function: J(u) = G(u)
+        # For the DC problem F(u) = G(u)*u - b(u), the Jacobian is:
+        # dF/du = G(u) + dG/du * u - db/du
+        # For well-linearized devices, dG/du * u ≈ contributions already in G
+        # So J ≈ G (the conductance matrix at operating point)
+        function jacobian!(J, u, p)
+            ctx = builder(params, spec; x=u)
+            sys = assemble!(ctx)
+            copyto!(J, sys.G)
+            return nothing
+        end
 
-    # Use RobustMultiNewton with finite differences (like dcop.jl)
-    nlsolver = RobustMultiNewton(autodiff=AutoFiniteDiff())
+        # Use sparse Jacobian prototype for efficiency
+        jac_prototype = sys0.G
+        nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+        nlprob = NonlinearProblem(nlfunc, x0)
+
+        # Use RobustMultiNewton with explicit Jacobian for robustness
+        # The solver uses the Jacobian from NonlinearFunction, providing both
+        # accurate gradients and fallback mechanisms for difficult cases
+        nlsolver = RobustMultiNewton()
+    else
+        # Fall back to finite differences
+        nlprob = NonlinearProblem(residual!, x0)
+        nlsolver = RobustMultiNewton(autodiff=AutoFiniteDiff())
+    end
 
     sol = solve(nlprob, nlsolver; abstol=abstol, maxiters=maxiters)
 
@@ -1376,6 +1402,8 @@ Structure discovery happens once, then values are updated in-place each iteratio
 # Keyword Arguments
 - `u0`: Initial state (default: DC solution)
 - `du0`: Initial derivatives (default: computed for consistency)
+- `explicit_jacobian`: Whether to provide explicit Jacobian to solver (default: true).
+  Set to `false` if you encounter IDA initialization failures with time-dependent sources.
 
 # Example
 ```julia
@@ -1387,9 +1415,16 @@ sol = solve(prob, IDA())
 # Performance
 Circuit compilation provides ~10x speedup for transient analysis by reusing
 the fixed sparsity pattern and updating matrix values in-place.
+
+# Jacobian
+By default, the explicit Jacobian (G + gamma*C) is provided to the DAE solver.
+This avoids finite differencing and provides more accurate gradients. If you
+encounter solver initialization issues with certain circuits (e.g., time-dependent
+sources with IDA), set `explicit_jacobian=false` to fall back to solver-internal
+finite differencing.
 """
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, du0=nothing, kwargs...)
+                               u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
     # Get initial conditions
     if u0 === nothing || du0 === nothing
         u0_computed, du0_computed = compute_initial_conditions(circuit)
@@ -1404,11 +1439,19 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # Detect differential variables
     diff_vars = detect_differential_vars(circuit)
 
-    # Create DAEFunction without explicit Jacobian
-    # Note: Explicit Jacobian can cause IDA initialization failures with time-dependent sources.
-    # IDA uses internal finite difference Jacobian which works more reliably.
-    # ODE solvers (Rodas5P, QNDF, FBDF) can use explicit Jacobian via the ODEProblem path.
-    f = SciMLBase.DAEFunction(residual!)
+    # Create DAEFunction with explicit Jacobian for better performance
+    # The Jacobian is J = G + gamma*C where gamma is the BDF coefficient
+    if explicit_jacobian
+        jacobian! = make_compiled_dae_jacobian(pc)
+        # Create Jacobian prototype (sparsity pattern) from G + C
+        # This tells the solver which entries can be nonzero
+        jac_prototype = pc.G + pc.C
+        f = SciMLBase.DAEFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    else
+        # Fall back to solver-internal finite differencing
+        # Some solvers (e.g., IDA with time-dependent sources) may work better without explicit Jacobian
+        f = SciMLBase.DAEFunction(residual!)
+    end
 
     return SciMLBase.DAEProblem(
         f,
