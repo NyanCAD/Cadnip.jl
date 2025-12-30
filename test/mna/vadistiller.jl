@@ -707,7 +707,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is true, so uses R=2000
@@ -719,7 +719,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is false, so uses Ralt=500
@@ -754,7 +754,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; x=x, spec=s)
+            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
@@ -766,7 +766,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; x=x, spec=s)
+            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # Same result - alias forwards to tnom
