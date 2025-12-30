@@ -63,7 +63,4 @@ include("precompile.jl")
 # Analysis solvers (uses precompile.jl types)
 include("solve.jl")
 
-# Compiled circuit for zero-allocation evaluation (Phase 8)
-include("compiled.jl")
-
 end # module MNA
