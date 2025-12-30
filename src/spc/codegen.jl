@@ -40,10 +40,27 @@ function cg_expr! end
 function cg_expr!(state::CodegenState, cs::SNode{SC.NumberLiteral})
     txt = String(cs)
     sf = d"1"
-    if !isempty(txt) && txt[end] ∈ keys(spectre_magnitudes)
-        sf = spectre_magnitudes[txt[end]]
-        txt = txt[begin:end-1]
+
+    # Find where the numeric part ends (digits, '.', 'e', 'E', '+', '-')
+    num_end = 0
+    for (i, c) in enumerate(txt)
+        if isdigit(c) || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
+            num_end = i
+        else
+            break
+        end
     end
+
+    # Check for magnitude suffix after the numeric part
+    if num_end < length(txt)
+        mag_char = txt[num_end + 1]
+        if mag_char ∈ keys(spectre_magnitudes)
+            sf = spectre_magnitudes[mag_char]
+        end
+        # Any remaining characters (e.g., 'f' in '23pf' for farad) are ignored
+        txt = txt[begin:num_end]
+    end
+
     # Try to parse as integer first, then as float
     ret = tryparse(Int64, txt)
     if ret !== nothing
@@ -2668,4 +2685,62 @@ function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{S
         error("Section '$section' not found in $file")
     end
     return only(expr.args)
+end
+
+#==============================================================================#
+# Default Parameterization Extraction
+#==============================================================================#
+
+"""
+    get_default_parameterization(ast) -> Vector{Pair{Symbol, Any}}
+
+Extract the default parameter values from a parsed SPICE/Spectre AST.
+Returns a vector of Symbol => value pairs for all top-level parameters.
+
+# Example
+```julia
+ast = SpectreNetlistParser.parse(IOBuffer("* test\\n.param foo=1.0 bar=2.0"))
+params = get_default_parameterization(ast)
+# Returns [(:foo => 1.0), (:bar => 2.0)]
+```
+"""
+function get_default_parameterization(ast::SNode)
+    # Parse the AST to get sema result
+    sema_result = sema(ast)
+
+    result = Pair{Symbol, Any}[]
+    state = CodegenState(sema_result)
+
+    # Extract parameters from sema
+    for (name, param_list) in sema_result.params
+        if !isempty(param_list)
+            # Get the first (non-conditional) definition
+            _, param = first(param_list)
+            param_node = param.val
+
+            # Extract the value from the parameter node
+            if isa(param_node, SNode{SP.Parameter})
+                if param_node.val !== nothing
+                    try
+                        val = cg_expr!(state, param_node.val)
+                        push!(result, name => val)
+                    catch
+                        # If we can't evaluate the expression, just use the symbol
+                        push!(result, name => name)
+                    end
+                end
+            elseif isa(param_node, SNode{SC.Parameter})
+                if param_node.val !== nothing
+                    try
+                        val = cg_expr!(state, param_node.val)
+                        push!(result, name => val)
+                    catch
+                        push!(result, name => name)
+                    end
+                end
+            end
+        end
+    end
+
+    return result
 end
