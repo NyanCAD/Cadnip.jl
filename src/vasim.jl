@@ -863,13 +863,14 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         # This requires a branch current variable for proper DC current flow
         expr = to_julia(cs.assign_expr)
         # Create a unique name for this voltage contribution's current variable
-        I_alloc_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
+        # Use runtime instance-prefixed name to avoid collisions between instances
+        I_alloc_name_suffix = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
             # Skip if nodes are aliased (short circuit optimization)
             if $p_node != $n_node
                 # Allocate branch current (idempotent - returns existing index if already allocated)
-                let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_name)
+                let I_var = CedarSim.MNA.alloc_current!(ctx, Symbol(_mna_instance_, "_", $I_alloc_name_suffix))
                     v_contrib_raw = $expr
                     v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
 
@@ -1378,24 +1379,30 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end
 
     # Allocate current variables for named branches with voltage contributions
+    # Use runtime instance-prefixed names to avoid collisions between instances
     branch_current_alloc = Expr(:block)
     branch_current_vars = Dict{Symbol, Symbol}()  # branch_name -> current_var_name
     for (branch_name, _) in voltage_branch_contribs
         I_var = Symbol("_I_branch_", branch_name, "_idx")
-        alloc_name = Symbol(symname, "_I_", branch_name)
+        # Create runtime name with conditional prefix (empty prefix -> no underscore)
+        alloc_name_suffix = QuoteNode(Symbol(symname, "_I_", branch_name))
+        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $(QuoteNode(alloc_name)))))
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_name_expr)))
         branch_current_vars[branch_name] = I_var
     end
 
     # Allocate current variables for two-node voltage contributions (e.g., V(a,b) <+ 0)
     # These need branch currents to carry DC current through short circuits
+    # Use runtime instance-prefixed names to avoid collisions between instances
     twonode_voltage_vars = Dict{Tuple{Symbol,Symbol}, Symbol}()  # (p,n) -> current_var_name
     for ((p_sym, n_sym), _) in twonode_voltage_contribs
         I_var = Symbol("_I_V_", p_sym, "_", n_sym, "_idx")
-        alloc_name = Symbol(symname, "_I_V_", p_sym, "_", n_sym)
+        # Create runtime name with conditional prefix (empty prefix -> no underscore)
+        alloc_name_suffix = QuoteNode(Symbol(symname, "_I_V_", p_sym, "_", n_sym))
+        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $(QuoteNode(alloc_name)))))
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_name_expr)))
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
@@ -1527,9 +1534,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Generate internal node allocation code (runs once per stamp! call)
     # This allocates matrix/vector entries for internal nodes
     # If a short circuit is detected, alias to external node instead of allocating
+    # Internal node names need to be unique per instance
+    # We use _mna_instance_ as a prefix to create names like "xu1_xm_PSP103VA_GP"
     internal_node_alloc = Expr(:block)
     for (i, (int_sym, int_param)) in enumerate(zip(internal_nodes, internal_node_params))
-        alloc_name = Symbol(symname, "_", int_sym)
+        # Create runtime node name with conditional prefix (empty prefix -> no underscore)
+        alloc_name_suffix = QuoteNode(Symbol(symname, "_", int_sym))
+        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
 
         if haskey(short_circuits, int_sym)
             # This internal node can be aliased to an external node when condition is true
@@ -1546,18 +1557,31 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     :($int_param = if !(iszero($condition))
                         $ext_param  # Alias to external node
                     else
-                        CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))
+                        CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
                     end))
             else
                 # External node not found in ports, fall back to regular allocation
                 push!(internal_node_alloc.args,
-                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)))
             end
         else
             # Regular allocation (no short circuit detected)
             push!(internal_node_alloc.args,
-                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)))
         end
+    end
+
+    # Add GMIN (minimum conductance) to ground for internal nodes
+    # This prevents floating nodes that can cause singular matrix issues
+    # Especially important for noise-related internal nodes that have no DC path
+    # GMIN value: 1e-12 S (1 pS) - standard SPICE minimum conductance
+    gmin_stamp = Expr(:block)
+    for int_param in internal_node_params
+        push!(gmin_stamp.args, quote
+            if $int_param != 0
+                CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, 1e-12)
+            end
+        end)
     end
 
     # Generate voltage extraction for all nodes (terminals + internal)
@@ -1597,6 +1621,16 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Check for valid positive index within bounds
         push!(branch_current_extraction.args,
             :($I_sym = isempty(_mna_x_) || $I_var < 1 || $I_var > length(_mna_x_) ? 0.0 : _mna_x_[$I_var]))
+    end
+
+    # Initialize branch current variables for named branches that don't have voltage contributions
+    # These are typically noise branches (e.g., I(NOII) <+ white_noise(...)) that are probed
+    # In DC/transient analysis, noise sources contribute 0 current
+    for (branch_name, _) in to_julia.named_branches
+        if !haskey(branch_current_vars, branch_name)
+            I_sym = Symbol("_I_branch_", branch_name)
+            push!(branch_current_extraction.args, :($I_sym = 0.0))
+        end
     end
 
     # Generate voltage contribution stamping for named branches
@@ -1731,7 +1765,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
                                      _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Float64[],
-                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
+                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                     _mna_instance_::Symbol=Symbol(""))
             $(params_to_locals...)
             $(function_defs...)
 
@@ -1741,6 +1776,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
             # Allocate internal nodes (idempotent - returns existing index if already allocated)
             $internal_node_alloc
+
+            # Add GMIN to ground for internal nodes (prevents floating nodes)
+            $gmin_stamp
 
             # Allocate current variables for named branches with voltage contributions
             $branch_current_alloc

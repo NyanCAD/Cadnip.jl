@@ -203,6 +203,24 @@ function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit,
 end
 
 """
+    parse_spice_file_to_mna(filepath::AbstractString; circuit_name=:circuit, imported_hdl_modules=Module[])
+
+Parse a SPICE netlist file and generate an MNA builder function.
+This variant preserves the file path context for resolving relative includes.
+
+# Example
+```julia
+circuit_code = parse_spice_file_to_mna("circuit.sp"; circuit_name=:my_circuit)
+eval(circuit_code)
+```
+"""
+function parse_spice_file_to_mna(filepath::AbstractString; circuit_name::Symbol=:circuit,
+                                  imported_hdl_modules::Vector{Module}=Module[])
+    ast = SpectreNetlistParser.parsefile(filepath; start_lang=:spice, implicit_title=true)
+    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
+end
+
+"""
     solve_spice_mna(spice_code::String; temp=27.0)
 
 Parse SPICE code, build MNA circuit, and solve DC operating point.

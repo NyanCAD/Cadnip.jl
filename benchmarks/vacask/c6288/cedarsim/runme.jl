@@ -35,12 +35,12 @@ else
 end
 
 # Load and parse the SPICE netlist from file
+# Use parse_spice_file_to_mna to preserve file path context for .include resolution
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
 
-# Parse SPICE to code, then evaluate to get the builder function
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:c6288_circuit,
-                                         imported_hdl_modules=[PSP103VA_module])
+# Parse SPICE file to code, then evaluate to get the builder function
+const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:c6288_circuit,
+                                              imported_hdl_modules=[PSP103VA_module])
 eval(circuit_code)
 
 """

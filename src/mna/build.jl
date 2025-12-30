@@ -58,26 +58,58 @@ system_size(sys::MNASystem) = sys.n_nodes + sys.n_currents
 #==============================================================================#
 
 """
-    assemble_G(ctx::MNAContext) -> SparseMatrixCSC{Float64,Int}
+    assemble_G(ctx::MNAContext; gmin::Float64=0.0) -> SparseMatrixCSC{Float64,Int}
 
 Assemble the G (conductance) matrix from COO format stamps.
 Duplicate entries are summed (standard sparse matrix behavior).
 
+If gmin > 0, GMIN (minimum conductance) is added from each voltage node
+to ground to prevent singular matrices from floating nodes. This is
+standard SPICE practice for circuit simulation stability with complex
+device models.
+
 Note: Negative indices (representing current variables) are resolved
 to actual indices using resolve_index before assembly.
 """
-function assemble_G(ctx::MNAContext)
+function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
     n = system_size(ctx)
     if n == 0
         return spzeros(Float64, 0, 0)
     end
-    if isempty(ctx.G_I)
-        return spzeros(Float64, n, n)
-    end
+
     # Resolve any negative indices (current variables)
+    if isempty(ctx.G_I)
+        if gmin > 0
+            # Only GMIN stamps
+            gmin_I = collect(1:ctx.n_nodes)
+            gmin_J = collect(1:ctx.n_nodes)
+            gmin_V = fill(gmin, ctx.n_nodes)
+            return sparse(gmin_I, gmin_J, gmin_V, n, n)
+        else
+            return spzeros(Float64, n, n)
+        end
+    end
+
     I_resolved = [resolve_index(ctx, i) for i in ctx.G_I]
     J_resolved = [resolve_index(ctx, j) for j in ctx.G_J]
-    return sparse(I_resolved, J_resolved, ctx.G_V, n, n)
+
+    if gmin > 0
+        # Add GMIN from each voltage node to ground
+        # This is standard SPICE practice to prevent singular matrices
+        # GMIN is only added to voltage nodes (1:n_nodes), not current variables
+        gmin_I = collect(1:ctx.n_nodes)
+        gmin_J = collect(1:ctx.n_nodes)
+        gmin_V = fill(gmin, ctx.n_nodes)
+
+        # Combine stamps with GMIN
+        all_I = vcat(I_resolved, gmin_I)
+        all_J = vcat(J_resolved, gmin_J)
+        all_V = vcat(ctx.G_V, gmin_V)
+
+        return sparse(all_I, all_J, all_V, n, n)
+    else
+        return sparse(I_resolved, J_resolved, ctx.G_V, n, n)
+    end
 end
 
 """

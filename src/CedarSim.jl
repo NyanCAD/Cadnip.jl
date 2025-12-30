@@ -34,7 +34,7 @@ export @dyn, @requires, @provides, @isckt_or
 export solve
 
 # Phase 4: MNA SPICE codegen exports
-export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
+export make_mna_circuit, parse_spice_to_mna, parse_spice_file_to_mna, solve_spice_mna
 export @mna_sp_str
 
 # PDK/VA precompilation exports
