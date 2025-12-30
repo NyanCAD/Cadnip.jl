@@ -114,9 +114,9 @@ using PrecompileTools
         sa1 = VerilogAParser.parsefile(joinpath(@__DIR__, "../VerilogAParser.jl/test/inputs/resistor.va"))
         code1 = CedarSim.make_mna_module(sa1)
         sa2 = SpectreNetlistParser.parse(IOBuffer(spectre))
-        code2 = CedarSim.make_spectre_circuit(sa2)
-        sa3 = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
-        code3 = CedarSim.make_spectre_circuit(sa3)
+        code2 = CedarSim.make_mna_circuit(sa2)
+        sa3 = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+        code3 = CedarSim.make_mna_circuit(sa3)
     end
 end
 
