@@ -194,7 +194,7 @@ function sema_visit_ids!(f, expr::Union{SNode{SC.TernaryExpr}, SNode{SP.TernaryE
     sema_visit_ids!(f, expr.elsecase)
 end
 
-function sema_visit_ids!(f, expr::SNode{SP.BinaryExpression})
+function sema_visit_ids!(f, expr::Union{SNode{SC.BinaryExpression}, SNode{SP.BinaryExpression}})
     sema_visit_ids!(f, expr.lhs)
     sema_visit_ids!(f, expr.rhs)
 end
