@@ -228,3 +228,190 @@ Body::Nothing
 ```
 
 The allocations are due to object creation (MNAContext, vectors), not type instability.
+
+## External Reference Implementations
+
+### VACASK Architecture (C++)
+
+VACASK is an analog circuit simulator that uses OpenVAF's OSDI interface for device models.
+Source: https://codeberg.org/arpadbuermen/VACASK
+
+**Key Pattern: Direct Pointer Stamping**
+
+VACASK separates circuit setup into distinct phases:
+
+1. **Structure Discovery** (`populateStructures()`):
+   - Determines sparsity pattern
+   - Allocates Jacobian entries in sparse matrix
+   - Allocates state storage
+
+2. **Pointer Binding** (`bindCore()`):
+   - Gets raw pointers to sparse matrix nonzeros
+   - Stores pointers in device instance: `jacResistArray[i] = matResist->valuePtr(...)`
+   - These pointers remain valid for the entire simulation
+
+3. **Evaluation** (`eval()` + `load()`):
+   - `eval()` computes device currents/charges from voltages
+   - `load()` writes directly to pre-bound pointers - **zero allocation**
+
+```cpp
+// In bindCore() - called once during setup
+for(auto i=0; i<numEntries; i++) {
+    auto& entry = jacobianEntry(i);
+    auto e = nodes_[entry.nodes.node_1]->unknownIndex();
+    auto u = nodes_[entry.nodes.node_2]->unknownIndex();
+
+    // Store pointer directly to sparse matrix storage
+    jacResistArray[i] = matResist->valuePtr(MatrixEntryPosition(e, u), ...);
+}
+
+// In loadCore() - called every Newton iteration
+// Writes directly through stored pointers - NO ALLOCATION
+descriptor->load_jacobian_resist(instance, model);
+```
+
+### OpenVAF OSDI Interface
+
+OpenVAF compiles Verilog-A to native code with the OSDI interface.
+Source: https://github.com/pascalkuthe/OpenVAF
+
+**OSDI Descriptor Key Fields:**
+
+```c
+typedef struct OsdiDescriptor {
+    // Jacobian structure - determined at compile time
+    uint32_t num_jacobian_entries;
+    OsdiJacobianEntry *jacobian_entries;
+
+    // Offset into instance struct where Jacobian pointers are stored
+    uint32_t jacobian_ptr_resist_offset;
+
+    // Core functions - write directly to bound pointers
+    void (*load_jacobian_resist)(void *inst, void* model);
+    void (*load_jacobian_react)(void *inst, void* model, double alpha);
+    void (*load_residual_resist)(void *inst, void* model, double *dst);
+} OsdiDescriptor;
+```
+
+**Key Insight**: The OSDI interface requires the simulator to:
+1. Allocate instance storage (`instance_size` bytes)
+2. Bind Jacobian pointers during setup
+3. Call `load_*` functions during Newton iteration - these write through the pre-bound pointers
+
+### SciML GPU Requirements
+
+For GPU acceleration with DiffEqGPU.jl, residual functions must meet specific requirements.
+Sources:
+- https://github.com/SciML/DiffEqGPU.jl
+- https://docs.sciml.ai/DiffEqGPU/stable/getting_started/
+
+**GPU Compatibility Requirements:**
+
+1. **Array Types**:
+   - Large state vectors: Use `CuArray` (lives on GPU)
+   - Small ensemble problems: Use `StaticArrays` (`SVector`, `SMatrix`)
+   - Prefer `Float32` for better GPU performance
+
+2. **Non-Allocating Code**:
+   - Residual functions must be fully non-allocating
+   - Use in-place operations: `mul!(du, A, u)` instead of `du = A * u`
+   - For ensemble methods: Use `SVector` for immutable, stack-allocated returns
+
+3. **Broadcast-Compatible**:
+   - All operations must work with Julia's broadcasting
+   - GPU arrays override broadcast to run on GPU
+
+4. **Function Signature**:
+   - Standard: `f!(du, u, p, t)` for in-place
+   - Out-of-place: `f(u, p, t) -> SVector{N}` for ensemble GPU
+
+**Example GPU-Compatible Pattern:**
+```julia
+# GPU-compatible residual (no allocations)
+function residual!(du, u, p, t)
+    # All operations are in-place or use preallocated buffers
+    mul!(du, p.G, u)            # G*u into du
+    mul!(du, p.C, p.du_cache, 1.0, 1.0)  # add C*du_cache
+    du .-= p.b                   # subtract b
+    return nothing
+end
+```
+
+## Recommended Architecture: OSDI-Inspired Design
+
+Based on VACASK, OpenVAF, and SciML requirements, here's the recommended architecture:
+
+### Phase 1: Compilation (Once)
+
+```julia
+struct CompiledCircuit{T}
+    # Fixed structure
+    n::Int                           # System size
+    G::SparseMatrixCSC{T,Int}       # Conductance matrix (structure fixed)
+    C::SparseMatrixCSC{T,Int}       # Capacitance matrix (structure fixed)
+    b::Vector{T}                     # RHS vector
+
+    # Direct-access stamps (like OSDI Jacobian entries)
+    stamps::Vector{CompiledStamp{T}}
+
+    # State storage (like OSDI state arrays)
+    states::Vector{T}
+    prev_states::Vector{T}
+end
+
+struct CompiledStamp{T}
+    # Which matrix entry to update
+    matrix::Symbol        # :G, :C, or :b
+    nz_idx::Int          # Index into nonzeros(matrix)
+
+    # How to compute the value
+    value_fn::Function   # (params, spec, x, states) -> T
+end
+```
+
+### Phase 2: Rebuild (Every Newton Iteration)
+
+```julia
+function fast_rebuild!(cc::CompiledCircuit, u, t)
+    spec = SimSpec(time=t, ...)
+
+    # Reset matrices (fast, no allocation)
+    fill!(nonzeros(cc.G), 0.0)
+    fill!(nonzeros(cc.C), 0.0)
+    fill!(cc.b, 0.0)
+
+    # Evaluate each stamp directly into matrix storage
+    @inbounds for stamp in cc.stamps
+        val = stamp.value_fn(params, spec, u, cc.states)
+        if stamp.matrix == :G
+            nonzeros(cc.G)[stamp.nz_idx] += val
+        elseif stamp.matrix == :C
+            nonzeros(cc.C)[stamp.nz_idx] += val
+        else
+            cc.b[stamp.nz_idx] += val
+        end
+    end
+end
+```
+
+### Benefits of This Architecture
+
+1. **Zero allocation per iteration**: All storage is preallocated
+2. **GPU compatible**: Can use CuArray for matrices, stamps are just indices
+3. **OSDI compatible**: Same pattern as VACASK, easy to integrate native VA models
+4. **Type stable**: No runtime dispatch, all indices known at compile time
+
+### Migration Path
+
+1. **Phase 1**: Modify `PrecompiledCircuit` to store cached `MNAContext`
+   - Pass context to builder instead of creating new one
+   - ~70% allocation reduction
+
+2. **Phase 2**: Implement `CompiledStamp` pattern
+   - Each stamp becomes (matrix, index, value_fn) tuple
+   - ~95% allocation reduction
+
+3. **Phase 3**: GPU support
+   - Replace `Vector` with `CuVector`
+   - Replace `SparseMatrixCSC` with `CuSparseMatrixCSC`
+   - Stamps become GPU kernel operations
