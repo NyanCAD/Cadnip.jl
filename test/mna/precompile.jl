@@ -82,7 +82,7 @@ end
 end
 
 @testset "Compile simple RC circuit" begin
-    function build_rc(params, spec; x=Float64[])
+    function build_rc(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -114,7 +114,7 @@ end
 end
 
 @testset "PrecompiledCircuit DC solution" begin
-    function build_divider(params, spec; x=Float64[])
+    function build_divider(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         mid = get_node!(ctx, :mid)
@@ -138,7 +138,7 @@ end
 end
 
 @testset "PrecompiledCircuit with DC solve" begin
-    function build_rc(params, spec; x=Float64[])
+    function build_rc(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -162,7 +162,7 @@ end
 end
 
 @testset "fast_residual! computation" begin
-    function build_rc(params, spec; x=Float64[])
+    function build_rc(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -192,7 +192,7 @@ end
 end
 
 @testset "Nonlinear circuit compilation" begin
-    function build_diode_circuit(params, spec; x=Float64[])
+    function build_diode_circuit(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -223,7 +223,7 @@ end
 end
 
 @testset "alter with compiled circuit" begin
-    function build_r(params, spec; x=Float64[])
+    function build_r(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
 
@@ -249,7 +249,7 @@ end
 end
 
 @testset "Performance comparison" begin
-    function build_large_ladder(params, spec; x=Float64[])
+    function build_large_ladder(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         N = params.N
 

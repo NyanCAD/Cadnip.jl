@@ -5,7 +5,11 @@
 # A full wave rectifier (4 diodes) with a capacitor and a resistor as load
 # excited by a sinusoidal voltage.
 #
-# Benchmark target: ~1 million timepoints, ~2 million iterations
+# Benchmark target: ~1 million timepoints with dtmax=1e-6
+#
+# Note: Uses ImplicitEuler solver since the small timestep (1us) is artificially
+# enforced rather than physics-driven. First-order methods are more efficient
+# when the timestep is forced small.
 #==============================================================================#
 
 using CedarSim
@@ -55,12 +59,16 @@ end
 function run_benchmark(; warmup=true, dtmax=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
+    # Use ImplicitEuler for forced small timesteps - first-order is more efficient
+    # when the timestep is artificially constrained rather than physics-driven
+    solver = ImplicitEuler()
+
     # Warmup run (compiles everything)
     if warmup
         println("Warmup run...")
         try
             sim = setup_simulation(; dtmax=dtmax)
-            tran!(sim, (0.0, 0.001); dtmax=dtmax)
+            tran!(sim, (0.0, 0.001); dtmax=dtmax, solver=solver)
         catch e
             println("Warmup failed: ", e)
             showerror(stdout, e, catch_backtrace())
@@ -72,12 +80,12 @@ function run_benchmark(; warmup=true, dtmax=1e-6)
     sim = setup_simulation(; dtmax=dtmax)
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis...")
-    bench = @benchmark tran!($sim, $tspan; dtmax=$dtmax) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with ImplicitEuler...")
+    bench = @benchmark tran!($sim, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     sim = setup_simulation(; dtmax=dtmax)
-    sol = tran!(sim, tspan; dtmax=dtmax)
+    sol = tran!(sim, tspan; dtmax=dtmax, solver=solver)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))

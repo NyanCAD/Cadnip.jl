@@ -1389,7 +1389,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                     _mna_instance_ = $(QuoteNode(Symbol(name))))
             end
         end
@@ -1443,7 +1443,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
         let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
         end
     end
 end
@@ -1494,7 +1494,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                 # Build hierarchical instance name from _mna_prefix_ + local instance name
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                     _mna_instance_ = full_instance_name)
             end
         end
@@ -1550,7 +1550,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
             # Build hierarchical prefix from current _mna_prefix_ + local instance name
             local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
         end
     end
 end
@@ -1760,7 +1760,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                         _mna_instance_ = $(QuoteNode(Symbol(name))))
                 end
             end
@@ -1797,7 +1797,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # Pass instance_name as _mna_prefix_ for hierarchical naming
             return quote
                 let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
                 end
             end
         else
@@ -1847,7 +1847,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     return quote
         let dev = $device_expr
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
-                _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                 _mna_instance_ = $(QuoteNode(Symbol(name))))
         end
     end
@@ -1905,7 +1905,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = vals[1:2:end]
                         values = vals[2:2:end]
                         stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1915,7 +1915,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = vals[1:2:end]
                         values = vals[2:2:end]
                         stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             end
@@ -1939,7 +1939,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1948,7 +1948,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             end
@@ -1976,7 +1976,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                         values = [v1, v1, v2, v2, v1, v1]
                         stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1986,7 +1986,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                         values = [i1, i1, i2, i2, i1, i1]
                         stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
+                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             end
@@ -2364,7 +2364,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::$(MNAContext), $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # Make parent_params available for default expression evaluation
@@ -2437,7 +2437,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
 
         # Main circuit builder
         # x is the current solution vector for nonlinear Newton iteration
-        function $(circuit_name)(params, spec::$(MNASpec)=$(MNASpec)(); x::AbstractVector=Float64[])
+        # t is simulation time (passed explicitly for zero-allocation iteration)
+        function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0; x::AbstractVector=Float64[])
             ctx = $(MNAContext)()
             $body
             return ctx
