@@ -1920,7 +1920,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "RC circuit with multiple ODE solvers" begin
             # Simple RC circuit to test solver compatibility
-            function build_rc(params, spec; x=Float64[])
+            function build_rc(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 v = get_node!(ctx, :v)
                 out = get_node!(ctx, :out)
@@ -1953,7 +1953,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "Diode rectifier with multiple ODE solvers" begin
             # Half-wave rectifier with DC source (stable for all solvers)
-            function build_rectifier(params, spec; x=Float64[])
+            function build_rectifier(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
@@ -1987,7 +1987,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "MOSFET CS amplifier with multiple ODE solvers" begin
             # Common-source amplifier with SIN input
-            function build_cs_amp(params, spec; x=Float64[])
+            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
@@ -2029,7 +2029,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "BJT CE amplifier with SIN source" begin
             # BJT + SIN source using IDA (pure algebraic - no capacitors)
-            function build_ce_amp(params, spec; x=Float64[])
+            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)
@@ -2073,7 +2073,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "BJT CE amplifier with DC source" begin
             # BJT circuit with DC source using IDA (pure algebraic - no capacitors)
-            function build_ce_dc(params, spec; x=Float64[])
+            function build_ce_dc(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)

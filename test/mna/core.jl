@@ -1901,7 +1901,7 @@ using VerilogAParser
         using OrdinaryDiffEq
 
         # Build RC circuit with PWL voltage source
-        function build_pwl_rc(params, spec; x=Float64[])
+        function build_pwl_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1912,7 +1912,7 @@ using VerilogAParser
                 [0.0, params.Vmax];
                 name=:Vpwl
             )
-            stamp!(pwl, ctx, vcc, 0; t=spec.time, _sim_mode_=spec.mode)
+            stamp!(pwl, ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
@@ -1943,7 +1943,7 @@ using VerilogAParser
         using OrdinaryDiffEq
 
         # RC circuit with sinusoidal source
-        function build_sin_rc(params, spec; x=Float64[])
+        function build_sin_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1952,7 +1952,7 @@ using VerilogAParser
                 params.vo, params.va, params.freq;
                 name=:Vsin
             )
-            stamp!(sin_src, ctx, vcc, 0; t=spec.time, _sim_mode_=spec.mode)
+            stamp!(sin_src, ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
@@ -1998,14 +1998,14 @@ using VerilogAParser
 
         using CedarSim.MNA: SinVoltageSource
 
-        function build_rc_sin(params, spec; x=Float64[])
+        function build_rc_sin(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
             # SIN source: DC offset + AC amplitude at given frequency
             stamp!(SinVoltageSource(params.vo, params.va, params.freq; name=:Vin),
-                   ctx, vcc, 0; t=spec.time, _sim_mode_=spec.mode)
+                   ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
