@@ -73,13 +73,13 @@ const r_val_pwl = 2
     end
 
     # Also test using direct MNA API with PWLCurrentSource
-    function PWLIRcircuit(params, spec; x=Float64[])
+    function PWLIRcircuit(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vout = get_node!(ctx, :vout)
         # PWL: 0->0 at 1ms, 0->i_max at 9ms
         times = [1e-3, 9e-3]
         values = [0.0, Float64(i_max)]
-        stamp!(PWLCurrentSource(times, values; name=:I), ctx, vout, 0; t=spec.time, _sim_mode_=spec.mode)
+        stamp!(PWLCurrentSource(times, values; name=:I), ctx, vout, 0; t=t, _sim_mode_=spec.mode)
         stamp!(Resistor(Float64(r_val_pwl); name=:R), ctx, vout, 0)
         return ctx
     end
@@ -188,14 +188,14 @@ const ω_val = 1
     @test isapprox(rms(steady_state_vout), 0.5; atol=0.15, rtol=0.15)
 
     # Test using direct MNA API with SinVoltageSource
-    function butterworth_circuit(params, spec; x=Float64[])
+    function butterworth_circuit(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         n1 = get_node!(ctx, :n1)
         vout = get_node!(ctx, :vout)
 
         # SIN source: V(t) = sin(ω*t)
-        stamp!(SinVoltageSource(0.0, 1.0, ω_val/2π; name=:V), ctx, vin, 0; t=spec.time, _sim_mode_=spec.mode)
+        stamp!(SinVoltageSource(0.0, 1.0, ω_val/2π; name=:V), ctx, vin, 0; t=t, _sim_mode_=spec.mode)
         stamp!(Inductor(L1_val; name=:L1), ctx, vin, n1)
         stamp!(Capacitor(C2_val; name=:C2), ctx, n1, 0)
         stamp!(Inductor(L3_val; name=:L3), ctx, n1, vout)
@@ -210,7 +210,7 @@ const ω_val = 1
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get vout index from direct API circuit
-    ctx2 = butterworth_circuit((;), CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0))
+    ctx2 = butterworth_circuit((;), CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0), 0.0)
     sys2 = CedarSim.MNA.assemble!(ctx2)
     vout_idx2 = findfirst(n -> n == :vout, sys2.node_names)
 
