@@ -7,8 +7,9 @@
 #
 # Benchmark target: ~1 million timepoints with dtmax=1e-6
 #
-# Note: Uses MNASim with static matrix assembly and ODE solver (Rodas5P).
-# This is numerically stable because matrices are computed once at t=0.
+# Note: Uses ImplicitEuler solver since the small timestep (1us) is artificially
+# enforced rather than physics-driven. First-order methods are more efficient
+# when the timestep is forced small.
 #==============================================================================#
 
 using CedarSim
@@ -58,9 +59,9 @@ end
 function run_benchmark(; warmup=true, dtmax=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
-    # Use Rodas5P (default) with static matrix assembly
-    # The static assembly means matrices are computed once at t=0
-    solver = Rodas5P()
+    # Use ImplicitEuler for forced small timesteps - first-order is more efficient
+    # when the timestep is artificially constrained rather than physics-driven
+    solver = ImplicitEuler()
 
     # Warmup run (compiles everything)
     if warmup
@@ -79,7 +80,7 @@ function run_benchmark(; warmup=true, dtmax=1e-6)
     sim = setup_simulation(; dtmax=dtmax)
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with Rodas5P...")
+    println("\nBenchmarking transient analysis with ImplicitEuler...")
     bench = @benchmark tran!($sim, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
