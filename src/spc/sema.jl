@@ -473,8 +473,10 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 else
                     thispath = scope.ast.ps.srcfile.path
                     if thispath !== nothing
-                        path = isabspath(str) ? str : joinpath(dirname(thispath), str)
-                        # Otherwise, relative to the cache module (handled by the cache)
+                        path = joinpath(dirname(thispath), str)
+                    else
+                        # Relative path with no source file context - use as-is
+                        path = str
                     end
                 end
             end
@@ -538,6 +540,13 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 end
             end
             resize!(scope.condition_stack, depth)
+        elseif isa(stmt, SNode{SP.GlobalStatement})
+            # .global statements declare global nodes
+            # For MNA, all nodes are effectively global within the simulation, so we can skip these
+            # Just register the nets to ensure they're tracked
+            for node in stmt.nodes
+                push!(get!(()->[], scope.nets, LSymbol(node)), scope.global_position=>node)
+            end
         else
             @show stmt
             error()

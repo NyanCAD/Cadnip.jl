@@ -1385,10 +1385,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
         # Generate stamp! call for VA module
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
+        # Include instance name for unique internal node naming
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
+                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = $(QuoteNode(Symbol(name))))
             end
         end
     end
@@ -1437,10 +1439,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Generate code that:
     # 1. Navigates to subcircuit's portion of the lens via getproperty
     # 2. Calls builder with navigated lens, parent_params as positional arg, and explicit params as kwargs
+    # 3. Passes instance_name as _mna_prefix_ for hierarchical naming
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
         let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
         end
     end
 end
@@ -1485,10 +1488,14 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
         # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+        # Use hierarchical prefix for unique internal node naming (e.g., xu1_xmp_xm)
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
+                # Build hierarchical instance name from _mna_prefix_ + local instance name
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
+                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
             end
         end
     end
@@ -1538,9 +1545,12 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         Expr(:tuple, Expr(:parameters, parent_param_pairs...))
     end
 
+    # Pass hierarchical prefix: combine current prefix with instance name
     return quote
         let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
+            # Build hierarchical prefix from current _mna_prefix_ + local instance name
+            local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
         end
     end
 end
@@ -1746,10 +1756,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             end
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+            # Include instance name for unique internal node naming
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
+                        _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = $(QuoteNode(Symbol(name))))
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
@@ -1782,9 +1794,10 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             end
 
             # Generate subcircuit call similar to SPICE SubcktCall
+            # Pass instance_name as _mna_prefix_ for hierarchical naming
             return quote
                 let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
                 end
             end
         else
@@ -1830,10 +1843,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    # Include instance name for unique internal node naming
     return quote
         let dev = $device_expr
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
-                _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
+                _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_instance_ = $(QuoteNode(Symbol(name))))
         end
     end
 end
@@ -2349,7 +2364,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params, x; $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # Make parent_params available for default expression evaluation
@@ -2407,8 +2422,16 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     # Generate the body - pass subckt_semas in case top-level has subcircuit instances
     body = codegen_mna!(state; subckt_semas=subckt_semas)
 
-    # Wrap in function definition
+    # Wrap in function definition with necessary imports
+    # These imports are needed when the generated code is eval'd directly in Main
     return quote
+        # Import MNA device types needed for stamping
+        using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+        using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
+        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!
+        using CedarSim: ParamLens, IdentityLens
+        using CedarSim.SpectreEnvironment
+
         # Subcircuit builders
         $(subckt_defs...)
 
