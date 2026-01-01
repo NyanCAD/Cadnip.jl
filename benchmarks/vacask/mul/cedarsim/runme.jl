@@ -15,6 +15,9 @@
 # Important: This benchmark requires dt=1ns (not 10ns like ngspice) due to the
 # stiff diode switching in the VA model. The simulation time is reduced to 0.5ms
 # to maintain the ~500k timestep target.
+#
+# TODO: Investigate whether gmin is fully hooked up to VA models. The smaller
+# timestep requirement may be related to gmin not being properly applied.
 #==============================================================================#
 
 using CedarSim
