@@ -8,11 +8,23 @@ This document outlines a plan for implementing advanced Verilog-A derivative ana
 2. **Reactive vs resistive classification**: Statically classify contributions as resistive (f) or reactive (q)
 3. **Dependent capacitor rewriting**: Detect and transform voltage-dependent charges to proper charge formulation
 
-## Current State Analysis
+## Context: Why Not DAECompiler or Symbolics?
 
-### SpiceArmyKnife.jl Architecture
+**DAECompiler.jl** (CedarEDA) solved these problems using Julia's compiler infrastructure:
+- Custom `AbstractInterpreter` with `Incidence` lattice for linearity tracking
+- Diffractor for AD-aware type inference
+- StateSelection.jl for structural analysis
 
-The current implementation uses an elegant **s-dual approach** (see `src/mna/contrib.jl`):
+However, **DAECompiler is unmaintainable** - it's tightly coupled to specific Julia compiler internals that break across versions. This is why SpiceArmyKnife uses the MNA + ForwardDiff approach.
+
+**Symbolics.jl** is unsuitable for large Verilog models due to:
+- Expression blowup with conditionals (if/else creates 2^n terms)
+- No native support for ddt/idt operators
+- Poor scaling for BSIM4-class models with 1000s of equations
+
+## Current State: MNA + ForwardDiff
+
+The current s-dual approach (see `src/mna/contrib.jl`) is elegant:
 
 ```julia
 # s represents the Laplace variable (s = jω)
@@ -25,6 +37,7 @@ va_ddt(x) = Dual{ContributionTag}(zero(x), x)
 - No AST walking required for basic cases
 - Jacobians computed automatically
 - Works well for simple VA models
+- No dependency on fragile compiler internals
 
 **Limitations:**
 - No static classification (can't determine at compile time if a contribution is purely resistive)
@@ -33,7 +46,33 @@ va_ddt(x) = Dual{ContributionTag}(zero(x), x)
 - No charge reformulation detection
 - All devices go through AD even when analytical derivatives exist
 
-### OpenVAF Architecture (Reference)
+## Available Julia Infrastructure
+
+Packages that could help without reinventing wheels:
+
+| Package | Status | Use Case |
+|---------|--------|----------|
+| **Diffractor.jl** | Forward-mode stable (2025) | AD-aware type inference, demand-driven transforms |
+| **BaseCompiler.jl** | Julia 1.12+ | Access to `AbstractInterpreter` for custom analysis |
+| **CompilerPluginTools.jl** | Active | Utilities for custom abstract interpreters |
+| **JET.jl** | Active | Plugin analyzer framework, shows how to build custom analysis |
+| **Enzyme.jl** | Active | Activity analysis (what's differentiable vs constant) |
+| **StateSelection.jl** | Shared with MTK | Structural analysis (if we need tearing/Pantelides) |
+
+### Key Insight from DAECompiler
+
+DAECompiler's `Incidence` lattice tracks:
+```julia
+struct Linearity
+    time_dependent::Bool    # Does coefficient depend on time?
+    state_dependent::Bool   # Does coefficient depend on other states?
+    nonlinear::Bool         # Is the usage nonlinear?
+end
+```
+
+This is exactly what we need for classifying contributions. The question is: can we achieve this without the full DAECompiler machinery?
+
+## OpenVAF Architecture (Reference)
 
 OpenVAF uses a sophisticated multi-pass approach:
 
@@ -47,6 +86,178 @@ Key insights from OpenVAF:
 - **Explicit classification**: `ContributeKind` enum marks `is_reactive: bool` at lowering time
 - **Linearization decision**: `Evaluation::{Equation, Linear, Dead}` based on dependency analysis
 - **Callback-based operators**: `ddt`, `idt`, `ddx` lowered as callbacks, replaced during AD
+
+---
+
+## Practical Approaches (Without DAECompiler)
+
+Given that DAECompiler is unmaintainable and Symbolics has blowup issues, here are practical options ranked by feasibility:
+
+### Option 1: Diffractor's Demand-Driven AD (Recommended)
+
+Diffractor applies transforms only to IR statements that contribute to outputs. This is exactly what we need:
+
+```julia
+using Diffractor
+
+# Diffractor can tell us at compile time:
+# - Which statements contribute to the derivative
+# - Which are "dead" w.r.t. differentiation
+# - Activity analysis (like Enzyme but at Julia IR level)
+```
+
+**Pros:**
+- Actively maintained, forward-mode stable
+- Works at Julia IR level (handles conditionals)
+- Integrates with ChainRules for custom derivatives
+- Demand-driven = no expression blowup
+
+**Cons:**
+- Need to understand Diffractor's internals
+- May need to extract/adapt specific passes
+
+**Investigation needed:** Can we use Diffractor's `fwd_abstract_call_gf_by_type` to determine if a function contains `va_ddt` calls at compile time?
+
+### Option 2: Enzyme Activity Analysis
+
+Enzyme has sophisticated activity analysis that determines what's differentiable:
+
+```julia
+using Enzyme
+
+# Enzyme's activity analysis tells us:
+# - Is this value Const (doesn't affect derivative)?
+# - Is this value Duplicated (does affect derivative)?
+# - Activity stability (known at compile time or runtime)
+```
+
+**Pros:**
+- Very mature activity analysis
+- Handles complex control flow
+- Well documented
+
+**Cons:**
+- Works at LLVM level (might be overkill)
+- Would need to extract just the analysis, not the full AD
+
+### Option 3: Lightweight VerilogA AST Analysis
+
+Instead of analyzing Julia IR, analyze the VerilogA AST directly during codegen:
+
+```julia
+# During vasim.jl codegen:
+function analyze_contribution(contrib_stmt)
+    has_ddt = walk_ast(contrib_stmt.rhs, contains_ddt)
+    has_idt = walk_ast(contrib_stmt.rhs, contains_idt)
+
+    if !has_ddt && !has_idt
+        return :purely_resistive
+    elseif has_ddt && is_linear_in_ddt(contrib_stmt.rhs)
+        return :linearizable_reactive
+    else
+        return :needs_runtime_ad
+    end
+end
+```
+
+**Pros:**
+- Simple, no external dependencies
+- We control the VerilogA AST (VerilogAParser.jl)
+- Can be done incrementally
+
+**Cons:**
+- Doesn't benefit from Julia optimizations
+- Need to handle all VA constructs
+
+### Option 4: Runtime Classification with Caching
+
+Keep the current ForwardDiff approach but cache the classification:
+
+```julia
+# First evaluation determines characteristics
+struct ContributionCache
+    is_purely_resistive::Bool  # partials are always zero
+    is_purely_reactive::Bool   # value is always zero
+    is_linear::Bool            # Jacobian is constant
+    cached_jacobian::Union{Nothing, Matrix{Float64}}
+end
+
+# On first stamp!, analyze and cache
+function stamp_with_caching!(dev, ctx, p, n, x)
+    cache = get!(CONTRIBUTION_CACHE, typeof(dev)) do
+        analyze_at_runtime(dev, x)
+    end
+
+    if cache.is_linear && cache.cached_jacobian !== nothing
+        # Use cached Jacobian, skip AD
+        stamp_linear!(ctx, p, n, cache.cached_jacobian)
+    else
+        # Fall back to full AD
+        stamp_current_contribution!(ctx, p, n, contrib_fn, x)
+    end
+end
+```
+
+**Pros:**
+- No new dependencies
+- Works with existing infrastructure
+- Graceful degradation
+
+**Cons:**
+- First evaluation still pays AD cost
+- Classification based on sample point (might miss edge cases)
+
+### Option 5: JET.jl-Style Custom Analyzer
+
+Build a lightweight analyzer using JET.jl's plugin system:
+
+```julia
+using JET
+
+# Custom analyzer that tracks ddt/idt calls
+struct ReactiveAnalyzer <: JET.AbstractAnalyzer
+    # Track which values flow through va_ddt
+end
+
+# Override abstract interpretation to track va_ddt
+function JET.analyze_call(analyzer::ReactiveAnalyzer, ...)
+    if is_call_to(va_ddt, ...)
+        mark_reactive!(analyzer, result)
+    end
+end
+```
+
+**Pros:**
+- JET.jl is actively maintained
+- Built on Core.Compiler but provides stable API
+- Good for static analysis
+
+**Cons:**
+- Need to learn JET's plugin API
+- Might be more than we need
+
+---
+
+## Recommended Approach: Hybrid
+
+Combine Options 3 and 4:
+
+1. **At codegen time (Option 3)**: Analyze VerilogA AST to classify contributions
+   - Mark each contribution as `:resistive`, `:reactive`, `:mixed`
+   - Generate specialized code paths
+
+2. **At runtime (Option 4)**: Cache analysis results
+   - First evaluation determines linearity
+   - Cache Jacobians for linear devices
+   - Skip redundant AD for known-linear contributions
+
+3. **Future enhancement**: Investigate Diffractor for compile-time classification
+
+This approach:
+- Requires no new dependencies
+- Works incrementally with current code
+- Handles conditionals correctly (runtime path)
+- Optimizes common cases (codegen path)
 
 ---
 
