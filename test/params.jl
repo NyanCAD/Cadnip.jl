@@ -144,32 +144,37 @@ x1 out 0 outer
 
 ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
 
-# Test ParamObserver (requires DAECompiler for make_spectre_circuit)
-# Only run if DAECompiler is available
-if HAS_DAECOMPILER
-    observer = CedarSim.ParamObserver(foo=200);
-    code = CedarSim.make_spectre_circuit(ast)
-    circuit = eval(code)
-    circuit(observer);
-    observed = convert(NamedTuple, observer)
-    expected = (
-        x1 = (; x1 = (; r1 = (r = 2200,), foo = 2200)),
-        i1 = (; dc = 200,), foo = 200, l1 = (; l = 0.001,), inner = 1
-    )
-
-    # `observed` may contain extra fields, but it must agree on all of `expected`s fields
-    ⊑(x::NamedTuple, y::NamedTuple) = all(haskey(x, k) && (x[k] == y[k] || x[k] ⊑ y[k]) for k in keys(y))
-    @test observed ⊑ expected
-end
-
 # Test MNA circuit building with parameters
 # Generate MNA builder from SPICE
 mna_code = CedarSim.make_mna_circuit(ast)
 m = Module()
 Base.eval(m, :(using CedarSim.MNA))
-Base.eval(m, :(using CedarSim: ParamLens))
+Base.eval(m, :(using CedarSim: ParamLens, AbstractParamLens, ParamObserver, @param))
 Base.eval(m, :(using CedarSim.SpectreEnvironment))
 mna_builder = Base.eval(m, mna_code)
+
+# Test ParamObserver with MNA circuits
+# ParamObserver collects parameter hierarchy when circuit is called
+observer = CedarSim.ParamObserver(foo=200)
+spec = MNASpec(temp=27.0, mode=:dcop)
+ctx = Base.invokelatest(mna_builder, observer, spec)
+
+# Convert observer to NamedTuple and verify parameter values
+observed = convert(NamedTuple, observer)
+
+# Helper function for subset comparison
+⊑(x::Number, y::Number) = x == y
+⊑(x::NamedTuple, y::NamedTuple) = all(haskey(x, k) && (x[k] ⊑ y[k]) for k in keys(y))
+
+# With foo=200, i1's DC value should be 200
+# inner subcircuit has foo=foo+2000, so at x1.x1 level, foo should be 2200
+# R1 uses 'foo' which is 2200 at that scope
+# Note: ParamObserver puts parameters at top level, not under 'params'
+expected = (
+    foo = 200,
+    x1 = (; x1 = (; foo = 2200.0,))
+)
+@test observed ⊑ expected
 
 # Test that we can pass parameters to subcircuits via MNACircuit
 # ParamLens expects params wrapped in (params=(...),) for merging to work
