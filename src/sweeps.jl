@@ -501,12 +501,19 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
 end
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
-# Note: explicit_jacobian defaults to true for performance. Set to false for circuits
-# with time-dependent sources (SIN, PWL, etc.) if you encounter initialization issues.
+# Note: explicit_jacobian defaults to true for Sundials solvers (IDA) for performance.
+# OrdinaryDiffEq DAE solvers (DFBDF, DABDF2, DImplicitEuler) need explicit_jacobian=false
+# because their internal W matrix computation is incompatible with our custom Jacobian.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, explicit_jacobian=true,
+                        abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
                         initializealg=nothing, kwargs...)
+    # Auto-detect explicit_jacobian based on solver type
+    # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
+    if explicit_jacobian === nothing
+        explicit_jacobian = solver isa Sundials.SundialsDAEAlgorithm
+    end
+
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
     # Use initializealg if provided, otherwise let the solver use its default
     if initializealg !== nothing
