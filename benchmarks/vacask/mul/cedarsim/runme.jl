@@ -5,12 +5,16 @@
 # A voltage multiplier (4 diodes, 4 capacitors) with a series resistor at its
 # input excited by a sinusoidal voltage.
 #
-# Benchmark target: ~500k timepoints, ~1M NR iterations
+# Benchmark target: ~500k timepoints, ~500k-1M NR iterations
 #
 # Note: Uses DABDF2 (BDF2) solver with fixed timesteps (adaptive=false) to match
 # ngspice's "method=gear maxord=2" (Gear2) setting used in VACASK benchmarks.
 # The sin source uses phase=90 to start at peak voltage (dV/dt=0), avoiding
 # Newton convergence issues at t=0 with the cascaded diode topology.
+#
+# Important: This benchmark requires dt=1ns (not 10ns like ngspice) due to the
+# stiff diode switching in the VA model. The simulation time is reduced to 0.5ms
+# to maintain the ~500k timestep target.
 #==============================================================================#
 
 using CedarSim
@@ -57,8 +61,8 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dt=1e-8)
-    tspan = (0.0, 5e-3)  # 5ms simulation (~500k timepoints with dt=10ns)
+function run_benchmark(; warmup=true, dt=1e-9)
+    tspan = (0.0, 0.5e-3)  # 0.5ms simulation (~500k timepoints with dt=1ns)
 
     # Use DABDF2 (BDF2/Gear2) with fixed timesteps to match ngspice
     # adaptive=false forces the solver to use the specified dt
