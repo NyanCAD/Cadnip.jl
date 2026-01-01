@@ -7,9 +7,8 @@
 #
 # Benchmark target: ~1 million timepoints, ~2 million NR iterations
 #
-# Note: Uses ImplicitEuler solver with fixed timesteps (adaptive=false) to match
-# the VACASK benchmark methodology. The timestep is forced artificially small
-# so that roughly 1 million timesteps are computed.
+# Note: Uses DABDF2 (BDF2) solver with fixed timesteps (adaptive=false) to match
+# ngspice's "method=gear maxord=2" (Gear2) setting used in VACASK benchmarks.
 #==============================================================================#
 
 using CedarSim
@@ -59,10 +58,10 @@ end
 function run_benchmark(; warmup=true, dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation (~1M timepoints with dt=1us)
 
-    # Use ImplicitEuler with fixed timesteps for benchmarking
+    # Use DABDF2 (BDF2/Gear2) with fixed timesteps to match ngspice
     # adaptive=false forces the solver to use the specified dt
-    # Loose tolerances (1e-3) ensure Newton converges at each step
-    solver = ImplicitEuler(nlsolve=NLNewton(max_iter=100))
+    # Loose tolerances (1e-3) and high max_iter ensure Newton converges at each step
+    solver = DABDF2(nlsolve=NLNewton(max_iter=100))
 
     # Warmup run (compiles everything)
     if warmup
@@ -81,7 +80,7 @@ function run_benchmark(; warmup=true, dt=1e-6)
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with ImplicitEuler (fixed dt=$dt)...")
+    println("\nBenchmarking transient analysis with DABDF2 (fixed dt=$dt)...")
     bench = @benchmark tran!($circuit, $tspan; dt=$dt, adaptive=false, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
