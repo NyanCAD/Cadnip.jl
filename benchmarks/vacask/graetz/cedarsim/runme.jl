@@ -5,14 +5,16 @@
 # A full wave rectifier (4 diodes) with a capacitor and a resistor as load
 # excited by a sinusoidal voltage.
 #
-# Uses IDA (DAE solver) which correctly handles voltage-dependent junction
-# capacitance in the diode model. IDA is much more efficient than ODE solvers
-# for this circuit (599 steps vs ~10k+ with ImplicitEuler).
+# Benchmark target: ~1 million timepoints, ~2 million NR iterations
+#
+# Note: Uses ImplicitEuler solver with fixed timesteps (adaptive=false) to match
+# the VACASK benchmark methodology. The timestep is forced artificially small
+# so that roughly 1 million timesteps are computed.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using Sundials
+using OrdinaryDiffEq
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -54,19 +56,20 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true)
-    tspan = (0.0, 1.0)  # 1 second simulation
+function run_benchmark(; warmup=true, dt=1e-6)
+    tspan = (0.0, 1.0)  # 1 second simulation (~1M timepoints with dt=1us)
 
-    # Use IDA (DAE solver) which correctly handles voltage-dependent junction
-    # capacitance in the diode model. Much more efficient than ODE solvers.
-    # IDA uses adaptive timesteps based on error control.
+    # Use ImplicitEuler with fixed timesteps for benchmarking
+    # adaptive=false forces the solver to use the specified dt
+    # Loose tolerances (1e-3) ensure Newton converges at each step
+    solver = ImplicitEuler(nlsolve=NLNewton(max_iter=100))
 
     # Warmup run (compiles everything)
     if warmup
         println("Warmup run...")
         try
             circuit = setup_simulation()
-            tran!(circuit, (0.0, 0.02); abstol=1e-6, reltol=1e-4)
+            tran!(circuit, (0.0, 0.001); dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
         catch e
             println("Warmup failed: ", e)
             showerror(stdout, e, catch_backtrace())
@@ -78,16 +81,18 @@ function run_benchmark(; warmup=true)
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    # IDA uses adaptive timesteps - no dtmax needed
-    println("\nBenchmarking transient analysis with IDA (DAE solver)...")
-    bench = @benchmark tran!($circuit, $tspan; abstol=1e-6, reltol=1e-4) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with ImplicitEuler (fixed dt=$dt)...")
+    bench = @benchmark tran!($circuit, $tspan; dt=$dt, adaptive=false, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; abstol=1e-6, reltol=1e-4)
+    sol = tran!(circuit, tspan; dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
 
     println("\n=== Results ===")
-    @printf("Timepoints: %d\n", length(sol.t))
+    @printf("Timepoints:  %d\n", length(sol.t))
+    @printf("Expected:    ~%d\n", round(Int, (tspan[2] - tspan[1]) / dt) + 1)
+    @printf("NR iters:    %d\n", sol.stats.nnonliniter)
+    @printf("Iter/step:   %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
     println()
 
