@@ -755,136 +755,7 @@ function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
     )
 end
 
-#==============================================================================#
-# MNASim: Parameterized MNA Circuit Wrapper
-#==============================================================================#
-
-"""
-    MNASim{F,P}
-
-Parameterized MNA circuit simulation wrapper, similar to CedarSim's ParamSim.
-
-# Fields
-- `builder::F`: Function that builds the circuit given parameters
-- `mode::Symbol`: Simulation mode (:tran, :dcop, :tranop)
-- `params::P`: Named tuple of circuit parameters
-
-# Modes
-- `:tran` - Full transient simulation with time-dependent sources
-- `:dcop` - DC operating point (time-dependent sources at t=0)
-- `:tranop` - Transient operating point (steady state for tran)
-
-# Example
-```julia
-function build_circuit(p)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
-    stamp!(Resistor(p.R), ctx, vcc, out)
-    stamp!(Capacitor(p.C), ctx, out, 0)
-
-    return ctx
-end
-
-sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
-sys = assemble!(sim)
-sol = solve_dc(sys)
-```
-
-# New API with explicit spec:
-```julia
-function build_circuit(params, spec)
-    ctx = MNAContext()
-    # params: circuit parameters (R, C, Vcc, etc.)
-    # spec: MNASpec with temp, mode
-
-    R_temp = params.R * (1 + 0.004 * (spec.temp - 27))
-    stamp!(Resistor(R_temp), ctx, ...)
-
-    v = spec.mode == :dcop ? params.Vdc : params.Vss
-    stamp!(VoltageSource(v), ctx, ...)
-
-    return ctx
-end
-
-sim = MNASim(build_circuit; spec=MNASpec(temp=50.0), Vcc=5.0, R=1000.0)
-```
-"""
-struct MNASim{F,S,P}
-    builder::F
-    spec::S        # MNASpec or compatible
-    params::P      # Circuit parameters (NamedTuple)
-
-    function MNASim(builder::F; spec=MNASpec(), mode::Symbol=:tran, temp::Real=27.0, kwargs...) where {F}
-        # Support both new API (spec=...) and legacy (mode=...)
-        if spec isa MNASpec
-            actual_spec = spec
-        else
-            actual_spec = MNASpec(temp=Float64(temp), mode=mode)
-        end
-        params = NamedTuple(kwargs)
-        new{F,typeof(actual_spec),typeof(params)}(builder, actual_spec, params)
-    end
-end
-
-export MNASim, alter
-
-# Callable interface - invokes builder with (params, spec, t=0.0)
-function (sim::MNASim)()
-    return sim.builder(sim.params, sim.spec, 0.0)
-end
-
-# Build and assemble in one step
-function assemble!(sim::MNASim)
-    ctx = sim()
-    return assemble!(ctx)
-end
-
-# Create a new sim with different spec
-function with_spec(sim::MNASim, spec::MNASpec)
-    return MNASim(sim.builder; spec=spec, sim.params...)
-end
-
-# Create a new sim with different mode (convenience)
-function with_mode(sim::MNASim, mode::Symbol)
-    new_spec = MNASpec(temp=sim.spec.temp, mode=mode)
-    return with_spec(sim, new_spec)
-end
-
-# Create a new sim with different temperature (convenience)
-function with_temp(sim::MNASim, temp::Real)
-    new_spec = MNASpec(temp=Float64(temp), mode=sim.spec.mode)
-    return with_spec(sim, new_spec)
-end
-
-# Create a new sim with altered circuit parameters
-# Supports nested paths via var-strings: alter(sim; var"inner.R1" = 100.0)
-function alter(sim::MNASim; kwargs...)
-    # Helper to convert symbol to lens (handles nested paths like "a.b.c")
-    function to_lens(selector::Symbol)
-        parts = Symbol.(split(string(selector), "."))
-        return Accessors.opticcompose(PropertyLens.(parts)...)
-    end
-
-    new_params = sim.params
-    for (selector, value) in pairs(kwargs)
-        if value === nothing
-            continue  # Skip nothing values (sentinel for "use default")
-        end
-        lens = to_lens(selector)
-        # Auto-convert numeric types to Float64 if the target is Float64
-        if isa(value, Number) && isa(lens(new_params), Float64)
-            value = Float64(value)
-        end
-        new_params = Accessors.set(new_params, lens, value)
-    end
-
-    return MNASim(sim.builder; spec=sim.spec, new_params...)
-end
-
-export with_spec
+export alter
 
 #==============================================================================#
 # Out-of-Place Evaluation (GPU-Compatible)
@@ -936,38 +807,6 @@ end
 
 export eval_circuit
 
-"""
-    eval_circuit(sim::MNASim; t=0.0, u=nothing) -> MNASystem
-
-Out-of-place evaluation from MNASim wrapper.
-"""
-function eval_circuit(sim::MNASim; t::Real=0.0, u=nothing)
-    return eval_circuit(sim.builder, sim.params, sim.spec; t=t, u=u)
-end
-
-"""
-    solve_dc(sim::MNASim) -> DCSolution
-
-Build circuit from sim and solve DC operating point.
-"""
-function solve_dc(sim::MNASim)
-    sys = assemble!(sim)
-    return solve_dc(sys)
-end
-
-"""
-    solve_ac(sim::MNASim, freqs; kwargs...) -> ACSolution
-
-Build circuit from sim and perform AC analysis.
-"""
-function solve_ac(sim::MNASim, freqs::AbstractVector{<:Real}; kwargs...)
-    sys = assemble!(sim)
-    return solve_ac(sys, freqs; kwargs...)
-end
-
-# NOTE: make_dc_initialized_* removed - use MNACircuit + DAEProblem/ODEProblem instead
-# The new API automatically performs DC initialization.
-
 #==============================================================================#
 # Utility Functions
 #==============================================================================#
@@ -1008,7 +847,7 @@ function condition_number(sys::MNASystem)
     end
 end
 
-# Note: dc! and tran! for MNASim are defined in sweeps.jl to integrate
+# Note: dc! and tran! for MNACircuit are defined in sweeps.jl to integrate
 # with CedarSim's existing sweep API (CircuitSweep, ProductSweep, etc.)
 
 #==============================================================================#
@@ -1023,9 +862,9 @@ Wraps an ODESolution with the MNASystem for name resolution.
 
 # Example
 ```julia
-sim = MNASim(build_circuit; Vcc=5.0, R=1000.0)
-sol = tran!(sim, (0.0, 1e-3))
-acc = MNASolutionAccessor(sol, assemble!(sim))
+circuit = MNACircuit(build_circuit; Vcc=5.0, R=1000.0)
+sol = tran!(circuit, (0.0, 1e-3))
+acc = MNASolutionAccessor(sol, assemble!(circuit))
 acc[:out]  # Voltage trajectory at node :out
 ```
 """
