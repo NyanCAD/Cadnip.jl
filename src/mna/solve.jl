@@ -1306,6 +1306,28 @@ function system_size(circuit::MNACircuit)
     return system_size(sys0)
 end
 
+"""
+    assemble!(circuit::MNACircuit) -> MNASystem
+
+Build and assemble the circuit into an MNASystem.
+
+This is useful for accessing node names and solution accessors after simulation.
+Note that time-dependent sources are evaluated at t=0.
+
+# Example
+```julia
+circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
+sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P())
+sys = assemble!(circuit)
+acc = MNASolutionAccessor(sol, sys)
+v_out = voltage(acc, :out, 0.5e-3)
+```
+"""
+function assemble!(circuit::MNACircuit)
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    return assemble!(ctx)
+end
+
 # NOTE: make_dae_residual and make_dae_jacobian removed.
 # Use the compiled versions (make_compiled_dae_residual) for ~10x speedup.
 

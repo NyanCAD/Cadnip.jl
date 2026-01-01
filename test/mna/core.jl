@@ -1704,7 +1704,7 @@ using VerilogAParser
     using CedarSim: dc!, tran!
     using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
 
-    @testset "dc! and tran! API" begin
+    @testset "dc! and tran! API with MNACircuit" begin
         # Define a simple RC circuit
         function build_rc_simple(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
@@ -1718,20 +1718,20 @@ using VerilogAParser
             return ctx
         end
 
-        sim = MNASim(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
+        circuit = MNACircuit(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
         τ = 1000.0 * 1e-6  # 1ms
 
-        # Test dc!(sim) - matches CedarSim API
-        dc_sol = dc!(sim)
+        # Test dc!(circuit) - matches CedarSim API
+        dc_sol = dc!(circuit)
         @test dc_sol isa DCSolution
         @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
 
-        # Test tran!(sim, tspan) - matches CedarSim API
-        ode_sol = tran!(sim, (0.0, 5τ))
+        # Test tran!(circuit, tspan) with ODE solver (Rodas5P)
+        ode_sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P())
         @test ode_sol.retcode == ReturnCode.Success
 
         # Wrap for symbolic access
-        sys = assemble!(sim)
+        sys = assemble!(circuit)
         acc = MNASolutionAccessor(ode_sol, sys)
 
         # Test voltage access by name
@@ -1755,7 +1755,7 @@ using VerilogAParser
         @test length(state_at_tau) == 3  # vcc, out, I_V
     end
 
-    @testset "Hierarchical scope access" begin
+    @testset "Hierarchical scope access with MNACircuit" begin
         # Build a circuit with hierarchical-like node names
         function build_hierarchical(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
@@ -1767,13 +1767,13 @@ using VerilogAParser
             stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
             stamp!(Resistor(params.R1), ctx, vcc, x1_in)
             stamp!(Resistor(params.R2), ctx, x1_in, x1_out)
-            stamp!(Resistor(params.R3), ctx, x1_out, 0)
+            stamp!(Capacitor(params.C), ctx, x1_out, 0)  # Add cap for transient
 
             return ctx
         end
 
-        sim = MNASim(build_hierarchical; Vcc=10.0, R1=1000.0, R2=1000.0, R3=1000.0)
-        sys = assemble!(sim)
+        circuit = MNACircuit(build_hierarchical; Vcc=10.0, R1=1000.0, R2=1000.0, C=1e-6)
+        sys = assemble!(circuit)
 
         # Test ScopedSystem
         s = scope(sys)
@@ -1785,8 +1785,8 @@ using VerilogAParser
         @test node_ref.name == :out
         @test node_ref.path == [:x1]
 
-        # Test with tran!
-        ode_sol = tran!(sim, (0.0, 1e-3))
+        # Test with tran! using ODE solver
+        ode_sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P())
         acc = MNASolutionAccessor(ode_sol, sys)
 
         # Access via NodeRef
