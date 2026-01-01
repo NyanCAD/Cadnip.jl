@@ -28,6 +28,35 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 # Path to vadistiller models
 const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
+# Memory tracking helper for diagnosing OOM issues
+function mem_mb()
+    return round(Sys.total_memory() - Sys.free_memory(); digits=0) / 1024 / 1024
+end
+
+function with_memory_tracking(name::String, f)
+    GC.gc()
+    mem_before = mem_mb()
+    t0 = time()
+    result = f()
+    elapsed = time() - t0
+    GC.gc()
+    mem_after = mem_mb()
+    @info "$name" elapsed_s=round(elapsed; digits=2) mem_before_mb=round(mem_before; digits=0) mem_after_mb=round(mem_after; digits=0) mem_delta_mb=round(mem_after - mem_before; digits=0)
+    return result
+end
+
+# Load a VA model file with memory tracking
+function load_va_model(filename::String)
+    filepath = joinpath(vadistiller_path, filename)
+    with_memory_tracking("Loading $filename") do
+        va_code = read(filepath, String)
+        va = VerilogAParser.parse(IOBuffer(va_code))
+        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+        va = nothing  # Help GC
+    end
+    GC.gc()
+end
+
 @testset "VADistiller Integration Tests" begin
 
     #==========================================================================#
@@ -39,14 +68,11 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
     @testset "Tier 6: Full VADistiller Models (from file)" begin
 
+        @info "Starting Tier 6 tests" initial_mem_mb=round(mem_mb(); digits=0)
+
         # Group 1: Simple passives (resistor, capacitor, inductor)
         @testset "VADistiller passives" begin
-            let
-                resistor_va = read(joinpath(vadistiller_path, "resistor.va"), String)
-                va = VerilogAParser.parse(IOBuffer(resistor_va))
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("resistor.va")
 
             @testset "sp_resistor divider" begin
                 function sp_resistor_divider(params, spec, t::Real=0.0)
@@ -69,12 +95,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test isapprox_deftol(voltage(sol, :mid), 2.5)
             end
 
-            let
-                cap_va = read(joinpath(vadistiller_path, "capacitor.va"), String)
-                va = VerilogAParser.parse(IOBuffer(cap_va))
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("capacitor.va")
 
             @testset "sp_capacitor DC" begin
                 function sp_capacitor_circuit(params, spec, t::Real=0.0)
@@ -97,13 +118,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
             end
 
-            let
-                ind_va = read(joinpath(vadistiller_path, "inductor.va"), String)
-                va = VerilogAParser.parse(IOBuffer(ind_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("inductor.va")
 
             @testset "sp_inductor DC" begin
                 function sp_inductor_circuit(params, spec, t::Real=0.0)
@@ -129,13 +144,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 2: Diode
         @testset "VADistiller sp_diode" begin
-            let
-                diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
-                va = VerilogAParser.parse(IOBuffer(diode_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("diode.va")
 
             @testset "Basic diode circuit" begin
                 function sp_diode_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -183,13 +192,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 3: BJT
         @testset "VADistiller sp_bjt" begin
-            let
-                bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
-                va = VerilogAParser.parse(IOBuffer(bjt_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("bjt.va")
 
             @testset "Basic BJT circuit" begin
                 function sp_bjt_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -217,13 +220,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 4: JFETs and MESFETs
         @testset "VADistiller 3-terminal FETs" begin
-            let
-                jfet_va = read(joinpath(vadistiller_path, "jfet1.va"), String)
-                va = VerilogAParser.parse(IOBuffer(jfet_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("jfet1.va")
 
             @testset "sp_jfet1" begin
                 function sp_jfet_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -244,13 +241,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                mes_va = read(joinpath(vadistiller_path, "mes1.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mes_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mes1.va")
 
             @testset "sp_mes1" begin
                 function sp_mes_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -271,13 +262,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                jfet2_va = read(joinpath(vadistiller_path, "jfet2.va"), String)
-                va = VerilogAParser.parse(IOBuffer(jfet2_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("jfet2.va")
 
             @testset "sp_jfet2" begin
                 function sp_jfet2_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -303,13 +288,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 5: MOSFETs (mos1, mos2, mos3, mos6, mos9)
         @testset "VADistiller MOSFETs" begin
-            let
-                mos1_va = read(joinpath(vadistiller_path, "mos1.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mos1_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mos1.va")
 
             @testset "sp_mos1" begin
                 function sp_mos1_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -330,13 +309,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                mos2_va = read(joinpath(vadistiller_path, "mos2.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mos2_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mos2.va")
 
             @testset "sp_mos2" begin
                 function sp_mos2_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -357,13 +330,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                mos3_va = read(joinpath(vadistiller_path, "mos3.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mos3_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mos3.va")
 
             @testset "sp_mos3" begin
                 function sp_mos3_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -384,13 +351,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                mos6_va = read(joinpath(vadistiller_path, "mos6.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mos6_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mos6.va")
 
             @testset "sp_mos6" begin
                 function sp_mos6_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -411,13 +372,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
                 @test true
             end
 
-            let
-                mos9_va = read(joinpath(vadistiller_path, "mos9.va"), String)
-                va = VerilogAParser.parse(IOBuffer(mos9_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("mos9.va")
 
             @testset "sp_mos9" begin
                 function sp_mos9_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -443,13 +398,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 6: VDMOS (5-terminal with thermal nodes)
         @testset "VADistiller sp_vdmos" begin
-            let
-                vdmos_va = read(joinpath(vadistiller_path, "vdmos.va"), String)
-                va = VerilogAParser.parse(IOBuffer(vdmos_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("vdmos.va")
 
             @testset "sp_vdmos circuit" begin
                 function sp_vdmos_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -475,13 +424,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 7: BSIM3v3 (large model - 4K lines)
         @testset "VADistiller sp_bsim3v3" begin
-            let
-                bsim3v3_va = read(joinpath(vadistiller_path, "bsim3v3.va"), String)
-                va = VerilogAParser.parse(IOBuffer(bsim3v3_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("bsim3v3.va")
 
             @testset "sp_bsim3v3 circuit" begin
                 function sp_bsim3v3_circuit(params, spec, t::Real=0.0; x=Float64[])
@@ -507,13 +450,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         # Group 8: BSIM4v8 (largest model - 10K lines)
         @testset "VADistiller sp_bsim4v8" begin
-            let
-                bsim4_va = read(joinpath(vadistiller_path, "bsim4v8.va"), String)
-                va = VerilogAParser.parse(IOBuffer(bsim4_va))
-                @test !va.ps.errored
-                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-            end
-            GC.gc()
+            load_va_model("bsim4v8.va")
 
             @testset "sp_bsim4v8 string parameters" begin
                 @test fieldtype(sp_bsim4v8, :version) == CedarSim.DefaultOr{String}
@@ -547,11 +484,15 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
         GC.gc()
 
+        @info "Completed Tier 6 tests" final_mem_mb=round(mem_mb(); digits=0)
+
     end  # Tier 6
 
     #==========================================================================#
     # Tier 7: Transient Circuits with VADistiller Models
     #==========================================================================#
+
+    @info "Starting Tier 7 transient tests" mem_mb=round(mem_mb(); digits=0)
 
     @testset "Tier 7: Transient Circuits" begin
 
@@ -682,6 +623,8 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
     end  # Tier 7
 
     GC.gc()
+
+    @info "Completed Tier 7, starting Tier 8" mem_mb=round(mem_mb(); digits=0)
 
     #==========================================================================#
     # Tier 8: DAE Transient with Voltage-Dependent Capacitors
@@ -832,5 +775,7 @@ const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
     end  # Tier 8
 
     GC.gc()
+
+    @info "All integration tests completed" final_mem_mb=round(mem_mb(); digits=0)
 
 end  # VADistiller Integration Tests
