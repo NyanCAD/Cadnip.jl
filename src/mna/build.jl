@@ -97,8 +97,8 @@ function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
         end
     end
 
-    I_resolved = [resolve_index(ctx, i) for i in ctx.G_I]
-    J_resolved = [resolve_index(ctx, j) for j in ctx.G_J]
+    I_resolved = Int[resolve_index(ctx, i) for i in ctx.G_I]
+    J_resolved = Int[resolve_index(ctx, j) for j in ctx.G_J]
 
     if gmin > 0
         # Add GMIN from each voltage node to ground
@@ -137,8 +137,8 @@ function assemble_C(ctx::MNAContext)
         return spzeros(Float64, n, n)
     end
     # Resolve any negative indices (current variables)
-    I_resolved = [resolve_index(ctx, i) for i in ctx.C_I]
-    J_resolved = [resolve_index(ctx, j) for j in ctx.C_J]
+    I_resolved = Int[resolve_index(ctx, i) for i in ctx.C_I]
+    J_resolved = Int[resolve_index(ctx, j) for j in ctx.C_J]
     return sparse(I_resolved, J_resolved, ctx.C_V, n, n)
 end
 

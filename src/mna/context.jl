@@ -28,10 +28,6 @@ export system_size
 # This prevents index corruption when n_nodes changes during stamping.
 #==============================================================================#
 
-# Offset to distinguish charge indices from current indices in deferred index scheme
-# Current k → -k, Charge k → -(CHARGE_INDEX_OFFSET + k)
-const CHARGE_INDEX_OFFSET = 1000000
-
 """
     MNAIndex
 
@@ -78,25 +74,11 @@ struct ChargeIndex <: MNAIndex
     k::Int  # Charge variable number (1-based)
 end
 
-# Allow Int to be used where MNAIndex is expected (backward compatibility)
-# Positive = node, 0 = ground, negative = current (-k means current k)
-# Very negative (< -CHARGE_INDEX_OFFSET) = charge
-Base.convert(::Type{MNAIndex}, x::Int) = x == 0 ? GROUND : (x > 0 ? NodeIndex(x) :
-    (x > -CHARGE_INDEX_OFFSET ? CurrentIndex(-x) : ChargeIndex(-(x + CHARGE_INDEX_OFFSET))))
-
-# Allow MNAIndex in integer contexts (for backward compatibility with existing stamps)
-Base.convert(::Type{Int}, x::GroundIndex) = 0
-Base.convert(::Type{Int}, x::NodeIndex) = x.idx
-Base.convert(::Type{Int}, x::CurrentIndex) = -x.k
-Base.convert(::Type{Int}, x::ChargeIndex) = -(CHARGE_INDEX_OFFSET + x.k)
-
-# Comparison with integers
-Base.:(==)(x::GroundIndex, y::Int) = y == 0
-Base.:(==)(x::Int, y::GroundIndex) = x == 0
-Base.:(==)(x::NodeIndex, y::Int) = x.idx == y
-Base.:(==)(x::Int, y::NodeIndex) = x == y.idx
-Base.:(!=)(x::MNAIndex, y::Int) = !(x == y)
-Base.:(!=)(x::Int, y::MNAIndex) = !(x == y)
+# Ground check for stamps
+Base.iszero(::GroundIndex) = true
+Base.iszero(::NodeIndex) = false
+Base.iszero(::CurrentIndex) = false
+Base.iszero(::ChargeIndex) = false
 
 """
     MNAContext
@@ -157,21 +139,20 @@ mutable struct MNAContext
     n_currents::Int
 
     # COO format for G matrix (conductance/resistive)
-    G_I::Vector{Int}
-    G_J::Vector{Int}
+    G_I::Vector{MNAIndex}
+    G_J::Vector{MNAIndex}
     G_V::Vector{Float64}
 
     # COO format for C matrix (capacitance/reactive)
-    C_I::Vector{Int}
-    C_J::Vector{Int}
+    C_I::Vector{MNAIndex}
+    C_J::Vector{MNAIndex}
     C_V::Vector{Float64}
 
     # RHS vector (pre-allocated for known size, or extended dynamically)
     b::Vector{Float64}
 
-    # Deferred b vector stamps for negative indices (current variables)
-    # These are resolved at assembly time when n_nodes is final
-    b_I::Vector{Int}
+    # Deferred b vector stamps (resolved at assembly time when n_nodes is final)
+    b_I::Vector{MNAIndex}
     b_V::Vector{Float64}
 
     # Charge state variables (for voltage-dependent capacitors)
@@ -199,14 +180,14 @@ function MNAContext()
         BitVector(),        # internal_node_flags
         Symbol[],           # current_names
         0,                  # n_currents
-        Int[],              # G_I
-        Int[],              # G_J
+        MNAIndex[],         # G_I
+        MNAIndex[],         # G_J
         Float64[],          # G_V
-        Int[],              # C_I
-        Int[],              # C_J
+        MNAIndex[],         # C_I
+        MNAIndex[],         # C_J
         Float64[],          # C_V
         Float64[],          # b
-        Int[],              # b_I (deferred b stamps)
+        MNAIndex[],         # b_I (deferred b stamps)
         Float64[],          # b_V (deferred b stamps)
         Symbol[],           # charge_names
         0,                  # n_charges
@@ -305,36 +286,30 @@ x = [V₁, V₂, ..., Vₙ, I₁, I₂, ..., Iₘ]
 ```julia
 # Voltage source needs a current variable
 i_idx = alloc_current!(ctx, :I_V1)
-# i_idx is negative (deferred index), resolved to n_nodes + k at assembly time
+# i_idx is a CurrentIndex, resolved to n_nodes + k at assembly time
 ```
 
-Note: Returns a NEGATIVE index representing current variable k.
+Returns a `CurrentIndex` representing current variable k.
 This allows n_nodes to change (e.g., from internal node allocation)
 without invalidating previously stamped indices.
-The negative index is translated to the actual index (n_nodes + k)
-at assembly time by `resolve_index`.
 """
-function alloc_current!(ctx::MNAContext, name::Symbol)::Int
+function alloc_current!(ctx::MNAContext, name::Symbol)::CurrentIndex
     ctx.n_currents += 1
     push!(ctx.current_names, name)
-
-    # Return negative index representing current variable k
-    # This is resolved to n_nodes + k at assembly time
-    return -ctx.n_currents
+    return CurrentIndex(ctx.n_currents)
 end
 
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
 
 """
-    resolve_index(ctx::MNAContext, idx) -> Int
+    resolve_index(ctx::MNAContext, idx::MNAIndex) -> Int
 
 Resolve an MNA index to an actual system row/column index.
 
-Supports both typed indices (MNAIndex subtypes) and legacy integer encoding:
-- GroundIndex / 0: Returns 0 (stamps involving ground are skipped)
-- NodeIndex / positive Int: Returns the node index unchanged
-- CurrentIndex / negative Int (-k): Returns n_nodes + k
-- ChargeIndex / very negative Int (-(CHARGE_INDEX_OFFSET+k)): Returns n_nodes + n_currents + k
+- GroundIndex: Returns 0 (stamps involving ground are skipped)
+- NodeIndex: Returns the node index unchanged
+- CurrentIndex(k): Returns n_nodes + k
+- ChargeIndex(k): Returns n_nodes + n_currents + k
 
 This allows current and charge variable indices to be stamped before all nodes are known,
 and resolved at assembly time when n_nodes is final.
@@ -344,39 +319,18 @@ and resolved at assembly time when n_nodes is final.
 @inline resolve_index(ctx::MNAContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
 @inline resolve_index(ctx::MNAContext, idx::ChargeIndex)::Int = ctx.n_nodes + ctx.n_currents + idx.k
 
-# Legacy integer interface (for backward compatibility)
-@inline function resolve_index(ctx::MNAContext, idx::Int)::Int
-    idx >= 0 && return idx  # Node index or ground
-    # Check if it's a charge index (below -CHARGE_INDEX_OFFSET)
-    if idx <= -CHARGE_INDEX_OFFSET
-        # Charge variable: -(CHARGE_INDEX_OFFSET + k) → n_nodes + n_currents + k
-        k = -(idx + CHARGE_INDEX_OFFSET)
-        return ctx.n_nodes + ctx.n_currents + k
-    else
-        # Current variable: -k → n_nodes + k
-        return ctx.n_nodes - idx
-    end
-end
-
 """
-    get_current_idx(ctx::MNAContext, name::Symbol) -> Int
+    get_current_idx(ctx::MNAContext, name::Symbol) -> CurrentIndex
 
 Look up a current variable index by name.
-Returns a negative index (-k) representing current variable k.
+Returns a `CurrentIndex` representing current variable k.
 Use `resolve_index` to get the actual system index.
 Throws an error if the current variable doesn't exist.
-
-# Example
-```julia
-# After stamping a voltage source V1
-i_idx = get_current_idx(ctx, :I_V1)  # Returns -1
-actual_idx = resolve_index(ctx, i_idx)  # Returns n_nodes + 1
-```
 """
-function get_current_idx(ctx::MNAContext, name::Symbol)::Int
+function get_current_idx(ctx::MNAContext, name::Symbol)::CurrentIndex
     idx = findfirst(==(name), ctx.current_names)
     idx === nothing && error("Current variable $name not found in MNA context")
-    return -idx  # Return negative index
+    return CurrentIndex(idx)
 end
 
 get_current_idx(ctx::MNAContext, name::String) = get_current_idx(ctx, Symbol(name))
@@ -480,7 +434,7 @@ end
 #==============================================================================#
 
 """
-    alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int) -> Int
+    alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int) -> ChargeIndex
 
 Allocate a charge state variable for a voltage-dependent capacitor.
 
@@ -497,8 +451,8 @@ This yields a constant mass matrix suitable for SciML Rosenbrock solvers.
 - `p`, `n`: Branch nodes - current flows from p to n
 
 # Returns
-System index for the charge variable (n_nodes + n_currents + charge_number).
-Unlike current variables, charge indices are NOT deferred (positive indices).
+A `ChargeIndex` representing charge variable k, resolved to
+n_nodes + n_currents + k at assembly time by `resolve_index`.
 
 # Example
 ```julia
@@ -512,36 +466,28 @@ q_idx = alloc_charge!(ctx, :Q_Cj_D1, a, c)
 ```
 
 See doc/voltage_dependent_capacitors.md for full formulation.
-
-Note: Returns a DEFERRED negative index representing charge variable k.
-This allows n_nodes to change (e.g., from internal node allocation by subsequent instances)
-without invalidating previously stamped indices. The negative index is translated to the
-actual index (n_nodes + n_currents + k) at assembly time by `resolve_index`.
 """
-function alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int)::Int
+function alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int)::ChargeIndex
     ctx.n_charges += 1
     push!(ctx.charge_names, name)
     push!(ctx.charge_branches, (p, n))
-
-    # Return deferred negative index: -(CHARGE_INDEX_OFFSET + k)
-    # This is resolved to n_nodes + n_currents + k at assembly time
-    return -(CHARGE_INDEX_OFFSET + ctx.n_charges)
+    return ChargeIndex(ctx.n_charges)
 end
 
 alloc_charge!(ctx::MNAContext, name::String, p::Int, n::Int) = alloc_charge!(ctx, Symbol(name), p, n)
 
 """
-    get_charge_idx(ctx::MNAContext, name::Symbol) -> Int
+    get_charge_idx(ctx::MNAContext, name::Symbol) -> ChargeIndex
 
 Look up a charge variable index by name.
-Returns a deferred negative index (-(CHARGE_INDEX_OFFSET + k)).
+Returns a `ChargeIndex` representing charge variable k.
 Use `resolve_index` to get the actual system index.
 Throws an error if the charge variable doesn't exist.
 """
-function get_charge_idx(ctx::MNAContext, name::Symbol)::Int
+function get_charge_idx(ctx::MNAContext, name::Symbol)::ChargeIndex
     idx = findfirst(==(name), ctx.charge_names)
     idx === nothing && error("Charge variable $name not found in MNA context")
-    return -(CHARGE_INDEX_OFFSET + idx)  # Return deferred negative index
+    return ChargeIndex(idx)
 end
 
 get_charge_idx(ctx::MNAContext, name::String) = get_charge_idx(ctx, Symbol(name))
@@ -583,11 +529,19 @@ This is needed when ForwardDiff Duals are nested (e.g., ContributionTag wrapping
     extract_value(ForwardDiff.value(x))
 end
 
+# Convert to typed index for storage
+@inline _to_typed(idx::Int) = NodeIndex(idx)
+@inline _to_typed(idx::NodeIndex) = idx
+@inline _to_typed(idx::CurrentIndex) = idx
+@inline _to_typed(idx::ChargeIndex) = idx
+
 """
-    stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
+    stamp_G!(ctx::MNAContext, i, j, val)
 
 Stamp a value into the G (conductance) matrix at position (i, j).
-Entries involving ground (i=0 or j=0) are skipped.
+Entries involving ground are skipped.
+
+Accepts typed indices (NodeIndex, CurrentIndex, ChargeIndex) or integers.
 
 The G matrix represents resistive (algebraic) relationships:
 - Resistor: stamps ±1/R pattern
@@ -605,23 +559,23 @@ stamp_G!(ctx, n, p, -G)  # Current leaving n due to Vp
 stamp_G!(ctx, n, n,  G)  # Current leaving n due to Vn
 ```
 """
-@inline function stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
-    (i == 0 || j == 0) && return nothing
+@inline function stamp_G!(ctx::MNAContext, i, j, val)
+    iszero(i) && return nothing
+    iszero(j) && return nothing
     v = extract_value(val)
-    # Note: We do NOT skip zero entries here. For precompilation to work,
-    # the COO structure must be consistent regardless of operating point.
-    # Zero values are handled correctly by sparse matrix assembly.
-    push!(ctx.G_I, i)
-    push!(ctx.G_J, j)
+    push!(ctx.G_I, _to_typed(i))
+    push!(ctx.G_J, _to_typed(j))
     push!(ctx.G_V, v)
     return nothing
 end
 
 """
-    stamp_C!(ctx::MNAContext, i::Int, j::Int, val)
+    stamp_C!(ctx::MNAContext, i, j, val)
 
 Stamp a value into the C (capacitance) matrix at position (i, j).
-Entries involving ground (i=0 or j=0) are skipped.
+Entries involving ground are skipped.
+
+Accepts typed indices (NodeIndex, CurrentIndex, ChargeIndex) or integers.
 
 The C matrix represents reactive (differential) relationships:
 - Capacitor: stamps ±C pattern
@@ -629,58 +583,50 @@ The C matrix represents reactive (differential) relationships:
 
 For the ODE formulation: C * dx/dt + G * x = b
 """
-@inline function stamp_C!(ctx::MNAContext, i::Int, j::Int, val)
-    (i == 0 || j == 0) && return nothing
+@inline function stamp_C!(ctx::MNAContext, i, j, val)
+    iszero(i) && return nothing
+    iszero(j) && return nothing
     v = extract_value(val)
-    # Note: For voltage-dependent capacitors, we don't skip zeros because
-    # the COO structure must be consistent regardless of operating point.
-    # Zero values at some operating points are fine - they'll be in the matrix.
-    # However, devices WITHOUT ddt() should not call stamp_C! at all; this is
-    # handled by stamp_contribution! which skips C stamps for pure resistive devices.
-    push!(ctx.C_I, i)
-    push!(ctx.C_J, j)
+    push!(ctx.C_I, _to_typed(i))
+    push!(ctx.C_J, _to_typed(j))
     push!(ctx.C_V, v)
     return nothing
 end
 
 """
-    stamp_b!(ctx::MNAContext, i::Int, val)
+    stamp_b!(ctx::MNAContext, i, val)
 
 Add a value to the RHS vector b at position i.
-Entries at ground (i=0) are skipped.
+Entries at ground are skipped.
+
+Accepts typed indices (NodeIndex, CurrentIndex, ChargeIndex) or integers.
 
 The b vector contains source terms:
 - Independent current sources: stamp into KCL equations
 - Independent voltage sources: stamp voltage value into constraint equation
 """
-@inline function stamp_b!(ctx::MNAContext, i::Int, val)
-    i == 0 && return nothing
+@inline function stamp_b!(ctx::MNAContext, i, val)
+    iszero(i) && return nothing
     v = extract_value(val)
-    # Note: We do NOT skip zero entries here for consistency with stamp_G!/stamp_C!.
-    # This ensures the structure of deferred stamps is consistent.
+    typed = _to_typed(i)
 
-    # Resolve negative index (current variable) to actual index
-    # Note: For b vector, we need to resolve at assembly time since n_nodes may change.
-    # Instead of storing directly, we'll store the stamp and resolve later.
-    # For now, handle negative indices by deferring to assembly time.
-    if i < 0
-        # Store in deferred b stamps (need to add this)
-        push!(ctx.b_I, i)
+    # CurrentIndex/ChargeIndex are deferred until n_nodes is final
+    if typed isa CurrentIndex || typed isa ChargeIndex
+        push!(ctx.b_I, typed)
         push!(ctx.b_V, v)
         return nothing
     end
 
-    # Extend b if needed
-    if i > length(ctx.b)
+    # NodeIndex can be applied immediately
+    idx = typed.idx
+    if idx > length(ctx.b)
         old_len = length(ctx.b)
-        resize!(ctx.b, i)
-        # Zero-initialize all new elements (resize! leaves them uninitialized)
-        @inbounds for j in (old_len+1):i
+        resize!(ctx.b, idx)
+        @inbounds for j in (old_len+1):idx
             ctx.b[j] = 0.0
         end
     end
-
-    ctx.b[i] += v
+    ctx.b[idx] += v
     return nothing
 end
 
