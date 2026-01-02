@@ -1558,7 +1558,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(branch_stamp.args, quote
             if has_reactive
                 # Get cached voltage dependence result (populated by detection_block)
-                _is_voltage_dependent = get(ctx.charge_is_vdep, $charge_name_expr, false)
+                _is_voltage_dependent = Base.get(ctx.charge_is_vdep, $charge_name_expr, false)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
@@ -1954,7 +1954,7 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs, get
+        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
@@ -2153,7 +2153,7 @@ function load_mna_va_modules(into::Module, file::String)
             # Create module expression
             module_expr = :(baremodule $mod_name
                 using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs, get
+                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment
