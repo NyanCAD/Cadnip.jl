@@ -1737,11 +1737,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     # Generate branch current extraction for named branches
     # ZeroVector returns 0.0 for any index, eliminating bounds checks
+    # NOTE: We use begin/end instead of let to avoid local scope issues
+    # (the variable must be accessible in contrib_eval and voltage_stamp_code)
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
         push!(branch_current_extraction.args,
-            :(let _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
+            :(begin
+                _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
                 $I_sym = _mna_x_[_i_idx]
             end))
     end
