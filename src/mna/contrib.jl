@@ -72,6 +72,14 @@ ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = true   # All external tags A
 ForwardDiff.:≺(::Type{JacobianTag}, ::Type) = false      # JacobianTag is NOT less than external tags
 ForwardDiff.:≺(::Type, ::Type{JacobianTag}) = true       # External tags ARE less than JacobianTag
 
+# Explicit rules for ForwardDiff.Tag{F,V} parametric types
+# ForwardDiff.Tag is INNERMOST - lower precedence than our tags
+# This means when ForwardDiff.derivative wraps values, our tags stay outer
+ForwardDiff.:≺(::Type{JacobianTag}, ::Type{ForwardDiff.Tag{F,V}}) where {F,V} = false
+ForwardDiff.:≺(::Type{ForwardDiff.Tag{F,V}}, ::Type{JacobianTag}) where {F,V} = true
+ForwardDiff.:≺(::Type{ContributionTag}, ::Type{ForwardDiff.Tag{F,V}}) where {F,V} = false
+ForwardDiff.:≺(::Type{ForwardDiff.Tag{F,V}}, ::Type{ContributionTag}) where {F,V} = true
+
 #==============================================================================#
 # Voltage-Dependent Capacitor Detection (Charge Formulation Support)
 #
@@ -89,12 +97,9 @@ export is_voltage_dependent_charge
 
 Detect if a contribution contains voltage-dependent capacitance.
 
-Compares capacitance C = ∂Q/∂V at two different voltages. If C differs,
-the capacitance is voltage-dependent and requires charge formulation
-to achieve a constant mass matrix for SciML solvers.
-
-Uses ForwardDiff.derivative internally, which reuses already-compiled
-specializations and avoids introducing new nested dual types.
+Compares capacitance C = ∂Q/∂V at several voltages using ForwardDiff.
+If C differs between voltages, the capacitance is voltage-dependent
+and requires charge formulation for a constant mass matrix.
 
 # Arguments
 - `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
@@ -117,51 +122,53 @@ is_voltage_dependent_charge(V -> va_ddt(...), 0.3, 0.0)  # true
 ```
 
 # Implementation
-Uses finite-difference detection via first-order AD at two voltage points:
-1. Compute C₁ = ∂Q/∂V at V = 0.0
-2. Compute C₂ = ∂Q/∂V at V = 0.5
-3. If C₁ ≠ C₂, capacitance is voltage-dependent
+Uses ForwardDiff.derivative at multiple voltage points:
+1. Extract charge Q(V) via the reactive part of ContributionTag dual
+2. Compute C = dQ/dV using ForwardDiff.derivative
+3. If capacitances differ significantly across voltages, it's voltage-dependent
 
-This avoids nested duals entirely - ForwardDiff.derivative uses standard
-machinery that's already compiled for Float64.
+Tag ordering rules ensure ForwardDiff.Tag{F,V} is inner to our tags.
 """
 @inline function is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real)::Bool
-    # Function to extract charge from contribution result
-    # When called with a ForwardDiff dual, va_ddt will wrap in ContributionTag
-    # and we extract Q from the reactive (partial) component
-    #
-    # Important: Return the reactive part directly (keeping any dual structure)
-    # so that ForwardDiff.derivative can extract dQ/dV correctly.
+    # Extract charge from contribution - returns the reactive part
+    # Strips any JacobianTag wrapper that may leak from outer scope
     function extract_charge(Vpn)
         result = contrib_fn(Vpn)
         if result isa Dual{ContributionTag}
-            # Has ddt: return charge directly (may be a Dual with dQ/dV info)
-            return partials(result, 1)
+            # Has ddt: get the reactive part (charge)
+            react = partials(result, 1)
+            # Strip JacobianTag if present (leaked from outer scope)
+            # Keep only the ForwardDiff.derivative's tag or scalar
+            while react isa Dual{JacobianTag}
+                react = value(react)
+            end
+            return react
         else
-            # No reactive component - return zero of same type for AD
+            # No reactive component
             return zero(Vpn)
         end
     end
 
-    # Compute capacitance C = dQ/dV at two different voltages
-    # Using ForwardDiff.derivative reuses existing compiled specializations
-    # Use voltages away from zero to avoid edge cases
-    V1 = 0.25
-    V2 = 0.75
+    # Test at several voltages to avoid special cases
+    test_voltages = (0.17, 0.42, 0.73, 0.91)
 
-    C1 = ForwardDiff.derivative(extract_charge, V1)
-    C2 = ForwardDiff.derivative(extract_charge, V2)
+    # Compute reference capacitance at first voltage
+    C_ref = ForwardDiff.derivative(extract_charge, test_voltages[1])
 
-    # If capacitances differ significantly, it's voltage-dependent
-    # For voltage-dependent caps, the difference should be substantial
-    # Use relative comparison when values are non-zero, absolute when near zero
-    diff = abs(C1 - C2)
-    maxC = max(abs(C1), abs(C2))
+    # Check if capacitance differs at other voltages
+    for V in test_voltages[2:end]
+        C = ForwardDiff.derivative(extract_charge, V)
 
-    # Consider voltage-dependent if difference exceeds both:
-    # - A tiny absolute threshold (for numerical noise)
-    # - A relative threshold compared to the larger capacitance
-    return diff > 1e-15 && (maxC < 1e-30 || diff / maxC > 1e-6)
+        # If capacitance differs significantly, it's voltage-dependent
+        diff = abs(C - C_ref)
+        maxC = max(abs(C), abs(C_ref))
+
+        if diff > 1e-12 && (maxC < 1e-30 || diff / maxC > 1e-6)
+            return true
+        end
+    end
+
+    return false
 end
 
 """
