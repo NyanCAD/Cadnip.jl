@@ -12,12 +12,10 @@
 # The sin source uses phase=90 to start at peak voltage (dV/dt=0), avoiding
 # Newton convergence issues at t=0 with the cascaded diode topology.
 #
-# Important: This benchmark requires dt=1ns (not 10ns like ngspice) due to the
-# stiff diode switching in the VA model. The simulation time is reduced to 0.5ms
-# to maintain the ~500k timestep target.
-#
-# TODO: Investigate whether gmin is fully hooked up to VA models. The smaller
-# timestep requirement may be related to gmin not being properly applied.
+# MNASpec.gmin is accessible to VA models via $simparam("gmin", 1e-12). This matches
+# VACASK behavior where gmin is device-level only (not matrix-level). The diode.va model
+# applies gmin internally. Testing shows convergence still requires dt=1ns (not 10ns like
+# ngspice) - further investigation needed (limiting, source ramping, homotopy).
 #==============================================================================#
 
 using CedarSim

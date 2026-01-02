@@ -672,21 +672,20 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            # With default gmin=1e-12
+            # With default gmin=1e-12 (VA model applies gmin internally)
             spec = MNASpec()
             sol = solve_dc(gmin_circuit, (;), spec)
-            # I ≈ 5/1000 + 5*1e-12 (VA) + 5*1e-12 (matrix) ≈ 0.005
+            # I ≈ 5/1000 + 5*1e-12 (VA gmin) ≈ 0.005
             @test isapprox(current(sol, :I_V1), -0.005; atol=1e-6)
 
             # With custom gmin=1e-3 (very high for testing)
-            # Note: gmin now affects BOTH VA $simparam AND matrix-level convergence
+            # VA model applies gmin via $simparam("gmin") internally
             # - Resistor: 5/1000 = 0.005
             # - VA $simparam gmin: 5*1e-3 = 0.005
-            # - Matrix-level gmin (node diagonal): 5*1e-3 = 0.005
-            # Total: 0.015
+            # Total: 0.01
             spec_gmin = MNASpec(gmin=1e-3)
             sol_gmin = solve_dc(gmin_circuit, (;), spec_gmin)
-            @test isapprox(current(sol_gmin, :I_V1), -0.015; atol=1e-6)
+            @test isapprox(current(sol_gmin, :I_V1), -0.01; atol=1e-6)
         end
 
         @testset "\$param_given check" begin

@@ -176,15 +176,14 @@ function get_rhs(ctx::MNAContext)
 end
 
 """
-    assemble!(ctx::MNAContext) -> MNASystem
+    assemble!(ctx::MNAContext; gmin::Float64=0.0) -> MNASystem
 
 Assemble the complete MNA system from the context.
 Returns an MNASystem ready for analysis.
 
-If `ctx.gmin > 0`, GMIN (minimum conductance) is added from each voltage node
+If `gmin > 0`, GMIN (minimum conductance) is added from each voltage node
 to ground in the G matrix. This is a standard SPICE convergence aid for
-circuits with high-impedance nodes. Use `set_gmin!(ctx, spec.gmin)` in your
-circuit builder to enable this feature.
+circuits with high-impedance nodes. Pass `gmin=spec.gmin` when assembling.
 
 # Note on C Matrix Stamping
 C matrix stamping is determined by TYPE, not VALUE. Devices with ddt() terms
@@ -196,14 +195,13 @@ even when capacitance values happen to be zero at certain operating points.
 # Example
 ```julia
 ctx = MNAContext()
-set_gmin!(ctx, 1e-12)  # Enable GMIN for convergence
 # ... stamp devices ...
-sys = assemble!(ctx)
+sys = assemble!(ctx; gmin=1e-12)  # Enable GMIN for convergence
 x = sys.G \\ sys.b  # DC solution
 ```
 """
-function assemble!(ctx::MNAContext)
-    G = assemble_G(ctx; gmin=ctx.gmin)
+function assemble!(ctx::MNAContext; gmin::Float64=0.0)
+    G = assemble_G(ctx; gmin=gmin)
     C = assemble_C(ctx)
     b = get_rhs(ctx)
 

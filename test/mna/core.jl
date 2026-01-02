@@ -20,7 +20,6 @@ using SciMLBase: ReturnCode
 using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!, resolve_index
 using CedarSim.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
 using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
-using CedarSim.MNA: set_gmin!
 using CedarSim.MNA: stamp!, system_size
 using CedarSim.MNA: MNAIndex, NodeIndex, CurrentIndex, ChargeIndex
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
@@ -245,15 +244,13 @@ using VerilogAParser
         n1 = get_node!(ctx, :n1)
         n2 = get_node!(ctx, :n2)
 
-        # Set gmin before assembly
-        gmin_val = 1e-9
-        set_gmin!(ctx, gmin_val)
-
         # Add a resistor
         G_val = 1.0 / 1000.0  # 1k ohm
         stamp_conductance!(ctx, n1, n2, G_val)
 
-        sys = assemble!(ctx)
+        # Pass gmin to assemble!
+        gmin_val = 1e-9
+        sys = assemble!(ctx; gmin=gmin_val)
         G_dense = Matrix(sys.G)
 
         # Diagonals should have resistor contribution + gmin
@@ -266,10 +263,12 @@ using VerilogAParser
     end
 
     @testset "GMIN with MNASpec" begin
-        # Test that gmin from MNASpec is automatically applied
+        # Test that MNASpec.gmin is available for VA models via $simparam("gmin")
+        # Note: Matrix-level gmin is NOT applied automatically - only VA models
+        # that call $simparam("gmin") use this value internally.
         using CedarSim.MNA: MNASpec, MNACircuit, solve_dc
 
-        # Builder does NOT need to set gmin - it's applied automatically from spec
+        # Test circuit with high impedance path (built-in devices, no VA)
         function gmin_test_circuit(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
 
@@ -283,24 +282,12 @@ using VerilogAParser
             return ctx
         end
 
-        # Without gmin, out is nearly floating - solve might have issues
-        # With gmin, the small conductance to ground stabilizes the solution
-
-        # Low gmin - nearly floating
-        spec_low_gmin = MNASpec(gmin=1e-18)
-        sol_low = solve_dc(gmin_test_circuit, (;), spec_low_gmin)
-        # Current through 1T ohm: I = 5V / 1e12 = 5e-12 A
-        # With gmin=1e-18, node out gets: V_out ≈ 5V (negligible gmin effect)
-        @test voltage(sol_low, :out) ≈ 5.0 atol=0.01
-
-        # Higher gmin - noticeable effect on floating nodes
-        spec_high_gmin = MNASpec(gmin=1e-6)  # Much higher gmin
-        sol_high = solve_dc(gmin_test_circuit, (;), spec_high_gmin)
-        # With gmin=1e-6, there's a 1µS conductance to ground at node out
-        # R_eq = 1e12 || (1/1e-6) = 1e12 || 1e6 ≈ 1e6
-        # V_out = 5V * (1e6 / (1e12 + 1e6)) ≈ 5e-6 V
-        # This shows gmin pulls floating nodes toward ground
-        @test voltage(sol_high, :out) < 1.0  # Much lower due to gmin
+        # Built-in devices don't use $simparam("gmin"), so MNASpec.gmin
+        # doesn't affect them. Node out remains at 5V regardless of spec.gmin.
+        spec = MNASpec(gmin=1e-6)
+        sol = solve_dc(gmin_test_circuit, (;), spec)
+        # V_out = 5V (no matrix-level gmin applied for built-in devices)
+        @test voltage(sol, :out) ≈ 5.0 atol=0.01
     end
 
     #==========================================================================#
