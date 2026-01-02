@@ -1415,6 +1415,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
+    # Generate voltage-dependent charge detection block (runs with plain Float64 values)
+    # Detection must run BEFORE dual_creation to avoid capturing JacobianTag duals
+    # Results are cached in ctx.charge_is_vdep so stamp_code only checks the cache
+    detection_block = Expr(:block)
+
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
     # Now handles both terminal nodes and internal nodes
     stamp_code = Expr(:block)
@@ -1447,60 +1452,66 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         charge_name_suffix = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
         charge_name_expr = :(_mna_instance_ == Symbol("") ? $charge_name_suffix : Symbol(_mna_instance_, "_", $charge_name_suffix))
 
+        # Pre-computed pseudo-random voltage scales for detection
+        # Different values for each node ensure we test capacitance between all node pairs
+        # Values chosen to avoid special cases (0, 1, etc.)
+        voltage_scales = (0.0, 0.31, 0.57, 0.83, 0.19, 0.67, 0.41, 0.73, 0.29, 0.61)
+
+        # Add detection call to detection_block (runs BEFORE dual_creation with plain Float64)
+        # The detection lambda uses a let block to create fresh Float64 bindings
+        # This runs once at build time to populate the cache
+        push!(detection_block.args, quote
+            CedarSim.MNA.detect_or_cached!(
+                ctx, $charge_name_expr,
+                function (_Vpn)
+                    # Use let to create fresh Float64 bindings that shadow any outer scope
+                    # Each node gets a different voltage (scaled by _Vpn) to detect
+                    # capacitance dependencies between any pair of nodes
+                    let $([begin
+                            if sym == p_sym
+                                :($(sym) = _Vpn)
+                            elseif sym == n_sym
+                                :($(sym) = zero(_Vpn))
+                            else
+                                # Use pre-computed pseudo-random scale for this node
+                                scale = voltage_scales[mod1(i, length(voltage_scales))]
+                                :($(sym) = $(scale) * _Vpn)
+                            end
+                        end for (i, sym) in enumerate(all_node_syms)]...)
+                        $sum_expr
+                    end
+                end,
+                $(Symbol("V_", p_idx !== nothing ? p_idx : 1)),
+                $(Symbol("V_", n_idx !== nothing ? n_idx : 1))
+            )
+        end)
+
         branch_stamp = quote
             # Evaluate the branch current
             I_branch = $sum_expr
 
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                # Has ddt: ContributionTag wraps voltage duals
+                # Has ddt: ContributionTag wraps JacobianTag duals
                 I_resist = ForwardDiff.value(I_branch)       # Dual{JacobianTag} for I and ∂I/∂V
                 I_react = ForwardDiff.partials(I_branch, 1)  # Dual{JacobianTag} for q and ∂q/∂V
 
-                # Extract resistive values - unwrap CapacitanceDerivTag layer
-                _I_inner = ForwardDiff.value(I_resist)  # Dual{CapacitanceDerivTag}
-                I_val = ForwardDiff.value(_I_inner)     # Float64
+                # Extract resistive values (JacobianTag partials are plain floats)
+                I_val = ForwardDiff.value(I_resist)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
 
-                # Extract dI/dV - each is Dual{CapacitanceDerivTag}, take value
-                $([:($(Symbol("dI_dV", k)) = ForwardDiff.value(ForwardDiff.partials(I_resist, $k))) for k in 1:n_all_nodes]...)
-
-                # Extract charge value - unwrap CapacitanceDerivTag layer
-                _q_inner = ForwardDiff.value(I_react)   # Dual{CapacitanceDerivTag}
-                q_val = ForwardDiff.value(_q_inner)     # Float64
-
-                # Extract dq/dV - each is Dual{CapacitanceDerivTag}
-                # Keep as dual to check second derivatives for voltage dependence
-                $([:($(Symbol("dq_dV_dual", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
-
-                # Extract actual capacitance values (first derivatives)
-                $([:($(Symbol("dq_dV", k)) = ForwardDiff.value($(Symbol("dq_dV_dual", k)))) for k in 1:n_all_nodes]...)
-
-                # Check for voltage-dependent charge by looking at second derivatives
-                # If any d²q/dV² ≠ 0, the charge is voltage-dependent
-                _is_voltage_dependent = false
-                $([quote
-                    _dq_dual = $(Symbol("dq_dV_dual", k))
-                    if _dq_dual isa ForwardDiff.Dual
-                        for _p in ForwardDiff.partials(_dq_dual)
-                            if !iszero(_p)
-                                _is_voltage_dependent = true
-                                break
-                            end
-                        end
-                    end
-                end for k in 1:n_all_nodes]...)
+                # Extract charge value and capacitances
+                q_val = ForwardDiff.value(I_react)
+                $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
 
                 has_reactive = true
 
             elseif I_branch isa ForwardDiff.Dual
-                # Pure resistive: just voltage dual, no ContributionTag
-                # Unwrap CapacitanceDerivTag layer
-                _I_inner = ForwardDiff.value(I_branch)  # Dual{CapacitanceDerivTag}
-                I_val = ForwardDiff.value(_I_inner)
-                $([:($(Symbol("dI_dV", k)) = ForwardDiff.value(ForwardDiff.partials(I_branch, $k))) for k in 1:n_all_nodes]...)
+                # Pure resistive: just JacobianTag dual, no ContributionTag
+                I_val = ForwardDiff.value(I_branch)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 has_reactive = false
-                _is_voltage_dependent = false
 
             else
                 # Scalar result (constant contribution)
@@ -1509,7 +1520,6 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 has_reactive = false
-                _is_voltage_dependent = false
             end
         end
 
@@ -1542,9 +1552,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         #
         # For linear capacitors, we use standard C matrix stamping (no extra variables).
 
-        # Build the stamping code with runtime detection
+        # Stamp reactive Jacobians (capacitances) into C matrix OR use charge formulation
+        # Detection was already run in detection_block (before dual_creation)
+        # Here we just fetch the cached result
         push!(branch_stamp.args, quote
             if has_reactive
+                # Get cached voltage dependence result (populated by detection_block)
+                _is_voltage_dependent = Base.get(ctx.charge_is_vdep, $charge_name_expr, false)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
@@ -1682,10 +1696,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # V_(n_ports+1)..V_n_all_nodes are for internal nodes
     voltage_extraction = Expr(:block)
     # Terminal nodes (from function arguments)
+    # Ground nodes (index 0) always return 0.0, others index into the solution vector
     for i in 1:n_ports
         np = node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(_mna_x_) ? 0.0 : _mna_x_[$np])))
+            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : _mna_x_[$np]))
     end
     # Internal nodes (from alloc_internal_node!)
     # Note: Internal nodes can be aliased to terminals (including ground) via short-circuit detection
@@ -1693,52 +1708,45 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         idx = n_ports + i
         inp = internal_node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(_mna_x_) || $inp > length(_mna_x_) ? 0.0 : _mna_x_[$inp])))
+            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : _mna_x_[$inp]))
+    end
+
+    # Generate Float64 assignment for all nodes (for detection phase)
+    # This runs BEFORE dual_creation so detection lambdas capture plain floats
+    float_node_assignment = Expr(:block)
+    for i in 1:n_all_nodes
+        node_sym = all_node_syms[i]
+        push!(float_node_assignment.args,
+            :($node_sym = $(Symbol("V_", i))))
     end
 
     # Generate dual creation for all nodes (terminals + internal)
     # Each node gets a dual with identity partials: ∂V_i/∂V_k = δ_ik
     #
-    # For voltage-dependent capacitor detection, we use triple-nested duals:
-    # CapacitanceDerivTag < JacobianTag < ContributionTag
-    #
-    # Inner (CapacitanceDerivTag): carries ∂/∂V for second derivative detection
-    # Outer (JacobianTag): carries ∂/∂V for Jacobian extraction
-    #
-    # When we extract dq_dV from the reactive part, it will be Dual{CapacitanceDerivTag}.
-    # If its partials are non-zero, d²q/dV² ≠ 0 → voltage-dependent charge.
+    # We use single-layer JacobianTag duals for ddx() support.
+    # Voltage-dependent capacitor detection runs BEFORE this block with plain Float64
+    # values, so detection lambdas never capture JacobianTag duals.
     dual_creation = Expr(:block)
     for i in 1:n_all_nodes
         node_sym = all_node_syms[i]
-        # Create inner dual (CapacitanceDerivTag) with partials for second derivative
-        inner_partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
-        inner_dual = :(Dual{CedarSim.MNA.CapacitanceDerivTag}($(Symbol("V_", i)), $inner_partials...))
-
-        # Create outer dual (JacobianTag) wrapping the inner dual
-        # The partials are also inner duals to propagate second derivatives
-        outer_partials_exprs = []
-        for k in 1:n_all_nodes
-            if k == i
-                # ∂V_i/∂V_i = 1 (inner dual with value 1, zero partials)
-                push!(outer_partials_exprs, :(Dual{CedarSim.MNA.CapacitanceDerivTag}(1.0, $(Expr(:tuple, zeros(n_all_nodes)...)))))
-            else
-                # ∂V_i/∂V_k = 0 (inner dual with value 0, zero partials)
-                push!(outer_partials_exprs, :(Dual{CedarSim.MNA.CapacitanceDerivTag}(0.0, $(Expr(:tuple, zeros(n_all_nodes)...)))))
-            end
-        end
-        outer_partials = Expr(:tuple, outer_partials_exprs...)
-
+        # Create JacobianTag dual with identity partials for ddx() support
+        partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
         push!(dual_creation.args,
-            :($node_sym = Dual{CedarSim.MNA.JacobianTag}($inner_dual, $outer_partials...)))
+            :($node_sym = Dual{CedarSim.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
     end
 
     # Generate branch current extraction for named branches
+    # ZeroVector returns 0.0 for any index, eliminating bounds checks
+    # NOTE: We use begin/end instead of let to avoid local scope issues
+    # (the variable must be accessible in contrib_eval and voltage_stamp_code)
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
-        # Check for valid positive index within bounds
         push!(branch_current_extraction.args,
-            :($I_sym = isempty(_mna_x_) || $I_var < 1 || $I_var > length(_mna_x_) ? 0.0 : _mna_x_[$I_var]))
+            :(begin
+                _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
+                $I_sym = _mna_x_[_i_idx]
+            end))
     end
 
     # Initialize branch current variables for named branches that don't have voltage contributions
@@ -1882,9 +1890,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Float64[],
+                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
                                      _mna_instance_::Symbol=Symbol(""))
+            # Convert empty vectors to ZERO_VECTOR for safe indexing
+            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
             $(params_to_locals...)
             $(function_defs...)
 
@@ -1907,8 +1917,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Get operating point currents for named branches
             $branch_current_extraction
 
+            # Assign Float64 voltages to node symbols (for detection phase)
+            # This runs BEFORE dual_creation so detection lambdas capture plain floats
+            $float_node_assignment
+
+            # Run voltage-dependent charge detection (with plain Float64 values)
+            # Results are cached in ctx.charge_is_vdep for later use in stamp_code
+            $detection_block
+
             # Create duals with partials for each node voltage (terminals + internal)
             # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
+            # This overwrites node symbols (p, n, etc.) with JacobianTag duals
             $dual_creation
 
             # Evaluate contribution expressions with duals
@@ -1947,7 +1966,7 @@ function make_mna_module(va::VANode)
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename
@@ -2146,7 +2165,7 @@ function load_mna_va_modules(into::Module, file::String)
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment
-                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
+                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
                 using ForwardDiff: Dual, value, partials
                 import ForwardDiff
                 export $typename

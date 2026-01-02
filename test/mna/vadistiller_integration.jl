@@ -23,6 +23,7 @@ using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF
 using VerilogAParser
 using Sundials: IDA
+using SciMLBase
 using CedarSim: tran!, dc!
 
 const deftol = 1e-6
