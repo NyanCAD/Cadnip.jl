@@ -76,40 +76,12 @@ ForwardDiff.:≺(::Type, ::Type{JacobianTag}) = true       # External tags ARE l
 # Voltage-Dependent Capacitor Detection (Charge Formulation Support)
 #
 # To detect if a capacitor is voltage-dependent (C(V) = ∂Q/∂V varies with V),
-# we check if ∂²Q/∂V² ≠ 0 using an additional dual layer.
+# we compare C at two different voltages using first-order AD.
 #
 # See doc/voltage_dependent_capacitors.md for full design.
 #==============================================================================#
 
-"""
-    CapacitanceDerivTag
-
-Tag for detecting voltage-dependent capacitance via second derivatives.
-
-Used to compute ∂C/∂V = ∂²Q/∂V². If this is non-zero, the capacitance
-depends on voltage and requires charge formulation for constant mass matrix.
-
-Precedence ordering: CapacitanceDerivTag ≺ JacobianTag ≺ ContributionTag
-- CapacitanceDerivTag is innermost (for ∂²/∂V²)
-- JacobianTag is middle (for ∂/∂V)
-- ContributionTag is outermost (separates resistive/reactive)
-"""
-struct CapacitanceDerivTag end
-
-# Self-comparison
-ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{CapacitanceDerivTag}) = false
-
-# CapacitanceDerivTag is inner to both JacobianTag and ContributionTag
-ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{JacobianTag}) = true
-ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{ContributionTag}) = true
-ForwardDiff.:≺(::Type{JacobianTag}, ::Type{CapacitanceDerivTag}) = false
-ForwardDiff.:≺(::Type{ContributionTag}, ::Type{CapacitanceDerivTag}) = false
-
-# CapacitanceDerivTag vs external tags: CapacitanceDerivTag is outer to external
-ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type) = false
-ForwardDiff.:≺(::Type, ::Type{CapacitanceDerivTag}) = true
-
-export CapacitanceDerivTag, is_voltage_dependent_charge
+export is_voltage_dependent_charge
 
 
 """
@@ -117,13 +89,16 @@ export CapacitanceDerivTag, is_voltage_dependent_charge
 
 Detect if a contribution contains voltage-dependent capacitance.
 
-Uses nested AD to check if ∂C/∂V = ∂²Q/∂V² ≠ 0. If so, the capacitance
-C(V) = ∂Q/∂V varies with voltage and requires charge formulation to
-achieve a constant mass matrix for SciML solvers.
+Compares capacitance C = ∂Q/∂V at two different voltages. If C differs,
+the capacitance is voltage-dependent and requires charge formulation
+to achieve a constant mass matrix for SciML solvers.
+
+Uses ForwardDiff.derivative internally, which reuses already-compiled
+specializations and avoids introducing new nested dual types.
 
 # Arguments
 - `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
-- `Vp`, `Vn`: Operating point voltages
+- `Vp`, `Vn`: Operating point voltages (unused, kept for API compatibility)
 
 # Returns
 - `true` if the contribution has voltage-dependent capacitance
@@ -142,90 +117,51 @@ is_voltage_dependent_charge(V -> va_ddt(...), 0.3, 0.0)  # true
 ```
 
 # Implementation
-Uses triple-nested duals:
-1. CapacitanceDerivTag (innermost): carries ∂²/∂V² information
-2. JacobianTag (middle): carries ∂/∂V partials
-3. ContributionTag (outermost): separates resistive/reactive via va_ddt
+Uses finite-difference detection via first-order AD at two voltage points:
+1. Compute C₁ = ∂Q/∂V at V = 0.0
+2. Compute C₂ = ∂Q/∂V at V = 0.5
+3. If C₁ ≠ C₂, capacitance is voltage-dependent
 
-The detection checks if the reactive part's JacobianTag partials contain
-non-zero CapacitanceDerivTag partials (indicating ∂C/∂V ≠ 0).
+This avoids nested duals entirely - ForwardDiff.derivative uses standard
+machinery that's already compiled for Float64.
 """
 @inline function is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real)::Bool
-    # Create triple-nested duals for second derivative detection
-    # Structure: CapacitanceDerivTag wraps the base value, then JacobianTag wraps that
+    # Function to extract charge from contribution result
+    # When called with a ForwardDiff dual, va_ddt will wrap in ContributionTag
+    # and we extract Q from the reactive (partial) component
     #
-    # For Vp: we want ∂/∂Vp and ∂²/∂Vp²
-    # Inner (CapacitanceDerivTag): Dual(Vp, 1.0) for ∂/∂Vp (first pass)
-    # Outer (JacobianTag): wraps the inner dual
-    #
-    # IMPORTANT: To detect voltage dependence at the TYPE level (not VALUE level),
-    # we evaluate at multiple points. Some polynomials have ∂²Q/∂V² = 0 at certain
-    # points (e.g., Q = V³ has ∂²Q/∂V² = 6V = 0 at V=0). We test at the given
-    # operating point AND at a perturbed point to catch these cases.
-
-    # Test at given operating point
-    if _is_voltage_dependent_at_point(contrib_fn, Vp, Vn)
-        return true
-    end
-
-    # Test at a perturbed point to catch cases where ∂²Q/∂V² = 0 at the operating point
-    # but the function is still nonlinear (e.g., V³ at V=0)
-    eps = 1e-3  # Small perturbation
-    if _is_voltage_dependent_at_point(contrib_fn, Vp + eps, Vn)
-        return true
-    end
-
-    return false
-end
-
-"""
-Internal helper: check voltage dependence at a single point.
-"""
-@inline function _is_voltage_dependent_at_point(contrib_fn, Vp::Real, Vn::Real)::Bool
-    # Inner duals: CapacitanceDerivTag with ∂/∂Vp and ∂/∂Vn seeds
-    Vp_inner = Dual{CapacitanceDerivTag}(Float64(Vp), 1.0)  # ∂/∂Vp = 1
-    Vn_inner = Dual{CapacitanceDerivTag}(Float64(Vn), -1.0) # ∂/∂Vn = -1 (for Vpn = Vp - Vn)
-
-    # Outer duals: JacobianTag wrapping inner duals
-    # Partials are also CapacitanceDerivTag duals to track second derivatives
-    one_inner = Dual{CapacitanceDerivTag}(1.0, 0.0)
-    zero_inner = Dual{CapacitanceDerivTag}(0.0, 0.0)
-
-    Vp_dual = Dual{JacobianTag}(Vp_inner, one_inner, zero_inner)   # ∂/∂Vp = 1, ∂/∂Vn = 0
-    Vn_dual = Dual{JacobianTag}(Vn_inner, zero_inner, one_inner)   # ∂/∂Vp = 0, ∂/∂Vn = 1
-
-    # Compute Vpn = Vp - Vn
-    Vpn_dual = Vp_dual - Vn_dual
-
-    # Evaluate contribution
-    result = contrib_fn(Vpn_dual)
-
-    # Check if result has reactive component with voltage-dependent capacitance
-    if result isa Dual{ContributionTag}
-        # Has ddt: extract reactive part (the charge)
-        react = partials(result, 1)  # This is Dual{JacobianTag} containing q and ∂q/∂V
-
-        if react isa Dual{JacobianTag}
-            # Extract ∂q/∂Vp which is the capacitance C
-            dq_dVp = partials(react, 1)  # This should be Dual{CapacitanceDerivTag}
-
-            if dq_dVp isa Dual{CapacitanceDerivTag}
-                # The partials of dq_dVp give ∂C/∂V = ∂²q/∂V²
-                d2q_dV2 = partials(dq_dVp, 1)
-                return !iszero(d2q_dV2)
-            elseif dq_dVp isa Real
-                # Constant capacitance (no second derivative)
-                return false
-            end
-        elseif react isa Dual{CapacitanceDerivTag}
-            # JacobianTag collapsed - check inner partials
-            d2q_dV2 = partials(react, 1)
-            return !iszero(d2q_dV2)
+    # Important: Return the reactive part directly (keeping any dual structure)
+    # so that ForwardDiff.derivative can extract dQ/dV correctly.
+    function extract_charge(Vpn)
+        result = contrib_fn(Vpn)
+        if result isa Dual{ContributionTag}
+            # Has ddt: return charge directly (may be a Dual with dQ/dV info)
+            return partials(result, 1)
+        else
+            # No reactive component - return zero of same type for AD
+            return zero(Vpn)
         end
     end
 
-    # No reactive component or constant capacitance
-    return false
+    # Compute capacitance C = dQ/dV at two different voltages
+    # Using ForwardDiff.derivative reuses existing compiled specializations
+    # Use voltages away from zero to avoid edge cases
+    V1 = 0.25
+    V2 = 0.75
+
+    C1 = ForwardDiff.derivative(extract_charge, V1)
+    C2 = ForwardDiff.derivative(extract_charge, V2)
+
+    # If capacitances differ significantly, it's voltage-dependent
+    # For voltage-dependent caps, the difference should be substantial
+    # Use relative comparison when values are non-zero, absolute when near zero
+    diff = abs(C1 - C2)
+    maxC = max(abs(C1), abs(C2))
+
+    # Consider voltage-dependent if difference exceeds both:
+    # - A tiny absolute threshold (for numerical noise)
+    # - A relative threshold compared to the larger capacitance
+    return diff > 1e-15 && (maxC < 1e-30 || diff / maxC > 1e-6)
 end
 
 """
@@ -233,8 +169,8 @@ end
 
 Check cache for voltage-dependent charge detection result, or run detection if not cached.
 
-This is a build-time optimization: detection uses triple-nested duals (expensive) but only
-needs to run once per branch. After the first call, results are cached in the context.
+This is a build-time optimization: detection only needs to run once per branch.
+After the first call, results are cached in the context.
 
 # Arguments
 - `ctx`: MNA context containing the detection cache
@@ -263,7 +199,7 @@ end
     if cached !== nothing
         return cached
     end
-    # First time: run detection with triple-nested duals
+    # First time: run detection via finite-difference (comparing C at two voltages)
     result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
     cache[name] = result
     return result

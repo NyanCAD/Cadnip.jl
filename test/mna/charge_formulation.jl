@@ -7,7 +7,7 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: va_ddt, is_voltage_dependent_charge, CapacitanceDerivTag
+using CedarSim.MNA: va_ddt, is_voltage_dependent_charge
 using CedarSim.MNA: ContributionTag, JacobianTag
 using ForwardDiff: Dual, value, partials
 
