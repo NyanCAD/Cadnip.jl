@@ -1694,13 +1694,21 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Generate voltage extraction for all nodes (terminals + internal)
     # V_1..V_n_ports are for terminal nodes
     # V_(n_ports+1)..V_n_all_nodes are for internal nodes
+    #
+    # IMPORTANT: Use extract_scalar() to handle state vectors containing Duals
+    # from OrdinaryDiffEq's autodiff. This prevents nested duals like:
+    #   Dual{JacobianTag, Dual{OrdinaryDiffEqTag, Float64, 9}, N}
+    # which exceed Julia's 80-byte inline threshold and cause heap allocations.
+    #
+    # By extracting Float64 first, we ensure JacobianTag duals are always:
+    #   Dual{JacobianTag, Float64, N}
     voltage_extraction = Expr(:block)
     # Terminal nodes (from function arguments)
     # Ground nodes (index 0) always return 0.0, others index into the solution vector
     for i in 1:n_ports
         np = node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : _mna_x_[$np]))
+            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : CedarSim.MNA.extract_scalar(_mna_x_[$np])))
     end
     # Internal nodes (from alloc_internal_node!)
     # Note: Internal nodes can be aliased to terminals (including ground) via short-circuit detection
@@ -1708,7 +1716,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         idx = n_ports + i
         inp = internal_node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : _mna_x_[$inp]))
+            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : CedarSim.MNA.extract_scalar(_mna_x_[$inp])))
     end
 
     # Generate Float64 assignment for all nodes (for detection phase)
@@ -1739,13 +1747,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # ZeroVector returns 0.0 for any index, eliminating bounds checks
     # NOTE: We use begin/end instead of let to avoid local scope issues
     # (the variable must be accessible in contrib_eval and voltage_stamp_code)
+    # Use extract_scalar() to handle Duals from solver autodiff
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
         push!(branch_current_extraction.args,
             :(begin
                 _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
-                $I_sym = _mna_x_[_i_idx]
+                $I_sym = CedarSim.MNA.extract_scalar(_mna_x_[_i_idx])
             end))
     end
 
