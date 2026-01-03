@@ -189,13 +189,10 @@ mutable struct MNAContext
     charge_branches::Vector{Tuple{Int,Int}}
 
     # Cache for voltage-dependent charge detection (build-time optimization)
-    # Maps charge_name => is_voltage_dependent
-    # This allows detection to run once at circuit construction, not every Newton iteration
-    charge_is_vdep::Dict{Symbol, Bool}
-
-    # Order of charge detection calls (for ValueOnlyContext counter-based access)
-    # Populated by detect_or_cached! in the order calls are made
-    charge_is_vdep_order::Vector{Symbol}
+    # Vector of detection results in order of first detection
+    # Uses counter-based access: on first run, detect and push; on subsequent runs, return cached
+    charge_is_vdep::Vector{Bool}
+    charge_detection_pos::Int
 
     # Track if system has been finalized
     finalized::Bool
@@ -226,8 +223,8 @@ function MNAContext()
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
-        Dict{Symbol,Bool}(), # charge_is_vdep (detection cache)
-        Symbol[],           # charge_is_vdep_order (insertion order for value-only mode)
+        Bool[],             # charge_is_vdep (detection cache - vector with counter access)
+        1,                  # charge_detection_pos (counter for detection cache access)
         false               # finalized
     )
 end
@@ -778,6 +775,9 @@ function reset_for_restamping!(ctx::MNAContext)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
 
+    # Reset charge detection counter for re-stamping (cache is preserved)
+    ctx.charge_detection_pos = 1
+
     ctx.finalized = false
     return nothing
 end
@@ -809,7 +809,7 @@ function clear!(ctx::MNAContext)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
     empty!(ctx.charge_is_vdep)
-    empty!(ctx.charge_is_vdep_order)
+    ctx.charge_detection_pos = 1
     ctx.finalized = false
     return nothing
 end

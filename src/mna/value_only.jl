@@ -89,10 +89,8 @@ Create a ValueOnlyContext from a completed MNAContext.
 The original context's structure is captured, and value arrays are
 sized appropriately for subsequent value-only rebuilds.
 
-Charge detection results from the MNAContext's Dict are copied to a Vector
-in the order they were inserted (tracked by charge_is_vdep_order).
-This ensures counter-based access during value-only rebuilds matches
-the original detection order.
+Charge detection cache is directly copied from MNAContext (both use Vector{Bool}).
+Counter-based access during value-only rebuilds matches the original detection order.
 """
 function create_value_only_context(ctx::MNAContext)
     n_G = length(ctx.G_V)
@@ -100,11 +98,8 @@ function create_value_only_context(ctx::MNAContext)
     n_b = length(ctx.b)
     n_b_deferred = length(ctx.b_V)
 
-    # Copy charge detection results from Dict to Vector in insertion order
-    # The order is tracked by charge_is_vdep_order during the first build.
-    # During value-only rebuilds, we access by position counter which matches
-    # the execution order of detect_or_cached! calls.
-    charge_is_vdep_vec = Bool[ctx.charge_is_vdep[name] for name in ctx.charge_is_vdep_order]
+    # Copy charge detection cache (already a Vector in MNAContext)
+    charge_is_vdep_vec = copy(ctx.charge_is_vdep)
 
     ValueOnlyContext{Float64}(
         ctx.node_to_idx,
@@ -118,7 +113,7 @@ function create_value_only_context(ctx::MNAContext)
         1,                               # current_pos
         1,                               # charge_pos
         n_G, n_C, n_b_deferred,
-        charge_is_vdep_vec,              # charge detection cache (in insertion order)
+        charge_is_vdep_vec,              # charge detection cache
         1                                # charge_detection_pos
     )
 end
