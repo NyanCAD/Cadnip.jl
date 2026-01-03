@@ -184,8 +184,120 @@ stamp!(PWLVoltageSource(
 **Result**: Reduced from 472 bytes/iter → **40 bytes/iter** (91.5% reduction)
 
 The remaining 40 bytes includes:
-- 16 bytes from function barrier dispatch (affects all circuits)
-- 24 bytes from PWL type specialization overhead
+- 16 bytes from Float64 boxing when passing time through dynamic function call
+- 4 bytes from String allocation in keyword argument processing
+- ~20 bytes from PWL type specialization overhead
+
+### Remaining Allocation Sources (Profiled)
+
+Using `Profile.Allocs`, the exact allocation sources per iteration are:
+
+| Type | Bytes | Source |
+|------|-------|--------|
+| Float64 | 16 | Boxing `ws.time` when calling `cs.builder(...)` |
+| String | 4 | Keyword argument processing overhead |
+
+These allocations occur in `fast_rebuild!` at line 900:
+```julia
+cs.builder(cs.params, cs.spec, ws.time; x=u, ctx=vctx)
+```
+
+The builder function is stored in `CompiledStructure{F,P,S}` as a type parameter,
+but calling it with keyword arguments causes Julia to box the Float64 time value.
+
+## Phase 5: True Zero-Allocation for GPU ❌ (Not Started)
+
+**GPU requires absolutely zero heap allocation.** The current 20+ bytes/iter is unacceptable.
+
+### Root Cause: Dynamic Function Dispatch
+
+The fundamental issue is that `cs.builder` is a function stored at runtime.
+Even though it's a type parameter, the call still goes through Julia's
+dynamic dispatch machinery, which boxes arguments.
+
+### Required Changes for GPU
+
+1. **Compile-Time Builder Inlining**
+
+   Replace runtime function calls with `@generated` functions that inline
+   the builder at compile time:
+
+   ```julia
+   @generated function gpu_rebuild!(ws::EvalWorkspace{T,CS}, u, t) where {T,CS}
+       # Extract builder from type parameter
+       F = CS.parameters[1]  # Builder function type
+
+       # Generate inlined stamp calls - NO function pointer
+       quote
+           vctx = ws.vctx
+           reset_value_only!(vctx)
+
+           # Inlined builder code here (generated from F)
+           # All stamp! calls become direct, no dispatch
+
+           # Copy to workspace...
+       end
+   end
+   ```
+
+2. **Eliminate Keyword Arguments**
+
+   Keyword arguments cause allocation. Replace with:
+   - Positional arguments only, OR
+   - A context struct that holds time/mode:
+
+   ```julia
+   struct StampContext
+       t::Float64
+       mode::Symbol
+   end
+   # Pass as single positional arg, not kwargs
+   ```
+
+3. **Static Time Access**
+
+   Instead of passing time as argument, read from a fixed location:
+
+   ```julia
+   # Store time in workspace, read directly in stamp!
+   @inline get_time(ws::EvalWorkspace) = ws.time
+   ```
+
+4. **Fully Static Circuit Topology**
+
+   For GPU, the circuit structure must be completely static:
+   - No Dict lookups (node_to_idx)
+   - All node indices known at compile time
+   - Use generated functions to create specialized code per circuit
+
+### GPU Architecture Sketch
+
+```julia
+# GPU-compatible circuit evaluation
+struct GPUCircuit{N,M,G_NNZ,C_NNZ}
+    # All sizes known at compile time
+    G_I::SVector{G_NNZ,Int32}
+    G_J::SVector{G_NNZ,Int32}
+    C_I::SVector{C_NNZ,Int32}
+    C_J::SVector{C_NNZ,Int32}
+    b_indices::SVector{M,Int32}
+end
+
+# Generated function that inlines everything
+@generated function gpu_evaluate!(
+    G_V::MVector{G_NNZ,T},
+    C_V::MVector{C_NNZ,T},
+    b::MVector{N,T},
+    circuit::GPUCircuit{N,M,G_NNZ,C_NNZ},
+    u::SVector{N,T},
+    t::T
+) where {N,M,G_NNZ,C_NNZ,T}
+    # Generate completely inlined stamp code
+    # No function calls, no allocations
+end
+```
+
+This would require significant refactoring but is necessary for GPU execution.
 
 ## Completed Phases
 
