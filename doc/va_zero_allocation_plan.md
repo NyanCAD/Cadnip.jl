@@ -390,3 +390,63 @@ end
 
 4. **Internal node aliasing**: Short-circuit detection currently modifies structure at runtime -
    needs to be part of pattern discovery.
+
+---
+
+## VA Device Zero-Allocation: Remaining Work (January 2026)
+
+### Problem: VA stamp! Only Accepts MNAContext
+
+While the value-only mode infrastructure is complete, **VA-generated stamp! methods
+only accept `MNAContext`**, not `ValueOnlyContext`.
+
+**Location:** `src/vasim.jl:1891`
+```julia
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+```
+
+When `supports_value_only_ctx()` tests passing a `ValueOnlyContext`, the call fails
+with `MethodError` and the code falls back to `MNAContext` reuse.
+
+### Experimental Fix Attempted
+
+**Change 1:** VA stamp! method signature
+```julia
+# Before:
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+
+# After:
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext, ...)
+```
+
+**Change 2:** Add `AnyMNAContext` import to generated module.
+
+**Result:** Simple diode test passed, but hit a second issue...
+
+### The Charge Detection Problem
+
+VA devices with `ddt()` terms need `detect_or_cached!()` to determine if capacitance
+is voltage-dependent:
+
+```julia
+# In generated stamp! code:
+_is_vdep = detect_or_cached!(ctx, :Q_branch1, contrib_fn, Vp, Vn)
+if _is_vdep
+    # Use charge formulation (allocates charge variable)
+else
+    # Use C matrix directly
+end
+```
+
+**Problem:** `detect_or_cached!()` only works with `MNAContext` because it needs the
+`charge_is_vdep` cache. `ValueOnlyContext` doesn't have this cache.
+
+### Proper Fix Required
+
+1. **Store detection cache in `CompiledStructure`** during compilation
+2. **Pass cache reference to `ValueOnlyContext`**
+3. **Add `detect_or_cached!(::ValueOnlyContext, ...)` method** that looks up cached values
+4. **Update VA stamp! signature** to accept `AnyMNAContext`
+
+This ensures the detection result from the first build is reused in value-only mode,
+maintaining consistent stamp structure.
