@@ -390,3 +390,206 @@ end
 
 4. **Internal node aliasing**: Short-circuit detection currently modifies structure at runtime -
    needs to be part of pattern discovery.
+
+---
+
+## VA Device Zero-Allocation: Remaining Work (January 2026)
+
+### Problem: VA stamp! Only Accepts MNAContext
+
+While the value-only mode infrastructure is complete, **VA-generated stamp! methods
+only accept `MNAContext`**, not `ValueOnlyContext`.
+
+**Location:** `src/vasim.jl:1891`
+```julia
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+```
+
+When `supports_value_only_ctx()` tests passing a `ValueOnlyContext`, the call fails
+with `MethodError` and the code falls back to `MNAContext` reuse.
+
+### Experimental Fix Attempted
+
+**Change 1:** VA stamp! method signature
+```julia
+# Before:
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+
+# After:
+function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext, ...)
+```
+
+**Change 2:** Add `AnyMNAContext` import to generated module.
+
+**Result:** Simple diode test passed, but hit a second issue...
+
+### The Charge Detection Problem
+
+VA devices with `ddt()` terms need `detect_or_cached!()` to determine if capacitance
+is voltage-dependent:
+
+```julia
+# In generated stamp! code:
+_is_vdep = detect_or_cached!(ctx, :Q_branch1, contrib_fn, Vp, Vn)
+if _is_vdep
+    # Use charge formulation (allocates charge variable)
+else
+    # Use C matrix directly
+end
+```
+
+**Problem:** `detect_or_cached!()` only works with `MNAContext` because it needs the
+`charge_is_vdep` cache (a `Dict{Symbol,Bool}`). `ValueOnlyContext` doesn't have this cache,
+and a Dict doesn't fit the value-only paradigm anyway (dynamic allocation, hash lookups).
+
+### Proper Fix: Index-Based Charge Detection
+
+Keep the mutable Dict in MNAContext for first-build detection, then bake results into
+a static tuple for ValueOnlyContext. Use the **same index** for both stamping and
+charge detection lookup.
+
+**Key insight:** The branch index used for COO stamping (1, 2, 3, ...) can also index
+into the charge detection results. No need for Symbol-based lookup.
+
+**First build (MNAContext):**
+```julia
+# Detection runs with Dict (flexible, mutable)
+_is_vdep = detect_or_cached!(ctx, branch_idx, contrib_fn, Vp, Vn)
+# Stores: ctx.charge_is_vdep[branch_idx] = result
+```
+
+**Compilation (create ValueOnlyContext):**
+```julia
+# Convert Dict to static tuple, ordered by branch index
+charge_tuple = ntuple(i -> get(ctx.charge_is_vdep, i, false), n_branches)
+
+# ValueOnlyContext stores the baked tuple
+vctx = ValueOnlyContext{Float64, typeof(charge_tuple)}(
+    ...,
+    charge_tuple,  # NTuple{N,Bool} - statically sized
+)
+```
+
+**Value-only builds:**
+```julia
+# stamp! method specialized on ValueOnlyContext{T, NTuple{N,Bool}}
+# Compiler can inline the tuple lookup
+@inline is_charge_vdep(vctx::ValueOnlyContext, i::Int) = vctx.charge_is_vdep[i]
+
+# Generated stamp code uses same index for both:
+_is_vdep = is_charge_vdep(ctx, branch_idx)  # O(1) indexed lookup
+# ... stamp at position branch_idx ...
+```
+
+**Implementation steps:**
+
+1. **Codegen (vasim.jl):** Assign each branch a sequential index (1, 2, 3, ...)
+2. **MNAContext:** Keep Dict for detection, but key by index not Symbol
+3. **create_value_only_context():** Convert Dict → NTuple, parameterize ValueOnlyContext
+4. **stamp! methods:** Use `is_charge_vdep(ctx, idx)` that dispatches on context type
+5. **Update VA stamp! signature** to accept `AnyMNAContext`
+
+This approach:
+- MNAContext keeps Dict for flexible first-build detection
+- ValueOnlyContext gets baked NTuple - zero allocation, O(1) lookup
+- Same index for stamping and detection - no Symbol overhead
+- Tuple is a type parameter → compiler can specialize and inline
+
+### Internal Node Indexing Investigation (January 2026)
+
+The user raised a concern: "we have to be a bit careful because we defer branch indices
+because internal nodes can create new ones and invalidate them, so we need to make sure
+we use the index as compiled rather than the reference."
+
+**Investigation findings:**
+
+1. **Current charge name approach uses Symbols, not indices:**
+   ```julia
+   # vasim.jl:1452-1453
+   charge_name_suffix = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
+   charge_name_expr = :(_mna_instance_ == Symbol("") ? $charge_name_suffix : ...)
+   ```
+   The charge name is built from port SYMBOLS (p_sym, n_sym) and module name - these are
+   STABLE because they come from VA module definition, not runtime node indices.
+
+2. **Internal node indices are allocated at runtime:**
+   ```julia
+   # vasim.jl:1677
+   $int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
+   ```
+   The index returned depends on allocation ORDER. Different execution orders would
+   yield different indices.
+
+3. **Counter-based approach is safe:**
+   The `ValueOnlyContext` already uses counter-based access for:
+   - `alloc_current!`: Returns sequential CurrentIndex(pos++)
+   - `stamp_G!`: Writes to G_V[G_pos++]
+   - `stamp_C!`: Writes to C_V[C_pos++]
+
+   These work because **execution order is deterministic** - the same builder function
+   always executes stamps in the same sequence.
+
+**Key insight:** We don't need to map Symbol → index. We use the same counter-based
+approach as `alloc_current!`:
+
+```julia
+# MNAContext: detection stores results sequentially
+mutable struct MNAContext
+    charge_is_vdep::Vector{Bool}  # Results in detection order
+    charge_detection_pos::Int     # Counter (advanced by each detect_or_cached!)
+end
+
+# ValueOnlyContext: lookup by same position counter
+mutable struct ValueOnlyContext{T,N}
+    charge_is_vdep::NTuple{N,Bool}  # Baked from Vector
+    charge_detection_pos::Int        # Counter (reset each rebuild)
+end
+
+# Unified interface - works for both:
+@inline function detect_or_cached!(ctx::MNAContext, contrib_fn, Vp, Vn)::Bool
+    pos = ctx.charge_detection_pos
+    ctx.charge_detection_pos = pos + 1
+    # Check if already detected
+    if pos <= length(ctx.charge_is_vdep)
+        return ctx.charge_is_vdep[pos]
+    end
+    # First time: run detection
+    result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
+    push!(ctx.charge_is_vdep, result)
+    return result
+end
+
+@inline function detect_or_cached!(vctx::ValueOnlyContext{T,N}, contrib_fn, Vp, Vn)::Bool where {T,N}
+    pos = vctx.charge_detection_pos
+    vctx.charge_detection_pos = pos + 1
+    return @inbounds vctx.charge_is_vdep[pos]  # Just lookup, no detection
+end
+```
+
+**Why this is safe:**
+1. Detection calls happen in DETERMINISTIC order (same builder = same order)
+2. The counter tracks position, not a Symbol→index mapping
+3. Internal node indices don't affect the counter (it counts detection calls, not nodes)
+4. The baked NTuple preserves the same order as the Vector
+
+**What changes from current design:**
+1. Remove `charge_name_expr` argument from `detect_or_cached!` (not needed)
+2. Use `Vector{Bool}` instead of `Dict{Symbol,Bool}` in MNAContext
+3. Add position counter field to both context types
+4. Generated code calls `detect_or_cached!(ctx, contrib_fn, Vp, Vn)` without name
+
+**Alternative: Keep Symbol names, resolve at stamping time**
+
+If we need to preserve Symbol-based identification for debugging:
+```julia
+# Keep Symbol for MNAContext (debugging, error messages)
+detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp, Vn)
+
+# ValueOnlyContext ignores name, uses counter
+detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp, Vn)
+    # name parameter ignored - just for API compatibility
+    pos = vctx.charge_detection_pos
+    ...
+```
+
+This maintains API compatibility while allowing zero-allocation operation
