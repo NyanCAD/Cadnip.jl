@@ -441,7 +441,7 @@ CCCS(gain::Real; name::Symbol=:F) = CCCS(Float64(gain), name)
 #==============================================================================#
 
 """
-    stamp!(device, ctx::MNAContext, ports...)
+    stamp!(device, ctx::AnyMNAContext, ports...)
 
 Stamp a device into the MNA context.
 
@@ -456,7 +456,7 @@ function stamp! end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(R::Resistor, ctx::MNAContext, p::Int, n::Int)
+    stamp!(R::Resistor, ctx::AnyMNAContext, p::Int, n::Int)
 
 Stamp a resistor between nodes p and n.
 
@@ -472,7 +472,7 @@ Vp [ +G  -G ]
 Vn [ -G  +G ]
 ```
 """
-function stamp!(R::Resistor, ctx::MNAContext, p::Int, n::Int)
+function stamp!(R::Resistor, ctx::AnyMNAContext, p::Int, n::Int)
     G = 1.0 / R.r
     stamp_conductance!(ctx, p, n, G)
     return nothing
@@ -483,7 +483,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(C::Capacitor, ctx::MNAContext, p::Int, n::Int)
+    stamp!(C::Capacitor, ctx::AnyMNAContext, p::Int, n::Int)
 
 Stamp a capacitor between nodes p and n.
 
@@ -497,7 +497,7 @@ Vp [ +C  -C ]
 Vn [ -C  +C ]
 ```
 """
-function stamp!(C::Capacitor, ctx::MNAContext, p::Int, n::Int)
+function stamp!(C::Capacitor, ctx::AnyMNAContext, p::Int, n::Int)
     stamp_capacitance!(ctx, p, n, C.c)
     return nothing
 end
@@ -507,7 +507,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(L::Inductor, ctx::MNAContext, p::Int, n::Int) -> Int
+    stamp!(L::Inductor, ctx::AnyMNAContext, p::Int, n::Int) -> Int
 
 Stamp an inductor between nodes p and n.
 Returns the index of the inductor current variable.
@@ -535,7 +535,7 @@ Note: The -L in C comes from rewriting V = L*dI/dt as:
       G*x + C*dx/dt = b
       Vp - Vn - L*dI/dt = 0
 """
-function stamp!(L::Inductor, ctx::MNAContext, p::Int, n::Int)
+function stamp!(L::Inductor, ctx::AnyMNAContext, p::Int, n::Int)
     # Allocate current variable
     I_idx = alloc_current!(ctx, Symbol(:I_, L.name))
 
@@ -559,7 +559,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(V::VoltageSource, ctx::MNAContext, p::Int, n::Int) -> Int
+    stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int) -> Int
 
 Stamp a voltage source between nodes p and n (V_p - V_n = V.v).
 Returns the index of the source current variable.
@@ -581,7 +581,7 @@ G = I_V[+1  -1   .  ]     Voltage constraint: Vp - Vn
 b = V_dc                  Source voltage value
 ```
 """
-function stamp!(V::VoltageSource, ctx::MNAContext, p::Int, n::Int)
+function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
     # Allocate current variable
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
@@ -602,7 +602,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(I::CurrentSource, ctx::MNAContext, p::Int, n::Int)
+    stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
 
 Stamp a current source between nodes p and n.
 Positive current flows from n to p (into the positive terminal p).
@@ -622,7 +622,7 @@ b = +I   (current enters p)
     -I   (current leaves n)
 ```
 """
-function stamp!(I::CurrentSource, ctx::MNAContext, p::Int, n::Int)
+function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
     # Current flows from n to p (into positive terminal)
     # KCL at p: current I enters (add to RHS)
     # KCL at n: current I leaves (subtract from RHS)
@@ -636,7 +636,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(E::VCVS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Int
+    stamp!(E::VCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Int
 
 Stamp a voltage-controlled voltage source.
 V(out_p, out_n) = E.gain * V(in_p, in_n)
@@ -652,7 +652,7 @@ G = I_E    [ +1    -1   -A   +A    . ]  Voltage: Vout - A*Vin = 0
 ```
 where A = E.gain
 """
-function stamp!(E::VCVS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
+function stamp!(E::VCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
     # Allocate current variable for output branch
     I_idx = alloc_current!(ctx, Symbol(:I_, E.name))
 
@@ -674,7 +674,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(G_dev::VCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
+    stamp!(G_dev::VCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
 
 Stamp a voltage-controlled current source (transconductance).
 I(out_p, out_n) = G_dev.gm * V(in_p, in_n)
@@ -689,7 +689,7 @@ out_p      [  .     .   -gm  +gm ]  Current leaving out_p = -gm*Vin
 G = out_n  [  .     .   +gm  -gm ]  Current leaving out_n = +gm*Vin
 ```
 """
-function stamp!(G_dev::VCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
+function stamp!(G_dev::VCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
     gm = G_dev.gm
     # I = gm * V(in_p, in_n) flows INTO out_p (from out_n)
     # MNA uses "current leaving is positive", so:
@@ -707,7 +707,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Tuple{Int,Int}
+    stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Tuple{Int,Int}
 
 Stamp a current-controlled voltage source (transresistance).
 V(out_p, out_n) = H.rm * I(in_p, in_n)
@@ -716,7 +716,7 @@ Returns (I_out_idx, I_in_idx) - indices of output and input current variables.
 
 The input branch is a zero-volt voltage source (ammeter) to sense current.
 """
-function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
+function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
     # Input current variable (sensing branch: V = 0)
     I_in_idx = alloc_current!(ctx, Symbol(:I_, H.name, :_in))
 
@@ -748,7 +748,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Int
+    stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int) -> Int
 
 Stamp a current-controlled current source.
 I(out_p, out_n) = F.gain * I(in_p, in_n)
@@ -757,7 +757,7 @@ Returns I_in_idx - the index of the input current variable.
 
 The input branch is a zero-volt voltage source (ammeter) to sense current.
 """
-function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
+function stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
     # Input current variable (sensing branch)
     I_in_idx = alloc_current!(ctx, Symbol(:I_, F.name, :_in))
 
@@ -780,7 +780,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Int
+    stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Int
 
 Stamp a CCVS using an existing current variable (SPICE-style).
 V(out_p, out_n) = H.rm * I_in
@@ -790,7 +790,7 @@ This is used when the SPICE netlist references a voltage source name for current
 
 Returns I_out_idx - the index of the output current variable.
 """
-function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
     # Output current variable
     I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
 
@@ -808,7 +808,7 @@ function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
 end
 
 """
-    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Nothing
+    stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::Int) -> Nothing
 
 Stamp a CCCS using an existing current variable (SPICE-style).
 I(out_p, out_n) = F.gain * I_in
@@ -816,7 +816,7 @@ I(out_p, out_n) = F.gain * I_in
 I_in_idx is the index of an existing current variable (e.g., from a voltage source).
 This is used when the SPICE netlist references a voltage source name for current sensing.
 """
-function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
+function stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
     # Output current: gain * I_in flows into out_p (out of out_n)
     # Negative stamp means current entering the node
     stamp_G!(ctx, out_p, I_in_idx, -F.gain)
@@ -829,11 +829,11 @@ end
 # These forward to the base implementation since stamp_G! handles CurrentIndex natively
 
 """
-    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> CurrentIndex
+    stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> CurrentIndex
 
 Stamp a CCVS using an existing current variable (accepts CurrentIndex from get_current_idx).
 """
-function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
+function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
     # Output current variable
     I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
 
@@ -851,11 +851,11 @@ function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Curr
 end
 
 """
-    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> Nothing
+    stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> Nothing
 
 Stamp a CCCS using an existing current variable (accepts CurrentIndex from get_current_idx).
 """
-function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
+function stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
     # Output current: gain * I_in flows into out_p (out of out_n)
     # Negative stamp means current entering the node
     stamp_G!(ctx, out_p, I_in_idx, -F.gain)
@@ -869,11 +869,11 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    stamp!(V::TimeDependentVoltageSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a time-dependent voltage source.
 """
-function stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(V::TimeDependentVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
                 t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
@@ -889,11 +889,11 @@ function stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int;
 end
 
 """
-    stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    stamp!(V::PWLVoltageSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a PWL voltage source evaluated at time t.
 """
-function stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(V::PWLVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
                 t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
@@ -909,11 +909,11 @@ function stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int;
 end
 
 """
-    stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    stamp!(V::SinVoltageSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a sinusoidal voltage source evaluated at time t.
 """
-function stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(V::SinVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
                 t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
@@ -933,11 +933,11 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    stamp!(I::PWLCurrentSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a PWL current source evaluated at time t.
 """
-function stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(I::PWLCurrentSource, ctx::AnyMNAContext, p::Int, n::Int;
                 t::Real=0.0, _sim_mode_::Symbol=:dcop)
     i = get_source_value(I, t, _sim_mode_)
     stamp_b!(ctx, p,  i)
@@ -946,11 +946,11 @@ function stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int;
 end
 
 """
-    stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    stamp!(I::SinCurrentSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a sinusoidal current source evaluated at time t.
 """
-function stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(I::SinCurrentSource, ctx::AnyMNAContext, p::Int, n::Int;
                 t::Real=0.0, _sim_mode_::Symbol=:dcop)
     i = get_source_value(I, t, _sim_mode_)
     stamp_b!(ctx, p,  i)
@@ -963,15 +963,15 @@ end
 #==============================================================================#
 
 """
-    stamp!(device, ctx::MNAContext, p::Symbol, n::Symbol, ...)
+    stamp!(device, ctx::AnyMNAContext, p::Symbol, n::Symbol, ...)
 
 Stamp a device using node names (automatically allocated).
 """
-function stamp!(device, ctx::MNAContext, p::Symbol, n::Symbol)
+function stamp!(device, ctx::AnyMNAContext, p::Symbol, n::Symbol)
     stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n))
 end
 
-function stamp!(device, ctx::MNAContext, out_p::Symbol, out_n::Symbol, in_p::Symbol, in_n::Symbol)
+function stamp!(device, ctx::AnyMNAContext, out_p::Symbol, out_n::Symbol, in_p::Symbol, in_n::Symbol)
     stamp!(device, ctx,
            get_node!(ctx, out_p), get_node!(ctx, out_n),
            get_node!(ctx, in_p), get_node!(ctx, in_n))
@@ -980,7 +980,7 @@ end
 # Convenience for time-dependent sources with symbols
 function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinVoltageSource,
                               PWLCurrentSource, SinCurrentSource},
-                ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, _sim_mode_::Symbol=:dcop)
+                ctx::AnyMNAContext, p::Symbol, n::Symbol; t::Real=0.0, _sim_mode_::Symbol=:dcop)
     stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, _sim_mode_=_sim_mode_)
 end
 
@@ -1051,7 +1051,7 @@ export BehavioralCurrentSource
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(B::BehavioralVoltageSource, ctx::MNAContext, p::Int, n::Int;
+    stamp!(B::BehavioralVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
            get_voltage=nothing) -> Int
 
 Stamp a behavioral voltage source. The source voltage is computed by calling
@@ -1065,7 +1065,7 @@ at the current solution estimate and stamp as a fixed voltage source.
 
 Returns the index of the source current variable.
 """
-function stamp!(B::BehavioralVoltageSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(B::BehavioralVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
                 get_voltage=nothing)
     # Allocate current variable
     I_idx = alloc_current!(ctx, Symbol(:I_, B.name))
@@ -1095,7 +1095,7 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(B::BehavioralCurrentSource, ctx::MNAContext, p::Int, n::Int;
+    stamp!(B::BehavioralCurrentSource, ctx::AnyMNAContext, p::Int, n::Int;
            get_voltage=nothing)
 
 Stamp a behavioral current source. The source current is computed by calling
@@ -1103,7 +1103,7 @@ Stamp a behavioral current source. The source current is computed by calling
 
 Positive current flows from n to p (into the positive terminal p).
 """
-function stamp!(B::BehavioralCurrentSource, ctx::MNAContext, p::Int, n::Int;
+function stamp!(B::BehavioralCurrentSource, ctx::AnyMNAContext, p::Int, n::Int;
                 get_voltage=nothing)
     # Compute the behavioral current value
     i = if get_voltage !== nothing
@@ -1121,7 +1121,7 @@ end
 
 # Convenience for behavioral sources with symbol nodes
 function stamp!(B::Union{BehavioralVoltageSource, BehavioralCurrentSource},
-                ctx::MNAContext, p::Symbol, n::Symbol; get_voltage=nothing)
+                ctx::AnyMNAContext, p::Symbol, n::Symbol; get_voltage=nothing)
     stamp!(B, ctx, get_node!(ctx, p), get_node!(ctx, n); get_voltage=get_voltage)
 end
 
@@ -1174,7 +1174,7 @@ end
 export Diode
 
 """
-    stamp!(D::Diode, ctx::MNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
+    stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
 
 Stamp a nonlinear diode into MNA matrices.
 
@@ -1189,7 +1189,7 @@ Stamps:
 
 The x parameter provides the current solution for V0.
 """
-function stamp!(D::Diode, ctx::MNAContext, p::Int, n::Int;
+function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
                 x::AbstractVector=Float64[])
     # Get operating point voltage
     Vp = p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[p])
@@ -1318,7 +1318,7 @@ end
 export diode_junction_cap, diode_junction_charge
 
 """
-    stamp!(D::DiodeWithCap, ctx::MNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
+    stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
 
 Stamp a diode with junction capacitance.
 
@@ -1328,7 +1328,7 @@ This stamps both:
 
 For transient analysis, the capacitor current is I = dq/dt = C(V) * dV/dt.
 """
-function stamp!(D::DiodeWithCap, ctx::MNAContext, p::Int, n::Int;
+function stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int;
                 x::AbstractVector=Float64[])
     # Get operating point voltage
     Vp = p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[p])
@@ -1408,14 +1408,14 @@ end
 export SimpleMOSFET
 
 """
-    stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int;
+    stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
            x::AbstractVector=Float64[])
 
 Stamp a simple MOSFET (3-terminal: drain, gate, source).
 
 Uses ForwardDiff to compute transconductances gm, gds from the square-law model.
 """
-function stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int;
+function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
                 x::AbstractVector=Float64[])
     # Get operating point voltages
     Vd = d == 0 ? 0.0 : (isempty(x) ? 0.0 : x[d])
@@ -1477,7 +1477,7 @@ function stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int;
 end
 
 # 4-terminal version with body (bulk)
-function stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int, b::Int;
+function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int, b::Int;
                 x::AbstractVector=Float64[])
     # For the simple model, body is not connected (ignore body effect)
     # Just call 3-terminal version

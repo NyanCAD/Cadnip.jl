@@ -47,6 +47,9 @@ using ForwardDiff
 # Context and stamping primitives
 include("context.jl")
 
+# Value-only evaluation mode (zero-allocation rebuilding)
+include("value_only.jl")
+
 # Sparse matrix assembly
 include("build.jl")
 

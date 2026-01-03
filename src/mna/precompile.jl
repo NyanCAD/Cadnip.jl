@@ -89,6 +89,11 @@ struct CompiledStructure{F,P,S}
     # Sparse matrices (structure fixed, values updated via nonzeros())
     G::SparseMatrixCSC{Float64,Int}
     C::SparseMatrixCSC{Float64,Int}
+
+    # Resolved indices for deferred b stamps (CurrentIndex/ChargeIndex → actual positions)
+    # Pre-computed during compilation for zero-allocation value-only mode
+    b_deferred_resolved::Vector{Int}
+    n_b_deferred::Int
 end
 
 """
@@ -145,8 +150,16 @@ mutable struct EvalWorkspace{T,CS<:CompiledStructure}
     # Each EvalWorkspace has its own ctx for thread safety
     ctx::MNAContext
 
+    # ValueOnlyContext for true zero-allocation stamping (no push!)
+    # Used when supports_value_only_mode is true
+    vctx::ValueOnlyContext{T}
+
     # Whether the builder supports ctx keyword argument for context reuse
     supports_ctx_reuse::Bool
+
+    # Whether to use ValueOnlyContext for zero-allocation stamping
+    # True when builder supports ctx and we can use vctx for value-only mode
+    supports_value_only_mode::Bool
 end
 
 """
@@ -162,6 +175,13 @@ function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
     # Check if builder supports ctx reuse
     ctx_reuse = supports_ctx_kwarg(cs.builder, cs.params, cs.spec)
 
+    # Create ValueOnlyContext for true zero-allocation stamping
+    vctx = create_value_only_context(ctx)
+
+    # Check if we can use value-only mode (ctx reuse is required)
+    # We also verify the builder works with ValueOnlyContext
+    value_only_mode = ctx_reuse && supports_value_only_ctx(cs.builder, cs.params, cs.spec, vctx)
+
     EvalWorkspace{Float64,typeof(cs)}(
         cs,
         zeros(Float64, cs.G_n_coo),
@@ -171,9 +191,35 @@ function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
         Float64[],
         0.0,
         zeros(Float64, cs.n),
-        ctx,        # Preallocated context for zero-allocation iteration
-        ctx_reuse   # Whether builder supports ctx reuse
+        ctx,             # Preallocated MNAContext (fallback)
+        vctx,            # ValueOnlyContext for zero-allocation mode
+        ctx_reuse,       # Whether builder supports ctx reuse
+        value_only_mode  # Whether to use ValueOnlyContext
     )
+end
+
+"""
+    supports_value_only_ctx(builder, params, spec, vctx) -> Bool
+
+Check if the builder works correctly with ValueOnlyContext.
+
+This verifies that passing a ValueOnlyContext produces the same number of
+stamps as the original MNAContext build.
+"""
+function supports_value_only_ctx(builder::F, params::P, spec::S, vctx::ValueOnlyContext) where {F,P,S}
+    try
+        # Reset and try a build with ValueOnlyContext
+        reset_value_only!(vctx)
+        builder(params, spec, 0.0; x=Float64[], ctx=vctx)
+
+        # Check that positions match expected counts
+        # G_pos should be n_G + 1 after stamping all G entries
+        # C_pos should be n_C + 1 after stamping all C entries
+        return (vctx.G_pos == vctx.n_G + 1) && (vctx.C_pos == vctx.n_C + 1)
+    catch e
+        # If it fails, fall back to MNAContext path
+        return false
+    end
 end
 
 """
@@ -389,7 +435,8 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
             Symbol[], Symbol[],
             Int[], Int[],
             0, 0,
-            spzeros(0, 0), spzeros(0, 0)
+            spzeros(0, 0), spzeros(0, 0),
+            Int[], 0
         )
     end
 
@@ -410,13 +457,31 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     n_G = length(ctx0.G_I)
     n_C = length(ctx0.C_I)
 
+    # Resolve deferred b stamp indices (CurrentIndex/ChargeIndex → actual b vector positions)
+    # These are fixed after the first build and can be reused in value-only mode
+    n_b_deferred = length(ctx0.b_I)
+    b_deferred_resolved = Vector{Int}(undef, n_b_deferred)
+    @inbounds for k in 1:n_b_deferred
+        idx_typed = ctx0.b_I[k]
+        b_deferred_resolved[k] = if idx_typed isa NodeIndex
+            idx_typed.idx
+        elseif idx_typed isa CurrentIndex
+            ctx0.n_nodes + idx_typed.k
+        elseif idx_typed isa ChargeIndex
+            ctx0.n_nodes + ctx0.n_currents + idx_typed.k
+        else
+            0  # GroundIndex - skip
+        end
+    end
+
     return CompiledStructure{F,P,S}(
         builder, params, spec,
         n, ctx0.n_nodes, ctx0.n_currents,
         copy(ctx0.node_names), copy(ctx0.current_names),
         G_coo_to_nz, C_coo_to_nz,
         n_G, n_C,
-        G, C
+        G, C,
+        b_deferred_resolved, n_b_deferred
     )
 end
 
@@ -817,21 +882,79 @@ Builders must accept time as explicit parameter:
 
 The spec contains temperature, mode, and tolerances (immutable during simulation).
 Time is passed separately since it changes every iteration.
+
+# Zero-Allocation Path
+When `supports_value_only_mode` is true, uses ValueOnlyContext which writes
+directly to pre-sized arrays without any push! operations. This eliminates
+the ~1KB/iteration allocations from COO stamping.
 """
 function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     cs = ws.structure
     ws.time = real_time(t)
 
-    # Call builder at current operating point with explicit time
-    ctx = if ws.supports_ctx_reuse
-        # ZERO-ALLOCATION PATH: Pass stored context to avoid allocating a new one
-        # The builder will call reset_for_restamping!(ctx) and restamp into it
-        cs.builder(cs.params, cs.spec, ws.time; x=u, ctx=ws.ctx)
+    if ws.supports_value_only_mode
+        # TRUE ZERO-ALLOCATION PATH: Use ValueOnlyContext
+        # ValueOnlyContext writes directly to pre-sized arrays without push!
+        vctx = ws.vctx
+        reset_value_only!(vctx)
+        cs.builder(cs.params, cs.spec, ws.time; x=u, ctx=vctx)
+
+        # Copy values directly from ValueOnlyContext
+        # vctx.G_V, vctx.C_V already contain the stamped values
+        n_G = cs.G_n_coo
+        n_C = cs.C_n_coo
+
+        @inbounds for k in 1:n_G
+            ws.G_V[k] = vctx.G_V[k]
+        end
+        @inbounds for k in 1:n_C
+            ws.C_V[k] = vctx.C_V[k]
+        end
+
+        # b vector: zero first, then copy direct stamps and apply deferred
+        # We must zero ws.b because copyto! only copies length(vctx.b) elements,
+        # leaving positions beyond that with stale values from previous iterations
+        fill!(ws.b, zero(eltype(ws.b)))
+
+        # Copy direct stamps from vctx.b (node stamps only, length = n_nodes)
+        n_b = length(vctx.b)
+        @inbounds for i in 1:n_b
+            ws.b[i] = vctx.b[i]
+        end
+
+        # Apply deferred b stamps using pre-resolved indices from CompiledStructure
+        # The values are in vctx.b_V, indices are in cs.b_deferred_resolved
+        @inbounds for k in 1:cs.n_b_deferred
+            idx = cs.b_deferred_resolved[k]
+            if idx > 0
+                ws.b[idx] += vctx.b_V[k]
+            end
+        end
+
+        # Update sparse matrices in-place using precomputed mapping
+        update_sparse_from_coo!(cs.G, ws.G_V, cs.G_coo_to_nz, n_G)
+        update_sparse_from_coo!(cs.C, ws.C_V, cs.C_coo_to_nz, n_C)
+
+    elseif ws.supports_ctx_reuse
+        # REDUCED-ALLOCATION PATH: Reuse MNAContext but still uses push!
+        ctx = cs.builder(cs.params, cs.spec, ws.time; x=u, ctx=ws.ctx)
+        _copy_ctx_to_workspace!(ws, ctx, cs)
     else
-        # Fallback for hand-written builders without ctx support
-        cs.builder(cs.params, cs.spec, ws.time; x=u)
+        # FALLBACK PATH: Allocates new MNAContext each iteration
+        ctx = cs.builder(cs.params, cs.spec, ws.time; x=u)
+        _copy_ctx_to_workspace!(ws, ctx, cs)
     end
 
+    return nothing
+end
+
+"""
+    _copy_ctx_to_workspace!(ws::EvalWorkspace, ctx::MNAContext, cs::CompiledStructure)
+
+Copy COO values and b vector from MNAContext to workspace.
+Internal helper for the non-value-only rebuild paths.
+"""
+function _copy_ctx_to_workspace!(ws::EvalWorkspace, ctx::MNAContext, cs::CompiledStructure)
     # Structure must be constant
     @assert ctx.n_nodes == cs.n_nodes && ctx.n_currents == cs.n_currents (
         "Circuit structure changed: expected $(cs.n_nodes) nodes + $(cs.n_currents) currents, " *
@@ -852,7 +975,6 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     end
 
     # Update b vector: zero, copy direct stamps, then apply deferred stamps
-    # This mirrors update_b_vector! from the PrecompiledCircuit path
     fill!(ws.b, zero(eltype(ws.b)))
 
     # Copy direct stamps from ctx.b
@@ -863,7 +985,6 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
 
     # Apply deferred b stamps (typed indices for current/charge variables)
     @inbounds for (idx_typed, v) in zip(ctx.b_I, ctx.b_V)
-        # Resolve typed index to actual position
         idx = if idx_typed isa NodeIndex
             idx_typed.idx
         elseif idx_typed isa CurrentIndex
