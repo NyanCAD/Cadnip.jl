@@ -1897,24 +1897,60 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             # PWL(t1 v1 t2 v2 ...)
             vals = [cg_expr!(state, v) for v in tran_source.values]
 
-            if is_voltage
-                return quote
-                    let vals = [$(vals...)]
-                        n_points = div(length(vals), 2)
-                        times = vals[1:2:end]
-                        values = vals[2:2:end]
-                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+            # Check if all values are numeric constants (for zero-allocation SVector)
+            all_constant = all(x -> x isa Number, vals)
+            n_points = div(length(vals), 2)
+
+            if all_constant && n_points >= 1
+                # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
+                times_vals = Float64[Float64(vals[i]) for i in 1:2:length(vals)]
+                value_vals = Float64[Float64(vals[i]) for i in 2:2:length(vals)]
+
+                # Build SVector expression inside quote to avoid serialization issues
+                # We create explicit calls to SVector with literal values
+                times_exprs = [:($(t)) for t in times_vals]
+                values_exprs = [:($(v)) for v in value_vals]
+
+                # Use positional arguments for zero-allocation
+                if is_voltage
+                    return quote
+                        stamp!(PWLVoltageSource(
+                            $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
+                            $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
+                            name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n, t, spec.mode)
+                    end
+                else
+                    return quote
+                        stamp!(PWLCurrentSource(
+                            $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
+                            $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
+                            name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
-                return quote
-                    let vals = [$(vals...)]
-                        n_points = div(length(vals), 2)
-                        times = vals[1:2:end]
-                        values = vals[2:2:end]
-                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                # Still use positional arguments to minimize overhead
+                if is_voltage
+                    return quote
+                        let vals = [$(vals...)]
+                            n_points = div(length(vals), 2)
+                            times = vals[1:2:end]
+                            values = vals[2:2:end]
+                            stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n, t, spec.mode)
+                        end
+                    end
+                else
+                    return quote
+                        let vals = [$(vals...)]
+                            n_points = div(length(vals), 2)
+                            times = vals[1:2:end]
+                            values = vals[2:2:end]
+                            stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n, t, spec.mode)
+                        end
                     end
                 end
             end
@@ -1932,13 +1968,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             theta_expr = n_vals >= 5 ? vals[5] : 0.0
             phase_expr = n_vals >= 6 ? vals[6] : 0.0
 
+            # Use positional arguments for zero-allocation
             if is_voltage
                 return quote
                     let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
@@ -1947,7 +1984,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             end
@@ -1974,23 +2011,33 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 v1, v2 = Float64(v1_expr), Float64(v2_expr)
                 td, tr, tf, pw, per = Float64(td_expr), Float64(tr_expr), Float64(tf_expr), Float64(pw_expr), Float64(per_expr)
 
-                # PWL times and values as compile-time SVector (stack-allocated)
-                times_sv = SVector{6,Float64}(0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per)
-                values_sv = SVector{6,Float64}(v1, v1, v2, v2, v1, v1)
+                # Compute PWL times and values
+                t0, t1, t2, t3, t4, t5 = 0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per
+                v_1, v_2, v_3, v_4, v_5, v_6 = v1, v1, v2, v2, v1, v1
 
                 if is_voltage
+                    # Build SVector expression inside quote to avoid serialization issues
+                    # Use positional arguments for zero-allocation
                     return quote
-                        stamp!(PWLVoltageSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                        stamp!(PWLVoltageSource(
+                            $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
+                            $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
+                            name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n, t, spec.mode)
                     end
                 else
+                    # Use positional arguments for zero-allocation
                     return quote
-                        stamp!(PWLCurrentSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                        stamp!(PWLCurrentSource(
+                            $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
+                            $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
+                            name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                # Still use positional arguments to minimize overhead
                 if is_voltage
                     return quote
                         let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
@@ -1999,7 +2046,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [v1, v1, v2, v2, v1, v1]
                             stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
@@ -2009,7 +2056,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [i1, i1, i2, i2, i1, i1]
                             stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 end
@@ -2474,6 +2521,22 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
                 # Reuse existing context - reset for restamping while preserving structure
                 $(reset_for_restamping!)(ctx)
             end
+            $body
+            return ctx
+        end
+
+        # Zero-allocation positional version for fast_rebuild!
+        # Avoids keyword argument overhead which can cause allocations
+        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
+                                        x::AbstractVector, ctx::$(ValueOnlyContext))
+            $(reset_for_restamping!)(ctx)
+            $body
+            return ctx
+        end
+
+        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
+                                        x::AbstractVector, ctx::$(MNAContext))
+            $(reset_for_restamping!)(ctx)
             $body
             return ctx
         end

@@ -895,19 +895,21 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     if ws.supports_value_only_mode
         # TRUE ZERO-ALLOCATION PATH: Use ValueOnlyContext
         # ValueOnlyContext writes directly to pre-sized arrays without push!
+        # Call positional version to avoid keyword argument allocation overhead
         vctx = ws.vctx
         reset_value_only!(vctx)
-        cs.builder(cs.params, cs.spec, ws.time; x=u, ctx=vctx)
+        cs.builder(cs.params, cs.spec, ws.time, u, vctx)
 
         # Copy values directly from ValueOnlyContext
         # vctx.G_V, vctx.C_V already contain the stamped values
+        # Use @simd to force scalar loop optimization and avoid iterator allocations
         n_G = cs.G_n_coo
         n_C = cs.C_n_coo
 
-        @inbounds for k in 1:n_G
+        @inbounds @simd for k in 1:n_G
             ws.G_V[k] = vctx.G_V[k]
         end
-        @inbounds for k in 1:n_C
+        @inbounds @simd for k in 1:n_C
             ws.C_V[k] = vctx.C_V[k]
         end
 
@@ -918,13 +920,14 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
 
         # Copy direct stamps from vctx.b (node stamps only, length = n_nodes)
         n_b = length(vctx.b)
-        @inbounds for i in 1:n_b
+        @inbounds @simd for i in 1:n_b
             ws.b[i] = vctx.b[i]
         end
 
         # Apply deferred b stamps using pre-resolved indices from CompiledStructure
         # The values are in vctx.b_V, indices are in cs.b_deferred_resolved
-        @inbounds for k in 1:cs.n_b_deferred
+        n_deferred = cs.n_b_deferred
+        @inbounds for k in 1:n_deferred
             idx = cs.b_deferred_resolved[k]
             if idx > 0
                 ws.b[idx] += vctx.b_V[k]
