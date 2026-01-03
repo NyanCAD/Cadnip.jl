@@ -631,7 +631,7 @@ end
 #==============================================================================#
 
 # Import MNA types for codegen
-using ..MNA: MNAContext, MNASpec, get_node!, stamp!
+using ..MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!
 using ..MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using ..MNA: VCVS, VCCS, CCVS, CCCS
 
@@ -2427,7 +2427,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
-        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
+        using CedarSim.MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
 
@@ -2438,9 +2438,10 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # x is the current solution vector for nonlinear Newton iteration
         # t is simulation time (passed explicitly for zero-allocation iteration)
         # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
+        # ctx can be MNAContext (normal), ValueOnlyContext (zero-alloc), or nothing (create new)
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                  x::AbstractVector=ZERO_VECTOR,
-                                 ctx::Union{$(MNAContext), Nothing}=nothing)
+                                 ctx::Union{$(MNAContext), $(ValueOnlyContext), Nothing}=nothing)
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
