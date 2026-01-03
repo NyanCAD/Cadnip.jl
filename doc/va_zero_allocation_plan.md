@@ -439,14 +439,44 @@ end
 ```
 
 **Problem:** `detect_or_cached!()` only works with `MNAContext` because it needs the
-`charge_is_vdep` cache. `ValueOnlyContext` doesn't have this cache.
+`charge_is_vdep` cache (a `Dict{Symbol,Bool}`). `ValueOnlyContext` doesn't have this cache,
+and a Dict doesn't fit the value-only paradigm anyway (dynamic allocation, hash lookups).
 
-### Proper Fix Required
+### Proper Fix: Index-Based Charge Detection
 
-1. **Store detection cache in `CompiledStructure`** during compilation
-2. **Pass cache reference to `ValueOnlyContext`**
-3. **Add `detect_or_cached!(::ValueOnlyContext, ...)` method** that looks up cached values
-4. **Update VA stamp! signature** to accept `AnyMNAContext`
+Instead of `Dict{Symbol,Bool}`, use a statically-sized tuple or vector indexed by
+branch number. During codegen, each branch with `ddt()` gets a unique index.
 
-This ensures the detection result from the first build is reused in value-only mode,
-maintaining consistent stamp structure.
+**Codegen change (vasim.jl):**
+```julia
+# Instead of:
+_is_vdep = detect_or_cached!(ctx, :Q_branch1, contrib_fn, Vp, Vn)
+
+# Generate:
+_is_vdep = is_charge_vdep(ctx, 1)  # Branch index 1
+```
+
+**Context storage:**
+```julia
+# In CompiledStructure (immutable, computed once):
+charge_is_vdep::NTuple{N,Bool}  # or SVector{N,Bool}
+
+# In ValueOnlyContext (reference to compiled structure):
+charge_is_vdep::NTuple{N,Bool}  # Copy or reference
+
+# Lookup is trivial:
+@inline is_charge_vdep(ctx, i::Int) = ctx.charge_is_vdep[i]
+```
+
+**Implementation steps:**
+
+1. **Codegen (vasim.jl):** Assign each branch a unique index during stamp method generation
+2. **First build (MNAContext):** Run detection, store results in indexed structure
+3. **Compilation:** Copy detection results to `CompiledStructure.charge_is_vdep`
+4. **Value-only builds:** `ValueOnlyContext` holds reference, indexed lookup is O(1)
+5. **Update VA stamp! signature** to accept `AnyMNAContext`
+
+This approach:
+- Eliminates Dict allocation and hash lookup
+- Is GPU-friendly (no dynamic allocation)
+- Maintains consistent stamp structure between first build and value-only rebuilds
