@@ -25,8 +25,6 @@ using SparseArrays
 using LinearAlgebra
 using ForwardDiff: Dual, value
 using StaticArrays: SVector, MVector
-using RuntimeGeneratedFunctions
-RuntimeGeneratedFunctions.init(@__MODULE__)
 
 # Extract real value from ForwardDiff.Dual (for tgrad compatibility)
 # Needed for time-dependent sources with Rosenbrock solvers
