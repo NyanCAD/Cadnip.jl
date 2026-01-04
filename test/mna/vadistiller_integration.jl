@@ -19,6 +19,7 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
+using CedarSim.MNA: reset_for_restamping!
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF
 using VerilogAParser
@@ -151,8 +152,8 @@ end
             load_va_model("diode.va")
 
             @testset "Basic diode circuit" begin
-                function sp_diode_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_diode_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vcc = get_node!(ctx, :vcc)
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
@@ -167,8 +168,8 @@ end
             end
 
             @testset "Diode with series resistance" begin
-                function sp_diode_rs_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_diode_rs_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vcc = get_node!(ctx, :vcc)
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
@@ -199,8 +200,8 @@ end
             load_va_model("bjt.va")
 
             @testset "Basic BJT circuit" begin
-                function sp_bjt_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_bjt_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vcc = get_node!(ctx, :vcc)
                     vb = get_node!(ctx, :vb)
                     collector = get_node!(ctx, :collector)
@@ -227,8 +228,8 @@ end
             load_va_model("jfet1.va")
 
             @testset "sp_jfet1" begin
-                function sp_jfet_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_jfet_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -248,8 +249,8 @@ end
             load_va_model("mes1.va")
 
             @testset "sp_mes1" begin
-                function sp_mes_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mes_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -269,8 +270,8 @@ end
             load_va_model("jfet2.va")
 
             @testset "sp_jfet2" begin
-                function sp_jfet2_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_jfet2_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -295,8 +296,8 @@ end
             load_va_model("mos1.va")
 
             @testset "sp_mos1" begin
-                function sp_mos1_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mos1_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -316,8 +317,8 @@ end
             load_va_model("mos2.va")
 
             @testset "sp_mos2" begin
-                function sp_mos2_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mos2_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -337,8 +338,8 @@ end
             load_va_model("mos3.va")
 
             @testset "sp_mos3" begin
-                function sp_mos3_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mos3_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -358,8 +359,8 @@ end
             load_va_model("mos6.va")
 
             @testset "sp_mos6" begin
-                function sp_mos6_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mos6_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -379,8 +380,8 @@ end
             load_va_model("mos9.va")
 
             @testset "sp_mos9" begin
-                function sp_mos9_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_mos9_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -405,8 +406,8 @@ end
             load_va_model("vdmos.va")
 
             @testset "sp_vdmos circuit" begin
-                function sp_vdmos_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_vdmos_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -431,8 +432,8 @@ end
             load_va_model("bsim3v3.va")
 
             @testset "sp_bsim3v3 circuit" begin
-                function sp_bsim3v3_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_bsim3v3_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -467,8 +468,8 @@ end
             end
 
             @testset "sp_bsim4v8 circuit" begin
-                function sp_bsim4v8_circuit(params, spec, t::Real=0.0; x=Float64[])
-                    ctx = MNAContext()
+                function sp_bsim4v8_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
                     vdd = get_node!(ctx, :vdd)
                     drain = get_node!(ctx, :drain)
                     gate = get_node!(ctx, :gate)
@@ -501,8 +502,8 @@ end
     @testset "Tier 7: Transient Circuits" begin
 
         @testset "RC circuit with VADistiller components" begin
-            function build_rc(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 v = get_node!(ctx, :v)
                 out = get_node!(ctx, :out)
 
@@ -524,8 +525,8 @@ end
         end
 
         @testset "Diode rectifier transient" begin
-            function build_rectifier(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function build_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
 
@@ -547,8 +548,8 @@ end
         end
 
         @testset "MOSFET CS amplifier transient" begin
-            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
                 vdrain = get_node!(ctx, :vdrain)
@@ -576,8 +577,8 @@ end
         end
 
         @testset "BJT CE amplifier transient" begin
-            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)
                 vcollector = get_node!(ctx, :vcollector)
@@ -622,8 +623,8 @@ end
     @testset "Tier 8: DAE Transient with Voltage-Dependent Capacitors" begin
 
         @testset "Diode junction capacitance (sp_diode with IDA)" begin
-            function diode_rectifier_with_cap(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function diode_rectifier_with_cap(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
 
@@ -670,8 +671,8 @@ end
         end
 
         @testset "MOSFET gate capacitance (sp_mos1 with IDA)" begin
-            function cs_amp_with_cap(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function cs_amp_with_cap(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
                 vdrain = get_node!(ctx, :vdrain)
@@ -718,8 +719,8 @@ end
         end
 
         @testset "Half-wave rectifier with filter cap (sp_diode with IDA)" begin
-            function halfwave_rectifier(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function halfwave_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+                reset_for_restamping!(ctx)
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
 
