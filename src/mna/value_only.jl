@@ -315,9 +315,8 @@ Device stamp! methods use this to accept either context type, allowing
 the same code to work for both initial structure discovery (MNAContext)
 and value-only rebuilds (ValueOnlyContext).
 """
-const AnyMNAContext = Union{MNAContext, ValueOnlyContext}
-
-export AnyMNAContext
+# NOTE: AnyMNAContext is defined AFTER DirectStampContext at end of file
+# This placeholder is needed to allow devices.jl to be included before the final definition
 
 #==============================================================================#
 # DirectStampContext: Zero-Copy Stamping to Sparse Matrices
@@ -580,6 +579,11 @@ end
 
 @inline reset_for_restamping!(dctx::DirectStampContext) = reset_direct_stamp!(dctx)
 
-# Update AnyMNAContext to include DirectStampContext
-const AnyStampContext = Union{MNAContext, ValueOnlyContext, DirectStampContext}
+# Define AnyMNAContext after DirectStampContext is defined
+# This is the single union type for all context types used by device stamp! methods
+const AnyMNAContext = Union{MNAContext, ValueOnlyContext, DirectStampContext}
+export AnyMNAContext
+
+# Alias for backward compatibility
+const AnyStampContext = AnyMNAContext
 export AnyStampContext

@@ -1631,8 +1631,10 @@ prob = DAEProblem(f, du0, u0, tspan; p=ws, ...)
 ```
 """
 function make_workspace_dae_residual()
-    function dae_residual!(resid, du, u, p::EvalWorkspace, t)
-        fast_residual!(resid, du, u, p, real_time(t))
+    # Accept any workspace type (EvalWorkspace, DirectWorkspace, SpecializedWorkspace)
+    # that has fast_residual! defined
+    function dae_residual!(resid, du, u, ws, t)
+        fast_residual!(resid, du, u, ws, real_time(t))
         return nothing
     end
     return dae_residual!
@@ -1641,11 +1643,12 @@ end
 """
     make_workspace_dae_jacobian() -> Function
 
-Create a DAE Jacobian function that uses EvalWorkspace passed as `p`.
+Create a DAE Jacobian function that uses workspace passed as `p`.
 """
 function make_workspace_dae_jacobian()
-    function dae_jac!(J, du, u, p::EvalWorkspace, gamma, t)
-        fast_jacobian!(J, du, u, p, gamma, real_time(t))
+    # Accept any workspace type that has fast_jacobian! defined
+    function dae_jac!(J, du, u, ws, gamma, t)
+        fast_jacobian!(J, du, u, ws, gamma, real_time(t))
         return nothing
     end
     return dae_jac!

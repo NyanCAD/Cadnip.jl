@@ -107,119 +107,69 @@ Return the system size (number of unknowns).
 system_size(cs::CompiledStructure) = cs.n
 
 #==============================================================================#
-# EvalWorkspace: Mutable Per-Iteration Workspace
+# EvalWorkspace: Zero-Copy Stamping Workspace
+#
+# Uses DirectStampContext which stamps directly to sparse matrix nzval,
+# eliminating ALL intermediate arrays. Optimal for all circuit sizes.
+#
+# Data flow:
+#   builder stamps → DirectStampContext → G.nzval/C.nzval (single write)
+#
+# No vctx.G_V, no intermediate copying between arrays.
 #==============================================================================#
 
 """
     EvalWorkspace{T,CS}
 
-Immutable evaluation workspace containing preallocated storage for Newton iteration.
-Passed as the `p` parameter to DAE solvers.
+Immutable evaluation workspace with zero-copy DirectStampContext.
 
-This struct is IMMUTABLE but contains MUTABLE vectors - the vector contents
-can change while the struct itself cannot be reassigned. This gives us both
-safety (no accidental field reassignment) and performance (mutable storage).
-
-Time is passed explicitly to fast_rebuild! rather than stored, avoiding the
-need for a mutable struct.
-
-Each thread should have its own EvalWorkspace, while sharing the same
-CompiledStructure.
+Stamps go directly to sparse matrix nzval arrays - no intermediate storage.
+This is the fastest path for all circuits.
 
 # Fields
-- `structure::CompiledStructure`: Reference to compiled circuit (immutable)
-- `b::Vector{T}`: Preallocated RHS vector (mutable contents)
+- `structure::CS`: Compiled circuit structure
+- `dctx::DirectStampContext`: Direct stamping context with sparse refs
 - `resid_tmp::Vector{T}`: Working storage for residual computation
-- `ctx::MNAContext`: Preallocated context for fallback path
-- `vctx::ValueOnlyContext{T}`: Zero-allocation stamping context
-- `supports_ctx_reuse::Bool`: Whether builder supports ctx kwarg
-- `supports_value_only_mode::Bool`: Whether to use ValueOnlyContext path
-
-Note: G_V and C_V arrays are no longer stored here - in value-only mode
-we stamp directly from vctx to sparse matrices (eliminating intermediate copy).
 """
 struct EvalWorkspace{T,CS<:CompiledStructure}
-    # Reference to immutable structure
     structure::CS
-
-    # RHS vector (mutable contents, immutable reference)
-    b::Vector{T}
-
-    # Working storage
+    dctx::DirectStampContext
     resid_tmp::Vector{T}
-
-    # Preallocated MNAContext for fallback Newton iteration path
-    # Each EvalWorkspace has its own ctx for thread safety
-    ctx::MNAContext
-
-    # ValueOnlyContext for true zero-allocation stamping (no push!)
-    # Used when supports_value_only_mode is true
-    vctx::ValueOnlyContext{T}
-
-    # Whether the builder supports ctx keyword argument for context reuse
-    supports_ctx_reuse::Bool
-
-    # Whether to use ValueOnlyContext for zero-allocation stamping
-    # True when builder supports ctx and we can use vctx for value-only mode
-    supports_value_only_mode::Bool
 end
 
 """
     create_workspace(cs::CompiledStructure{F,P,S}) -> EvalWorkspace
 
-Create an immutable evaluation workspace for the given compiled structure.
+Create a workspace that stamps directly to sparse matrices.
 
-The workspace contains preallocated vectors whose contents are mutable,
-but the struct itself is immutable (no field reassignment).
+This is the single recommended API - it works optimally for all circuit sizes:
+- No intermediate G_V, C_V arrays
+- Stamps go straight to sparse nzval
+- Deferred b stamps resolved using precomputed mapping
 """
 function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Create a preallocated MNAContext for this workspace
-    # We call the builder once to get a fully initialized context with correct structure
+    # Get initial context for structure info
     ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
 
-    # Check if builder supports ctx reuse
-    ctx_reuse = supports_ctx_kwarg(cs.builder, cs.params, cs.spec)
+    # Create b vector
+    b = zeros(Float64, cs.n)
 
-    # Create ValueOnlyContext for true zero-allocation stamping
-    vctx = create_value_only_context(ctx)
-
-    # Check if we can use value-only mode (ctx reuse is required)
-    # We also verify the builder works with ValueOnlyContext
-    value_only_mode = ctx_reuse && supports_value_only_ctx(cs.builder, cs.params, cs.spec, vctx)
+    # Create DirectStampContext with references to sparse nzval
+    dctx = create_direct_stamp_context(
+        ctx,
+        nonzeros(cs.G),
+        nonzeros(cs.C),
+        b,
+        cs.G_coo_to_nz,
+        cs.C_coo_to_nz,
+        cs.b_deferred_resolved
+    )
 
     EvalWorkspace{Float64,typeof(cs)}(
         cs,
-        zeros(Float64, cs.n),    # b vector
-        zeros(Float64, cs.n),    # resid_tmp
-        ctx,                     # Preallocated MNAContext (fallback)
-        vctx,                    # ValueOnlyContext for zero-allocation mode
-        ctx_reuse,               # Whether builder supports ctx reuse
-        value_only_mode          # Whether to use ValueOnlyContext
+        dctx,
+        zeros(Float64, cs.n)
     )
-end
-
-"""
-    supports_value_only_ctx(builder, params, spec, vctx) -> Bool
-
-Check if the builder works correctly with ValueOnlyContext.
-
-This verifies that passing a ValueOnlyContext produces the same number of
-stamps as the original MNAContext build.
-"""
-function supports_value_only_ctx(builder::F, params::P, spec::S, vctx::ValueOnlyContext) where {F,P,S}
-    try
-        # Reset and try a build with ValueOnlyContext
-        reset_value_only!(vctx)
-        builder(params, spec, 0.0; x=Float64[], ctx=vctx)
-
-        # Check that positions match expected counts
-        # G_pos should be n_G + 1 after stamping all G entries
-        # C_pos should be n_C + 1 after stamping all C entries
-        return (vctx.G_pos == vctx.n_G + 1) && (vctx.C_pos == vctx.n_C + 1)
-    catch e
-        # If it fails, fall back to MNAContext path
-        return false
-    end
 end
 
 """
@@ -854,158 +804,28 @@ end
 #==============================================================================#
 
 """
-    reset_workspace!(ws::EvalWorkspace)
-
-Reset workspace b vector to zero.
-Called at the start of each evaluation before re-stamping.
-
-Note: In value-only mode, reset_value_only!(vctx) handles its own reset.
-Sparse matrix values are zeroed directly in fast_rebuild!.
-"""
-function reset_workspace!(ws::EvalWorkspace{T}) where T
-    fill!(ws.b, zero(T))
-    return nothing
-end
-
-"""
     fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
 
-Zero-allocation rebuild of circuit at operating point u and time t.
+Zero-copy rebuild using DirectStampContext.
 
-This version uses the EvalWorkspace which preallocates all storage.
-Time is passed explicitly as a parameter (not stored in workspace).
-
-# Builder API
-Builders must accept time as explicit parameter:
-    builder(params, spec, t::Real; x=ZERO_VECTOR) -> MNAContext
-
-The spec contains temperature, mode, and tolerances (immutable during simulation).
-Time is passed separately since it changes every iteration.
-
-# Zero-Allocation Path
-When `supports_value_only_mode` is true, uses ValueOnlyContext which writes
-directly to pre-sized arrays without any push! operations. Values are then
-stamped directly from vctx to sparse matrices (no intermediate copy).
+Stamps go directly to sparse matrix nzval - no intermediate arrays.
 """
 function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     cs = ws.structure
-    time = real_time(t)  # Local variable, not stored in struct
+    dctx = ws.dctx
 
-    if ws.supports_value_only_mode
-        # TRUE ZERO-ALLOCATION PATH: Use ValueOnlyContext
-        # ValueOnlyContext writes directly to pre-sized arrays without push!
-        # Call positional version to avoid keyword argument allocation overhead
-        vctx = ws.vctx
-        reset_value_only!(vctx)
-        cs.builder(cs.params, cs.spec, time, u, vctx)
+    # Reset counters and zero matrices
+    reset_direct_stamp!(dctx)
 
-        # Stamp directly from vctx to sparse matrices (no intermediate ws.G_V copy)
-        n_G = cs.G_n_coo
-        n_C = cs.C_n_coo
+    # Builder stamps directly to sparse via DirectStampContext
+    cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx)
 
-        # Update sparse matrices directly from vctx values
-        # This eliminates the intermediate copy: vctx.G_V → ws.G_V → sparse
-        _update_sparse_direct!(cs.G, vctx.G_V, cs.G_coo_to_nz, n_G)
-        _update_sparse_direct!(cs.C, vctx.C_V, cs.C_coo_to_nz, n_C)
-
-        # b vector: zero first, then copy direct stamps and apply deferred
-        fill!(ws.b, zero(eltype(ws.b)))
-
-        # Copy direct stamps from vctx.b (node stamps only, length = n_nodes)
-        n_b = length(vctx.b)
-        @inbounds @simd for i in 1:n_b
-            ws.b[i] = vctx.b[i]
-        end
-
-        # Apply deferred b stamps using pre-resolved indices from CompiledStructure
-        n_deferred = cs.n_b_deferred
-        @inbounds for k in 1:n_deferred
-            idx = cs.b_deferred_resolved[k]
-            if idx > 0
-                ws.b[idx] += vctx.b_V[k]
-            end
-        end
-
-    elseif ws.supports_ctx_reuse
-        # REDUCED-ALLOCATION PATH: Reuse MNAContext but still uses push!
-        ctx = cs.builder(cs.params, cs.spec, time; x=u, ctx=ws.ctx)
-        _copy_ctx_to_workspace!(ws, ctx, cs)
-    else
-        # FALLBACK PATH: Allocates new MNAContext each iteration
-        ctx = cs.builder(cs.params, cs.spec, time; x=u)
-        _copy_ctx_to_workspace!(ws, ctx, cs)
-    end
-
-    return nothing
-end
-
-"""
-    _update_sparse_direct!(S, V, mapping, n_entries)
-
-Update sparse matrix values directly from source array.
-Zeros the matrix first, then accumulates values using precomputed mapping.
-
-This is the direct path: source → sparse (no intermediate array).
-"""
-@inline function _update_sparse_direct!(S::SparseMatrixCSC, V::AbstractVector,
-                                        mapping::Vector{Int}, n_entries::Int)
-    nz = nonzeros(S)
-    fill!(nz, 0.0)
-
-    @inbounds for k in 1:n_entries
-        idx = mapping[k]
+    # Apply deferred b stamps
+    n_deferred = cs.n_b_deferred
+    @inbounds for k in 1:n_deferred
+        idx = dctx.b_resolved[k]
         if idx > 0
-            nz[idx] += V[k]
-        end
-    end
-
-    return nothing
-end
-
-"""
-    _copy_ctx_to_workspace!(ws::EvalWorkspace, ctx::MNAContext, cs::CompiledStructure)
-
-Copy values from MNAContext to workspace and update sparse matrices.
-Internal helper for the non-value-only rebuild paths (fallback).
-"""
-function _copy_ctx_to_workspace!(ws::EvalWorkspace, ctx::MNAContext, cs::CompiledStructure)
-    # Structure must be constant
-    @assert ctx.n_nodes == cs.n_nodes && ctx.n_currents == cs.n_currents (
-        "Circuit structure changed: expected $(cs.n_nodes) nodes + $(cs.n_currents) currents, " *
-        "got $(ctx.n_nodes) + $(ctx.n_currents)")
-
-    n_G = length(ctx.G_I)
-    n_C = length(ctx.C_I)
-
-    @assert n_G == cs.G_n_coo "G matrix COO length changed: expected $(cs.G_n_coo), got $n_G"
-    @assert n_C == cs.C_n_coo "C matrix COO length changed: expected $(cs.C_n_coo), got $n_C"
-
-    # Update sparse matrices directly from ctx values (no intermediate copy)
-    _update_sparse_direct!(cs.G, ctx.G_V, cs.G_coo_to_nz, n_G)
-    _update_sparse_direct!(cs.C, ctx.C_V, cs.C_coo_to_nz, n_C)
-
-    # Update b vector: zero, copy direct stamps, then apply deferred stamps
-    fill!(ws.b, zero(eltype(ws.b)))
-
-    # Copy direct stamps from ctx.b
-    n_b = min(length(ctx.b), length(ws.b))
-    @inbounds for i in 1:n_b
-        ws.b[i] = ctx.b[i]
-    end
-
-    # Apply deferred b stamps (typed indices for current/charge variables)
-    @inbounds for (idx_typed, v) in zip(ctx.b_I, ctx.b_V)
-        idx = if idx_typed isa NodeIndex
-            idx_typed.idx
-        elseif idx_typed isa CurrentIndex
-            cs.n_nodes + idx_typed.k
-        elseif idx_typed isa ChargeIndex
-            cs.n_nodes + cs.n_currents + idx_typed.k
-        else
-            0  # GroundIndex - skip
-        end
-        if 1 <= idx <= length(ws.b)
-            ws.b[idx] += v
+            dctx.b[idx] += dctx.b_V[k]
         end
     end
 
@@ -1027,7 +847,7 @@ function fast_residual!(resid::AbstractVector, du::AbstractVector,
     # F(du, u) = C*du + G*u - b = 0
     mul!(resid, cs.C, du)
     mul!(resid, cs.G, u, 1.0, 1.0)
-    resid .-= ws.b
+    resid .-= ws.dctx.b
 
     return nothing
 end
@@ -1232,367 +1052,9 @@ end
 #
 # The MNACircuitCompiled type is kept for explicit precompilation when needed.
 
-#==============================================================================#
-# Specialized Function Generation for SROA Optimization
-#
-# For small circuits, we generate a specialized fast_rebuild! function where
-# the COO-to-CSC mappings are baked in as SVector literals. This enables:
-# - Full SROA (Scalar Replacement of Aggregates) by the compiler
-# - The mapping indices become constants in the generated code
-# - Loop unrolling for small circuits
-#
-# The threshold (MAX_SVECTOR_SIZE) balances compile time vs. runtime performance.
-#==============================================================================#
-
-export make_specialized_rebuild, SpecializedWorkspace, create_specialized_workspace
-
 """
-Maximum number of COO entries for SVector-based optimization.
-Beyond this, compilation time becomes excessive and we fall back to Vector.
+    b_vector(ws::EvalWorkspace) -> Vector{Float64}
+
+Get the b vector from an EvalWorkspace.
 """
-const MAX_SVECTOR_SIZE = 64
-
-"""
-    SpecializedWorkspace{T,CS,RF}
-
-Workspace with a specialized rebuild function for maximum performance.
-
-The rebuild function has structure mappings baked in as constants,
-enabling full SROA and loop unrolling for small circuits.
-
-# Fields
-- `structure::CS`: Compiled circuit structure
-- `b::Vector{T}`: RHS vector (mutable contents)
-- `resid_tmp::Vector{T}`: Working storage
-- `vctx::ValueOnlyContext{T}`: Value-only stamping context
-- `rebuild!::RF`: Specialized rebuild function
-"""
-struct SpecializedWorkspace{T,CS<:CompiledStructure,RF}
-    structure::CS
-    b::Vector{T}
-    resid_tmp::Vector{T}
-    vctx::ValueOnlyContext{T}
-    rebuild!::RF  # Specialized function: (vctx, G_nzval, C_nzval, b, u, t) -> nothing
-end
-
-"""
-    make_specialized_rebuild(cs::CompiledStructure) -> Function
-
-Generate a specialized rebuild function with structure captured in a closure.
-
-The closure captures:
-- builder, params, spec: Circuit definition
-- n_G, n_C, n_b, n_deferred: Size constants
-- G_mapping, C_mapping, b_resolved: COO-to-CSC mappings as SVectors (for small circuits)
-
-For small circuits, the SVector mappings can be SROA'd by the compiler.
-"""
-function make_specialized_rebuild(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Capture circuit definition
-    builder = cs.builder
-    params = cs.params
-    spec = cs.spec
-
-    # Capture size constants
-    n_G = cs.G_n_coo
-    n_C = cs.C_n_coo
-    n_b = cs.n_nodes
-    n_deferred = cs.n_b_deferred
-
-    # For small circuits, use SVectors which can be SROA'd
-    # For large circuits, use regular vectors
-    G_mapping = if n_G <= MAX_SVECTOR_SIZE && n_G > 0
-        SVector{n_G,Int}(cs.G_coo_to_nz[1:n_G]...)
-    else
-        cs.G_coo_to_nz[1:n_G]
-    end
-
-    C_mapping = if n_C <= MAX_SVECTOR_SIZE && n_C > 0
-        SVector{n_C,Int}(cs.C_coo_to_nz[1:n_C]...)
-    else
-        cs.C_coo_to_nz[1:n_C]
-    end
-
-    b_resolved = if n_deferred <= MAX_SVECTOR_SIZE && n_deferred > 0
-        SVector{n_deferred,Int}(cs.b_deferred_resolved[1:n_deferred]...)
-    else
-        n_deferred > 0 ? cs.b_deferred_resolved[1:n_deferred] : Int[]
-    end
-
-    # Create the specialized rebuild closure
-    # All structure is captured, enabling compiler optimization
-    function specialized_rebuild!(vctx::ValueOnlyContext, G_nzval::Vector{Float64},
-                                  C_nzval::Vector{Float64}, b::Vector{Float64},
-                                  u::AbstractVector, t::Real)
-        # Reset and run builder
-        reset_value_only!(vctx)
-        # Use keyword args for compatibility, positional for generated builders
-        builder(params, spec, real_time(t); x=u, ctx=vctx)
-
-        # Zero sparse matrices
-        fill!(G_nzval, 0.0)
-        fill!(C_nzval, 0.0)
-        fill!(b, 0.0)
-
-        # Stamp G matrix directly from vctx to sparse
-        @inbounds for k in 1:n_G
-            idx = G_mapping[k]
-            if idx > 0
-                G_nzval[idx] += vctx.G_V[k]
-            end
-        end
-
-        # Stamp C matrix directly from vctx to sparse
-        @inbounds for k in 1:n_C
-            idx = C_mapping[k]
-            if idx > 0
-                C_nzval[idx] += vctx.C_V[k]
-            end
-        end
-
-        # Copy direct b stamps
-        @inbounds for i in 1:min(length(vctx.b), n_b)
-            b[i] = vctx.b[i]
-        end
-
-        # Apply deferred b stamps
-        @inbounds for k in 1:n_deferred
-            idx = b_resolved[k]
-            if idx > 0
-                b[idx] += vctx.b_V[k]
-            end
-        end
-
-        return nothing
-    end
-
-    return specialized_rebuild!
-end
-
-"""
-    create_specialized_workspace(cs::CompiledStructure) -> SpecializedWorkspace
-
-Create a workspace with a specialized rebuild function for maximum performance.
-
-This is the most optimized path: the rebuild function has all structure
-information baked in as constants, enabling SROA and loop unrolling.
-"""
-function create_specialized_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Create a preallocated MNAContext for structure discovery
-    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
-
-    # Create ValueOnlyContext for stamping
-    vctx = create_value_only_context(ctx)
-
-    # Generate specialized rebuild function
-    rebuild! = make_specialized_rebuild(cs)
-
-    SpecializedWorkspace{Float64,typeof(cs),typeof(rebuild!)}(
-        cs,
-        zeros(Float64, cs.n),    # b vector
-        zeros(Float64, cs.n),    # resid_tmp
-        vctx,
-        rebuild!
-    )
-end
-
-"""
-    fast_rebuild!(ws::SpecializedWorkspace, u::AbstractVector, t::Real)
-
-Ultra-fast rebuild using specialized function with baked-in structure.
-"""
-function fast_rebuild!(ws::SpecializedWorkspace, u::AbstractVector, t::Real)
-    cs = ws.structure
-    G_nzval = nonzeros(cs.G)
-    C_nzval = nonzeros(cs.C)
-    ws.rebuild!(ws.vctx, G_nzval, C_nzval, ws.b, u, t)
-    return nothing
-end
-
-"""
-    fast_residual!(resid, du, u, ws::SpecializedWorkspace, t)
-
-Fast DAE residual evaluation using specialized rebuild.
-"""
-function fast_residual!(resid::AbstractVector, du::AbstractVector,
-                        u::AbstractVector, ws::SpecializedWorkspace, t::Real)
-    fast_rebuild!(ws, u, t)
-    cs = ws.structure
-
-    # F(du, u) = C*du + G*u - b = 0
-    mul!(resid, cs.C, du)
-    mul!(resid, cs.G, u, 1.0, 1.0)
-    resid .-= ws.b
-
-    return nothing
-end
-
-"""
-    fast_jacobian!(J, du, u, ws::SpecializedWorkspace, gamma, t)
-
-Fast DAE Jacobian computation using specialized rebuild: J = G + gamma*C
-"""
-function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
-                        u::AbstractVector, ws::SpecializedWorkspace,
-                        gamma::Real, t::Real)
-    fast_rebuild!(ws, u, t)
-    cs = ws.structure
-
-    # J = G + gamma*C
-    copyto!(J, cs.G)
-    J .+= gamma .* cs.C
-
-    return nothing
-end
-
-"""
-    system_size(ws::SpecializedWorkspace) -> Int
-"""
-system_size(ws::SpecializedWorkspace) = system_size(ws.structure)
-
-#==============================================================================#
-# DirectWorkspace: Zero-Copy Stamping for Large Circuits
-#
-# Uses DirectStampContext which stamps directly to sparse matrix nzval,
-# eliminating ALL intermediate arrays. This is optimal for large circuits
-# where SVector optimization doesn't apply.
-#
-# Data flow:
-#   builder stamps → DirectStampContext → G.nzval/C.nzval (single write)
-#
-# No vctx.G_V, no ws.G_V, no copying between arrays.
-#==============================================================================#
-
-export DirectWorkspace, create_direct_workspace
-
-"""
-    DirectWorkspace{T,CS}
-
-Workspace for large circuits using zero-copy DirectStampContext.
-
-Stamps go directly to sparse matrix nzval arrays - no intermediate storage.
-This is the fastest path for large circuits where SVector optimization
-would cause excessive compile time.
-
-# Fields
-- `structure::CS`: Compiled circuit structure
-- `dctx::DirectStampContext`: Direct stamping context with sparse refs
-- `resid_tmp::Vector{T}`: Working storage for residual computation
-"""
-struct DirectWorkspace{T,CS<:CompiledStructure}
-    structure::CS
-    dctx::DirectStampContext
-    resid_tmp::Vector{T}
-end
-
-"""
-    create_direct_workspace(cs::CompiledStructure) -> DirectWorkspace
-
-Create a workspace that stamps directly to sparse matrices.
-
-This is optimal for large circuits:
-- No intermediate G_V, C_V arrays
-- Stamps go straight to sparse nzval
-- Deferred b stamps resolved using precomputed mapping
-"""
-function create_direct_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Get initial context for structure info
-    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
-
-    # Create b vector
-    b = zeros(Float64, cs.n)
-
-    # Create DirectStampContext with references to sparse nzval
-    dctx = create_direct_stamp_context(
-        ctx,
-        nonzeros(cs.G),
-        nonzeros(cs.C),
-        b,
-        cs.G_coo_to_nz,
-        cs.C_coo_to_nz,
-        cs.b_deferred_resolved
-    )
-
-    DirectWorkspace{Float64,typeof(cs)}(
-        cs,
-        dctx,
-        zeros(Float64, cs.n)
-    )
-end
-
-"""
-    fast_rebuild!(ws::DirectWorkspace, u::AbstractVector, t::Real)
-
-Zero-copy rebuild using DirectStampContext.
-
-Stamps go directly to sparse matrix nzval - no intermediate arrays.
-"""
-function fast_rebuild!(ws::DirectWorkspace, u::AbstractVector, t::Real)
-    cs = ws.structure
-    dctx = ws.dctx
-
-    # Reset counters and zero matrices
-    reset_direct_stamp!(dctx)
-
-    # Builder stamps directly to sparse via DirectStampContext
-    cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx)
-
-    # Apply deferred b stamps
-    n_deferred = cs.n_b_deferred
-    @inbounds for k in 1:n_deferred
-        idx = dctx.b_resolved[k]
-        if idx > 0
-            dctx.b[idx] += dctx.b_V[k]
-        end
-    end
-
-    return nothing
-end
-
-"""
-    fast_residual!(resid, du, u, ws::DirectWorkspace, t)
-
-Fast DAE residual evaluation using direct stamping.
-"""
-function fast_residual!(resid::AbstractVector, du::AbstractVector,
-                        u::AbstractVector, ws::DirectWorkspace, t::Real)
-    fast_rebuild!(ws, u, t)
-    cs = ws.structure
-
-    # F(du, u) = C*du + G*u - b = 0
-    mul!(resid, cs.C, du)
-    mul!(resid, cs.G, u, 1.0, 1.0)
-    resid .-= ws.dctx.b
-
-    return nothing
-end
-
-"""
-    fast_jacobian!(J, du, u, ws::DirectWorkspace, gamma, t)
-
-Fast DAE Jacobian computation using direct stamping: J = G + gamma*C
-"""
-function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
-                        u::AbstractVector, ws::DirectWorkspace,
-                        gamma::Real, t::Real)
-    fast_rebuild!(ws, u, t)
-    cs = ws.structure
-
-    # J = G + gamma*C
-    copyto!(J, cs.G)
-    J .+= gamma .* cs.C
-
-    return nothing
-end
-
-"""
-    system_size(ws::DirectWorkspace) -> Int
-"""
-system_size(ws::DirectWorkspace) = system_size(ws.structure)
-
-"""
-    b_vector(ws::DirectWorkspace) -> Vector{Float64}
-
-Get the b vector from a DirectWorkspace.
-"""
-b_vector(ws::DirectWorkspace) = ws.dctx.b
+b_vector(ws::EvalWorkspace) = ws.dctx.b
