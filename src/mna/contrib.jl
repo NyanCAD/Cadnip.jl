@@ -232,6 +232,20 @@ compatibility with the MNAContext version.
     return @inbounds vctx.charge_is_vdep[pos]
 end
 
+"""
+    detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+
+Counter-based lookup of cached charge detection result for DirectStampContext.
+
+Like ValueOnlyContext, detection was done during the MNAContext build phase.
+This just returns the cached result.
+"""
+@inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
+    pos = dctx.charge_detection_pos
+    dctx.charge_detection_pos = pos + 1
+    return @inbounds dctx.charge_is_vdep[pos]
+end
+
 export detect_or_cached!
 
 """
@@ -260,6 +274,17 @@ The name parameter is ignored - uses position counter for O(1) access.
 end
 
 """
+    get_is_vdep(dctx::DirectStampContext, name::Symbol) -> Bool
+
+Counter-based lookup of cached charge detection result for DirectStampContext.
+"""
+@inline function get_is_vdep(dctx::DirectStampContext, name::Symbol)::Bool
+    pos = dctx.charge_detection_pos
+    dctx.charge_detection_pos = pos + 1
+    return @inbounds dctx.charge_is_vdep[pos]
+end
+
+"""
     reset_detection_counter!(ctx)
 
 Reset the charge detection counter for the stamping phase.
@@ -267,6 +292,7 @@ Called between detection_block and stamp_code in generated VA stamp methods.
 """
 @inline reset_detection_counter!(ctx::MNAContext) = (ctx.charge_detection_pos = 1; nothing)
 @inline reset_detection_counter!(vctx::ValueOnlyContext) = (vctx.charge_detection_pos = 1; nothing)
+@inline reset_detection_counter!(dctx::DirectStampContext) = (dctx.charge_detection_pos = 1; nothing)
 
 export get_is_vdep, reset_detection_counter!
 
