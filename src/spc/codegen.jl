@@ -631,7 +631,7 @@ end
 #==============================================================================#
 
 # Import MNA types for codegen
-using ..MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!
+using ..MNA: MNAContext, MNASpec, get_node!, stamp!
 using ..MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using ..MNA: VCVS, VCCS, CCVS, CCCS
 
@@ -2435,7 +2435,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::$(MNAContext), $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # Make parent_params available for default expression evaluation
@@ -2499,7 +2499,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
-        using CedarSim.MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
+        using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
         using StaticArrays
@@ -2511,10 +2511,10 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # x is the current solution vector for nonlinear Newton iteration
         # t is simulation time (passed explicitly for zero-allocation iteration)
         # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
-        # ctx can be MNAContext (normal), ValueOnlyContext (zero-alloc), or nothing (create new)
+        # ctx can be MNAContext (structure discovery) or DirectStampContext (fast restamping)
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                  x::AbstractVector=ZERO_VECTOR,
-                                 ctx::Union{$(MNAContext), $(ValueOnlyContext), Nothing}=nothing)
+                                 ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing)
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
@@ -2525,17 +2525,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
             return ctx
         end
 
-        # Zero-allocation positional version for fast_rebuild!
-        # Avoids keyword argument overhead which can cause allocations
+        # Zero-allocation positional version for DirectStampContext (fast path)
         @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
-                                        x::AbstractVector, ctx::$(ValueOnlyContext))
-            $(reset_for_restamping!)(ctx)
-            $body
-            return ctx
-        end
-
-        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
-                                        x::AbstractVector, ctx::$(MNAContext))
+                                        x::AbstractVector, ctx::$(DirectStampContext))
             $(reset_for_restamping!)(ctx)
             $body
             return ctx

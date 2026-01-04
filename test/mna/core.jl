@@ -30,6 +30,7 @@ using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
 using CedarSim.MNA: voltage, current, magnitude_db, phase_deg
 using CedarSim.MNA: make_ode_problem, make_ode_function
 using CedarSim.MNA: make_dae_problem, make_dae_function
+using CedarSim.MNA: reset_for_restamping!
 
 # Import CedarSim for tran! and solver comparison tests
 using CedarSim
@@ -1980,8 +1981,8 @@ using VerilogAParser
 
         using CedarSim.MNA: SinVoltageSource
 
-        function build_rc_sin(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function build_rc_sin(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+            reset_for_restamping!(ctx)
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
