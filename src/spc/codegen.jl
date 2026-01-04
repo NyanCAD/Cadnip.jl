@@ -2511,10 +2511,10 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # x is the current solution vector for nonlinear Newton iteration
         # t is simulation time (passed explicitly for zero-allocation iteration)
         # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
-        # ctx can be MNAContext (normal), ValueOnlyContext (zero-alloc), or nothing (create new)
+        # ctx can be MNAContext (structure), DirectStampContext (fast), ValueOnlyContext, or nothing
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                  x::AbstractVector=ZERO_VECTOR,
-                                 ctx::Union{$(MNAContext), $(ValueOnlyContext), Nothing}=nothing)
+                                 ctx::Union{$(MNAContext), $(ValueOnlyContext), $(DirectStampContext), Nothing}=nothing)
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
@@ -2536,6 +2536,14 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
 
         @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
                                         x::AbstractVector, ctx::$(MNAContext))
+            $(reset_for_restamping!)(ctx)
+            $body
+            return ctx
+        end
+
+        # Zero-allocation positional version for DirectStampContext (fast path)
+        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
+                                        x::AbstractVector, ctx::$(DirectStampContext))
             $(reset_for_restamping!)(ctx)
             $body
             return ctx
