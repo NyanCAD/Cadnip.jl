@@ -804,7 +804,7 @@ export stamp_multiport_charge!
 export stamp_charge_state!
 
 """
-    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name) -> Int
+    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name; charge_scale=1.0) -> Int
 
 Stamp a voltage-dependent capacitor using charge formulation for constant mass matrix.
 
@@ -821,26 +821,38 @@ This yields a constant mass matrix suitable for SciML Rosenbrock solvers.
 - `q_fn`: Function `V -> Q(V)` that computes charge from branch voltage
 - `x`: Current solution vector
 - `charge_name`: Unique name for the charge variable
+- `charge_scale`: Optional scaling factor for charge (default 1.0)
+
+# Charge Scaling
+When `charge_scale` is set to a value like `1e-15`, the internal charge variable
+is scaled: q_s = q / charge_scale. This improves conditioning when charges have
+much smaller magnitude than voltages.
+
+The equations become:
+- Current: I = dq/dt = charge_scale * dq_s/dt
+- Constraint: q_s - Q(V)/charge_scale = 0
+
+This maintains physical correctness while improving numerical conditioning.
 
 # Returns
 The system index of the allocated charge variable.
 
 # MNA Formulation
 
-The charge formulation adds these equations:
+The charge formulation adds these equations (with scaling factor `s`):
 
-1. **KCL coupling** (current I = dq/dt flows from p to n):
-   - `C[p, q_idx] = +1`  (current leaves p)
-   - `C[n, q_idx] = -1`  (current enters n)
+1. **KCL coupling** (current I = s * dq_s/dt flows from p to n):
+   - `C[p, q_idx] = +s`  (current leaves p)
+   - `C[n, q_idx] = -s`  (current enters n)
 
-2. **Charge dynamics** (dq/dt with constant mass):
-   - `C[q_idx, q_idx] = 1`  (constant coefficient!)
+2. **Charge dynamics** (dq_s/dt with constant mass):
+   - (No diagonal entry - constraint row is algebraic)
 
-3. **Algebraic constraint** (q - Q(V) = 0):
-   - `G[q_idx, q_idx] = 1`  (∂F/∂q = 1)
-   - `G[q_idx, p] = -∂Q/∂Vp`
-   - `G[q_idx, n] = -∂Q/∂Vn`
-   - `b[q_idx]` = Newton companion for constraint
+3. **Algebraic constraint** (q_s - Q(V)/s = 0):
+   - `G[q_idx, q_idx] = 1`  (∂F/∂q_s = 1)
+   - `G[q_idx, p] = -∂Q/∂Vp / s`
+   - `G[q_idx, n] = -∂Q/∂Vn / s`
+   - `b[q_idx]` = Newton companion for constraint (scaled)
 
 # Example
 ```julia
@@ -848,7 +860,11 @@ The charge formulation adds these equations:
 Cj0, phi, m = 1e-12, 0.7, 0.5
 q_fn(V) = Cj0 * phi * (1 - (1 - V/phi)^(1-m)) / (1-m)
 
+# Without scaling (may have poor conditioning)
 q_idx = stamp_charge_state!(ctx, a, c, q_fn, x, :Q_Cj_D1)
+
+# With scaling (improves conditioning for femtocoulomb-scale charges)
+q_idx = stamp_charge_state!(ctx, a, c, q_fn, x, :Q_Cj_D1; charge_scale=1e-15)
 ```
 
 See doc/voltage_dependent_capacitors.md for full derivation.
@@ -858,7 +874,8 @@ function stamp_charge_state!(
     p::Int, n::Int,
     q_fn,
     x::AbstractVector,
-    charge_name::Symbol
+    charge_name::Symbol;
+    charge_scale::Float64 = 1.0
 )
     # Allocate charge state variable
     q_idx = alloc_charge!(ctx, charge_name, p, n)
@@ -869,72 +886,67 @@ function stamp_charge_state!(
 
     # Get current charge value (for Newton companion)
     # If x doesn't have the charge variable yet, use the equilibrium value
-    q_current = length(x) >= q_idx ? x[q_idx] : 0.0
+    # Note: q_idx is a ChargeIndex, so we resolve it to get the actual index
+    q_sys_idx = resolve_index(ctx, q_idx)
+    q_current = length(x) >= q_sys_idx ? x[q_sys_idx] : 0.0
 
     # Evaluate charge function and capacitances
     result = evaluate_charge_contribution(q_fn, Vp, Vn)
+
+    # Inverse scale for constraint equation coefficients
+    inv_scale = 1.0 / charge_scale
 
     # --- 1. Mass matrix entries (constant coefficients!) ---
     #
     # NOTE: The constraint row (q_idx) is ALGEBRAIC - no C entry on diagonal.
     # The dq/dt terms only appear in the KCL equations (rows p and n).
-    # This correctly models: q = Q(V) as an algebraic constraint, with
-    # the current I = dq/dt appearing in KCL.
+    # This correctly models: q_s = Q(V)/s as an algebraic constraint, with
+    # the current I = s * dq_s/dt appearing in KCL.
 
-    # KCL coupling: current I = dq/dt flows from p to n
-    # At node p: current leaves → +dq/dt contribution
-    # At node n: current enters → -dq/dt contribution
+    # KCL coupling: current I = s * dq_s/dt flows from p to n
+    # At node p: current leaves → +s * dq_s/dt contribution
+    # At node n: current enters → -s * dq_s/dt contribution
     if p != 0
-        stamp_C!(ctx, p, q_idx, 1.0)
+        stamp_C!(ctx, p, q_idx, charge_scale)
     end
     if n != 0
-        stamp_C!(ctx, n, q_idx, -1.0)
+        stamp_C!(ctx, n, q_idx, -charge_scale)
     end
 
     # --- 2. Conductance matrix (constraint Jacobian) ---
 
-    # Constraint equation: F = q - Q(V) = 0
-    # Jacobian: ∂F/∂q = 1, ∂F/∂Vp = -∂Q/∂Vp, ∂F/∂Vn = -∂Q/∂Vn
+    # Scaled constraint equation: F = q_s - Q(V)/s = 0
+    # Jacobian: ∂F/∂q_s = 1, ∂F/∂Vp = -∂Q/∂Vp / s, ∂F/∂Vn = -∂Q/∂Vn / s
 
     stamp_G!(ctx, q_idx, q_idx, 1.0)
 
     if p != 0
-        stamp_G!(ctx, q_idx, p, -result.dq_dVp)
+        stamp_G!(ctx, q_idx, p, -result.dq_dVp * inv_scale)
     end
     if n != 0
-        stamp_G!(ctx, q_idx, n, -result.dq_dVn)
+        stamp_G!(ctx, q_idx, n, -result.dq_dVn * inv_scale)
     end
 
     # --- 3. RHS (Newton companion model for constraint) ---
 
-    # Newton companion: b = F(x₀) - J(x₀)*x₀ + J(x₀)*x
-    # Rearranging: J*x = b where b = F(x₀) - J*x₀
-    #
-    # For constraint F = q - Q(V):
-    # F(x₀) = q₀ - Q(Vp₀, Vn₀) = q₀ - result.q
-    #
-    # J*x₀ = 1*q₀ + (-∂Q/∂Vp)*Vp₀ + (-∂Q/∂Vn)*Vn₀
-    #      = q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀
-    #
-    # b = F(x₀) - J*x₀
-    #   = (q₀ - result.q) - (q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀)
-    #   = -result.q + result.dq_dVp*Vp₀ + result.dq_dVn*Vn₀
-    #
-    # Note: This ensures that at equilibrium (q = Q(V)), the constraint is satisfied.
+    # Newton companion for scaled constraint: F = q_s - Q(V)/s = 0
+    # b = F(x₀) - J*x₀ = (q_s₀ - Q(V₀)/s) - (1*q_s₀ - dQ/dVp/s*Vp₀ - dQ/dVn/s*Vn₀)
+    #   = -Q(V₀)/s + dQ/dVp/s*Vp₀ + dQ/dVn/s*Vn₀
+    #   = (-result.q + result.dq_dVp*Vp + result.dq_dVn*Vn) / s
 
-    b_constraint = -result.q + result.dq_dVp * Vp + result.dq_dVn * Vn
+    b_constraint = (-result.q + result.dq_dVp * Vp + result.dq_dVn * Vn) * inv_scale
     stamp_b!(ctx, q_idx, b_constraint)
 
     return q_idx
 end
 
 """
-    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name::String) -> Int
+    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name::String; charge_scale=1.0) -> Int
 
 String convenience overload.
 """
-stamp_charge_state!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String) =
-    stamp_charge_state!(ctx, p, n, q_fn, x, Symbol(charge_name))
+stamp_charge_state!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String; charge_scale::Float64 = 1.0) =
+    stamp_charge_state!(ctx, p, n, q_fn, x, Symbol(charge_name); charge_scale=charge_scale)
 
 #==============================================================================#
 # Automatic Detection and Stamping for VA Code Generation
@@ -943,7 +955,7 @@ stamp_charge_state!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector, ch
 export stamp_reactive_with_detection!
 
 """
-    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, charge_name) -> Bool
+    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, charge_name; charge_scale=1.0) -> Bool
 
 Detect if a contribution has voltage-dependent capacitance and stamp accordingly.
 
@@ -958,6 +970,7 @@ This function is designed for use by VA code generation. It:
 - `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
 - `x`: Current solution vector
 - `charge_name`: Name for charge variable (used if voltage-dependent)
+- `charge_scale`: Scaling factor for charge states (default 1.0)
 
 # Returns
 - `true` if charge formulation was used (voltage-dependent)
@@ -970,6 +983,9 @@ contrib_fn = V -> V/R + va_ddt(C * V^2)  # Voltage-dependent capacitor
 
 used_charge = stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, :Q_branch)
 # Returns true, allocated charge variable, and stamped charge formulation
+
+# With scaling for improved conditioning:
+used_charge = stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, :Q_branch; charge_scale=1e-15)
 ```
 """
 function stamp_reactive_with_detection!(
@@ -977,7 +993,8 @@ function stamp_reactive_with_detection!(
     p::Int, n::Int,
     contrib_fn,
     x::AbstractVector,
-    charge_name::Symbol
+    charge_name::Symbol;
+    charge_scale::Float64 = 1.0
 )
     # Get operating point
     Vp = p == 0 ? 0.0 : (length(x) >= p ? x[p] : 0.0)
@@ -1000,7 +1017,7 @@ function stamp_reactive_with_detection!(
             end
         end
 
-        stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
+        stamp_charge_state!(ctx, p, n, q_fn, x, charge_name; charge_scale=charge_scale)
         return true
     else
         # Use standard C matrix stamping
@@ -1016,5 +1033,5 @@ function stamp_reactive_with_detection!(
     end
 end
 
-stamp_reactive_with_detection!(ctx::MNAContext, p::Int, n::Int, contrib_fn, x::AbstractVector, name::String) =
-    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, Symbol(name))
+stamp_reactive_with_detection!(ctx::MNAContext, p::Int, n::Int, contrib_fn, x::AbstractVector, name::String; charge_scale::Float64 = 1.0) =
+    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, Symbol(name); charge_scale=charge_scale)

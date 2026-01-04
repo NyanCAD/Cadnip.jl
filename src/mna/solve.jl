@@ -36,14 +36,27 @@ Passed explicitly to circuit builders (not via ScopedValue) to enable JIT optimi
 - `temp::Float64`: Temperature in Celsius (default: 27.0)
 - `mode::Symbol`: Analysis mode - `:dcop`, `:tran`, `:tranop`, `:ac` (default: :tran)
 - `time::T`: Current simulation time for transient sources (default: 0.0)
+- `charge_scale::Float64`: Scaling factor for charge state variables (default: 1.0)
 
 The time field is parameterized to support ForwardDiff automatic differentiation
 during transient analysis with Rosenbrock ODE solvers.
+
+# Charge Scaling
+When `charge_scale` is set to a value like `1e-15`, charge state variables are
+scaled to have similar magnitude to voltage states. This improves conditioning
+of the Jacobian matrix for stiff systems with voltage-dependent capacitors.
+
+For a charge variable q with typical magnitude ~1e-15 C (femtocoulombs), setting
+`charge_scale = 1e-15` transforms the internal variable to q_s = q / scale, which
+has magnitude ~1 (similar to voltages).
 
 # Example
 ```julia
 spec = MNASpec(temp=50.0, mode=:dcop)
 spec_at_1ms = MNASpec(temp=27.0, mode=:tran, time=1e-3)
+
+# With charge scaling for improved conditioning:
+spec_scaled = MNASpec(temp=27.0, mode=:tran, charge_scale=1e-15)
 ```
 
 # Design Rationale
@@ -62,6 +75,7 @@ Base.@kwdef struct MNASpec{T<:Real}
     reltol::Float64 = 1e-3     # Relative tolerance
     vntol::Float64 = 1e-6      # Voltage tolerance
     iabstol::Float64 = 1e-12   # Current absolute tolerance
+    charge_scale::Float64 = 1.0  # Charge state scaling factor for conditioning
 end
 
 export MNASpec
@@ -73,7 +87,7 @@ Create new spec with different temperature.
 """
 with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time,
     gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    vntol=spec.vntol, iabstol=spec.iabstol, charge_scale=spec.charge_scale)
 
 """
     with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
@@ -82,7 +96,7 @@ Create new spec with different mode.
 """
 with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time,
     gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    vntol=spec.vntol, iabstol=spec.iabstol, charge_scale=spec.charge_scale)
 
 """
     with_time(spec::MNASpec, t::Real) -> MNASpec
@@ -92,9 +106,21 @@ Note: time type is preserved to support ForwardDiff Dual numbers.
 """
 with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t,
     gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    vntol=spec.vntol, iabstol=spec.iabstol, charge_scale=spec.charge_scale)
 
-export with_temp, with_mode, with_time
+"""
+    with_charge_scale(spec::MNASpec, scale::Real) -> MNASpec
+
+Create new spec with different charge scaling factor.
+
+Setting `charge_scale` to match typical charge magnitudes improves conditioning.
+For femtocoulomb-scale charges, use `charge_scale=1e-15`.
+"""
+with_charge_scale(spec::MNASpec, scale::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    vntol=spec.vntol, iabstol=spec.iabstol, charge_scale=Float64(scale))
+
+export with_temp, with_mode, with_time, with_charge_scale
 
 #==============================================================================#
 # Solution Types
