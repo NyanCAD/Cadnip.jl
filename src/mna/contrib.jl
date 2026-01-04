@@ -81,41 +81,6 @@ ForwardDiff.:≺(::Type{ContributionTag}, ::Type{ForwardDiff.Tag{F,V}}) where {F
 ForwardDiff.:≺(::Type{ForwardDiff.Tag{F,V}}, ::Type{ContributionTag}) where {F,V} = true
 
 #==============================================================================#
-# Scalar Extraction from Nested Duals
-#
-# When OrdinaryDiffEq uses autodiff, state vectors contain Dual numbers.
-# To avoid nested duals (which allocate due to size > 80 bytes), we extract
-# the scalar Float64 value before creating our JacobianTag duals.
-#==============================================================================#
-
-export extract_scalar
-
-"""
-    extract_scalar(x) -> Float64
-
-Extract the underlying Float64 value from a potentially nested Dual number.
-
-When OrdinaryDiffEq's autodiff wraps state in `Dual{OrdinaryDiffEqTag, Float64, N}`,
-and we create `Dual{JacobianTag}` around those values, the resulting nested duals
-exceed Julia's 80-byte inline threshold and allocate on every `value()`/`partials()` call.
-
-By extracting the Float64 first, we ensure:
-1. JacobianTag duals are always `Dual{JacobianTag, Float64, N}` (no nesting)
-2. Our analytical Jacobian is computed correctly with Float64 stamps
-3. No heap allocations from nested dual access
-
-# Examples
-```julia
-extract_scalar(1.5)                                    # → 1.5
-extract_scalar(Dual{SomeTag}(1.5, 0.1, 0.2))          # → 1.5
-extract_scalar(Dual{Outer}(Dual{Inner}(1.5, ...), ...)) # → 1.5 (recursive)
-```
-"""
-@inline extract_scalar(x::Float64) = x
-@inline extract_scalar(x::Real) = Float64(x)
-@inline extract_scalar(x::Dual) = extract_scalar(value(x))
-
-#==============================================================================#
 # Voltage-Dependent Capacitor Detection (Charge Formulation Support)
 #
 # To detect if a capacitor is voltage-dependent (C(V) = ∂Q/∂V varies with V),
