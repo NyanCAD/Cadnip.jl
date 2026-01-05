@@ -136,7 +136,7 @@ struct EvalWorkspace{T,CS<:CompiledStructure}
 end
 
 """
-    create_workspace(cs::CompiledStructure{F,P,S}) -> EvalWorkspace
+    create_workspace(cs::CompiledStructure{F,P,S}; ctx=nothing) -> EvalWorkspace
 
 Create a workspace that stamps directly to sparse matrices.
 
@@ -144,10 +144,17 @@ This is the single recommended API - it works optimally for all circuit sizes:
 - No intermediate G_V, C_V arrays
 - Stamps go straight to sparse nzval
 - Deferred b stamps resolved using precomputed mapping
+
+If `ctx` is provided, it will be used for the DirectStampContext (including its
+detection cache). This is important for voltage-dependent capacitor detection:
+if ZERO_VECTOR is used to build the context, reactive branches like ddt(Q(V))
+may return scalars instead of Duals, causing incorrect detection cache.
 """
-function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Get initial context for structure info
-    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
+function create_workspace(cs::CompiledStructure{F,P,S}; ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or rebuild (fallback for backward compatibility)
+    if ctx === nothing
+        ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
+    end
 
     # Create b vector
     b = zeros(Float64, cs.n)

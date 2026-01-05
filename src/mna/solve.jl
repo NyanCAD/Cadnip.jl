@@ -1273,9 +1273,10 @@ function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, No
     if ctx === nothing
         ctx0 = build_with_detection(circuit)
     else
-        # Use provided context - rebuild to get current structure
-        reset_for_restamping!(ctx)
-        circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+        # Use provided context directly - it should already have correct structure
+        # from previous build_with_detection or compute_initial_conditions.
+        # Do NOT rebuild with ZERO_VECTOR - reactive branches may return scalars
+        # at x=0 instead of Duals, causing incorrect structure.
         ctx0 = ctx
     end
     sys0 = assemble!(ctx0)
@@ -1484,10 +1485,15 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
 
     # Compile circuit structure using the same detection context
+    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
+    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
+    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
+    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
+    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
     reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
     cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
-    ws = create_workspace(cs)
+    ws = create_workspace(cs; ctx=ctx)
 
     # Initialize workspace at t=0 with the DC operating point
     # This is required for IDA's initialization to work properly
@@ -1579,8 +1585,10 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     end
 
     # Compile circuit using the same detection context
+    # Use u0 instead of ZERO_VECTOR to ensure consistent structure
+    # (see comment in DAEProblem for detailed explanation)
     reset_for_restamping!(ctx)
-    builder(params, base_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    builder(params, base_spec, 0.0; x=u0, ctx=ctx)
     pc = compile_circuit(builder, params, base_spec; ctx=ctx)
 
     # RHS function using precompiled circuit
