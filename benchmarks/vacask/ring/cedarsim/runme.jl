@@ -119,24 +119,24 @@ function get_initial_conditions(n, node_names, current_names)
 end
 
 """
-    run_benchmark(; solver=:ida, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
+    run_benchmark(; solver=:rodas5p, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
 
 Run the ring oscillator benchmark with the specified solver.
 
 # Solver options:
+- `:rodas5p` - OrdinaryDiffEq Rodas5P (ODE solver with mass matrix). Completes
+  full simulation but slower (~15 min for 1μs). This is the default.
 - `:ida` - Sundials IDA (DAE solver with explicit Jacobian). Fast but hits
   convergence failure around t=0.589μs due to numerical instability.
-- `:rodas5p` - OrdinaryDiffEq Rodas5P (ODE solver with mass matrix). Completes
-  full simulation but slower (~15 min for 1μs).
 
 # Arguments
-- `solver`: `:ida` or `:rodas5p`
+- `solver`: `:rodas5p` (default) or `:ida`
 - `dtmax`: Maximum timestep (default 0.05ns to match VACASK)
 - `reltol`: Relative tolerance (default 1e-2)
 - `abstol`: Absolute tolerance (default 1e-6)
 - `tspan_us`: Simulation duration in microseconds (default 1.0)
 """
-function run_benchmark(; solver=:ida, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
+function run_benchmark(; solver=:rodas5p, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
     tspan = (0.0, tspan_us * 1e-6)
 
     # Get circuit size and create initial conditions (bypasses DC solve)
