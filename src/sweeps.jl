@@ -528,8 +528,8 @@ end
 # This avoids Julia 1.12 issues with DAE initialization for singular mass matrices.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, initializealg=OrdinaryDiffEq.NoInit(), kwargs...)
-    prob = SciMLBase.ODEProblem(circuit, tspan)
+                        abstol=1e-10, reltol=1e-8, u0=nothing, initializealg=OrdinaryDiffEq.NoInit(), kwargs...)
+    prob = SciMLBase.ODEProblem(circuit, tspan; u0=u0)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 

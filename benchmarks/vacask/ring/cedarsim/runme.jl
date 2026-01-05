@@ -114,22 +114,17 @@ end
 """
     setup_simulation()
 
-Create and return an ODEProblem ready for transient analysis.
+Create MNACircuit and compute initial conditions.
 Ring oscillators need explicit ICs since they have no stable DC operating point.
-The ODEProblem includes mass matrix and explicit Jacobian for Rodas5P.
 """
 function setup_simulation()
-    tspan = (0.0, 1e-6)  # 1μs simulation (same as VACASK/ngspice)
-
     # Get circuit info and initial conditions
     n, node_names, current_names = get_circuit_info()
     u0, _ = get_initial_conditions(n, node_names, current_names)
 
-    # Create ODEProblem with explicit u0 (includes mass matrix + Jacobian)
+    # Create circuit
     circuit = MNACircuit(ring_circuit)
-    prob = SciMLBase.ODEProblem(circuit, tspan; u0=u0)
-
-    return prob
+    return circuit, u0
 end
 
 """
@@ -137,7 +132,7 @@ end
 
 Run the ring oscillator benchmark with Rodas5P solver.
 
-Uses ODEProblem with mass matrix + explicit Jacobian.
+Uses tran! with Rodas5P (ODE solver with mass matrix + explicit Jacobian).
 IDA fails at ~0.6μs due to numerical instability, so we use Rodas5P which
 completes the full 1μs simulation.
 
@@ -147,16 +142,17 @@ completes the full 1μs simulation.
 - `abstol`: Absolute tolerance (default 1e-6)
 """
 function run_benchmark(; dtmax=0.05e-9, reltol=1e-2, abstol=1e-6)
-    # Setup problem with explicit initial conditions
-    prob = setup_simulation()
+    tspan = (0.0, 1e-6)  # 1μs simulation (same as VACASK/ngspice)
+
+    # Setup circuit with explicit initial conditions
+    circuit, u0 = setup_simulation()
 
     println("\nBenchmarking ring oscillator with Rodas5P...")
     println("  tspan=1μs, dtmax=$(dtmax*1e9)ns, reltol=$reltol, abstol=$abstol")
     println("Running simulation...")
 
     t1 = time()
-    sol = SciMLBase.solve(prob, Rodas5P(); dtmax=dtmax, reltol=reltol, abstol=abstol,
-                          initializealg=OrdinaryDiffEq.NoInit())
+    sol = tran!(circuit, tspan; solver=Rodas5P(), dtmax=dtmax, reltol=reltol, abstol=abstol, u0=u0)
     t2 = time()
 
     # VACASK reference: 26,066 timepoints, 81,875 iterations, 1.18s
