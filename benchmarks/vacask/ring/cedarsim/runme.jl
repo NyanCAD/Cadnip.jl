@@ -14,18 +14,24 @@
 # PSP103 internal nodes (SI, DI, BP, BI, BS, BD) are initialized based on
 # transistor type (PMOS tied to vdd, NMOS tied to ground).
 #
-# Uses Sundials IDA (variable-order BDF) with dtmax=0.05ns to enforce timestep
-# constraint. IDA uses our explicit Jacobian for optimal performance.
+# Solver options:
+# - IDA (DAE): Uses explicit Jacobian, reaches ~0.6μs before convergence failure
+# - Rodas5P (ODE): Completes full 1μs but slower (~15 min for full simulation)
+#
+# The IDA convergence failure occurs around t=0.589μs when the timestep becomes
+# extremely small (h ~ 1e-84). Rodas5P avoids this by using a mass matrix
+# formulation instead of the full DAE.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
 using Sundials
+using OrdinaryDiffEq
 using SciMLBase
 using BenchmarkTools
 using Printf
 using VerilogAParser
-using DiffEqBase: BrownFullBasicInit
+using DiffEqBase: BrownFullBasicInit, NoInit
 
 # Load the PSP103 model
 const psp103_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "psp103v4", "psp103.va")
@@ -112,42 +118,76 @@ function get_initial_conditions(n, node_names, current_names)
     return u0, du0
 end
 
-function run_benchmark(; dtmax=0.05e-9, reltol=1e-2, abstol=1e-6)
-    tspan = (0.0, 1e-6)  # 1us simulation (same as ngspice/VACASK)
+"""
+    run_benchmark(; solver=:ida, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
 
-    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
-    # Higher iteration limits help with convergence on this stiff oscillator.
-    solver = IDA(max_nonlinear_iters=200, max_error_test_failures=50, max_convergence_failures=100)
+Run the ring oscillator benchmark with the specified solver.
+
+# Solver options:
+- `:ida` - Sundials IDA (DAE solver with explicit Jacobian). Fast but hits
+  convergence failure around t=0.589μs due to numerical instability.
+- `:rodas5p` - OrdinaryDiffEq Rodas5P (ODE solver with mass matrix). Completes
+  full simulation but slower (~15 min for 1μs).
+
+# Arguments
+- `solver`: `:ida` or `:rodas5p`
+- `dtmax`: Maximum timestep (default 0.05ns to match VACASK)
+- `reltol`: Relative tolerance (default 1e-2)
+- `abstol`: Absolute tolerance (default 1e-6)
+- `tspan_us`: Simulation duration in microseconds (default 1.0)
+"""
+function run_benchmark(; solver=:ida, dtmax=0.05e-9, reltol=1e-2, abstol=1e-6, tspan_us=1.0)
+    tspan = (0.0, tspan_us * 1e-6)
 
     # Get circuit size and create initial conditions (bypasses DC solve)
     n, node_names, current_names = get_circuit_info()
     u0, du0 = get_initial_conditions(n, node_names, current_names)
 
-    # Create circuit and DAEProblem with explicit ICs
+    # Create circuit
     circuit = MNACircuit(ring_circuit)
-    prob = SciMLBase.DAEProblem(circuit, tspan; u0=u0, du0=du0)
 
-    # Use BrownFullBasicInit with loose tolerance to find consistent ICs from our guess
-    init = BrownFullBasicInit(abstol=1e-2)
+    if solver == :ida
+        # Use Sundials IDA (DAE solver with explicit Jacobian)
+        # Higher iteration limits help with convergence on this stiff oscillator
+        ida_solver = IDA(max_nonlinear_iters=200, max_error_test_failures=50, max_convergence_failures=100)
+        prob = SciMLBase.DAEProblem(circuit, tspan; u0=u0, du0=du0)
+        init = BrownFullBasicInit(abstol=1e-2)
 
-    # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with IDA...")
-    println("  dtmax=$dtmax, reltol=$reltol, abstol=$abstol")
+        println("\nBenchmarking transient analysis with IDA (DAE)...")
+        println("  dtmax=$dtmax, reltol=$reltol, abstol=$abstol")
+        println("Running simulation...")
 
-    # Run once to get solution statistics
-    println("Running simulation...")
-    t1 = time()
-    sol = SciMLBase.solve(prob, solver; dtmax=dtmax, reltol=reltol, abstol=abstol, initializealg=init)
-    t2 = time()
+        t1 = time()
+        sol = SciMLBase.solve(prob, ida_solver; dtmax=dtmax, reltol=reltol, abstol=abstol, initializealg=init)
+        t2 = time()
+
+    elseif solver == :rodas5p
+        # Use OrdinaryDiffEq Rodas5P (ODE solver with mass matrix)
+        # Slower but completes where IDA fails
+        prob = SciMLBase.ODEProblem(circuit, tspan; u0=u0)
+
+        println("\nBenchmarking transient analysis with Rodas5P (ODE)...")
+        println("  dtmax=$dtmax, reltol=$reltol, abstol=$abstol")
+        println("Running simulation (this may take ~15 minutes for 1μs)...")
+
+        t1 = time()
+        sol = SciMLBase.solve(prob, Rodas5P(); dtmax=dtmax, reltol=reltol, abstol=abstol,
+                              initializealg=NoInit(), maxiters=10000000)
+        t2 = time()
+    else
+        error("Unknown solver: $solver. Use :ida or :rodas5p")
+    end
 
     # VACASK reference: 26,066 timepoints, 81,875 iterations
     # Ngspice reference: 20,556 timepoints, 80,018 iterations
     println("\n=== Results ===")
-    completed = sol.t[end] >= 0.99e-6
+    completed = sol.t[end] >= 0.99 * tspan[2]
     println("Completed: $(completed ? "YES ✓" : "NO ✗") (final t = $(round(sol.t[end]*1e6, digits=3))μs)")
     @printf("Timepoints: %d (VACASK: 26,066, Ngspice: 20,556)\n", length(sol.t))
-    @printf("NR iters:   %d (VACASK: 81,875, Ngspice: 80,018)\n", sol.stats.nnonliniter)
-    @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
+    if hasproperty(sol.stats, :nnonliniter)
+        @printf("NR iters:   %d (VACASK: 81,875, Ngspice: 80,018)\n", sol.stats.nnonliniter)
+        @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
+    end
     @printf("Wall time:  %.1fs\n", t2-t1)
     @printf("retcode:    %s\n", sol.retcode)
     println()
