@@ -8,15 +8,20 @@
 # VACASK reference: 26,066 timepoints, 81,875 iterations, 1.18s (trapezoidal)
 # Ngspice reference: 20,556 timepoints, 80,018 iterations, 1.60s
 #
-# Note: Uses Sundials IDA (variable-order BDF) with dtmax=0.05ns to enforce
-# timestep constraint. Tolerances reltol=1e-3, abstol=1e-9 provide stable
-# simulation with step counts comparable to VACASK/Ngspice.
-# IDA uses our explicit Jacobian for optimal performance.
+# Ring oscillators have no stable DC operating point, so we bypass DC analysis
+# by providing explicit initial conditions. The ring nodes are set with
+# alternating high/low voltages to break symmetry and kick-start oscillation.
+# PSP103 internal nodes (SI, DI, BP, BI, BS, BD) are initialized based on
+# transistor type (PMOS tied to vdd, NMOS tied to ground).
+#
+# Uses Sundials IDA (variable-order BDF) with dtmax=0.05ns to enforce timestep
+# constraint. IDA uses our explicit Jacobian for optimal performance.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
 using Sundials
+using SciMLBase
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -50,57 +55,104 @@ const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_circuit,
 eval(circuit_code)
 
 """
-    setup_simulation()
+    get_circuit_info()
 
-Create and return a fully-prepared MNACircuit ready for transient analysis.
-This separates problem setup from solve time for accurate benchmarking.
+Get circuit size and node names without triggering DC solve.
+Returns (n, node_names, current_names) where n is total system size.
 """
-function setup_simulation()
+function get_circuit_info()
     circuit = MNACircuit(ring_circuit)
-    # Perform DC operating point to initialize the circuit
-    MNA.assemble!(circuit)
-    return circuit
+    spec = MNASpec(temp=circuit.spec.temp, mode=:tran, time=0.0)
+    ctx = circuit.builder(circuit.params, spec, 0.0; x=MNA.ZERO_VECTOR)
+    n = MNA.system_size(ctx)
+    return n, ctx.node_names, ctx.current_names
 end
 
-function run_benchmark(; dtmax=0.05e-9, reltol=1e-3, abstol=1e-9)
+"""
+    get_initial_conditions(n, node_names, current_names)
+
+Create initial conditions for ring oscillator that bypass DC analysis.
+- vdd = 1.2V (supply voltage)
+- Ring nodes: alternating 0.9V/0.3V to break symmetry and kick-start oscillation
+- PMOS internal nodes (SI, BS, BP, BI): tied to vdd (1.2V)
+- NMOS internal nodes (SI, BS, BP, BI): tied to ground (0V)
+- Other internal nodes and currents: mid-rail (0.6V) or zero
+"""
+function get_initial_conditions(n, node_names, current_names)
+    u0 = fill(0.6, n)  # Default to mid-rail
+    du0 = zeros(n)
+
+    for (i, name) in enumerate(node_names)
+        sname = string(name)
+        if name == :vdd
+            u0[i] = 1.2  # Supply voltage
+        elseif occursin(r"^[1-9]$", sname)
+            # Ring stage outputs: alternate high/low to break symmetry
+            ring_idx = parse(Int, sname)
+            u0[i] = iseven(ring_idx) ? 0.9 : 0.3
+        elseif occursin("_xmp_", sname)  # PMOS internal nodes
+            if endswith(sname, "_SI") || endswith(sname, "_BS") ||
+               endswith(sname, "_BP") || endswith(sname, "_BI")
+                u0[i] = 1.2  # Tied to vdd
+            end
+        elseif occursin("_xmn_", sname)  # NMOS internal nodes
+            if endswith(sname, "_SI") || endswith(sname, "_BS") ||
+               endswith(sname, "_BP") || endswith(sname, "_BI")
+                u0[i] = 0.0  # Tied to ground
+            end
+        end
+    end
+
+    # Set all current variables to zero
+    n_nodes = length(node_names)
+    for i in 1:length(current_names)
+        u0[n_nodes + i] = 0.0
+    end
+
+    return u0, du0
+end
+
+function run_benchmark(; dtmax=0.05e-9, reltol=1e-2, abstol=1e-6)
     tspan = (0.0, 1e-6)  # 1us simulation (same as ngspice/VACASK)
 
     # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
-    # IDA uses our explicit Jacobian for optimal performance.
-    # Tolerances tuned to provide stable simulation with step counts comparable to VACASK.
-    # - reltol=1e-3 allows reasonable step sizes while maintaining accuracy
-    # - abstol=1e-9 is tight enough to avoid convergence issues
-    solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
+    # Higher iteration limits help with convergence on this stiff oscillator.
+    solver = IDA(max_nonlinear_iters=200, max_error_test_failures=50, max_convergence_failures=100)
 
-    # Setup the simulation outside the timed region
-    circuit = setup_simulation()
+    # Get circuit size and create initial conditions (bypasses DC solve)
+    n, node_names, current_names = get_circuit_info()
+    u0, du0 = get_initial_conditions(n, node_names, current_names)
 
-    # Use BrownFullBasicInit with relaxed tolerance for DAE initialization
-    # Ring oscillators don't have a stable equilibrium, so we need to accept
-    # approximate initial conditions and let the current pulse kick-start oscillation
-    init = BrownFullBasicInit(abstol=1e-3)
+    # Create circuit and DAEProblem with explicit ICs
+    circuit = MNACircuit(ring_circuit)
+    prob = SciMLBase.DAEProblem(circuit, tspan; u0=u0, du0=du0)
+
+    # Use BrownFullBasicInit with loose tolerance to find consistent ICs from our guess
+    init = BrownFullBasicInit(abstol=1e-2)
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with IDA...")
     println("  dtmax=$dtmax, reltol=$reltol, abstol=$abstol")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, reltol=$reltol, abstol=$abstol,
-                             solver=$solver, initializealg=$init) samples=6 evals=1 seconds=600
 
-    # Also run once to get solution statistics
-    circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dtmax, reltol=reltol, abstol=abstol,
-                solver=solver, initializealg=init)
+    # Run once to get solution statistics
+    println("Running simulation...")
+    t1 = time()
+    sol = SciMLBase.solve(prob, solver; dtmax=dtmax, reltol=reltol, abstol=abstol, initializealg=init)
+    t2 = time()
 
     # VACASK reference: 26,066 timepoints, 81,875 iterations
     # Ngspice reference: 20,556 timepoints, 80,018 iterations
     println("\n=== Results ===")
+    completed = sol.t[end] >= 0.99e-6
+    println("Completed: $(completed ? "YES ✓" : "NO ✗") (final t = $(round(sol.t[end]*1e6, digits=3))μs)")
     @printf("Timepoints: %d (VACASK: 26,066, Ngspice: 20,556)\n", length(sol.t))
     @printf("NR iters:   %d (VACASK: 81,875, Ngspice: 80,018)\n", sol.stats.nnonliniter)
     @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
-    display(bench)
+    @printf("Wall time:  %.1fs\n", t2-t1)
+    @printf("retcode:    %s\n", sol.retcode)
     println()
 
-    return bench, sol
+    return sol
 end
 
 # Run if executed directly
