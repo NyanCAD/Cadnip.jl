@@ -1140,7 +1140,7 @@ export alter
 Get the system size (number of unknowns) for the circuit.
 """
 function system_size(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    ctx0 = build_with_detection(circuit)
     sys0 = assemble!(ctx0)
     return system_size(sys0)
 end
@@ -1173,7 +1173,23 @@ function assemble!(circuit::MNACircuit)
     #
     # Key insight: While dq_dV from ForwardDiff doesn't capture intermediate value dependencies,
     # the actual Q value DOES change when x changes. So we compare Q/V ratios.
+    ctx = build_with_detection(circuit)
+    return assemble!(ctx)
+end
 
+"""
+    build_with_detection(circuit::MNACircuit) -> MNAContext
+
+Build circuit with multi-pass voltage-dependent charge detection.
+
+This function runs the builder multiple times with different operating points
+to detect which charges have voltage-dependent capacitance (Q/V ratio varies).
+All code paths that build from MNACircuit should use this function to ensure
+consistent detection results.
+
+Returns an MNAContext with accurate charge_is_vdep detection cache.
+"""
+function build_with_detection(circuit::MNACircuit)
     N_DETECTION_PASSES = 3
     ctx = nothing
     known_size = 0
@@ -1198,7 +1214,7 @@ function assemble!(circuit::MNACircuit)
         end
     end
 
-    return assemble!(ctx)
+    return ctx
 end
 
 """
@@ -1251,7 +1267,7 @@ Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
 """
 function detect_differential_vars(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    ctx0 = build_with_detection(circuit)
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1300,15 +1316,28 @@ Compute consistent initial conditions via DC operating point.
 This is equivalent to CedarDCOp initialization.
 """
 function compute_initial_conditions(circuit::MNACircuit)
+    # First run multi-pass detection to get consistent cache
+    # This ctx will be reused for all subsequent builds
+    ctx = build_with_detection(circuit)
+    sys0 = assemble!(ctx)
+    n = system_size(sys0)
+
     # DC solve for u0 (node voltages and currents)
+    # Use the detection-aware ctx for DC solve
     dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
-    u0 = solve_dc(circuit.builder, circuit.params, dc_spec).x
 
-    n = length(u0)
+    # Build with dcop spec using the cached detection
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, dc_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    dc_sys = assemble!(ctx)
 
-    # Get system structure to identify charge variables
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-    sys0 = assemble!(ctx0)
+    # Linear solve for DC operating point
+    u0 = dc_sys.G \ dc_sys.b
+
+    # Rebuild with tran spec at DC operating point
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+    sys0 = assemble!(ctx)
 
     # Fix charge variable initial values
     # The DC solve may not correctly initialize charges because the constraint
@@ -1329,8 +1358,9 @@ function compute_initial_conditions(circuit::MNACircuit)
         # Re-solve for charge values using Newton iteration
         # The constraint is q = Q(V), which can be solved directly
         for iter in 1:5  # Few iterations should suffice
-            ctx_iter = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-            sys_iter = assemble!(ctx_iter)
+            reset_for_restamping!(ctx)
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+            sys_iter = assemble!(ctx)
 
             # For each charge variable, solve the constraint equation
             n_nodes = sys_iter.n_nodes
@@ -1350,8 +1380,9 @@ function compute_initial_conditions(circuit::MNACircuit)
             end
 
             # Check convergence
-            ctx_check = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-            sys_check = assemble!(ctx_check)
+            reset_for_restamping!(ctx)
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+            sys_check = assemble!(ctx)
             resid = sys_check.G * u0 - sys_check.b
             if norm(resid) < 1e-12
                 break
@@ -1360,8 +1391,9 @@ function compute_initial_conditions(circuit::MNACircuit)
     end
 
     # Recompute system at final u0
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-    sys0 = assemble!(ctx0)
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+    sys0 = assemble!(ctx)
 
     du0 = zeros(n)
 
@@ -1572,14 +1604,17 @@ end
 # Note: Unlike some SPICE simulators that force :dcop mode, we respect the circuit's
 # spec to allow mode-aware testing. Use with_mode(circuit, :dcop) explicitly if needed.
 function solve_dc(circuit::MNACircuit)
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    ctx = build_with_detection(circuit)
     sys = assemble!(ctx)
     return solve_dc(sys)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
+    # Build with detection, then rebuild with AC spec
+    ctx = build_with_detection(circuit)
     ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
-    ctx = circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR)
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
     sys = assemble!(ctx)
     return solve_ac(sys, freqs; kwargs...)
 end
