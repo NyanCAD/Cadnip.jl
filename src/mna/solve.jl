@@ -1259,15 +1259,25 @@ end
 # Use the compiled versions (make_compiled_dae_residual) for ~10x speedup.
 
 """
-    detect_differential_vars(circuit::MNACircuit) -> BitVector
+    detect_differential_vars(circuit::MNACircuit; ctx=nothing) -> BitVector
 
 Determine which variables are differential (have du terms in C*du).
 
 Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
+
+If `ctx` is provided, it will be used instead of calling build_with_detection.
+This ensures consistent detection results across code paths.
 """
-function detect_differential_vars(circuit::MNACircuit)
-    ctx0 = build_with_detection(circuit)
+function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
+    if ctx === nothing
+        ctx0 = build_with_detection(circuit)
+    else
+        # Use provided context - rebuild to get current structure
+        reset_for_restamping!(ctx)
+        circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+        ctx0 = ctx
+    end
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1305,7 +1315,7 @@ function detect_differential_vars(sys::MNASystem)
 end
 
 """
-    compute_initial_conditions(circuit::MNACircuit) -> (u0, du0)
+    compute_initial_conditions(circuit::MNACircuit; ctx=nothing) -> (u0, du0)
 
 Compute consistent initial conditions via DC operating point.
 
@@ -1314,11 +1324,15 @@ Compute consistent initial conditions via DC operating point.
 3. Computes du0 to satisfy F(du0, u0, 0) = 0
 
 This is equivalent to CedarDCOp initialization.
+
+If `ctx` is provided, it will be used instead of calling build_with_detection.
+This ensures consistent detection results across code paths.
 """
-function compute_initial_conditions(circuit::MNACircuit)
-    # First run multi-pass detection to get consistent cache
-    # This ctx will be reused for all subsequent builds
-    ctx = build_with_detection(circuit)
+function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
+    # Use provided context or run multi-pass detection
+    if ctx === nothing
+        ctx = build_with_detection(circuit)
+    end
     sys0 = assemble!(ctx)
     n = system_size(sys0)
 
@@ -1458,21 +1472,20 @@ finite differencing.
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
                                u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
     # First run multi-pass detection to get consistent results
-    # This ctx will be reused for all subsequent operations
+    # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions using the detection-aware context
+    # Get initial conditions using the same detection context
     if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(circuit)
+        u0_computed, du0_computed = compute_initial_conditions(circuit; ctx=ctx)
         u0 = u0 === nothing ? u0_computed : u0
         du0 = du0 === nothing ? du0_computed : du0
     end
 
-    # Detect differential variables (uses build_with_detection internally)
-    diff_vars = detect_differential_vars(circuit)
+    # Detect differential variables using the same detection context
+    diff_vars = detect_differential_vars(circuit; ctx=ctx)
 
-    # Compile circuit structure using the detection-aware context
-    # This ensures compile_structure sees the same detection results
+    # Compile circuit structure using the same detection context
     reset_for_restamping!(ctx)
     circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
     cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
@@ -1559,14 +1572,15 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     base_spec = circuit.spec
 
     # First run multi-pass detection to get consistent results
+    # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions via DC solve (uses detection-aware context internally)
+    # Get initial conditions via DC solve using the same detection context
     if u0 === nothing
-        u0, _ = compute_initial_conditions(circuit)
+        u0, _ = compute_initial_conditions(circuit; ctx=ctx)
     end
 
-    # Compile circuit using the detection-aware context
+    # Compile circuit using the same detection context
     reset_for_restamping!(ctx)
     builder(params, base_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
     pc = compile_circuit(builder, params, base_spec; ctx=ctx)
