@@ -1457,19 +1457,25 @@ finite differencing.
 """
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
                                u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
-    # Get initial conditions
+    # First run multi-pass detection to get consistent results
+    # This ctx will be reused for all subsequent operations
+    ctx = build_with_detection(circuit)
+
+    # Get initial conditions using the detection-aware context
     if u0 === nothing || du0 === nothing
         u0_computed, du0_computed = compute_initial_conditions(circuit)
         u0 = u0 === nothing ? u0_computed : u0
         du0 = du0 === nothing ? du0_computed : du0
     end
 
-    # Detect differential variables
+    # Detect differential variables (uses build_with_detection internally)
     diff_vars = detect_differential_vars(circuit)
 
-    # Compile circuit structure (immutable) and create workspace (mutable)
-    # The workspace is passed as the p parameter to the DAE solver
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec)
+    # Compile circuit structure using the detection-aware context
+    # This ensures compile_structure sees the same detection results
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
     ws = create_workspace(cs)
 
     # Initialize workspace at t=0 with the DC operating point
@@ -1552,14 +1558,18 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     params = circuit.params
     base_spec = circuit.spec
 
-    # Get initial conditions via DC solve
+    # First run multi-pass detection to get consistent results
+    ctx = build_with_detection(circuit)
+
+    # Get initial conditions via DC solve (uses detection-aware context internally)
     if u0 === nothing
-        dc_spec = MNASpec(temp=base_spec.temp, mode=:dcop, time=0.0)
-        u0 = solve_dc(builder, params, dc_spec).x
+        u0, _ = compute_initial_conditions(circuit)
     end
 
-    # Compile circuit for ~10x speedup
-    pc = compile_circuit(builder, params, base_spec)
+    # Compile circuit using the detection-aware context
+    reset_for_restamping!(ctx)
+    builder(params, base_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    pc = compile_circuit(builder, params, base_spec; ctx=ctx)
 
     # RHS function using precompiled circuit
     function rhs!(du, u, p, t)

@@ -357,14 +357,21 @@ then creates the sparse matrices and COO→CSC mappings.
   Time is passed explicitly for zero-allocation iteration.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
+- `ctx`: Optional pre-built context with detection cache. If provided,
+  this context is used instead of building fresh. This ensures consistent
+  detection results across code paths.
 
 # Returns
 An immutable `CompiledStructure` that can be shared across threads.
 Use `create_workspace(cs)` to create a mutable workspace for evaluation.
 """
-function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
-    # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or build fresh
+    if ctx === nothing
+        ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    else
+        ctx0 = ctx
+    end
     n = system_size(ctx0)
 
     if n == 0
@@ -426,7 +433,7 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
 end
 
 """
-    compile_circuit(builder, params, spec; capacity_factor=2.0) -> PrecompiledCircuit
+    compile_circuit(builder, params, spec; capacity_factor=2.0, ctx=nothing) -> PrecompiledCircuit
 
 Compile a circuit builder into a PrecompiledCircuit.
 
@@ -440,6 +447,8 @@ then creates the sparse matrices and COO→CSC mappings.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
 - `capacity_factor`: Extra capacity for COO arrays (safety margin)
+- `ctx`: Optional pre-built context with detection cache. If provided,
+  this context is used instead of building fresh.
 
 # Returns
 A `PrecompiledCircuit` ready for fast evaluation.
@@ -486,9 +495,14 @@ points, consider:
 2. Using a "compilation operating point" that activates all paths
 """
 function compile_circuit(builder::F, params::P, spec::S;
-                        capacity_factor::Float64=2.0) where {F,P,S}
-    # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+                        capacity_factor::Float64=2.0,
+                        ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or build fresh
+    if ctx === nothing
+        ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    else
+        ctx0 = ctx
+    end
     n = system_size(ctx0)
 
     if n == 0
