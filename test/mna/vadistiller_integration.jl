@@ -548,7 +548,9 @@ end
             circuit = MNACircuit(build_rectifier; V=1.0, R=1000.0)
             tspan = (0.0, 1e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because diode has voltage-dependent junction capacitance
+            # QNDF uses mass matrix formulation which doesn't correctly handle vdep caps
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 0.5e-3
@@ -580,7 +582,8 @@ end
                                  Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
             tspan = (0.0, 2e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because MOSFET has voltage-dependent gate capacitance
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
@@ -613,7 +616,8 @@ end
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because BJT has voltage-dependent junction capacitance
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
