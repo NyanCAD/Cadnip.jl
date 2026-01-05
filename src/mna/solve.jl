@@ -1163,6 +1163,14 @@ v_out = voltage(acc, :out, 0.5e-3)
 ```
 """
 function assemble!(circuit::MNACircuit)
+    # Build circuit with conservative charge detection (always uses charge formulation)
+    # See doc/voltage_dependent_capacitor_detection_bug.md for why multi-pass detection
+    # doesn't work reliably for complex VA models like PSP103.
+    #
+    # Conservative approach: detect_or_cached! always returns true, so all ddt() calls
+    # use charge formulation. This guarantees correctness at the cost of potentially
+    # more state variables than strictly necessary for truly linear capacitors.
+
     ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
     return assemble!(ctx)
 end

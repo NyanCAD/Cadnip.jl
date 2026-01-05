@@ -166,37 +166,53 @@ Tag ordering rules ensure ForwardDiff.Tag{F,V} is inner to our tags.
 end
 
 """
-    detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+    detect_or_cached!(ctx::MNAContext, name::Symbol, C_total::Real) -> Bool
 
-Check cache for voltage-dependent charge detection result, or run detection if not cached.
+Conservative charge detection: always assume voltage-dependent.
 
-This is a build-time optimization: detection only needs to run once per branch.
-After the first call, results are cached in the context using counter-based access.
+Complex VA models (like PSP103) compute intermediate values (Qfgd, etc.) before
+JacobianTag duals are created. This means ∂Q/∂V computed via ForwardDiff doesn't
+capture the full voltage dependence - the intermediate values appear as constants.
 
-On first run through stamp code: pos > length(cache), so detect and push result.
-On subsequent runs (re-stamping): pos <= length(cache), so return cached result.
+Multi-pass detection comparing capacitances fails for these models because the
+intermediate calculations don't change when x changes (they're computed before
+the duals exist).
+
+Rather than incorrectly classifying nonlinear capacitors as linear, we use
+conservative detection: ALL ddt() calls use charge formulation. This:
+- Guarantees correctness (nonlinear caps get constant mass matrix)
+- Adds extra state variables for truly linear caps (minor overhead)
+- Avoids incorrect classification that causes solver convergence issues
+
+See doc/voltage_dependent_capacitor_detection_bug.md for details.
 
 # Arguments
-- `ctx`: MNA context containing the detection cache
-- `name`: Unique name for this branch (ignored, uses counter access)
-- `contrib_fn`: Contribution function `V -> I` that may contain `va_ddt(Q(V))`
-- `Vp`, `Vn`: Operating point voltages
+- `ctx`: MNA context containing detection cache
+- `name`: Unique name for this branch (for debugging)
+- `C_total`: Total capacitance (stored for diagnostics, not used for detection)
 
 # Returns
-- `true` if the contribution has voltage-dependent capacitance
-- `false` if purely resistive or constant capacitance
-
-# Example
-```julia
-# In generated stamp code:
-_is_vdep = detect_or_cached!(ctx, :Q_branch1, V -> va_ddt(C0 * V^2), Vp, Vn)
-if _is_vdep
-    # Use charge formulation
-else
-    # Use C matrix
-end
-```
+- `true` always (conservative: assume all charges are voltage-dependent)
 """
+@inline function detect_or_cached!(ctx::MNAContext, name::Symbol, C_total::Real)::Bool
+    pos = ctx.charge_detection_pos
+    ctx.charge_detection_pos = pos + 1
+
+    if pos > length(ctx.charge_capacitances)
+        # First run: record this branch exists, always assume voltage-dependent
+        push!(ctx.charge_is_vdep, true)  # Conservative: always true
+        push!(ctx.charge_capacitances, Float64(C_total))
+    else
+        # Update stored capacitance for diagnostics
+        @inbounds ctx.charge_capacitances[pos] = Float64(C_total)
+    end
+
+    # Conservative detection: always use charge formulation
+    return true
+end
+
+# Legacy signature for backward compatibility during transition
+# TODO: Remove once vasim.jl is updated
 @inline function detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
     cache = ctx.charge_is_vdep
     pos = ctx.charge_detection_pos
@@ -206,6 +222,7 @@ end
         # First time: run detection and cache result
         result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
         push!(cache, result)
+        push!(ctx.charge_capacitances, 0.0)  # Placeholder for new field
         return result
     else
         # Subsequent runs: return cached result
@@ -214,13 +231,20 @@ end
 end
 
 """
-    detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+    detect_or_cached!(dctx::DirectStampContext, name::Symbol, C_total::Real) -> Bool
 
 Counter-based lookup of cached charge detection result for DirectStampContext.
 
 Detection was done during the MNAContext build phase.
-This just returns the cached result.
+This just returns the cached result (C_total is ignored).
 """
+@inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, C_total::Real)::Bool
+    pos = dctx.charge_detection_pos
+    dctx.charge_detection_pos = pos + 1
+    return @inbounds dctx.charge_is_vdep[pos]
+end
+
+# Legacy signature for DirectStampContext
 @inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
     pos = dctx.charge_detection_pos
     dctx.charge_detection_pos = pos + 1

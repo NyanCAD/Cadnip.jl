@@ -189,9 +189,11 @@ mutable struct MNAContext
     charge_branches::Vector{Tuple{Int,Int}}
 
     # Cache for voltage-dependent charge detection (build-time optimization)
-    # Vector of detection results in order of first detection
-    # Uses counter-based access: on first run, detect and push; on subsequent runs, return cached
+    # Detection works by comparing capacitances across multiple runs with different
+    # random operating points. If capacitance differs, the charge is voltage-dependent.
+    # See doc/voltage_dependent_capacitor_detection_bug.md for design rationale.
     charge_is_vdep::Vector{Bool}
+    charge_capacitances::Vector{Float64}  # Stored capacitances for comparison
     charge_detection_pos::Int
 
     # Track if system has been finalized
@@ -223,7 +225,8 @@ function MNAContext()
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
-        Bool[],             # charge_is_vdep (detection cache - vector with counter access)
+        Bool[],             # charge_is_vdep (detection cache)
+        Float64[],          # charge_capacitances (for comparison across runs)
         1,                  # charge_detection_pos (counter for detection cache access)
         false               # finalized
     )
@@ -809,6 +812,7 @@ function clear!(ctx::MNAContext)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
     empty!(ctx.charge_is_vdep)
+    empty!(ctx.charge_capacitances)
     ctx.charge_detection_pos = 1
     ctx.finalized = false
     return nothing

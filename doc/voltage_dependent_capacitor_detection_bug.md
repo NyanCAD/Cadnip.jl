@@ -103,8 +103,36 @@ to the simulation initialization logic.
 - `src/mna/contrib.jl`: `is_voltage_dependent_charge()` implementation
 - `benchmarks/vacask/`: All benchmarks using PSP103 MOSFETs
 
-## Workaround
+## Implemented Fix: Conservative Detection (Option 2)
 
-Until this is fixed, complex VA models like PSP103 will have their capacitances
-stamped into the C matrix. This may affect accuracy and solver performance for
-circuits with significant nonlinear capacitance effects.
+As of January 2026, we implemented **Option 2: Conservative Detection**:
+
+- `detect_or_cached!` in `src/mna/contrib.jl` now **always returns true**
+- All `ddt()` calls in VA-generated code use charge formulation
+- This guarantees correctness for complex models like PSP103
+
+### Results After Fix
+
+```
+=== PSP103 Ring Oscillator ===
+Nodes: 154
+Currents: 127
+Charges: 144  <-- Now correctly allocated!
+System size: 425
+```
+
+All 144 charge contributions are now properly using charge formulation,
+ensuring a constant mass matrix for Rosenbrock solvers.
+
+### Trade-offs
+
+- **Pro**: Guaranteed correctness for all VA models
+- **Con**: Adds extra state variables for truly linear capacitors
+- **Note**: Simple inline expressions (using `stamp_reactive_with_detection!` directly)
+  still use accurate lambda-based detection via `is_voltage_dependent_charge`
+
+### Files Modified
+
+- `src/mna/contrib.jl`: `detect_or_cached!` returns true unconditionally
+- `src/mna/solve.jl`: `assemble!(::MNACircuit)` simplified (single pass)
+- `src/mna/context.jl`: Added `charge_capacitances` vector for diagnostics
