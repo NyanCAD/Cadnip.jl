@@ -1337,18 +1337,16 @@ function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, 
     n = system_size(sys0)
 
     # DC solve for u0 (node voltages and currents)
-    # Use the detection-aware ctx for DC solve
-    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
+    # IMPORTANT: Do NOT rebuild with dc_spec here! The detection cache is position-based
+    # (charge_detection_pos), and if the circuit stamps differently in dcop mode (e.g.,
+    # skips capacitor stamps), the position counter won't advance correctly, causing
+    # subsequent detection cache lookups to be misaligned.
+    #
+    # Instead, use the already-assembled sys0 for the initial DC solve. The G\b solve
+    # is just an approximation anyway - the charge iteration below will refine it.
+    u0 = sys0.G \ sys0.b
 
-    # Build with dcop spec using the cached detection
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, dc_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
-    dc_sys = assemble!(ctx)
-
-    # Linear solve for DC operating point
-    u0 = dc_sys.G \ dc_sys.b
-
-    # Rebuild with tran spec at DC operating point
+    # Rebuild with circuit spec at DC operating point
     reset_for_restamping!(ctx)
     circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
     sys0 = assemble!(ctx)
