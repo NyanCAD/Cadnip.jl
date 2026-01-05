@@ -144,8 +144,8 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     copyto!(integrator.uprev, integrator.u)
     integrator.u_modified = true
 
-    # Let IDADefaultInit handle the rest
-    SciMLBase.initialize_dae!(integrator, Sundials.IDADefaultInit())
+    # Let DefaultInit handle the rest
+    SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     return
 end
 
