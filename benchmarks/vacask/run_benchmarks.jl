@@ -42,10 +42,11 @@ struct BenchmarkResult
     memory::Float64  # MB
     allocs::Int
     timepoints::Int
+    rejected::Int
     error_msg::String
 end
 
-BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, error_msg)
+BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, 0, error_msg)
 
 function format_time(seconds::Float64)
     if isnan(seconds)
@@ -85,12 +86,13 @@ function generate_markdown(results::Vector{BenchmarkResult})
     # Summary table with all solvers
     println(io, "## Summary")
     println(io)
-    println(io, "| Benchmark | Solver | Status | Median Time | Timepoints | Memory |")
-    println(io, "|-----------|--------|--------|-------------|------------|--------|")
+    println(io, "| Benchmark | Solver | Status | Median Time | Timepoints | Rejected | Memory |")
+    println(io, "|-----------|--------|--------|-------------|------------|----------|--------|")
 
     for r in results
         status_emoji = r.status == :success ? "✅" : r.status == :skipped ? "⏭️" : "❌"
-        println(io, "| $(r.name) | $(r.solver) | $(status_emoji) | $(format_time(r.median_time)) | $(r.timepoints > 0 ? r.timepoints : "-") | $(format_memory(r.memory)) |")
+        rejected_str = r.rejected >= 0 ? string(r.rejected) : "-"
+        println(io, "| $(r.name) | $(r.solver) | $(status_emoji) | $(format_time(r.median_time)) | $(r.timepoints > 0 ? r.timepoints : "-") | $(rejected_str) | $(format_memory(r.memory)) |")
     end
     println(io)
 
@@ -108,11 +110,11 @@ function generate_markdown(results::Vector{BenchmarkResult})
         successful = filter(r -> r.status == :success, bench_results)
 
         if !isempty(successful)
-            println(io, "| Solver | Median | Min | Max | Memory | Allocs | Notes |")
-            println(io, "|--------|--------|-----|-----|--------|--------|-------|")
+            println(io, "| Solver | Median | Min | Max | Rejected | Memory | Notes |")
+            println(io, "|--------|--------|-----|-----|----------|--------|-------|")
             for r in successful
                 notes = isempty(r.error_msg) ? "" : r.error_msg
-                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(format_memory(r.memory)) | $(r.allocs) | $(notes) |")
+                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(r.rejected) | $(format_memory(r.memory)) | $(notes) |")
             end
             println(io)
 
@@ -168,10 +170,13 @@ function run_benchmark_with_solver(name, script_path, solver_name, solver_fn)
                 "Stopped at t=$(sol.t[end]), expected $(tspan_end)")
         end
 
+        # Extract rejected steps from solver stats
+        rejected = hasproperty(sol.stats, :nreject) ? sol.stats.nreject : 0
+
         return BenchmarkResult(
             name, solver_name, :success,
             median(bench.times) / 1e9, minimum(bench.times) / 1e9, maximum(bench.times) / 1e9,
-            bench.memory / 1e6, bench.allocs, length(sol.t), warning
+            bench.memory / 1e6, bench.allocs, length(sol.t), rejected, warning
         )
     catch e
         return BenchmarkResult(name, solver_name, :failed, sprint(showerror, e))
