@@ -7,12 +7,12 @@
 #
 # Benchmark target: ~1 million timepoints, ~2 million iterations
 #
-# Note: Uses Rodas5P (Rosenbrock method) with dtmax to enforce fixed timesteps.
+# Note: Uses FBDF (BDF method from OrdinaryDiffEq) - faster than Rodas5P and IDA.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using OrdinaryDiffEq: Rodas5P
+using OrdinaryDiffEq: FBDF
 using BenchmarkTools
 using Printf
 
@@ -40,14 +40,14 @@ end
 function run_benchmark(; dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
-    # Use Rodas5P (Rosenbrock method) with dtmax to enforce timestep constraint.
-    solver = Rodas5P()
+    # Use FBDF (BDF method) with dtmax to enforce timestep constraint.
+    solver = FBDF()
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with Rodas5P (dtmax=$dt)...")
+    println("\nBenchmarking transient analysis with FBDF (dtmax=$dt)...")
     bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
