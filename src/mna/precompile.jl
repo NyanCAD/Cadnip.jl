@@ -284,10 +284,6 @@ mutable struct PrecompiledCircuit{F,P,S}
 
     # Working storage for residual computation
     resid_tmp::Vector{Float64}
-
-    # Reference context with detection cache (preserved across rebuilds)
-    # This ensures consistent charge detection during Newton iteration
-    ctx::MNAContext
 end
 
 """
@@ -527,8 +523,7 @@ function compile_circuit(builder::F, params::P, spec::S;
             spzeros(0, 0), spzeros(0, 0), Float64[],
             Int[], Int[],
             0, 0,
-            Float64[],
-            ctx0  # Store the context
+            Float64[]
         )
     end
 
@@ -595,8 +590,7 @@ function compile_circuit(builder::F, params::P, spec::S;
         G, C, b,
         G_coo_to_nz_extended, C_coo_to_nz_extended,
         n_G, n_C,
-        zeros(n),  # resid_tmp
-        ctx0       # Store the context with detection cache
+        zeros(n)   # resid_tmp
     )
 end
 
@@ -710,10 +704,9 @@ The circuit structure (nodes, currents, COO entries) MUST be constant.
 Only values change during iteration. This is enforced by assertions.
 """
 function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
-    # Rebuild circuit at current operating point using stored context
-    # This preserves the detection cache, ensuring consistent structure
-    reset_for_restamping!(pc.ctx)
-    ctx = pc.builder(pc.params, pc.spec, real_time(t); x=u, ctx=pc.ctx)
+    # Build circuit at current operating point with explicit time
+    # Note: For zero-allocation operation, use EvalWorkspace with DirectStampContext
+    ctx = pc.builder(pc.params, pc.spec, real_time(t); x=u)
 
     # Structure must be constant
     @assert ctx.n_nodes == pc.n_nodes && ctx.n_currents == pc.n_currents (
