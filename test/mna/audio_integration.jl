@@ -5,6 +5,7 @@
 # - va"""...""" macro for creating VA device models (BJT Ebers-Moll)
 # - SPICE netlists with X device syntax for VA model instantiation
 # - Top-level eval pattern for production-style SPICE loading
+# - SPICE .param with MNACircuit parameter overrides for sweeps
 # - Transient simulation with sinusoidal sources (SIN syntax)
 # - Signal processing analysis (gain measurement)
 #
@@ -12,7 +13,8 @@
 # 1. VA device models defined separately, imported via imported_hdl_modules
 # 2. SPICE X device syntax to instantiate VA models in netlists
 # 3. Top-level parse_spice_to_mna + eval (no invokelatest overhead)
-# 4. MNACircuit + tran!() for transient simulation
+# 4. MNACircuit parameter overrides for parameterized circuits
+# 5. MNACircuit + tran!() for transient simulation
 #==============================================================================#
 
 using Test
@@ -78,12 +80,14 @@ X1 base 0 coll npnbjt
 """; circuit_name=:bjt_with_rc, imported_hdl_modules=[npnbjt_module])
 eval(bjt_with_rc_code)
 
-# Circuit 3: Common emitter amplifier with sine input (main transient test)
-# Parameters: Vcc=12V, Vbias=0.65V, Vac=1mV, freq=1kHz, Rc=4.7k, Cload=100pF
+# Circuit 3: Common emitter amplifier with parameterized sine input
+# Uses .param for values that can be overridden via MNACircuit kwargs
 const ce_amplifier_code = parse_spice_to_mna("""
-* Common emitter amplifier
+* Common emitter amplifier with parameterized input
+.param vac=0.001
+.param freq=1000.0
 Vcc vcc 0 DC 12.0
-Vin base 0 DC 0.65 SIN 0.65 0.001 1000.0
+Vin base 0 DC 0.65 SIN 0.65 vac freq
 Rc vcc coll 4.7k
 Cload coll 0 100p
 X1 base 0 coll npnbjt
@@ -216,28 +220,15 @@ eval(ce_amplifier_code)
     # Test 4: Gain Measurement with Different Signal Levels
     #
     # Test linearity by measuring gain with different input amplitudes.
-    # Uses runtime SPICE parsing since parameters vary in a loop.
+    # Uses SPICE .param with MNACircuit parameter overrides.
     #==========================================================================#
     @testset "Gain linearity with signal level" begin
-        Vcc = 12.0
-        Vbias = 0.65
         freq = 1000.0
-        Rc = 4.7e3
-        Cload = 100e-12
-
         gains = Float64[]
 
         for vac in [0.0005, 0.001, 0.002]
-            spice = """
-            * CE amplifier - signal level test
-            Vcc vcc 0 DC $Vcc
-            Vin base 0 DC $Vbias SIN $Vbias $vac $freq
-            Rc vcc coll $Rc
-            Cload coll 0 $Cload
-            X1 base 0 coll npnbjt
-            """
-
-            circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+            # Override vac parameter via MNACircuit kwargs
+            circuit = MNACircuit(ce_amplifier; vac=vac, freq=freq)
 
             period = 1.0 / freq
             tspan = (0.0, 5 * period)
@@ -277,28 +268,15 @@ eval(ce_amplifier_code)
     # Test 5: Frequency Response
     #
     # Test gain at different frequencies to verify proper operation
-    # across audio band. Uses runtime SPICE parsing since freq varies.
+    # across audio band. Uses SPICE .param with MNACircuit parameter overrides.
     #==========================================================================#
     @testset "Frequency response" begin
-        Vcc = 12.0
-        Vbias = 0.65
-        Vac = 0.001
-        Rc = 4.7e3
-        Cload = 100e-12
-
+        vac = 0.001
         gains = Float64[]
 
         for freq in [100.0, 1000.0, 10000.0]
-            spice = """
-            * CE amplifier - frequency response
-            Vcc vcc 0 DC $Vcc
-            Vin base 0 DC $Vbias SIN $Vbias $Vac $freq
-            Rc vcc coll $Rc
-            Cload coll 0 $Cload
-            X1 base 0 coll npnbjt
-            """
-
-            circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+            # Override freq parameter via MNACircuit kwargs
+            circuit = MNACircuit(ce_amplifier; vac=vac, freq=freq)
 
             period = 1.0 / freq
             tspan = (0.0, 10 * period)
