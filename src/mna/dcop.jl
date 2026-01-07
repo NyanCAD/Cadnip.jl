@@ -7,6 +7,13 @@
 #
 # The Sundials integration does proper dcop mode switching and bootstrapped
 # nonlinear solve before IDADefaultInit.
+#
+# UNIFIED DC SOLVE:
+# Both dc!(circuit) and CedarDCOp initialization share the same core logic:
+# - dc_residual! computes F(u) = G(u)*u - b(u) with dcop mode (defined in solve.jl)
+# - dc_solve_core does Newton iteration to solve F(u) = 0 (defined in solve.jl)
+# This ensures consistent DC operating point results between standalone DC
+# analysis and transient initialization.
 #==============================================================================#
 
 using OrdinaryDiffEq
@@ -19,6 +26,48 @@ using ADTypes
 using Sundials
 
 export CedarDCOp, CedarTranOp
+
+# Note: dc_residual! and dc_solve_core are defined in solve.jl and exported from there
+
+#==============================================================================#
+# Workspace-based DC Residual (for compiled circuits)
+#
+# This is the zero-allocation path used by CedarDCOp during transient initialization.
+# Uses DirectStampContext to rebuild values in-place.
+#==============================================================================#
+
+"""
+    dc_residual_ws!(out, u, ws::EvalWorkspace, spec)
+
+DC residual using EvalWorkspace (for compiled circuits).
+
+This is the zero-allocation path used by CedarDCOp during transient initialization.
+Uses DirectStampContext to rebuild values in-place. It shares the same residual
+definition as dc_residual! (F(u) = G(u)*u - b(u)) but operates on compiled structures.
+"""
+function dc_residual_ws!(out::AbstractVector, u::AbstractVector,
+                         ws::EvalWorkspace, spec)
+    cs = ws.structure
+    dctx = ws.dctx
+
+    # Reset and rebuild with dcop mode
+    reset_direct_stamp!(dctx)
+    cs.builder(cs.params, spec, 0.0; x=u, ctx=dctx)
+
+    # Apply deferred b stamps
+    n_deferred = cs.n_b_deferred
+    for k in 1:n_deferred
+        idx = dctx.b_resolved[k]
+        if idx > 0
+            dctx.b[idx] += dctx.b_V[k]
+        end
+    end
+
+    # F(u) = G*u - b
+    mul!(out, cs.G, u)
+    out .-= dctx.b
+    return nothing
+end
 
 """
     CedarDCOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -155,29 +204,16 @@ end
 
 """
 Evaluate DAE residual with :dcop mode for DC initialization.
+
+This is a thin wrapper around dc_residual_ws! that handles the mode switch.
 """
 function _eval_dae_dcop(out, du0, u, ws::EvalWorkspace, alg)
     mode = alg isa CedarDCOp ? :dcop : :tranop
     original_spec = ws.structure.spec
     dc_spec = with_mode(original_spec, mode)
 
-    cs = ws.structure
-    dctx = ws.dctx
-
-    reset_direct_stamp!(dctx)
-    cs.builder(cs.params, dc_spec, 0.0; x=u, ctx=dctx)
-
-    n_deferred = cs.n_b_deferred
-    for k in 1:n_deferred
-        idx = dctx.b_resolved[k]
-        if idx > 0
-            dctx.b[idx] += dctx.b_V[k]
-        end
-    end
-
-    # F(0, u) = G*u - b
-    mul!(out, cs.G, u)
-    out .-= dctx.b
+    # Use shared residual function
+    dc_residual_ws!(out, u, ws, dc_spec)
 
     return nothing
 end
