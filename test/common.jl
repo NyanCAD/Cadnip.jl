@@ -233,5 +233,10 @@ function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hd
     end
     circuit_fn = Base.eval(m, code)
 
-    return circuit_fn, m
+    # Wrap in invokelatest to handle world age issues (especially on Julia 1.12)
+    # This is needed because circuit_fn was defined via eval and may be called
+    # later from a different world age (e.g., inside MNACircuit/tran!)
+    wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+
+    return wrapped_fn, m
 end
