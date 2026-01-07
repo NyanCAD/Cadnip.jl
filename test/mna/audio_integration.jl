@@ -4,14 +4,15 @@
 # This file tests SPICE netlists with Verilog-A device models using:
 # - va"""...""" macro for creating VA device models (BJT Ebers-Moll)
 # - SPICE netlists with X device syntax for VA model instantiation
-# - solve_mna_spice_code() for DC analysis with Newton iteration
-# - make_mna_spice_circuit() for transient simulation (returns MNACircuit)
+# - Top-level eval pattern for production-style SPICE loading
+# - Transient simulation with sinusoidal sources (SIN syntax)
+# - Signal processing analysis (gain measurement)
 #
 # Key patterns demonstrated:
 # 1. VA device models defined separately, imported via imported_hdl_modules
 # 2. SPICE X device syntax to instantiate VA models in netlists
-# 3. Transient simulation with sinusoidal sources (SIN syntax)
-# 4. Signal processing analysis (gain measurement)
+# 3. Top-level parse_spice_to_mna + eval (no invokelatest overhead)
+# 4. MNACircuit + tran!() for transient simulation
 #==============================================================================#
 
 using Test
@@ -19,14 +20,11 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNACircuit, MNASolutionAccessor
 using CedarSim.MNA: voltage, current, assemble!
-using CedarSim: tran!
+using CedarSim: tran!, parse_spice_to_mna
 using OrdinaryDiffEq
 using SciMLBase
 
 include(joinpath(@__DIR__, "..", "common.jl"))
-
-const deftol = 1e-6
-isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
 #==============================================================================#
 # BJT Device Model: Simplified Ebers-Moll
@@ -54,6 +52,48 @@ module npnbjt(b, e, c);
 endmodule
 """
 
+#==============================================================================#
+# Circuit Definitions (top-level eval - no invokelatest needed)
+#
+# These circuits are parsed and eval'd at file load time, so subsequent
+# code can use them without world age issues.
+#==============================================================================#
+
+# Circuit 1: BJT with fixed voltage sources (for DC testing)
+const bjt_fixed_voltages_code = parse_spice_to_mna("""
+* BJT with fixed voltage sources
+Vbe base 0 DC 0.65
+Vce coll 0 DC 5.0
+X1 base 0 coll npnbjt
+"""; circuit_name=:bjt_fixed_voltages, imported_hdl_modules=[npnbjt_module])
+eval(bjt_fixed_voltages_code)
+
+# Circuit 2: BJT with collector resistor
+const bjt_with_rc_code = parse_spice_to_mna("""
+* BJT with collector resistor
+Vcc vcc 0 DC 12.0
+Vb base 0 DC 0.65
+Rc vcc coll 4.7k
+X1 base 0 coll npnbjt
+"""; circuit_name=:bjt_with_rc, imported_hdl_modules=[npnbjt_module])
+eval(bjt_with_rc_code)
+
+# Circuit 3: Common emitter amplifier with sine input (main transient test)
+# Parameters: Vcc=12V, Vbias=0.65V, Vac=1mV, freq=1kHz, Rc=4.7k, Cload=100pF
+const ce_amplifier_code = parse_spice_to_mna("""
+* Common emitter amplifier
+Vcc vcc 0 DC 12.0
+Vin base 0 DC 0.65 SIN 0.65 0.001 1000.0
+Rc vcc coll 4.7k
+Cload coll 0 100p
+X1 base 0 coll npnbjt
+"""; circuit_name=:ce_amplifier, imported_hdl_modules=[npnbjt_module])
+eval(ce_amplifier_code)
+
+#==============================================================================#
+# Tests
+#==============================================================================#
+
 @testset "Audio Integration Tests" begin
 
     #==========================================================================#
@@ -63,14 +103,8 @@ endmodule
     # This verifies the BJT model produces correct terminal currents.
     #==========================================================================#
     @testset "BJT with fixed voltages - active region" begin
-        spice = """
-        * BJT with fixed voltage sources
-        Vbe base 0 DC 0.65
-        Vce coll 0 DC 5.0
-        X1 base 0 coll npnbjt
-        """
-
-        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
+        spec = MNA.MNASpec(mode=:dcop)
+        sol = MNA.solve_dc(bjt_fixed_voltages, (;), spec)
 
         # Check voltages are as expected
         @test isapprox(voltage(sol, :base), 0.65; atol=1e-6)
@@ -96,15 +130,8 @@ endmodule
     # a resistor load at the collector. This forms the simplest amplifier.
     #==========================================================================#
     @testset "BJT with collector resistor" begin
-        spice = """
-        * BJT with collector resistor
-        Vcc vcc 0 DC 12.0
-        Vb base 0 DC 0.65
-        Rc vcc coll 4.7k
-        X1 base 0 coll npnbjt
-        """
-
-        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
+        spec = MNA.MNASpec(mode=:dcop)
+        sol = MNA.solve_dc(bjt_with_rc, (;), spec)
 
         V_coll = voltage(sol, :coll)
         V_base = voltage(sol, :base)
@@ -128,27 +155,13 @@ endmodule
     # - Measurement of voltage gain
     #==========================================================================#
     @testset "Common emitter amplifier transient" begin
-        # Circuit parameters
-        Vcc = 12.0
-        Vbias = 0.65
-        Vac = 0.001
         freq = 1000.0
-        Rc = 4.7e3
-        Cload = 100e-12
-
-        # SPICE netlist with sinusoidal input
-        # SIN(offset amplitude freq) syntax
-        spice = """
-        * Common emitter amplifier
-        Vcc vcc 0 DC $Vcc
-        Vin base 0 DC $Vbias SIN $Vbias $Vac $freq
-        Rc vcc coll $Rc
-        Cload coll 0 $Cload
-        X1 base 0 coll npnbjt
-        """
+        Vac = 0.001
+        Vbias = 0.65
 
         # First verify DC operating point
-        ctx, dc_sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
+        spec = MNA.MNASpec(mode=:dcop)
+        dc_sol = MNA.solve_dc(ce_amplifier, (;), spec)
         V_coll_dc = voltage(dc_sol, :coll)
         V_base_dc = voltage(dc_sol, :base)
 
@@ -156,8 +169,8 @@ endmodule
         @test isapprox(V_base_dc, Vbias; atol=0.01)
         @test V_coll_dc > 1.0 && V_coll_dc < 11.0
 
-        # Create circuit for transient
-        circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+        # Create circuit for transient (uses top-level defined builder)
+        circuit = MNACircuit(ce_amplifier)
 
         # Run transient simulation
         period = 1.0 / freq
@@ -203,6 +216,7 @@ endmodule
     # Test 4: Gain Measurement with Different Signal Levels
     #
     # Test linearity by measuring gain with different input amplitudes.
+    # Uses runtime SPICE parsing since parameters vary in a loop.
     #==========================================================================#
     @testset "Gain linearity with signal level" begin
         Vcc = 12.0
@@ -263,7 +277,7 @@ endmodule
     # Test 5: Frequency Response
     #
     # Test gain at different frequencies to verify proper operation
-    # across audio band.
+    # across audio band. Uses runtime SPICE parsing since freq varies.
     #==========================================================================#
     @testset "Frequency response" begin
         Vcc = 12.0
