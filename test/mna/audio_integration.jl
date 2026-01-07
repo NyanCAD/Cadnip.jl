@@ -5,7 +5,7 @@
 # - va"""...""" macro for creating VA device models (BJT Ebers-Moll)
 # - SPICE netlists with X device syntax for VA model instantiation
 # - solve_mna_spice_code() for DC analysis with Newton iteration
-# - make_mna_spice_circuit() + MNACircuit for transient simulation
+# - make_mna_spice_circuit() for transient simulation (returns MNACircuit)
 #
 # Key patterns demonstrated:
 # 1. VA device models defined separately, imported via imported_hdl_modules
@@ -157,8 +157,7 @@ endmodule
         @test V_coll_dc > 1.0 && V_coll_dc < 11.0
 
         # Create circuit for transient
-        builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
-        circuit = MNACircuit(builder)
+        circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
 
         # Run transient simulation
         period = 1.0 / freq
@@ -224,8 +223,7 @@ endmodule
             X1 base 0 coll npnbjt
             """
 
-            builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
-            circuit = MNACircuit(builder)
+            circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
 
             period = 1.0 / freq
             tspan = (0.0, 5 * period)
@@ -286,8 +284,7 @@ endmodule
             X1 base 0 coll npnbjt
             """
 
-            builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
-            circuit = MNACircuit(builder)
+            circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
 
             period = 1.0 / freq
             tspan = (0.0, 10 * period)

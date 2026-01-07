@@ -186,12 +186,13 @@ end
 using CedarSim.MNA: MNACircuit
 
 """
-    make_mna_spice_circuit(spice_code::String; temp=27.0, imported_hdl_modules=Module[]) -> (builder, eval_module)
+    make_mna_spice_circuit(spice_code::String; temp=27.0, imported_hdl_modules=Module[]) -> MNACircuit
 
-Parse SPICE code and return an MNA builder function suitable for MNACircuit.
+Parse SPICE code and return an MNACircuit ready for simulation.
 
-The builder can be used with MNACircuit for transient simulation of circuits
-that include VA devices (via imported_hdl_modules).
+Note: This uses `invokelatest` internally to handle world age issues with
+runtime-parsed code. For maximum performance in production, use the
+compile-time `mna_sp"..."` macro instead.
 
 # Example
 ```julia
@@ -208,8 +209,7 @@ Rc vcc coll 4.7k
 X1 base 0 coll npnbjt
 \"\"\"
 
-builder, m = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
-circuit = MNACircuit(builder)
+circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
 sol = tran!(circuit, (0.0, 1e-3))
 ```
 """
@@ -233,10 +233,12 @@ function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hd
     end
     circuit_fn = Base.eval(m, code)
 
-    # Wrap in invokelatest to handle world age issues (especially on Julia 1.12)
-    # This is needed because circuit_fn was defined via eval and may be called
-    # later from a different world age (e.g., inside MNACircuit/tran!)
+    # Wrap in invokelatest to handle world age issues.
+    # This is needed because circuit_fn was defined via eval and is called from
+    # ODE solver callbacks which are in an older world.
+    # For production performance, use the mna_sp"..." macro instead.
     wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
 
-    return wrapped_fn, m
+    spec = MNASpec(temp=Float64(temp), mode=:tran)
+    return MNACircuit(wrapped_fn, (;), spec)
 end
