@@ -190,17 +190,25 @@ using CedarSim.MNA: MNACircuit
 
 Parse SPICE code and return an MNACircuit ready for simulation.
 
-Note: This uses `invokelatest` internally to handle world age issues with
-runtime-parsed code. For maximum performance in production, use the
-compile-time `mna_sp"..."` macro instead.
+This is a convenience function for test code. It uses `invokelatest` internally
+to handle world age issues with runtime-parsed code.
 
-# Example
+For production code loading SPICE from files, use the top-level eval pattern:
+
 ```julia
-va\"\"\"
-module npnbjt(b, e, c); ...
-endmodule
-\"\"\"
+# At module/file load time (top level)
+using CedarSim: parse_spice_to_mna
+const circuit_code = parse_spice_to_mna(read("circuit.sp", String);
+                                        imported_hdl_modules=[MyVA_module])
+eval(circuit_code)  # Defines `circuit` function, advances world
 
+# Now can use normally without invokelatest
+circuit = MNACircuit(circuit)
+sol = tran!(circuit, (0.0, 1e-3))
+```
+
+# Example (test code)
+```julia
 spice = \"\"\"
 * BJT amplifier
 V1 vcc 0 DC 12
