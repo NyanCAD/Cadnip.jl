@@ -428,6 +428,86 @@ function dc_solve_core(builder, params, spec;
     return sol.u, converged
 end
 
+"""
+    dc_solve_compiled(builder, params, spec; abstol=1e-10, maxiters=100,
+                      nlsolve=RobustMultiNewton()) -> (u, converged)
+
+Compiled DC solve with zero-allocation Newton iteration.
+
+This is the optimized version of dc_solve_core that uses:
+- CompiledStructure for fixed sparsity pattern
+- EvalWorkspace with DirectStampContext for zero-allocation rebuilding
+- Fast residual/Jacobian evaluation via fast_rebuild!
+
+For circuits with many Newton iterations, this provides significant speedup
+over dc_solve_core which allocates new MNAContext each iteration.
+
+# Arguments
+- `builder`: Circuit builder function
+- `params`: Circuit parameters
+- `spec`: MNASpec (should have mode=:dcop)
+- `abstol`: Convergence tolerance
+- `maxiters`: Maximum iterations
+- `nlsolve`: Nonlinear solver algorithm
+
+# Returns
+- `u`: Solution vector
+- `converged`: Whether the solve converged
+"""
+function dc_solve_compiled(builder, params, spec;
+                           abstol::Real=1e-10, maxiters::Int=100,
+                           nlsolve=RobustMultiNewton())
+    # Build at x=0 to get initial structure
+    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    n = system_size(ctx0)
+
+    if n == 0
+        return Float64[], true
+    end
+
+    # Compile structure for zero-allocation iteration
+    cs = compile_structure(builder, params, spec; ctx=ctx0)
+    ws = create_workspace(cs; ctx=ctx0)
+
+    # Initial guess: linear solve
+    sys0 = assemble!(ctx0)
+    u0 = sys0.G \ sys0.b
+
+    # Check if linear solution is good enough
+    resid = zeros(n)
+    fast_rebuild!(ws, u0, 0.0)
+    mul!(resid, cs.G, u0)
+    resid .-= ws.dctx.b
+    if norm(resid) < abstol
+        return u0, true
+    end
+
+    # Need Newton iteration with compiled evaluation
+    function residual!(F, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+        return nothing
+    end
+
+    function jacobian!(J, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        copyto!(J, cs.G)
+        return nothing
+    end
+
+    jac_prototype = cs.G
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    nlprob = NonlinearProblem(nlfunc, u0)
+
+    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+
+    return sol.u, converged
+end
+
+export dc_solve_compiled
+
 export dc_residual!, dc_solve_core
 
 """
@@ -1383,8 +1463,9 @@ Compute consistent initial conditions via DC operating point.
 2. For charge variables, computes q = Q(V) from the constraint
 3. Computes du0 to satisfy F(du0, u0, 0) = 0
 
-This uses the shared `dc_solve_core` function which is also used by dc!(circuit)
-and CedarDCOp initialization, ensuring consistent DC operating point results.
+This uses `dc_solve_compiled` for zero-allocation Newton iteration, which is also
+used by solve_dc(circuit) and CedarDCOp initialization, ensuring consistent DC
+operating point results.
 
 If `ctx` is provided, it will be used for the charge iteration and du0 computation.
 This ensures consistent detection results across code paths.
@@ -1397,10 +1478,10 @@ function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, 
     sys0 = assemble!(ctx)
     n = system_size(sys0)
 
-    # DC solve for u0 using Newton iteration (handles nonlinear circuits)
+    # DC solve for u0 using compiled path (zero-allocation Newton iteration)
     # Use dcop mode to turn off time-dependent sources for DC operating point
     dc_spec = with_mode(circuit.spec, :dcop)
-    u0, _ = dc_solve_core(circuit.builder, circuit.params, dc_spec)
+    u0, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
 
     # Handle empty circuit case
     if length(u0) == 0
@@ -1730,7 +1811,24 @@ end
 function solve_dc(circuit::MNACircuit)
     # Use dcop mode to disable time-dependent sources for DC operating point
     dc_spec = with_mode(circuit.spec, :dcop)
-    return solve_dc(circuit.builder, circuit.params, dc_spec)
+
+    # Use compiled path for zero-allocation Newton iteration
+    u, converged = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
+
+    if !converged
+        @warn "Nonlinear DC solve did not converge"
+    end
+
+    n = length(u)
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
+    # Get final system for node names
+    ctx_final = circuit.builder(circuit.params, dc_spec, 0.0; x=u)
+    sys_final = assemble!(ctx_final)
+
+    return DCSolution(sys_final, u)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
