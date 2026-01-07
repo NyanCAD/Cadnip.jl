@@ -223,6 +223,58 @@ solutions = tran!(cs, tspan)
 - Built-in `Capacitor` device: ❌ Constant C only (sufficient for SPICE C elements)
 - Built-in `MOSFET` device: ❌ Constant Cgs/Cgd only (use VA models for real MOSFETs)
 
+**Stamping Context Types (MNAContext vs DirectStampContext):**
+
+The codebase has two stamping paths for performance optimization:
+
+| Context Type | Purpose | Used When |
+|-------------|---------|-----------|
+| `MNAContext` | Structure discovery | Initial circuit build, detection phase |
+| `DirectStampContext` | Zero-copy stamping | Fast iteration during transient solve |
+
+**Execution Flow:**
+
+1. **Compilation Phase** (once per circuit):
+   - `build_with_detection()` runs builder 3+ times with random x vectors
+   - Uses `MNAContext` to discover structure (nodes, currents, COO pattern)
+   - Detects voltage-dependent capacitors by comparing Q/V ratios across runs
+   - Results cached in `ctx.charge_is_vdep`
+   - Creates `CompiledStructure` with COO→CSC mapping
+
+2. **Workspace Creation** (once per problem):
+   - `create_workspace(cs; ctx=ctx)` creates `EvalWorkspace`
+   - `DirectStampContext` holds references to sparse matrix `nzval` arrays
+   - Detection cache copied from MNAContext: `dctx.charge_is_vdep = ctx.charge_is_vdep`
+
+3. **Evaluation Phase** (every Newton iteration):
+   - `fast_rebuild!(ws, u, t)` resets and restamps via `DirectStampContext`
+   - Stamps go DIRECTLY to sparse matrix `nzval` - no intermediate arrays
+   - Uses counter-based detection lookup: `detect_or_cached!(dctx, ...)` returns cached result
+
+**Key files:**
+- `src/mna/context.jl`: MNAContext definition
+- `src/mna/value_only.jl`: DirectStampContext with zero-copy stamping
+- `src/mna/precompile.jl`: EvalWorkspace, compile_structure, fast_rebuild!
+- `src/mna/contrib.jl`: `detect_or_cached!` for both context types
+
+**DAEProblem vs ODEProblem behavior:**
+
+| Aspect | DAEProblem | ODEProblem |
+|--------|------------|------------|
+| G matrix | Rebuilt each iteration | Rebuilt each iteration |
+| C matrix | Rebuilt each iteration | **Fixed** at DC point |
+| Charge formulation | ✅ Works correctly | ✅ Works correctly* |
+| Mass matrix | Uses current C from ws | Uses fixed `cs.C` |
+
+*For charge formulation: C entries (`C[p,q_idx]=1`, `C[n,q_idx]=-1`) are CONSTANT,
+and voltage-dependent `dQ/dV` is in G (rebuilt). So ODEProblem works correctly
+with voltage-dependent capacitors when using the charge formulation.
+
+**Note:** The comment in `solve.jl:1564-1575` about ODEProblem not handling
+voltage-dependent capacitance appears outdated for circuits using the charge
+formulation. However, the built-in `Capacitor` device (constant C) would have
+issues if C actually varied with voltage.
+
 #### **AC Analysis**
 
 | Function | Input | Features |
