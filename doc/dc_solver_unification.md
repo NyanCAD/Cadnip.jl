@@ -300,3 +300,145 @@ end
 | `src/sweeps.jl:435-437` | `dc!(circuit)` | Wrapper for `solve_dc(circuit)` |
 | `src/sweeps.jl:488-534` | `tran!`, `_tran_dispatch` | Transient analysis |
 | `src/ac.jl` | `ac!`, `noise!` | Legacy DAECompiler AC |
+
+---
+
+## Part 4: Type Hierarchy Analysis
+
+### 4.1 Current Type Landscape
+
+The MNA subsystem has accumulated many types. Here's the complete picture:
+
+```
+CODEGEN OUTPUT
+│
+├─► Builder Function: (params, spec, t; x, ctx) -> MNAContext
+│
+└─► Wrapping Layer
+    │
+    ├─► MNACircuit{F,P,S}              # Wraps builder + params + spec
+    │   └─► Used by: dc!, tran!, DAEProblem, ODEProblem
+    │
+    ├─► MNACircuitCompiled{F,P,S}      # Wraps PrecompiledCircuit
+    │   └─► STATUS: DEAD CODE (unused anywhere)
+    │
+    └─► CircuitSweep{T,C}              # Wraps builder + circuit + sweep iterator
+        └─► Used by: dc!(sweep), tran!(sweep)
+
+STAMPING LAYER (building circuits)
+│
+├─► MNAContext                         # Mutable, node dicts, COO arrays
+│   └─► Used during: build_with_detection, structure discovery
+│
+└─► DirectStampContext                 # Mutable, stamps directly to sparse nzval
+    └─► Used during: fast_rebuild! (transient iteration)
+
+ASSEMBLED SYSTEM
+│
+└─► MNASystem{T}                       # G, C, b matrices + metadata
+    └─► Used by: solve_dc(sys), solve_ac(sys)
+
+COMPILED/OPTIMIZED (two parallel paths!)
+│
+├─► PATH 1 (newer): CompiledStructure + EvalWorkspace
+│   ├─► CompiledStructure{F,P,S}       # Immutable compiled structure
+│   └─► EvalWorkspace{T,CS}            # Contains DirectStampContext
+│       └─► Used by: DAEProblem, ODEProblem (ws passed as p parameter)
+│
+└─► PATH 2 (older): PrecompiledCircuit
+    └─► PrecompiledCircuit{F,P,S}      # Mutable, separate G_V/C_V arrays
+        └─► Used by: compile(), make_compiled_dae_residual
+
+SOLUTIONS
+│
+├─► DCSolution                         # DC operating point result
+├─► ACSolution                         # AC frequency response result
+└─► MNASolutionAccessor{S}             # Wraps ODESolution for node access
+```
+
+### 4.2 Issues with Current Types
+
+1. **Dead code**: `MNACircuitCompiled` is defined but never used anywhere
+2. **Parallel compilation paths**: `CompiledStructure + EvalWorkspace` vs `PrecompiledCircuit` do the same thing
+3. **Intermediate type**: `MNASystem` is only used briefly between stamping and solving
+4. **Two stamping contexts**: `MNAContext` vs `DirectStampContext` with overlapping roles
+
+### 4.3 Proposed Type Simplification
+
+**Delete:**
+- `MNACircuitCompiled` - dead code
+
+**Consolidate:**
+- Merge `PrecompiledCircuit` functionality into `CompiledStructure + EvalWorkspace`
+- Remove `PrecompiledCircuit` after migration
+
+**Clarify roles:**
+```
+                     ┌─────────────────────────────────────┐
+                     │         CODEGEN OUTPUT              │
+                     │  Builder: (params,spec,t;x) -> ctx  │
+                     └────────────────┬────────────────────┘
+                                      │
+                     ┌────────────────▼────────────────────┐
+                     │           MNACircuit                │
+                     │   (builder + params + spec)         │
+                     │   ≈ SciML "System"                  │
+                     └────────────────┬────────────────────┘
+                                      │
+              ┌───────────────────────┼───────────────────────┐
+              │                       │                       │
+    ┌─────────▼─────────┐   ┌─────────▼─────────┐   ┌─────────▼─────────┐
+    │    dc(circuit)    │   │ DAEProblem(circ)  │   │ ODEProblem(circ)  │
+    │                   │   │                   │   │                   │
+    │  Newton solve     │   │  compile →        │   │  compile →        │
+    │  → DCSolution     │   │  EvalWorkspace    │   │  EvalWorkspace    │
+    └───────────────────┘   │  → DAEProblem     │   │  → ODEProblem     │
+                            └─────────┬─────────┘   └─────────┬─────────┘
+                                      │                       │
+                            ┌─────────▼─────────┐   ┌─────────▼─────────┐
+                            │ solve(prob, IDA)  │   │solve(prob,Rodas5P)│
+                            │ → ODESolution     │   │ → ODESolution     │
+                            └───────────────────┘   └───────────────────┘
+```
+
+### 4.4 Relationship to SciML Pattern
+
+The SciML pattern is: **System → Problem → solve() → Solution**
+
+| SciML Concept | Current MNA | Proposed |
+|---------------|-------------|----------|
+| System | `MNACircuit` | Keep as-is |
+| Problem | `DAEProblem`, `ODEProblem` | Keep as-is (defined on `MNACircuit`) |
+| Solver | IDA, Rodas5P, etc. | Keep as-is |
+| Solution | `ODESolution` + `MNASolutionAccessor` | Keep as-is |
+
+**Where sweeps fit:**
+- `CircuitSweep` wraps `MNACircuit` + sweep iterator
+- `dc!(sweep)` / `tran!(sweep)` iterate and call single-circuit functions
+- This is a convenience layer on top of the core pattern
+
+**Where test helpers fit:**
+- Low-level functions like `solve_dc(sys)` for quick linear tests
+- These should be internal, not part of public API
+
+### 4.5 What to Keep vs Remove
+
+**Keep (public API):**
+- `MNACircuit` - primary circuit type
+- `dc(circuit)` / `tran(circuit, tspan)` / `ac(circuit, freqs)` - analysis functions
+- `CircuitSweep` - sweep wrapper
+- `DCSolution` / `ACSolution` - solution types
+- `MNASolutionAccessor` - solution accessor
+
+**Keep (internal):**
+- `MNAContext` - for structure discovery
+- `DirectStampContext` - for fast iteration
+- `CompiledStructure` + `EvalWorkspace` - compiled evaluation
+- `MNASystem` - intermediate (could be removed later)
+- `solve_dc(sys)` - linear solve (internal/test helper)
+
+**Remove:**
+- `MNACircuitCompiled` - dead code
+- `PrecompiledCircuit` - consolidate into CompiledStructure
+- `dc!` / `tran!` - replace with `dc` / `tran`
+- `solve_dc(circuit::MNACircuit)` - broken, replace with `dc`
