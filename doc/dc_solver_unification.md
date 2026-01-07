@@ -333,10 +333,10 @@ STAMPING LAYER (building circuits)
 └─► DirectStampContext                 # Mutable, stamps directly to sparse nzval
     └─► Used during: fast_rebuild! (transient iteration)
 
-ASSEMBLED SYSTEM
+ASSEMBLED DATA (rename MNASystem → MNAData)
 │
-└─► MNASystem{T}                       # G, C, b matrices + metadata
-    └─► Used by: solve_dc(sys), solve_ac(sys)
+└─► MNAData{T}                         # G, C, b matrices + metadata
+    └─► Used by: solve_dc(data), solve_ac(data) (internal)
 
 COMPILED/OPTIMIZED (two parallel paths!)
 │
@@ -360,7 +360,7 @@ SOLUTIONS
 
 1. **Dead code**: `MNACircuitCompiled` is defined but never used anywhere
 2. **Parallel compilation paths**: `CompiledStructure + EvalWorkspace` vs `PrecompiledCircuit` do the same thing
-3. **Intermediate type**: `MNASystem` is only used briefly between stamping and solving
+3. **Confusing name**: `MNASystem` sounds like SciML's "System" but it's just assembled matrices (rename to `MNAData`)
 4. **Two stamping contexts**: `MNAContext` vs `DirectStampContext` with overlapping roles
 
 ### 4.3 Proposed Type Simplification
@@ -434,8 +434,8 @@ The SciML pattern is: **System → Problem → solve() → Solution**
 - `MNAContext` - for structure discovery
 - `DirectStampContext` - for fast iteration
 - `CompiledStructure` + `EvalWorkspace` - compiled evaluation
-- `MNASystem` - intermediate (could be removed later)
-- `solve_dc(sys)` - linear solve (internal/test helper)
+- `MNAData` (rename from `MNASystem`) - assembled matrices bundle
+- `solve_dc(data)` - linear solve (internal/test helper)
 
 **Remove:**
 - `MNACircuitCompiled` - dead code
