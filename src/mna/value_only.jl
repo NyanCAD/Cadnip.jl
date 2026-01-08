@@ -44,6 +44,7 @@ mutable struct DirectStampContext
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
     n_currents::Int
+    current_names::Vector{Symbol}  # For get_current_idx lookups (CCVS/CCCS)
 
     # Direct references to sparse matrix storage (these are the actual nzval arrays)
     G_nzval::Vector{Float64}
@@ -95,6 +96,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         ctx.node_to_idx,
         ctx.n_nodes,
         ctx.n_currents,
+        ctx.current_names,
         G_nzval,
         C_nzval,
         G_mapping,
@@ -108,6 +110,19 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         1
     )
 end
+
+"""
+    get_current_idx(ctx::DirectStampContext, name::Symbol) -> CurrentIndex
+
+Get the index of a current variable by name in DirectStampContext (for CCVS/CCCS restamping).
+"""
+function get_current_idx(ctx::DirectStampContext, name::Symbol)::CurrentIndex
+    idx = findfirst(==(name), ctx.current_names)
+    idx === nothing && error("Current variable $name not found in DirectStampContext")
+    return CurrentIndex(idx)
+end
+
+get_current_idx(ctx::DirectStampContext, name::String) = get_current_idx(ctx, Symbol(name))
 
 """
     reset_direct_stamp!(dctx::DirectStampContext)

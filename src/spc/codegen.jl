@@ -2299,7 +2299,22 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    for (name, instances) in state.sema.instances
+    # Helper to check if an instance is a voltage source (V element)
+    # Voltage sources need to be stamped first since they create current variables
+    # that controlled sources (H, F) reference
+    function is_voltage_source(inst)
+        if inst isa SNode{SP.Voltage}
+            return true
+        elseif inst isa SNode{SP.DCSource} && startswith(lowercase(String(inst.name)), "v")
+            return true
+        elseif inst isa SNode{SP.ACSource} && startswith(lowercase(String(inst.name)), "v")
+            return true
+        end
+        return false
+    end
+
+    # Helper to process an instance (handles conditional logic)
+    function process_instance(name, instances)
         if length(instances) == 1 && only(instances)[2].cond == 0
             (_, instance) = only(instances)
             instance = instance.val
@@ -2314,6 +2329,26 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 else
                     push!(block.args, codegen_instance(instance.val))
                 end
+            end
+        end
+    end
+
+    # First pass: process voltage sources (they create current variables)
+    for (name, instances) in state.sema.instances
+        if !isempty(instances)
+            first_inst = first(instances)[2].val
+            if is_voltage_source(first_inst)
+                process_instance(name, instances)
+            end
+        end
+    end
+
+    # Second pass: process all other instances
+    for (name, instances) in state.sema.instances
+        if !isempty(instances)
+            first_inst = first(instances)[2].val
+            if !is_voltage_source(first_inst)
+                process_instance(name, instances)
             end
         end
     end
@@ -2498,7 +2533,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
+        using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
         using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
+        using CedarSim.MNA: get_current_idx  # For CCVS/CCCS current sensing
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
         using StaticArrays

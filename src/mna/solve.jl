@@ -263,32 +263,6 @@ end
 # PUBLIC API: solve_dc(builder, params, spec) and solve_dc(circuit::MNACircuit)
 # Both use Newton iteration via dc_solve_compiled, which handles linear and
 # nonlinear circuits correctly. For convenience, use dc!(circuit).
-#
-# INTERNAL: dc_linear(ctx) for tests that stamp directly. This is NOT exported
-# and should only be used for linear circuits in tests.
-#==============================================================================#
-
-"""
-    dc_linear(ctx::MNAContext) -> DCSolution
-
-Internal linear DC solve for tests. NOT for general use.
-
-This performs a simple G*x = b solve on the assembled context. It works correctly
-for LINEAR circuits but gives wrong results for nonlinear circuits.
-
-For general use, use `solve_dc(builder, params, spec)` or `dc!(circuit)` which
-use Newton iteration.
-"""
-function dc_linear(ctx::MNAContext)
-    sys = assemble!(ctx)
-    n = system_size(sys)
-    n == 0 && return DCSolution(Float64[], Symbol[], Symbol[], 0)
-    x = sys.G \ sys.b
-    return DCSolution(sys, x)
-end
-
-#==============================================================================#
-# Builder-Based DC Analysis (with Newton Iteration)
 #==============================================================================#
 
 using NonlinearSolve
@@ -1788,11 +1762,11 @@ end
 # that stamp directly. It only does linear solve (G \ b) - use dc!(circuit) for
 # nonlinear circuits.
 function solve_dc(circuit::MNACircuit)
-    # Use dcop mode to disable time-dependent sources for DC operating point
-    dc_spec = with_mode(circuit.spec, :dcop)
+    # Use the circuit's spec directly - time-dependent sources handle mode internally
+    # If caller wants DC operating point behavior, they should set mode to :dcop
 
     # Use compiled path for zero-allocation Newton iteration
-    u, converged = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
+    u, converged = dc_solve_compiled(circuit.builder, circuit.params, circuit.spec)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
@@ -1804,7 +1778,7 @@ function solve_dc(circuit::MNACircuit)
     end
 
     # Get final system for node names
-    ctx_final = circuit.builder(circuit.params, dc_spec, 0.0; x=u)
+    ctx_final = circuit.builder(circuit.params, circuit.spec, 0.0; x=u)
     sys_final = assemble!(ctx_final)
 
     return DCSolution(sys_final, u)

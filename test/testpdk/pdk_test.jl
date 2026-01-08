@@ -9,7 +9,7 @@ This tests:
 
 using Test
 using CedarSim
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, VoltageSource
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit, dc!
 using CedarSim: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
@@ -90,10 +90,11 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
         end
 
         # Solve DC
-        ctx = build_inverter_test((;), MNASpec())
-        sol = dc_linear(ctx)
+        circuit = MNACircuit(build_inverter_test)
+        sol = dc!(circuit)
 
-        # Check that we get reasonable voltages
+        # Build ctx to get node indices
+        ctx = build_inverter_test((;), MNASpec())
         vdd_idx = ctx.node_to_idx[:vdd]
         vss_idx = ctx.node_to_idx[:vss]
         out_idx = ctx.node_to_idx[:out]
@@ -107,7 +108,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
     @testset "Compare corners" begin
         function get_nmos_current(corner)
             # Build simple circuit with just nmos
-            function build_nmos_test(params, spec::MNASpec)
+            function build_nmos_test(params, spec::MNASpec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
                 lens = ParamLens(params)
 
@@ -124,8 +125,8 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
                 return ctx
             end
 
-            ctx = build_nmos_test((;), MNASpec())
-            sol = dc_linear(ctx)
+            circuit = MNACircuit(build_nmos_test)
+            sol = dc!(circuit)
 
             # Get current through voltage source (last element typically)
             # Current = 1V / R, so higher current means lower resistance
@@ -185,10 +186,11 @@ end
         end
 
         # Solve DC
-        ctx = build_va_resistor_test((;), MNASpec())
-        sol = dc_linear(ctx)
+        circuit = MNACircuit(build_va_resistor_test)
+        sol = dc!(circuit)
 
-        # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
+        # Build ctx to get node indices
+        ctx = build_va_resistor_test((;), MNASpec())
         out_idx = ctx.node_to_idx[:out]
         @test sol.x[out_idx] ≈ 0.5 atol=1e-6
     end
@@ -196,23 +198,30 @@ end
     @testset "VA device with different parameters" begin
         # Test that parameter changes work
         function get_output_voltage(R_value)
-            ctx = MNAContext()
+            function va_divider_circuit(params, spec, t::Real=0.0; x=Float64[])
+                ctx = MNAContext()
 
-            vin = get_node!(ctx, :vin)
-            out = get_node!(ctx, :out)
+                vin = get_node!(ctx, :vin)
+                out = get_node!(ctx, :out)
 
-            # VA resistor with custom R
-            dev = test_resistor_module.test_resistor(R=R_value)
-            stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
+                # VA resistor with custom R
+                dev = test_resistor_module.test_resistor(R=R_value)
+                stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
-            # Voltage source
-            stamp!(VoltageSource(1.0), ctx, vin, 0)
+                # Voltage source
+                stamp!(VoltageSource(1.0), ctx, vin, 0)
 
-            # Fixed load
-            stamp!(CedarSim.MNA.Resistor(1000.0), ctx, out, 0)
+                # Fixed load
+                stamp!(CedarSim.MNA.Resistor(1000.0), ctx, out, 0)
 
-            sol = dc_linear(ctx)
+                return ctx
+            end
 
+            circuit = MNACircuit(va_divider_circuit)
+            sol = dc!(circuit)
+
+            # Build ctx to get node index
+            ctx = va_divider_circuit((;), MNASpec())
             return sol.x[ctx.node_to_idx[:out]]
         end
 
@@ -254,18 +263,23 @@ end
         builder = @eval $builder_code
 
         # Build and solve
-        ctx = builder((;), MNASpec())
-        sol = dc_linear(ctx)
+        circuit = MNACircuit(builder)
+        sol = dc!(circuit)
 
-        # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
+        # Build ctx to get node indices
+        ctx = builder((;), MNASpec())
         out_idx = ctx.node_to_idx[:out]
         @test sol.x[out_idx] ≈ 0.5 atol=1e-6
     end
 
     @testset "Compare SPICE-defined vs Julia-defined circuit" begin
         # Build the same circuit in pure Julia for comparison
-        function build_julia_circuit(params, spec::MNASpec)
-            ctx = MNAContext()
+        function build_julia_circuit(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
 
             vin = get_node!(ctx, :vin)
             out = get_node!(ctx, :out)
@@ -284,9 +298,9 @@ end
         end
 
         # Solve Julia-defined circuit
+        circuit_julia = MNACircuit(build_julia_circuit)
+        sol_julia = dc!(circuit_julia)
         ctx_julia = build_julia_circuit((;), MNASpec())
-        sys_julia = assemble!(ctx_julia)
-        sol_julia = solve_dc(sys_julia)
 
         # Solve SPICE-defined circuit
         using SpectreNetlistParser
@@ -295,9 +309,9 @@ end
             circuit_name=:va_circuit2,
             imported_hdl_modules=[test_resistor_module])
         builder = @eval $builder_code
+        circuit_spice = MNACircuit(builder)
+        sol_spice = dc!(circuit_spice)
         ctx_spice = builder((;), MNASpec())
-        sys_spice = assemble!(ctx_spice)
-        sol_spice = solve_dc(sys_spice)
 
         # Both should give same output voltage
         out_julia = sol_julia.x[ctx_julia.node_to_idx[:out]]

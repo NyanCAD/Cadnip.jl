@@ -15,8 +15,8 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current, make_ode_problem
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: voltage, current, make_ode_problem, dc!
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
 using CedarSim.MNA: reset_for_restamping!
@@ -92,8 +92,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_resistor_divider((;), MNASpec())
-                sol = dc_linear(ctx)
+                circuit = MNACircuit(sp_resistor_divider)
+                sol = dc!(circuit)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 2.5)
@@ -114,8 +114,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_capacitor_circuit((;), MNASpec())
-                sol = dc_linear(ctx)
+                circuit = MNACircuit(sp_capacitor_circuit)
+                sol = dc!(circuit)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
@@ -136,8 +136,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_inductor_circuit((;), MNASpec())
-                sol = dc_linear(ctx)
+                circuit = MNACircuit(sp_inductor_circuit)
+                sol = dc!(circuit)
                 @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
             end
         end

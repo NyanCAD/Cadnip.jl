@@ -13,8 +13,8 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current, make_ode_problem
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit, dc!
 using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials
@@ -57,8 +57,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = resistor_divider((;), MNASpec())
-            sol = dc_linear(ctx)
+            circuit = MNACircuit(resistor_divider)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -240,8 +240,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = vccs_circuit((;), MNASpec())
-            sol = dc_linear(ctx)
+            circuit = MNACircuit(vccs_circuit)
+            sol = dc!(circuit)
 
             # Ids = gm * Vgs = 1e-3 * 1.0 = 1mA
             # Vdrain = Vdd - Ids * Rd = 5 - 1e-3 * 1000 = 4V
@@ -809,8 +809,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = var_init_divider((;), MNASpec())
-            sol = dc_linear(ctx)
+            circuit = MNACircuit(var_init_divider)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -841,8 +841,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = var_init_offset((;), MNASpec())
-            sol = dc_linear(ctx)
+            circuit = MNACircuit(var_init_offset)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 4.5)
             # Current should be (4.5 + 0.5) / 1000 = 5mA
