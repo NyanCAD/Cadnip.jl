@@ -45,8 +45,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test in voltage divider
-            function resistor_divider(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function resistor_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
 
@@ -81,8 +85,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             C_val = 1e-6
             V_val = 5.0
 
-            function rc_circuit(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function rc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 cap = get_node!(ctx, :cap)
 
@@ -222,8 +230,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test: Vgs controls Ids
-            function vccs_circuit(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function vccs_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -797,8 +809,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test in voltage divider circuit
-            function var_init_divider(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function var_init_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
 
@@ -831,8 +847,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             endmodule
             """
 
-            function var_init_offset(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function var_init_offset(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(4.5; name=:V1), ctx, vcc, 0)
