@@ -14,7 +14,8 @@ using Test
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit, dc!
+using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit
+using CedarSim: dc!
 using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials

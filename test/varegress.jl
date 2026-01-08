@@ -4,7 +4,8 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: VoltageSource, Capacitor, MNACircuit, dc!
+using CedarSim.MNA: VoltageSource, Capacitor, MNACircuit
+using CedarSim: dc!
 using OrdinaryDiffEq
 using Test
 

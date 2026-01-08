@@ -9,7 +9,8 @@ This tests:
 
 using Test
 using CedarSim
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit, dc!
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit
+using CedarSim: dc!
 using CedarSim: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")

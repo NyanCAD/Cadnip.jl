@@ -32,9 +32,10 @@ using CedarSim.MNA: make_ode_problem, make_ode_function
 using CedarSim.MNA: make_dae_problem, make_dae_function
 using CedarSim.MNA: reset_for_restamping!
 
-# Import CedarSim for tran! and solver comparison tests
+# Import CedarSim for macros and dc!/tran!
 using CedarSim
-using CedarSim.MNA: MNACircuit, MNASpec, dc!
+using CedarSim: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
+using CedarSim.MNA: MNACircuit, MNASpec
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
 using VerilogAParser
 
@@ -1654,8 +1655,7 @@ using VerilogAParser
     # High-Level dc!/tran! API (integration with CedarSim sweep API)
     #==========================================================================#
 
-    # dc!/tran! are exported from CedarSim (via sweeps.jl), not MNA module
-    using CedarSim: dc!, tran!
+    # dc!/tran! are already imported at the top of this file from CedarSim
     using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
 
     @testset "dc! and tran! API with MNACircuit" begin

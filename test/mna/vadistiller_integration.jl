@@ -16,7 +16,7 @@ using Test
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, make_ode_problem, dc!
+using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
 using CedarSim.MNA: reset_for_restamping!

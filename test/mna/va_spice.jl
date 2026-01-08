@@ -20,7 +20,8 @@ using Test
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, MNACircuit, dc!
+using CedarSim.MNA: voltage, current, MNACircuit
+using CedarSim: dc!
 using CedarSim.MNA: VoltageSource, Resistor
 
 include(joinpath(@__DIR__, "..", "common.jl"))
