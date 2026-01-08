@@ -426,9 +426,13 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
     G_raw = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
     C_raw = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
 
-    # Create UNIFIED sparsity pattern using abs() to prevent cancellation
-    # This ensures J = G + gamma*C can be computed without allocation
-    jac_pattern = abs.(G_raw) + abs.(C_raw)
+    # Create UNIFIED sparsity pattern from COO indices directly.
+    # Using ones() ensures no positions are dropped due to value cancellation.
+    # This ensures J = G + gamma*C can be computed without allocation.
+    jac_pattern = sparse(
+        vcat(G_I_resolved, C_I_resolved),
+        vcat(G_J_resolved, C_J_resolved),
+        ones(length(G_I_resolved) + length(C_I_resolved)), n, n)
 
     # Pad G and C to match the unified pattern (same colptr, rowvals)
     G = _pad_to_pattern(G_raw, jac_pattern)
