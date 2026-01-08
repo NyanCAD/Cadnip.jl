@@ -36,6 +36,24 @@ export PrecompiledCircuit, compile_circuit, fast_residual!, fast_jacobian!
 export reset_coo_values!, update_sparse_from_coo!
 
 #==============================================================================#
+# Sparse Matrix Utilities for Zero-Allocation Jacobian
+#==============================================================================#
+
+"""
+    _pad_to_pattern(M::SparseMatrixCSC, pattern::SparseMatrixCSC) -> SparseMatrixCSC
+
+Expand sparse matrix M to have the sparsity pattern of `pattern`.
+Entries in `pattern` not in `M` are zero.
+"""
+function _pad_to_pattern(M::SparseMatrixCSC{Tv}, pattern::SparseMatrixCSC) where Tv
+    result = similar(pattern, Tv)
+    fill!(nonzeros(result), zero(Tv))
+    I, J, V = findnz(M)
+    result[CartesianIndex.(I, J)] .= V
+    return result
+end
+
+#==============================================================================#
 # CompiledStructure: Immutable Circuit Structure
 #==============================================================================#
 
@@ -87,7 +105,11 @@ struct CompiledStructure{F,P,S}
     G_n_coo::Int
     C_n_coo::Int
 
-    # Sparse matrices (structure fixed, values updated via nonzeros())
+    # Sparse matrices with UNIFIED sparsity pattern for zero-allocation Jacobian computation
+    # Both G and C are stored with the same sparsity pattern (|G| + |C|), padded with zeros
+    # where necessary. This enables J = G + gamma*C via direct nzval operations:
+    #   nonzeros(J) .= nonzeros(G) .+ gamma .* nonzeros(C)
+    # without any intermediate sparse matrix allocation.
     G::SparseMatrixCSC{Float64,Int}
     C::SparseMatrixCSC{Float64,Int}
 
@@ -401,10 +423,22 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
     C_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.C_I]
     C_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.C_J]
 
-    G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
-    C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
+    G_raw = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
+    C_raw = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
 
-    # Create COO→CSC mappings
+    # Create UNIFIED sparsity pattern from COO indices directly.
+    # Using ones() ensures no positions are dropped due to value cancellation.
+    # This ensures J = G + gamma*C can be computed without allocation.
+    jac_pattern = sparse(
+        vcat(G_I_resolved, C_I_resolved),
+        vcat(G_J_resolved, C_J_resolved),
+        ones(length(G_I_resolved) + length(C_I_resolved)), n, n)
+
+    # Pad G and C to match the unified pattern (same colptr, rowvals)
+    G = _pad_to_pattern(G_raw, jac_pattern)
+    C = _pad_to_pattern(C_raw, jac_pattern)
+
+    # Create COO→CSC mappings (now mapping to the padded matrices)
     G_coo_to_nz = compute_coo_to_nz_mapping(G_I_resolved, G_J_resolved, G)
     C_coo_to_nz = compute_coo_to_nz_mapping(C_I_resolved, C_J_resolved, C)
 
@@ -831,16 +865,39 @@ end
     fast_jacobian!(J, du, u, ws::EvalWorkspace, gamma, t)
 
 Fast DAE Jacobian computation using EvalWorkspace: J = G + gamma*C
+
+For sparse J: Uses zero-allocation nzval operations since G and C have unified sparsity.
+For dense J: Falls back to broadcast operations (IDA uses dense Jacobian by default).
 """
+function fast_jacobian!(J::SparseMatrixCSC, du::AbstractVector,
+                        u::AbstractVector, ws::EvalWorkspace,
+                        gamma::Real, t::Real)
+    fast_rebuild!(ws, u, t)
+    cs = ws.structure
+
+    # J = G + gamma*C via direct nzval operations (zero allocation)
+    # This works because G and C have been padded to the same sparsity pattern
+    J_nz = nonzeros(J)
+    G_nz = nonzeros(cs.G)
+    C_nz = nonzeros(cs.C)
+    @inbounds for i in eachindex(J_nz, G_nz, C_nz)
+        J_nz[i] = G_nz[i] + gamma * C_nz[i]
+    end
+
+    return nothing
+end
+
+# Fallback for dense matrices (Sundials IDA uses dense Jacobian by default)
 function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
                         u::AbstractVector, ws::EvalWorkspace,
                         gamma::Real, t::Real)
     fast_rebuild!(ws, u, t)
     cs = ws.structure
 
-    # J = G + gamma*C
-    copyto!(J, cs.G)
-    J .+= gamma .* cs.C
+    # J = G + gamma*C via dense matrix operations
+    # This path allocates but is used for dense solvers
+    copyto!(J, Matrix(cs.G))
+    J .+= gamma .* Matrix(cs.C)
 
     return nothing
 end
@@ -856,6 +913,10 @@ Fast DAE Jacobian computation: J = G + gamma*C
 
 This is called by DAE solvers (like Sundials IDA) to get the
 combined Jacobian for the implicit solve.
+
+Note: PrecompiledCircuit may not have unified sparsity pattern,
+so this uses the original broadcast approach. For zero-allocation
+Jacobian computation, use EvalWorkspace instead.
 """
 function fast_jacobian!(J::AbstractMatrix, du::Vector{Float64},
                         u::Vector{Float64}, pc::PrecompiledCircuit,
@@ -864,6 +925,7 @@ function fast_jacobian!(J::AbstractMatrix, du::Vector{Float64},
     fast_rebuild!(pc, u, t)
 
     # J = G + gamma*C
+    # Note: This path may allocate. Use EvalWorkspace for zero-allocation.
     copyto!(J, pc.G)
     J .+= gamma .* pc.C
 
