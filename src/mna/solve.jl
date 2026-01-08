@@ -1575,11 +1575,26 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
+    n = system_size(ctx)
 
     # Get initial conditions via DC solve
+    # IMPORTANT: Use the detection context's system size to ensure u0 has the
+    # correct dimension. dc_solve_compiled builds its own context which may have
+    # different size if the circuit produces different structure for :dcop vs :tran.
     if u0 === nothing
         dc_spec = with_mode(base_spec, :dcop)
-        u0, _ = dc_solve_compiled(builder, params, dc_spec)
+        u0_raw, _ = dc_solve_compiled(builder, params, dc_spec)
+        # Ensure u0 has the same size as the detection context
+        if length(u0_raw) == n
+            u0 = u0_raw
+        elseif length(u0_raw) < n
+            # Pad with zeros if dc_solve produced fewer variables
+            u0 = zeros(n)
+            u0[1:length(u0_raw)] = u0_raw
+        else
+            # Truncate if dc_solve produced more variables
+            u0 = u0_raw[1:n]
+        end
     end
 
     # Compile circuit structure using the same detection context
