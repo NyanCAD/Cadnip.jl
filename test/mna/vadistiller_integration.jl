@@ -80,8 +80,12 @@ end
             load_va_model("resistor.va")
 
             @testset "sp_resistor divider" begin
-                function sp_resistor_divider(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_resistor_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
@@ -102,8 +106,12 @@ end
             load_va_model("capacitor.va")
 
             @testset "sp_capacitor DC" begin
-                function sp_capacitor_circuit(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_capacitor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
@@ -124,8 +132,12 @@ end
             load_va_model("inductor.va")
 
             @testset "sp_inductor DC" begin
-                function sp_inductor_circuit(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_inductor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
