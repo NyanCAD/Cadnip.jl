@@ -345,9 +345,12 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     cs = compile_structure(builder, params, spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Initial guess: linear solve from the context's assembled system
-    sys0 = assemble!(ctx)
-    u0 = sys0.G \ sys0.b
+    # Initial guess: zeros
+    # Using zeros is more robust for highly nonlinear circuits (diodes, MOSFETs)
+    # than the linear solve G\b, which can give wildly wrong values when the
+    # circuit is linearized at x=0 (e.g., diode looks like open circuit at V=0).
+    # The Newton solver handles the nonlinearity more carefully from zeros.
+    u0 = zeros(n)
 
     return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
 end
