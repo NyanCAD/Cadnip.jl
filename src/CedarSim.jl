@@ -99,29 +99,6 @@ include("circsummary.jl")
 import .ModelLoader: load_VA_model
 export load_VA_model
 
-# Store the known-good julia version that we should be compiling against
-_blessed_julia_version = begin
-    julia_version_path = joinpath(@__DIR__, "../contrib/julia_build/julia_version.inc")
-    Base.include_dependency(julia_version_path)
-    strip(split(String(read(julia_version_path)), ":=")[2])
-end
-
-function check_version_match()
-    # Only print this out if we're not precompiling, as it's annoying to see this
-    # pop up for every extension precompile process.
-    if _blessed_julia_version != Base.GIT_VERSION_INFO.commit && ccall(:jl_generating_output, Cint, ()) != 1
-        @warn("""
-        You are not running on the Cedar-blessed Julia version! (currently '$(_blessed_julia_version)')
-        Try running './juliaup_cedar.sh', and remember to start julia with `julia +cedar`!
-        """)
-    end
-end
-
-function __init__()
-    # Do this at `__init__()` time instead of precompile time because it's too easy to miss it during precompilation.
-    check_version_match()
-end
-
 using PrecompileTools
 @setup_workload let
     spice = """
