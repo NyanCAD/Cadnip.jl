@@ -273,25 +273,44 @@ using ADTypes
 #==============================================================================#
 # Unified DC Solve
 #
-# ONE implementation shared by:
+# The core Newton iteration (_dc_newton_compiled) is shared by:
 # - solve_dc(circuit::MNACircuit) for standalone DC analysis
-# - DAEProblem/ODEProblem constructors for initial u0
-# - CedarDCOp for DAE initialization
+# - CedarDCOp for DAE/ODE transient initialization
 #
 # The flow is:
 # 1. build_with_detection() discovers all states via multi-pass detection
-# 2. dc_solve_with_ctx() does Newton iteration using that detected context
+# 2. _dc_newton_compiled does Newton iteration to solve F(u) = G*u - b = 0
 #==============================================================================#
 
 # Common Newton iteration core for compiled DC solve
+#
+# The optional `spec` parameter allows overriding the spec used during evaluation.
+# This is needed for CedarDCOp/CedarTranOp initialization where the workspace was
+# created with :tran spec but we need to evaluate with :dcop/:tranop spec.
 function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
                               abstol::Real=1e-10, maxiters::Int=100,
-                              nlsolve=RobustMultiNewton())
+                              nlsolve=RobustMultiNewton(),
+                              spec=nothing)
     n = length(u0)
+    use_spec = spec === nothing ? cs.spec : spec
+
+    # Helper to rebuild with the correct spec
+    function dc_rebuild!(u)
+        dctx = ws.dctx
+        reset_direct_stamp!(dctx)
+        cs.builder(cs.params, use_spec, 0.0; x=u, ctx=dctx)
+        # Apply deferred b stamps
+        for k in 1:cs.n_b_deferred
+            idx = dctx.b_resolved[k]
+            if idx > 0
+                dctx.b[idx] += dctx.b_V[k]
+            end
+        end
+    end
 
     # Check if linear solution is good enough
     resid = zeros(n)
-    fast_rebuild!(ws, u0, 0.0)
+    dc_rebuild!(u0)
     mul!(resid, cs.G, u0)
     resid .-= ws.dctx.b
     if norm(resid) < abstol
@@ -300,14 +319,14 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 
     # Need Newton iteration with compiled evaluation
     function residual!(F, u, p)
-        fast_rebuild!(ws, u, 0.0)
+        dc_rebuild!(u)
         mul!(F, cs.G, u)
         F .-= ws.dctx.b
         return nothing
     end
 
     function jacobian!(J, u, p)
-        fast_rebuild!(ws, u, 0.0)
+        dc_rebuild!(u)
         copyto!(J, cs.G)
         return nothing
     end
