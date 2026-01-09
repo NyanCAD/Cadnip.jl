@@ -480,6 +480,47 @@ eval(ring_oscillator_code)
                 v_drain = sol.x[2]  # drain node
                 @test 0.0 < v_drain < 5.0
             end
+
+            @testset "3-stage CMOS ring oscillator" begin
+                # Ring oscillator using sp_mos1 - tests CedarUICOp initialization
+                # for oscillators without stable DC equilibrium
+                # Circuit is defined via SPICE at module level (ring_oscillator)
+                circuit = MNACircuit(ring_oscillator)
+                tspan = (0.0, 200e-9)
+
+                # Use CedarUICOp for oscillator initialization (no stable DC point)
+                sol = tran!(circuit, tspan;
+                            solver=Rodas5P(),
+                            initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                            abstol=1e-9, reltol=1e-6,
+                            dtmax=1e-9)
+
+                @test sol.retcode == SciMLBase.ReturnCode.Success
+
+                sys = assemble!(circuit)
+                acc = MNASolutionAccessor(sol, sys)
+
+                # Sample in last half after startup transient
+                times = range(100e-9, 200e-9; length=500)
+                V_out1 = [voltage(acc, :out1, t) for t in times]
+
+                out1_min, out1_max = extrema(V_out1)
+
+                # Verify significant voltage swing (oscillation occurring)
+                @test (out1_max - out1_min) > 2.0
+                @test out1_max > 2.5  # Near Vdd
+                @test out1_min < 0.8  # Near ground
+
+                # Verify oscillation frequency by counting crossings
+                midpoint = (out1_max + out1_min) / 2
+                crossings = sum(
+                    (V_out1[i-1] < midpoint && V_out1[i] >= midpoint) ||
+                    (V_out1[i-1] > midpoint && V_out1[i] <= midpoint)
+                    for i in 2:length(V_out1)
+                )
+                # Should have multiple oscillation cycles in 100ns window
+                @test crossings > 10
+            end
         end
 
         GC.gc()
@@ -716,47 +757,6 @@ eval(ring_oscillator_code)
             @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
             @test vc_t0 > 0.0 && vc_t0 < 12.5
             @test vc_pos < vc_neg + 0.5
-        end
-
-        @testset "3-stage CMOS ring oscillator" begin
-            # Ring oscillator using sp_mos1 - tests CedarUICOp initialization
-            # for oscillators without stable DC equilibrium
-            # Circuit is defined via SPICE at module level (ring_oscillator)
-            circuit = MNACircuit(ring_oscillator)
-            tspan = (0.0, 200e-9)
-
-            # Use CedarUICOp for oscillator initialization (no stable DC point)
-            sol = tran!(circuit, tspan;
-                        solver=Rodas5P(),
-                        initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
-                        abstol=1e-9, reltol=1e-6,
-                        dtmax=1e-9)
-
-            @test sol.retcode == SciMLBase.ReturnCode.Success
-
-            sys = assemble!(circuit)
-            acc = MNASolutionAccessor(sol, sys)
-
-            # Sample in last half after startup transient
-            times = range(100e-9, 200e-9; length=500)
-            V_out1 = [voltage(acc, :out1, t) for t in times]
-
-            out1_min, out1_max = extrema(V_out1)
-
-            # Verify significant voltage swing (oscillation occurring)
-            @test (out1_max - out1_min) > 2.0
-            @test out1_max > 2.5  # Near Vdd
-            @test out1_min < 0.8  # Near ground
-
-            # Verify oscillation frequency by counting crossings
-            midpoint = (out1_max + out1_min) / 2
-            crossings = sum(
-                (V_out1[i-1] < midpoint && V_out1[i] >= midpoint) ||
-                (V_out1[i-1] > midpoint && V_out1[i] <= midpoint)
-                for i in 2:length(V_out1)
-            )
-            # Should have multiple oscillation cycles in 100ns window
-            @test crossings > 10
         end
 
     end  # Tier 7
