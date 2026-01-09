@@ -880,14 +880,16 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         # This requires a branch current variable for proper DC current flow
         expr = to_julia(cs.assign_expr)
         # Create a unique name for this voltage contribution's current variable
-        # Use runtime instance-prefixed name to avoid collisions between instances
-        I_alloc_name_suffix = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
+        # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
+        # For DirectStampContext, both names are ignored (counter-based access)
+        # For MNAContext, the full name is built from components
+        I_alloc_base_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
             # Skip if nodes are aliased (short circuit optimization)
             if $p_node != $n_node
                 # Allocate branch current (idempotent - returns existing index if already allocated)
-                let I_var = CedarSim.MNA.alloc_current!(ctx, Symbol(_mna_instance_, "_", $I_alloc_name_suffix))
+                let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
                     v_contrib_raw = $expr
                     v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
 
@@ -1496,30 +1498,30 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end
 
     # Allocate current variables for named branches with voltage contributions
-    # Use runtime instance-prefixed names to avoid collisions between instances
+    # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
+    # For DirectStampContext, both names are ignored (counter-based access)
+    # For MNAContext, the full name is built from components
     branch_current_alloc = Expr(:block)
     branch_current_vars = Dict{Symbol, Symbol}()  # branch_name -> current_var_name
     for (branch_name, _) in voltage_branch_contribs
         I_var = Symbol("_I_branch_", branch_name, "_idx")
-        # Create runtime name with conditional prefix (empty prefix -> no underscore)
-        alloc_name_suffix = QuoteNode(Symbol(symname, "_I_", branch_name))
-        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
+        # Base name is device_type + _I_ + branch_name (compile-time constant)
+        alloc_base_name = QuoteNode(Symbol(symname, "_I_", branch_name))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_name_expr)))
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
         branch_current_vars[branch_name] = I_var
     end
 
     # Allocate current variables for two-node voltage contributions (e.g., V(a,b) <+ 0)
     # These need branch currents to carry DC current through short circuits
-    # Use runtime instance-prefixed names to avoid collisions between instances
+    # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
     twonode_voltage_vars = Dict{Tuple{Symbol,Symbol}, Symbol}()  # (p,n) -> current_var_name
     for ((p_sym, n_sym), _) in twonode_voltage_contribs
         I_var = Symbol("_I_V_", p_sym, "_", n_sym, "_idx")
-        # Create runtime name with conditional prefix (empty prefix -> no underscore)
-        alloc_name_suffix = QuoteNode(Symbol(symname, "_I_V_", p_sym, "_", n_sym))
-        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
+        # Base name is device_type + _I_V_ + p_sym + _ + n_sym (compile-time constant)
+        alloc_base_name = QuoteNode(Symbol(symname, "_I_V_", p_sym, "_", n_sym))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_name_expr)))
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
@@ -1556,9 +1558,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         #
         # IMPORTANT: has_reactive is set based on TYPE, not value. This ensures
         # consistent COO structure for precompilation regardless of operating point.
-        # Generate charge variable name for this branch (used if voltage-dependent)
-        charge_name_suffix = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
-        charge_name_expr = :(_mna_instance_ == Symbol("") ? $charge_name_suffix : Symbol(_mna_instance_, "_", $charge_name_suffix))
+        # Generate charge variable base name for this branch (used if voltage-dependent)
+        # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
+        # For DirectStampContext, both names are ignored (counter-based access)
+        # For MNAContext, the full name is built from components
+        charge_base_name = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
 
         # NOTE: Detection now happens inline during stamp evaluation (not in detection_block)
         # by comparing capacitance values across multiple runs with different random operating points.
@@ -1655,11 +1659,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Detect voltage-dependence by comparing Q/V ratio across runs
                 # q_val is the charge value, V_branch is the branch voltage
                 _V_branch = $v_branch_expr
-                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_name_expr, _V_branch, q_val)
+                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_base_name, _mna_instance_, _V_branch, q_val)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
-                    _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_name_expr, $p_node, $n_node)
+                    _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
 
                     # --- Mass matrix (constant entries!) ---
                     # KCL coupling: I = dq/dt flows from p to n

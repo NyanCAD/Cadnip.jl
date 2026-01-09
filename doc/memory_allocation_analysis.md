@@ -30,22 +30,30 @@ The sparse LU factorization allocates ~5.5 KB per call, which dominates Rodas5P'
 
 ### 2. Graetz Allocates ~20x More Per Step Than RC (with FBDF)
 
-**Root Cause: VA Device Evaluation Allocations**
+**Root Cause: VA Device Evaluation Allocations (NOW FIXED)**
 
-The key finding from profiling:
+Initial profiling showed:
 
 ```
 RC Circuit:
   fast_rebuild!:  0.0 bytes/call
   fast_residual!: 0.0 bytes/call
 
-Graetz Circuit:
+Graetz Circuit (before fix):
   fast_rebuild!:  800.0 bytes/call
   fast_residual!: 800.0 bytes/call
 ```
 
-The 800 bytes/call allocation comes from the **builder function** which evaluates the
-Verilog-A diode model. This allocation is happening inside the VA device evaluation code.
+**After optimization**, VA device evaluation is allocation-free:
+
+```
+Graetz Circuit (after fix):
+  fast_rebuild!:  0.0 bytes/call
+  fast_residual!: 0.0 bytes/call
+```
+
+The 800 bytes/call was caused by runtime Symbol construction in generated VA code.
+The fix uses component-based APIs that avoid Symbol interpolation for DirectStampContext.
 
 Additional factors:
 - More Jacobian evaluations for nonlinear circuits (327 vs 1 for 10k steps)
@@ -72,14 +80,20 @@ For a 1-second simulation with dtmax=1µs (~1M timesteps):
 
 ## Optimization Opportunities
 
-### 1. VA Device Evaluation (High Priority)
+### 1. VA Device Evaluation (COMPLETED)
 
-The 800 bytes/call in `fast_rebuild!` for VA devices is a significant optimization target.
+The 800 bytes/call in `fast_rebuild!` for VA devices has been **fixed**.
 
-**Investigation needed:**
-- Profile the generated VA code to find allocation sources
-- Potential causes: string allocations, temporary arrays, closures
-- Consider precomputing temperature-dependent parameters
+**Root cause identified:** Runtime Symbol construction in generated VA code.
+- `detect_or_cached!`, `alloc_charge!`, `alloc_current!` were called with dynamically
+  constructed Symbol names (e.g., `Symbol(instance, "_", base)`)
+- For DirectStampContext, these names are ignored (uses counter-based access)
+- But the Symbol construction still happened, causing allocation
+
+**Solution implemented:** Component-based APIs that pass `base_name` and `instance_name`
+separately. DirectStampContext ignores both (counter-based), MNAContext builds the full name.
+
+Result: **0.0 bytes/call** for VA device evaluation.
 
 ### 2. Sparse LU Factorization Reuse (Medium Priority)
 
@@ -111,8 +125,11 @@ The following scripts were created for this analysis:
 2. **FBDF is the most memory-efficient** solver for these benchmarks due to
    lazy Jacobian evaluation
 
-3. **VA device allocations are the main target** for reducing Graetz memory usage -
-   the 800 bytes/call overhead is avoidable with careful code generation
+3. **VA device allocations have been fixed** - the 800 bytes/call overhead has been
+   eliminated by using component-based APIs that avoid runtime Symbol construction
 
 4. **IDA uses more memory than FBDF** despite similar algorithms, likely due to
    Sundials' internal data structures and dense Jacobian storage
+
+5. **Remaining optimization target** is sparse LU factorization reuse for Rosenbrock
+   methods (Rodas5P)

@@ -218,6 +218,35 @@ end
 
 @inline alloc_charge!(dctx::DirectStampContext, name::String, p::Int, n::Int) = alloc_charge!(dctx, Symbol(name), p, n)
 
+# Component-based APIs: avoid Symbol construction at call site
+# For DirectStampContext, base_name and instance_name are IGNORED - uses counter-based access
+# These exist so generated code can pass components without allocating Symbol
+
+"""
+    alloc_current!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol) -> CurrentIndex
+
+Component-based current allocation that avoids Symbol interpolation at call site.
+For DirectStampContext, both names are ignored - uses counter-based access.
+For MNAContext, this builds the full name from components.
+"""
+@inline function alloc_current!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol)::CurrentIndex
+    pos = dctx.current_pos
+    dctx.current_pos = pos + 1
+    return CurrentIndex(pos)
+end
+
+"""
+    alloc_charge!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int) -> ChargeIndex
+
+Component-based charge allocation that avoids Symbol interpolation at call site.
+For DirectStampContext, both names are ignored - uses counter-based access.
+"""
+@inline function alloc_charge!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int)::ChargeIndex
+    pos = dctx.charge_pos
+    dctx.charge_pos = pos + 1
+    return ChargeIndex(pos)
+end
+
 """
     stamp_G!(dctx::DirectStampContext, i, j, val)
 
