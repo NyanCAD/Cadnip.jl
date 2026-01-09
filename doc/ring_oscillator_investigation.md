@@ -63,13 +63,50 @@ Adding GMIN = 1e-12 to all G diagonal entries:
 - Condition number still high but finite (6.57e18)
 - V(vdd) correctly solved to 1.2V
 
+## LevenbergMarquardt Success
+
+Per `doc/circuit_initialization_ngspice_sciml.md`, LevenbergMarquardt acts as a GMIN-like
+regularizer. Testing confirms **it works**:
+
+```
+Trying LevenbergMarquardt...
+LM solve in 6.9s
+Retcode: MaxIters
+Max |u|: 1.1999809754198028
+V(vdd): 1.1999802730503715
+```
+
+**Key finding**: `LevenbergMarquardt(damping_initial=1.0)` successfully finds a reasonable
+pseudo-equilibrium for the ring oscillator in 6.9s (20 iterations).
+
+The `MaxIters` retcode is expected - ring oscillators don't have a true DC equilibrium.
+
+### Updated JIT Breakdown
+
+Full JIT compilation with both code paths:
+
+| Phase | Time |
+|-------|------|
+| Model loading | ~38s |
+| MNAContext stamp! compile | ~145s |
+| DirectStampContext stamp! compile | ~110s |
+| Ring builder first call (PMOS variant) | ~109s |
+| **Total first-call** | **~400s** |
+
+After JIT, operations are fast:
+- Residual evaluation: 0.1s
+- Jacobian evaluation: 0.2s
+- Linear solve: 2.4s
+- LM solve (20 iters): 6.9s
+
 ## Recommendations
 
 ### Short-term Fixes
 
-1. **Increase benchmark timeout**: Account for 190s+ JIT compilation
-2. **Precompile PSP103**: Add to precompile workload or use a precompiled device package
-3. **Add GMIN option**: Implement GMIN stepping in CedarDCOp/CedarUICOp
+1. **Increase benchmark timeout**: Account for 400s+ JIT compilation (both code paths)
+2. **Use LevenbergMarquardt**: Pass `nlsolve=LevenbergMarquardt(damping_initial=1.0)` to DC solve
+3. **Precompile PSP103**: Add to precompile workload or use a precompiled device package
+4. **Add GMIN option**: Implement GMIN stepping in CedarDCOp/CedarUICOp
 
 ### Medium-term Improvements
 
@@ -103,11 +140,11 @@ Max voltage: 16.18V  # Note: linear solve at u=0, not physically meaningful
 V(vdd): 1.2V  # Correct supply voltage
 ```
 
-## Files Created During Investigation
+## Investigation Notes
 
-- `diagnose_ring.jl` - Initial diagnostic
-- `diagnose_ring_simple.jl` - Simplified diagnostic
-- `diagnose_ring_builder.jl` - Builder isolation test
-- `diagnose_single_psp.jl` - Single PSP103 test
-- `diagnose_single_bsim4.jl` - Single BSIM4 test
-- `test_ring_gmin.jl` - GMIN regularization test
+Diagnostic scripts were used during investigation but have been cleaned up.
+Key tests performed:
+- Single PSP103 device stamping (identified JIT as bottleneck)
+- Single BSIM4 device comparison (76s vs 150s JIT)
+- GMIN regularization (enables linear solve)
+- LevenbergMarquardt solver (successfully finds pseudo-equilibrium)
