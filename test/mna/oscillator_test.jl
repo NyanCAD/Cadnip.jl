@@ -1,20 +1,7 @@
 #==============================================================================#
 # Standalone Oscillator Test Script
 #
-# Tests BJT astable multivibrator oscillator.
-#
-# STATUS: Work in Progress
-# The oscillator simulation currently fails because:
-# 1. Starting from all-zeros causes numerical issues with BJT exp() equations
-# 2. CedarUICOp warmup struggles to find a consistent initial state
-# 3. The circuit has no stable DC operating point by design
-#
-# Possible future solutions:
-# - Add startup circuit (PWL source) to bias one side initially
-# - Use MOSFET ring oscillator instead (better behaved in subthreshold)
-# - Implement ".ic" initial conditions from SPICE
-# - Improve CedarUICOp warmup convergence for oscillators
-#
+# Tests CMOS ring oscillator using vadistiller sp_mos1 model.
 # Run with: julia --project=test test/mna/oscillator_test.jl
 #==============================================================================#
 
@@ -25,101 +12,166 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor
 using CedarSim.MNA: MNACircuit, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!
+using CedarSim.MNA: reset_for_restamping!, CedarUICOp
 using VerilogAParser
 using SciMLBase
-using CedarSim: tran!, dc!, parse_spice_to_mna
-using CedarSim.MNA: CedarUICOp
+using CedarSim: tran!, parse_spice_to_mna
 using OrdinaryDiffEq: Rodas5P
 
 #==============================================================================#
-# Simple NPN BJT model (Ebers-Moll, same as audio_integration.jl)
+# Load sp_mos1 model from vadistiller
 #==============================================================================#
 
-va"""
-module npnbjt(b, e, c);
-    inout b, e, c;
-    electrical b, e, c;
-    analog I(b,e) <+ 1.0e-14*(exp(V(b,e)/25.0e-3) - 1) - 1.0/(1 + 100.0)*1.0e-14*(exp(V(b,c)/25.0e-3) - 1);
-    analog I(c,b) <+ 100.0/(1 + 100.0)*1.0e-14*(exp(V(b,e)/25.0e-3) - 1) - 1.0e-14*(exp(V(b,c)/25.0e-3) - 1);
-endmodule
-"""
-
-#==============================================================================#
-# Circuit Definition
-#==============================================================================#
-
-# Astable multivibrator circuit built programmatically with the simple BJT model
-function build_astable_multivibrator(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-    if ctx === nothing
-        ctx = MNAContext()
-    else
-        reset_for_restamping!(ctx)
-    end
-
-    # Power supply
-    vcc = get_node!(ctx, :vcc)
-    stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-
-    # Q1 nodes
-    q1_coll = get_node!(ctx, :q1_coll)
-    q1_base = get_node!(ctx, :q1_base)
-
-    # Q2 nodes
-    q2_coll = get_node!(ctx, :q2_coll)
-    q2_base = get_node!(ctx, :q2_base)
-
-    # Collector resistors (Vcc to collectors)
-    stamp!(Resistor(params.Rc; name=:Rc1), ctx, vcc, q1_coll)
-    stamp!(Resistor(params.Rc; name=:Rc2), ctx, vcc, q2_coll)
-
-    # Base bias resistors (Vcc to bases)
-    stamp!(Resistor(params.Rb; name=:Rb1), ctx, vcc, q1_base)
-    stamp!(Resistor(params.Rb; name=:Rb2), ctx, vcc, q2_base)
-
-    # Cross-coupling capacitors (slight asymmetry for startup)
-    # C1: Q1 collector to Q2 base
-    stamp!(Capacitor(params.C1; name=:C1), ctx, q1_coll, q2_base)
-    # C2: Q2 collector to Q1 base
-    stamp!(Capacitor(params.C2; name=:C2), ctx, q2_coll, q1_base)
-
-    # BJT Q1: (base, emitter, collector)
-    stamp!(npnbjt(), ctx, q1_base, 0, q1_coll;
-           _mna_spec_=spec, _mna_x_=x)
-
-    # BJT Q2: (base, emitter, collector)
-    stamp!(npnbjt(), ctx, q2_base, 0, q2_coll;
-           _mna_spec_=spec, _mna_x_=x)
-
-    return ctx
+const mos1_path = joinpath(@__DIR__, "..", "vadistiller", "models", "mos1.va")
+const mos1_va = VerilogAParser.parsefile(mos1_path)
+if mos1_va.ps.errored
+    error("Failed to parse mos1.va")
 end
+Core.eval(@__MODULE__, CedarSim.make_mna_module(mos1_va))
+
+#==============================================================================#
+# Ring Oscillator SPICE Netlist
+#
+# 3-stage CMOS ring oscillator:
+# - Each stage is an inverter (NMOS + PMOS)
+# - Output of each stage drives the next
+# - Output of last stage feeds back to first stage
+#
+# Oscillation frequency ≈ 1 / (2 * n * t_delay)
+# where n = number of stages, t_delay = inverter delay
+#==============================================================================#
+
+const ring_osc_code = parse_spice_to_mna("""
+* 3-stage CMOS Ring Oscillator
+* Uses sp_mos1 with minimal parameters
+
+* Power supply
+Vdd vdd 0 DC 3.3
+
+* Stage 1: Inverter (in1 -> out1)
+* PMOS: type=-1, NMOS: type=1
+XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Stage 2: Inverter (out1 -> out2)
+XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Stage 3: Inverter (out2 -> in1) - feedback
+XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Load capacitors (represent gate capacitance and wiring)
+C1 out1 0 10f
+C2 out2 0 10f
+C3 in1 0 10f
+
+.END
+"""; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
+eval(ring_osc_code)
+
+#==============================================================================#
+# Tests
+#==============================================================================#
 
 @testset "Oscillator Tests" begin
 
-    @testset "BJT astable multivibrator" begin
-        # This test is marked as broken until initialization issues are resolved
-        @test_broken false  # Placeholder - oscillator simulation not yet working
+    @testset "3-stage CMOS ring oscillator" begin
+        # Create circuit
+        circuit = MNACircuit(ring_oscillator)
 
-        # The circuit definition and component values are preserved for future work:
-        # Rc = 470 Ohm (collector load)
-        # Rb = 20k Ohm (base bias)
-        # C ≈ 0.1uF (coupling capacitor, with slight asymmetry for startup)
-        # Vcc = 5V
-        # Expected frequency ≈ 1/(1.4 * 20e3 * 0.1e-6) ≈ 357 Hz
-        # Expected period ≈ 2.8ms
+        # Expected frequency estimation:
+        # For CMOS inverter, delay ~ C * Vdd / (Kp * (Vgs - Vt)^2)
+        # With C=10fF, roughly delay ~ 0.1-1ns per stage
+        # 3 stages oscillating at half period = 3 * delay, full period = 6 * delay
+        # Expected period ~ 1-10ns, frequency ~ 100MHz - 1GHz
+        expected_period_min = 0.5e-9  # 500ps
+        expected_period_max = 50e-9   # 50ns
 
-        # Uncomment below to attempt simulation (currently diverges):
-        #=
-        circuit = MNACircuit(build_astable_multivibrator;
-                             Vcc=5.0, Rc=470.0, Rb=20e3, C1=0.099e-6, C2=0.101e-6)
+        # Simulate for 200ns to observe oscillation
+        tspan = (0.0, 200e-9)
 
-        expected_period = 1.4 * 20e3 * 0.1e-6
-        tspan = (0.0, 15 * expected_period)
+        # Use Rodas5P solver with CedarUICOp initialization
+        # CedarUICOp uses pseudo-transient relaxation for oscillators without stable DC equilibrium
+        @info "Running ring oscillator transient simulation" tspan
+        sol = tran!(circuit, tspan;
+                    solver=Rodas5P(),
+                    initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                    abstol=1e-9, reltol=1e-6,
+                    dtmax=1e-9)
 
-        sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-6, reltol=1e-4,
-                    initializealg=CedarUICOp(warmup_steps=100, dt=1e-9))
         @test sol.retcode == SciMLBase.ReturnCode.Success
-        =#
+
+        sys = assemble!(circuit)
+        acc = MNASolutionAccessor(sol, sys)
+
+        # Sample output voltages in the last half of simulation (after startup transient)
+        t_start = 100e-9
+        t_end = 200e-9
+        n_samples = 1000
+        times = range(t_start, t_end; length=n_samples)
+
+        V_out1 = [voltage(acc, :out1, t) for t in times]
+        V_out2 = [voltage(acc, :out2, t) for t in times]
+        V_in1 = [voltage(acc, :in1, t) for t in times]
+
+        # Verify oscillation occurs - outputs should swing significantly
+        out1_min, out1_max = extrema(V_out1)
+        out2_min, out2_max = extrema(V_out2)
+        in1_min, in1_max = extrema(V_in1)
+
+        @info "Output voltage ranges" out1_min out1_max out2_min out2_max in1_min in1_max
+
+        # Check voltage swings are significant (at least 2V swing for 3.3V supply)
+        @test (out1_max - out1_min) > 2.0
+        @test (out2_max - out2_min) > 2.0
+        @test (in1_max - in1_min) > 2.0
+
+        # Check outputs reach near rail voltages
+        @test out1_max > 2.5  # Near Vdd
+        @test out1_min < 0.8  # Near ground
+        @test out2_max > 2.5
+        @test out2_min < 0.8
+
+        # Estimate frequency by counting zero crossings on out1
+        midpoint = (out1_max + out1_min) / 2
+        crossings = 0
+        for i in 2:n_samples
+            if (V_out1[i-1] < midpoint && V_out1[i] >= midpoint) ||
+               (V_out1[i-1] > midpoint && V_out1[i] <= midpoint)
+                crossings += 1
+            end
+        end
+
+        # Each period has 2 crossings, so frequency = crossings / (2 * duration)
+        duration = t_end - t_start
+        measured_freq = crossings / (2 * duration)
+        measured_period = 1 / measured_freq
+
+        @info "Frequency measurement" crossings measured_freq measured_period
+
+        # Check oscillation frequency is in reasonable range
+        @test measured_period > expected_period_min
+        @test measured_period < expected_period_max
+
+        # Verify phase relationship: out1, out2, in1 should be ~120° apart
+        # (each inverter adds 180° but with 3 stages total = 540° = 180° per stage)
+        # Actually for ring oscillator, each node is 360°/3 = 120° apart
+        # This is harder to test precisely, so just verify they're not in phase
+        correlation_12 = sum(V_out1 .* V_out2) / n_samples
+        correlation_23 = sum(V_out2 .* V_in1) / n_samples
+
+        # Normalized to check anti-correlation tendency
+        # For 120° phase shift, correlation should be negative (closer to -0.5)
+        mean_v = (out1_max + out1_min) / 2
+        V_out1_centered = V_out1 .- mean_v
+        V_out2_centered = V_out2 .- mean_v
+        normalized_corr = sum(V_out1_centered .* V_out2_centered) /
+                          sqrt(sum(V_out1_centered.^2) * sum(V_out2_centered.^2))
+
+        @info "Phase correlation" normalized_corr
+        # 120° phase shift gives correlation of cos(120°) = -0.5
+        @test normalized_corr < 0.5  # Not in phase
     end
 
 end
