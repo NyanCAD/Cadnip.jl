@@ -378,14 +378,15 @@ eval(ce_amplifier_code)
         @test V_collector > 2.0  # Not saturated
     end
 
-    # BROKEN: High voltage common emitter test - needs DC solver refactor with source stepping
-    # Issue: Initial guess from linear solve at x=0 gives Vbe=6V, causing exp(240) overflow
-    # The solver converges to wrong solution with V(emitter) ≈ 0
-    # TODO: Enable this test when source stepping is implemented in solve_dc
-    #=
-    @testset "Common emitter high voltage (needs source stepping)" begin
-        function ce_high_voltage_builder(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+    # High voltage common emitter test - previously needed source stepping but now works
+    # with explicit Jacobians in RobustMultiNewton
+    @testset "Common emitter high voltage" begin
+        function ce_high_voltage_builder(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vin = MNA.get_node!(ctx, :vin)
             vcc = MNA.get_node!(ctx, :vcc)
             collector = MNA.get_node!(ctx, :collector)
@@ -411,7 +412,6 @@ eval(ce_amplifier_code)
         @test isapprox(V_vin_h, 6.0; atol=1e-6)
         @test isapprox(V_vcc_h, 12.0; atol=1e-6)
 
-        # These should pass once source stepping is implemented
         # Vbe should be around 0.7V
         Vbe_h = V_vin_h - V_emitter_h
         @test Vbe_h > 0.6 && Vbe_h < 0.8
@@ -423,6 +423,5 @@ eval(ce_amplifier_code)
         @test V_collector_h < V_vcc_h
         @test V_collector_h > 5.0
     end
-    =#
 
 end  # testset "Audio Integration Tests"

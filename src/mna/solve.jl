@@ -271,6 +271,17 @@ using SciMLBase: MatrixOperator
 using ADTypes
 
 #==============================================================================#
+# DC Operating Point Solver
+#
+# Uses RobustMultiNewton which provides a well-tuned poly algorithm with
+# 6 trust region variants. The key improvement is using explicit Jacobians
+# from the G matrix rather than finite differencing.
+#
+# The explicit Jacobian is provided via NonlinearFunction's jac parameter,
+# so we use RobustMultiNewton() without autodiff - it will use our Jacobian.
+#==============================================================================#
+
+#==============================================================================#
 # Unified DC Solve
 #
 # The core Newton iteration (_dc_newton_compiled) is shared by:
@@ -330,6 +341,8 @@ This ensures the solution vector has exactly the same size as the detection cont
 which is critical for DAE/ODE problem creation where u0 must match differential_vars/mass_matrix size.
 
 The context is used to determine the system structure, then compiled for Newton iteration.
+
+Uses `RobustMultiNewton()` by default with explicit Jacobians from the G matrix.
 """
 function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
                             abstol::Real=1e-10, maxiters::Int=100,
