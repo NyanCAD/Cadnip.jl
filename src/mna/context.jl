@@ -343,6 +343,18 @@ end
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
 
 """
+    alloc_current!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol) -> CurrentIndex
+
+Component-based current allocation that builds the full name from components.
+Avoids Symbol interpolation at call site for use with DirectStampContext.
+For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+"""
+function alloc_current!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol)::CurrentIndex
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return alloc_current!(ctx, name)
+end
+
+"""
     resolve_index(ctx::MNAContext, idx::MNAIndex) -> Int
 
 Resolve an MNA index to an actual system row/column index.
@@ -451,6 +463,13 @@ end
 
 alloc_internal_node!(ctx::MNAContext, name::String) = alloc_internal_node!(ctx, Symbol(name))
 
+# Component-based version: builds Symbol from instance_name and base_name
+# For MNAContext, we concatenate: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+function alloc_internal_node!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol)::Int
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return alloc_internal_node!(ctx, name)
+end
+
 """
     is_internal_node(ctx::MNAContext, idx::Int) -> Bool
 
@@ -519,6 +538,18 @@ function alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int)::ChargeInd
 end
 
 alloc_charge!(ctx::MNAContext, name::String, p::Int, n::Int) = alloc_charge!(ctx, Symbol(name), p, n)
+
+"""
+    alloc_charge!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int) -> ChargeIndex
+
+Component-based charge allocation that builds the full name from components.
+Avoids Symbol interpolation at call site for use with DirectStampContext.
+For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+"""
+function alloc_charge!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int)::ChargeIndex
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return alloc_charge!(ctx, name, p, n)
+end
 
 """
     get_charge_idx(ctx::MNAContext, name::Symbol) -> ChargeIndex

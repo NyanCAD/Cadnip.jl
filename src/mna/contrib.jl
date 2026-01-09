@@ -257,6 +257,18 @@ end
 end
 
 """
+    detect_or_cached!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, V_branch::Real, Q::Real) -> Bool
+
+Component-based charge detection that builds the full name from components.
+Avoids Symbol interpolation at call site for use with DirectStampContext.
+For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+"""
+@inline function detect_or_cached!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, V_branch::Real, Q::Real)::Bool
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return detect_or_cached!(ctx, name, V_branch, Q)
+end
+
+"""
     detect_or_cached!(dctx::DirectStampContext, name::Symbol, V_branch::Real, Q::Real) -> Bool
 
 Counter-based lookup of cached charge detection result for DirectStampContext.
@@ -272,6 +284,19 @@ end
 
 # Legacy signature for DirectStampContext (used by stamp_reactive_with_detection!)
 @inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
+    pos = dctx.charge_detection_pos
+    dctx.charge_detection_pos = pos + 1
+    return dctx.charge_is_vdep[pos]
+end
+
+"""
+    detect_or_cached!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, V_branch::Real, Q::Real) -> Bool
+
+Component-based charge detection that avoids Symbol interpolation at call site.
+For DirectStampContext, both names are ignored - uses counter-based access.
+For MNAContext, this builds the full name from components.
+"""
+@inline function detect_or_cached!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, V_branch::Real, Q::Real)::Bool
     pos = dctx.charge_detection_pos
     dctx.charge_detection_pos = pos + 1
     return dctx.charge_is_vdep[pos]
