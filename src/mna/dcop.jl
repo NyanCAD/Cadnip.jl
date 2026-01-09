@@ -178,14 +178,38 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
         return  # Already converged
     end
 
-    # Create nonlinear function that evaluates with :dcop mode
-    nlf! = (out, u, nl_p) -> _eval_dae_dcop(out, du0, u, nl_p, alg)
+    # Use the SAME Newton solver as dc_solve_with_ctx for unified DC initialization
+    # The workspace p contains the CompiledStructure and can be used directly
+    ws = p::EvalWorkspace
 
-    nlprob = NonlinearProblem(nlf!, u0, p)
-    sol = bootstrapped_nlsolve(nlprob, alg.nlsolve, abstol)
+    # Switch to dcop/tranop mode for the solve
+    mode = alg isa CedarDCOp ? :dcop : :tranop
+    original_spec = ws.structure.spec
+    dc_spec = with_mode(original_spec, mode)
 
-    integrator.u .= sol.u
-    if sol.retcode != ReturnCode.Success
+    # Create a temporary compiled structure with dcop mode
+    # We need to use the same _dc_newton_compiled that dc! uses
+    cs_dcop = CompiledStructure(
+        ws.structure.builder,
+        ws.structure.params,
+        dc_spec,
+        ws.structure.n_nodes,
+        ws.structure.n_currents,
+        ws.structure.G,
+        ws.structure.C,
+        ws.structure.n_b_deferred
+    )
+
+    # Use zeros as initial guess (same as dc_solve_with_ctx)
+    u0_zeros = zeros(length(u0))
+
+    # Call the shared Newton iteration
+    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, u0_zeros;
+                                                abstol=abstol, maxiters=100,
+                                                nlsolve=alg.nlsolve)
+
+    integrator.u .= u_sol
+    if !converged
         @warn "DC operating point analysis failed. Further failures may follow."
         integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
     end
