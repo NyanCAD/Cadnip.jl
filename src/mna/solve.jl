@@ -1394,39 +1394,28 @@ The circuit is automatically compiled for ~10x faster evaluation.
 - `tspan`: Time span for simulation `(t0, tf)`
 
 # Keyword Arguments
-- `u0`: Initial state (default: DC solution)
+- `u0`: Initial state (default: computed by CedarDCOp during solve)
 
 # Solver Recommendations
 - Use `Rodas5P()` - fast Rosenbrock method, handles singular mass matrices
 - Use `RadauIIA5()` - fully implicit Runge-Kutta, very stable
 - Use `QNDF()` or `FBDF()` - BDF methods, good for stiff problems
 
-# Important: Constant Mass Matrix
-The mass matrix (C) is evaluated once at the initial DC operating point and
-remains constant during integration. This means:
-
-- **Fixed capacitors**: Work correctly - capacitance doesn't change
-- **Voltage-dependent capacitors** (junction capacitance, nonlinear caps):
-  Will be approximated using the initial capacitance value
-
-For circuits with voltage-dependent capacitance, use `DAEProblem` instead.
-The DAE formulation rebuilds both G and C matrices at each Newton iteration,
-correctly handling nonlinear capacitance.
+# Mass Matrix and Voltage-Dependent Capacitors
+The mass matrix C is constant during integration. Voltage-dependent capacitors
+(junction capacitance, nonlinear caps) are automatically handled via charge
+formulation - the detection pass rewrites `ddt(C(V)*V)` as `ddt(Q(V))` where
+Q is the charge state variable.
 
 # Example
 ```julia
-# Simple RC circuit with fixed capacitor
 circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
 prob = ODEProblem(circuit, (0.0, 1e-3))
 sol = solve(prob, Rodas5P())
-
-# For circuits with voltage-dependent capacitance, use DAEProblem:
-prob_dae = DAEProblem(circuit, (0.0, 1e-3))
-sol = solve(prob_dae, IDA())  # Correctly handles nonlinear C(V)
 ```
 
 # See Also
-- `DAEProblem(circuit, tspan)` - Recommended for nonlinear circuits with IDA
+- `DAEProblem(circuit, tspan)` - Alternative using Sundials IDA
 """
 function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, kwargs...)
     builder = circuit.builder
@@ -1435,27 +1424,24 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
 
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
+    # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
+    n = system_size(ctx)
 
-    # Get initial conditions via DC solve using the SAME detection context
-    # This ensures u0 has exactly the same size as the mass matrix.
-    if u0 === nothing
-        dc_spec = with_mode(base_spec, :dcop)
-        u0, _ = dc_solve_with_ctx(builder, params, dc_spec, ctx)
-    end
-
-    # Compile circuit structure using the same detection context
-    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
-    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
-    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
-    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
-    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
-    reset_for_restamping!(ctx)
-    builder(params, base_spec, 0.0; x=u0, ctx=ctx)
+    # Compile circuit structure using the detection context
+    # Structure (sparsity pattern) is correct from detection passes
+    # Note: Voltage-dependent capacitors are rewritten as charge formulation,
+    # so the C matrix is constant regardless of operating point.
+    # CedarDCOp will compute the actual DC operating point during solve()
     cs = compile_structure(builder, params, base_spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Initialize workspace at t=0 with the DC operating point
+    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
+    if u0 === nothing
+        u0 = zeros(n)
+    end
+
+    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
     fast_rebuild!(ws, u0, 0.0)
 
     # RHS function using EvalWorkspace with DirectStampContext
@@ -1477,11 +1463,7 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         return nothing
     end
 
-    # Note: Mass matrix cs.C is evaluated at the initial DC operating point and
-    # remains constant during integration. For voltage-dependent capacitance
-    # (junction capacitance), use DAEProblem instead - it rebuilds the C matrix
-    # at each step via fast_rebuild!.
-
+    # Mass matrix C is constant - voltage-dependent capacitors use charge formulation
     f = SciMLBase.ODEFunction(
         rhs!;
         mass_matrix = cs.C,

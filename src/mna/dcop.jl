@@ -225,9 +225,9 @@ end
 #==============================================================================#
 # OrdinaryDiffEq Integration (for ODE solvers with mass matrix)
 #
-# For ODE solvers, CedarDCOp performs the same DC solve to refine u0.
-# The u0 passed to ODEProblem is already a DC solution, but CedarDCOp can
-# refine it if needed.
+# For ODE solvers, CedarDCOp performs the DC solve to compute u0.
+# The mass matrix C is constant (voltage-dependent capacitors use charge
+# formulation), so initialization only needs to solve for the DC operating point.
 #==============================================================================#
 
 function SciMLBase.initialize_dae!(integrator::OrdinaryDiffEq.ODEIntegrator,
@@ -244,17 +244,6 @@ function SciMLBase.initialize_dae!(integrator::OrdinaryDiffEq.ODEIntegrator,
 
     u0 = integrator.u
     cs = ws.structure
-
-    # Check if u0 already satisfies the DC residual (same optimization as IDA path)
-    # This avoids redundant DC solve if ODEProblem already computed valid u0
-    tmp = similar(u0)
-    fast_rebuild!(ws, u0, 0.0)
-    mul!(tmp, cs.G, u0)
-    tmp .-= ws.dctx.b
-
-    if norm(tmp) < abstol
-        return  # Already converged - skip DC solve
-    end
 
     # Switch to dcop/tranop mode for the solve
     mode = alg isa CedarDCOp ? :dcop : :tranop
@@ -273,8 +262,8 @@ function SciMLBase.initialize_dae!(integrator::OrdinaryDiffEq.ODEIntegrator,
         cs.n_b_deferred
     )
 
-    # Use existing u0 as starting point (it's likely close to the solution)
-    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, copy(u0);
+    # Solve DC operating point using the simulation workspace
+    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, zeros(length(u0));
                                                 abstol=abstol, maxiters=100,
                                                 nlsolve=alg.nlsolve)
 
