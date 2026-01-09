@@ -350,7 +350,20 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
     nlprob = NonlinearProblem(nlfunc, u0)
 
     sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+
+    # Check convergence: Success is ideal, but for oscillators without true DC equilibrium,
+    # accept MaxIters if the residual is reasonably small (e.g., < 1e-2).
+    # This allows circuits like ring oscillators to initialize even without a true equilibrium.
     converged = sol.retcode == SciMLBase.ReturnCode.Success
+    if !converged && sol.retcode == SciMLBase.ReturnCode.MaxIters
+        # Check final residual - accept if "good enough" for initialization
+        residual!(resid, sol.u, nothing)
+        final_resid_norm = norm(resid)
+        if final_resid_norm < 1e-2
+            @info "DC solve reached MaxIters but residual norm $(final_resid_norm) is acceptable for initialization"
+            converged = true
+        end
+    end
 
     return sol.u, converged
 end
