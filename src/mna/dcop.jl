@@ -223,6 +223,59 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
 end
 
 #==============================================================================#
+# OrdinaryDiffEq Integration (for ODE solvers with mass matrix)
+#
+# For ODE solvers, CedarDCOp performs the same DC solve to refine u0.
+# The u0 passed to ODEProblem is already a DC solution, but CedarDCOp can
+# refine it if needed.
+#==============================================================================#
+
+function SciMLBase.initialize_dae!(integrator::OrdinaryDiffEq.ODEIntegrator,
+                                   alg::Union{CedarDCOp, CedarTranOp})
+    prob = integrator.sol.prob
+    abstol = min(integrator.opts.abstol, alg.abstol)
+
+    # For ODE problems, p is the EvalWorkspace
+    ws = prob.p
+    if !(ws isa EvalWorkspace)
+        # Not an MNA circuit - delegate to default
+        return
+    end
+
+    u0 = integrator.u
+
+    # Switch to dcop/tranop mode for the solve
+    mode = alg isa CedarDCOp ? :dcop : :tranop
+    original_spec = ws.structure.spec
+    dc_spec = with_mode(original_spec, mode)
+
+    # Create a temporary compiled structure with dcop mode
+    cs_dcop = CompiledStructure(
+        ws.structure.builder,
+        ws.structure.params,
+        dc_spec,
+        ws.structure.n_nodes,
+        ws.structure.n_currents,
+        ws.structure.G,
+        ws.structure.C,
+        ws.structure.n_b_deferred
+    )
+
+    # Call the shared Newton iteration
+    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, zeros(length(u0));
+                                                abstol=abstol, maxiters=100,
+                                                nlsolve=alg.nlsolve)
+
+    integrator.u .= u_sol
+    if !converged
+        @warn "DC operating point analysis failed. Further failures may follow."
+        integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
+    end
+
+    return
+end
+
+#==============================================================================#
 # Helper Functions for Mode Switching
 #==============================================================================#
 
