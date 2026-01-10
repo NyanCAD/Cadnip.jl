@@ -91,7 +91,6 @@ export sp_vdmos_module, sp_bsim3v3_module, sp_bsim4v8_module
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
 # 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
 # 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
-# Note: Complex models (BSIM3v3, BSIM4v8, VDMOS) skipped due to compile-time issues
 @compile_workload begin
     using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
@@ -113,41 +112,100 @@ export sp_vdmos_module, sp_bsim3v3_module, sp_bsim4v8_module
         fast_rebuild!(ws, zeros(cs.n), 0.0)
     end
 
-    # 2-terminal device builder template
-    function resistor_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
-        if ctx === nothing
-            ctx = MNAContext()
-        else
-            reset_for_restamping!(ctx)
-        end
-        n1 = get_node!(ctx, :n1)
+    # Helper to build stamp call with optional _mna_x_
+    function stamp_with_x!(dev, ctx, nodes...; spec, x, use_zero_vector)
         if use_zero_vector
-            stamp!(sp_resistor_module.sp_resistor(), ctx, n1, 0; _mna_spec_=spec)
+            stamp!(dev, ctx, nodes...; _mna_spec_=spec)
         else
-            stamp!(sp_resistor_module.sp_resistor(), ctx, n1, 0; _mna_spec_=spec, _mna_x_=x)
+            stamp!(dev, ctx, nodes...; _mna_spec_=spec, _mna_x_=x)
         end
-        return ctx
     end
-    precompile_device(resistor_builder, NamedTuple())
 
-    # 4-terminal MOSFET builder (most common usage)
-    function mos1_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
-        if ctx === nothing
-            ctx = MNAContext()
-        else
-            reset_for_restamping!(ctx)
+    # Generic builder factory for 2-terminal devices
+    function make_2term_builder(device_fn)
+        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            n1 = get_node!(ctx, :n1)
+            stamp_with_x!(device_fn(), ctx, n1, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            return ctx
         end
-        d = get_node!(ctx, :d)
-        g = get_node!(ctx, :g)
-        s = get_node!(ctx, :s)
-        if use_zero_vector
-            stamp!(sp_mos1_module.sp_mos1(), ctx, d, g, s, 0; _mna_spec_=spec)
-        else
-            stamp!(sp_mos1_module.sp_mos1(), ctx, d, g, s, 0; _mna_spec_=spec, _mna_x_=x)
-        end
-        return ctx
     end
-    precompile_device(mos1_builder, NamedTuple())
+
+    # Generic builder factory for 3-terminal devices (jfet, mes)
+    function make_3term_builder(device_fn)
+        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            d = get_node!(ctx, :d)
+            g = get_node!(ctx, :g)
+            stamp_with_x!(device_fn(), ctx, d, g, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            return ctx
+        end
+    end
+
+    # Generic builder factory for 4-terminal devices (mos, bjt)
+    function make_4term_builder(device_fn)
+        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            d = get_node!(ctx, :d)
+            g = get_node!(ctx, :g)
+            s = get_node!(ctx, :s)
+            stamp_with_x!(device_fn(), ctx, d, g, s, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            return ctx
+        end
+    end
+
+    # Generic builder factory for 5-terminal devices (vdmos)
+    function make_5term_builder(device_fn)
+        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            d = get_node!(ctx, :d)
+            g = get_node!(ctx, :g)
+            s = get_node!(ctx, :s)
+            tj = get_node!(ctx, :tj)
+            stamp_with_x!(device_fn(), ctx, d, g, s, 0, tj; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            return ctx
+        end
+    end
+
+    # 2-terminal devices
+    precompile_device(make_2term_builder(() -> sp_resistor_module.sp_resistor()), NamedTuple())
+    precompile_device(make_2term_builder(() -> sp_capacitor_module.sp_capacitor()), NamedTuple())
+    precompile_device(make_2term_builder(() -> sp_inductor_module.sp_inductor()), NamedTuple())
+    precompile_device(make_2term_builder(() -> sp_diode_module.sp_diode()), NamedTuple())
+
+    # 3-terminal devices (JFETs, MESFET)
+    precompile_device(make_3term_builder(() -> sp_jfet1_module.sp_jfet1()), NamedTuple())
+    precompile_device(make_3term_builder(() -> sp_jfet2_module.sp_jfet2()), NamedTuple())
+    precompile_device(make_3term_builder(() -> sp_mes1_module.sp_mes1()), NamedTuple())
+
+    # 4-terminal devices (BJT uses c,b,e,s but mapped to d,g,s,b positions)
+    precompile_device(make_4term_builder(() -> sp_bjt_module.sp_bjt()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_mos1_module.sp_mos1()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_mos2_module.sp_mos2()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_mos3_module.sp_mos3()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_mos6_module.sp_mos6()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_mos9_module.sp_mos9()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_bsim3v3_module.sp_bsim3v3()), NamedTuple())
+    precompile_device(make_4term_builder(() -> sp_bsim4v8_module.sp_bsim4v8()), NamedTuple())
+
+    # 5-terminal devices (VDMOS with thermal node)
+    precompile_device(make_5term_builder(() -> sp_vdmos_module.sp_vdmos()), NamedTuple())
 end
 
 end # module
