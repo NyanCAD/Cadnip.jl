@@ -18,7 +18,7 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!, CedarUICOp
+using CedarSim.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
@@ -240,9 +240,11 @@ eval(monostable_code)
                 circuit = MNACircuit(monostable_multivibrator)
                 tspan = (0.0, 1e-3)  # Short simulation to test initialization
 
-                # CedarDCOp with default maxiters=500 handles sp_bjt internal nodes
+                # sp_bjt has internal nodes (excess phase) that can't converge to tight
+                # tolerances, so use abstol=1e-3 for DC initialization
                 sol = tran!(circuit, tspan;
                             solver=Rodas5P(),
+                            initializealg=CedarDCOp(abstol=1e-3),
                             abstol=1e-6, reltol=1e-4,
                             dtmax=1e-4)
 

@@ -38,7 +38,7 @@ This is the recommended initialization algorithm for circuits with nonlinear
 devices (diodes, MOSFETs, voltage-dependent capacitors).
 
 # Arguments
-- `abstol`: Tolerance for the DC solve (default: 1e-6)
+- `abstol`: Tolerance for the DC solve (default: 1e-9)
 - `maxiters`: Maximum Newton iterations (default: 500). VA models with internal
   nodes (like BJT excess phase) may need more iterations to converge at tight
   tolerances.
@@ -61,7 +61,7 @@ struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     maxiters::Int
     nlsolve::NLSOLVE
 end
-CedarDCOp(;abstol=1e-6, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, maxiters, nlsolve)
+CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, maxiters, nlsolve)
 
 """
     CedarTranOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -74,7 +74,7 @@ struct CedarTranOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     maxiters::Int
     nlsolve::NLSOLVE
 end
-CedarTranOp(;abstol=1e-6, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, maxiters, nlsolve)
+CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, maxiters, nlsolve)
 
 """
     CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm
