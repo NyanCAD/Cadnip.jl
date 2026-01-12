@@ -612,6 +612,42 @@ end
 ```
 This is mathematically equivalent but may be simpler to implement.
 
+#### 5.3.1 Jacobian Analysis: Empirical Findings
+
+Running Jacobian analysis on a simple circuit with diodes and capacitors revealed:
+
+**System structure** (5 unknowns: 4 node voltages + 1 branch current):
+- G matrix condition number: **1.71e+03** (reasonable)
+- C matrix has 3 nonzeros (for 10 fF capacitors)
+
+**Key finding**: The |G|/|C| ratio shows the scaling problem:
+
+| Node | |G| (row norm) | |C| (row norm) | Ratio |G|/|C| |
+|------|---------------|---------------|----------------|
+| node1 | 2.45e-03 | 1.00e-14 | **2.45e+11** |
+| node2 | 2.45e-03 | 1.00e-14 | **2.45e+11** |
+| node3 | 2.24e-03 | 1.00e-14 | **2.24e+11** |
+
+With 10 fF capacitors and 1 kΩ resistors: G = 1e-3 S, C = 1e-14 F, ratio = 1e11.
+
+**SVD analysis** at solution point:
+```
+Max singular value: 1.00e+00
+Min singular value: 5.86e-04
+Condition ratio:    1.71e+03
+```
+The smallest singular values are associated with the voltage nodes (node2, node3),
+meaning small changes in the RHS can cause large changes in node voltages.
+
+**Implications for transient simulation**:
+- The DAE Jacobian is J = G + γC where γ = 1/Δt
+- With Δt ~ 1e-9 s (nanosecond timestep), γ ~ 1e9
+- The γC term dominates, improving conditioning during transient
+- But at small timesteps for stiff problems, the G/C mismatch remains significant
+
+**Recommendation**: Implement charge scaling (CHARGE_SCALE ~ 1e-12) to bring the
+C matrix entries to O(1) scale, making |G|/|C| ~ 1e0 instead of 1e11.
+
 ### 5.4 Runtime Convergence: Per-Iteration Voltage Limiting (Priority: High)
 
 **This is critical for transient simulation, not just DC init.**

@@ -11,6 +11,10 @@
 - **Use Julia 1.11** - this is what CI uses and what the Manifest.toml is locked to
   - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
   - Don't add compatibility hacks for older Julia versions
+- **VADistillerModels/PSPModels precompilation** may segfault in some environments
+  - Try single thread: `JULIA_NUM_PRECOMPILE_TASKS=1 ~/.juliaup/bin/julia --project=test`
+  - If still fails, use built-in MNA devices (Resistor, Capacitor, Diode) for testing
+  - The segfaults appear related to VA model compilation, not threading
 
 ## Development Guidelines
 
