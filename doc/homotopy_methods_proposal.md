@@ -111,6 +111,49 @@ Vd = $limit(V(anode, cathode), "pnjlim", Vt, Vcrit);
 
 **Not needed for SciML**: Contributing pnjlim to SciML is not appropriate - it's a circuit-domain heuristic, not a general numerical technique. SciML's trust regions and line searches serve the same purpose more generally.
 
+### Q4: Should the `gmin` kwarg in `assemble_G` be connected to `MNASpec.gmin`?
+
+**Short answer**: No - these are different things with different purposes.
+
+**Matrix-level GMIN** (`assemble_G(...; gmin=x)`):
+```julia
+# Changes the problem being solved:
+F(x) = (G + gmin·I) · x - b
+# Every node has a shunt resistor to ground
+# The equilibrium point is DIFFERENT from the original circuit
+```
+
+**LevenbergMarquardt damping** (in NonlinearSolve):
+```julia
+# Keeps the original problem:
+F(x) = G · x - b
+# Only the Newton step calculation changes:
+Δx = (J'J + λI)⁻¹ J' F   # λ regularizes Jacobian inversion only
+# If it converges, you get the TRUE circuit equilibrium
+```
+
+**Critical distinction**:
+| Aspect | Matrix GMIN | LM Damping |
+|--------|-------------|------------|
+| Changes residual | Yes | No |
+| Changes equilibrium | Yes (pulls nodes to 0V) | No |
+| Oscillators (no DC solution) | Creates fake equilibrium | Can't help - no solution exists |
+| Singular Jacobian | Regularizes problem | Regularizes inversion |
+
+**Why this matters for oscillators**: Ring oscillators have no DC equilibrium - LM can iterate forever because there's no solution to converge to. Matrix GMIN creates a fake (but stable) equilibrium by adding shunt resistors.
+
+**Recommendation**:
+1. **Keep `MNASpec.gmin`** for device-level GMIN (accessed via `$simparam("gmin")`) - this is physics-correct
+2. **Add a separate `matrix_gmin` parameter** for creating initial conditions:
+   ```julia
+   Base.@kwdef struct MNASpec{T<:Real}
+       gmin::Float64 = 1e-12       # Device-level GMIN (for VA models)
+       matrix_gmin::Float64 = 0.0  # Matrix diagonal GMIN (for oscillator init)
+       # ...
+   end
+   ```
+3. **Use matrix_gmin only for `:dcop` mode** when finding initial conditions for oscillators
+
 ## 1. ngspice Default Tolerances and Homotopy Methods
 
 ### 1.1 Default Tolerance Values (from `cktntask.c`)
