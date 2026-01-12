@@ -639,6 +639,63 @@ ckt->CKTdelta = ckt->CKTdelta / 8;  // Cut timestep by 8x on non-convergence
 ```
 DifferentialEquations.jl handles this automatically via adaptive stepping.
 
+#### 5.4.1 SciML Integration Challenges
+
+**The problem**: ngspice's limiting works because device load functions are called every Newton
+iteration and have access to `CKTstate0` (previous iteration's values). In SciML, the residual
+function `f!(F, u, p)` is a black box - there are no hooks into individual Newton iterations.
+
+**Potential approaches** (in order of practicality):
+
+1. **`limexp()` only (simplest)** - Doesn't need previous state, prevents overflow:
+   ```julia
+   limexp(x) = x < 80 ? exp(x) : exp(80) * (1 + x - 80)
+   ```
+   Benefit: Trivial to implement in `va_env.jl`. Limitation: Doesn't provide same convergence
+   benefits as pnjlim (which limits voltage change, not just exponential value).
+
+2. **Iterator interface for DC only** - Use `init()`/`step!()` for manual Newton control:
+   ```julia
+   cache = init(prob, NewtonRaphson())
+   u_prev = copy(cache.u)
+   for i in 1:maxiters
+       step!(cache)
+       apply_limiting!(cache.u, u_prev)
+       u_prev .= cache.u
+   end
+   ```
+   Works for DC operating point but doesn't integrate with OrdinaryDiffEq's implicit timesteppers.
+
+3. **`step_limiter!` callback** - Available on BDF methods (`FBDF`, `ABDF2`):
+   ```julia
+   FBDF(; step_limiter! = (u, integrator, p, t) -> apply_limiting!(u))
+   ```
+   But this is called *after* Newton converges at each timestep, not between Newton iterations.
+   Still useful for catching runaway solutions early.
+
+4. **Custom nonlinear solver** - Wrap NonlinearSolve.jl with limiting:
+   ```julia
+   struct LimitingNewton{ALG} <: AbstractNonlinearSolveAlgorithm
+       alg::ALG
+       junction_indices::Vector{Int}  # Which u indices are junction voltages
+   end
+   ```
+   Would need to implement the full solver interface, using iterator interface internally.
+
+5. **Reformulate equations** - Instead of `I = Is*(exp(V/Vt) - 1)`, use implicit form:
+   ```julia
+   # Clamp voltage in residual evaluation
+   V_safe = clamp(V, -40*Vt, 40*Vt)
+   I = Is*(exp(V_safe/Vt) - 1)
+   ```
+   Simple but changes the mathematical problem slightly.
+
+**Recommended approach**:
+1. Implement `limexp()` immediately (trivial, helps with overflow)
+2. Use `step_limiter!` for post-Newton limiting on BDF methods
+3. Consider opening a SciML issue requesting Newton iteration hooks for circuit simulation
+4. Long-term: Custom nonlinear solver wrapper with proper limiting
+
 ### 5.5 Implement NODESET Support (Priority: Low)
 
 Add initial guess hints for specific nodes:
