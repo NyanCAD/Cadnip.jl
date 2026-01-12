@@ -1397,7 +1397,10 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
 
     if explicit_jacobian
         jacobian! = make_workspace_dae_jacobian()
-        jac_prototype = cs.G + cs.C
+        # Use copy of G as jac_prototype since G and C share the unified sparsity pattern.
+        # Do NOT use cs.G + cs.C - numeric cancellation can drop entries and cause
+        # dimension mismatch errors with sparse solvers like KLU.
+        jac_prototype = copy(cs.G)
         f = SciMLBase.DAEFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
     else
         f = SciMLBase.DAEFunction(residual!)
