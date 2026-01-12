@@ -612,41 +612,48 @@ end
 ```
 This is mathematically equivalent but may be simpler to implement.
 
-#### 5.3.1 Jacobian Analysis: Empirical Findings
+#### 5.3.1 Jacobian Analysis: Ring Oscillator with MOS1
 
-Running Jacobian analysis on a simple circuit with diodes and capacitors revealed:
+Running Jacobian analysis on the 3-stage ring oscillator with sp_mos1 MOSFETs:
 
 **System structure** (5 unknowns: 4 node voltages + 1 branch current):
-- G matrix condition number: **1.71e+03** (reasonable)
-- C matrix has 3 nonzeros (for 10 fF capacitors)
+- G matrix condition number: **3.63e+11** (extremely ill-conditioned!)
+- Min singular value: **2.76e-12** (nearly singular)
+- C matrix has 16 nonzeros (MOS junction capacitances + load caps)
 
-**Key finding**: The |G|/|C| ratio shows the scaling problem:
+**Row-by-row analysis**:
 
-| Node | |G| (row norm) | |C| (row norm) | Ratio |G|/|C| |
-|------|---------------|---------------|----------------|
-| node1 | 2.45e-03 | 1.00e-14 | **2.45e+11** |
-| node2 | 2.45e-03 | 1.00e-14 | **2.45e+11** |
-| node3 | 2.24e-03 | 1.00e-14 | **2.24e+11** |
+| Node | |G| (row norm) | |C| (row norm) | |G|/|C| | Problem |
+|------|---------------|---------------|--------|---------|
+| in1  | 5.09e-06 | 1.00e-14 | 5.09e+08 | Low G |
+| out1 | **4.12e-12** | 1.00e-14 | 4.12e+02 | **G ≈ gmin** |
+| vdd  | 1.00e+00 | 0 | ∞ | Voltage source |
+| out2 | **1.83e-11** | 1.00e-14 | 1.83e+03 | **G ≈ gmin** |
+| I_vdd| 1.00e+00 | 0 | ∞ | Branch current |
 
-With 10 fF capacitors and 1 kΩ resistors: G = 1e-3 S, C = 1e-14 F, ratio = 1e11.
+**Critical insight**: The rows for out1 and out2 have G values ~1e-11 to 1e-12.
+This is because at the initial operating point (V=0), all MOSFETs are in cutoff
+and their conductances are essentially just gmin (1e-12 S).
 
-**SVD analysis** at solution point:
-```
-Max singular value: 1.00e+00
-Min singular value: 5.86e-04
-Condition ratio:    1.71e+03
-```
-The smallest singular values are associated with the voltage nodes (node2, node3),
-meaning small changes in the RHS can cause large changes in node voltages.
+**Why the ring oscillator is hard**:
+1. **No stable DC point**: Ring oscillator is inherently unstable - it has no equilibrium
+2. **Cutoff MOSFETs**: At x=0, all MOSFETs are off, so KCL equations only have gmin terms
+3. **Feedback loop**: The output of each inverter feeds the next, creating circular dependency
+4. **Near-singular Jacobian**: Without GMIN stepping, Newton iteration fails immediately
 
-**Implications for transient simulation**:
-- The DAE Jacobian is J = G + γC where γ = 1/Δt
-- With Δt ~ 1e-9 s (nanosecond timestep), γ ~ 1e9
-- The γC term dominates, improving conditioning during transient
-- But at small timesteps for stiff problems, the G/C mismatch remains significant
+**This explains the need for GMIN stepping**:
+- At u=0, the Jacobian is nearly singular (κ = 3.6e11)
+- Adding diagGmin = 0.01 S would change condition number to ~100
+- As GMIN ramps down, the MOSFETs gradually turn on and provide conductance
 
-**Recommendation**: Implement charge scaling (CHARGE_SCALE ~ 1e-12) to bring the
-C matrix entries to O(1) scale, making |G|/|C| ~ 1e0 instead of 1e11.
+**Comparison with simple RC circuit**:
+- Simple RC with diodes: κ = 1.7e3 (well-conditioned)
+- Ring oscillator with MOSFETs: κ = 3.6e11 (ill-conditioned)
+
+The difference is the MOSFET in cutoff vs the diode which always has some conductance.
+
+**Recommendation**: GMIN stepping is essential for DC convergence. Source stepping
+alone won't help because the problem is the Jacobian singularity, not the source values.
 
 ### 5.4 Runtime Convergence: Per-Iteration Voltage Limiting (Priority: High)
 
