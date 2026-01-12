@@ -193,17 +193,42 @@ ngspice implements a **sequential fallback chain** in `CKTop()`:
 3. Source Stepping (srcFact: 0 → 1)
 ```
 
-**Key clarification**: There is no separate "gshunt stepping". The `gshunt` parameter is simply the **target floor** for GMIN stepping. When `gshunt > 0`, GMIN stepping ramps `diagGmin` down to `gshunt` instead of `gmin`.
+**Key clarification**: There is no separate "gshunt stepping". The `gshunt` parameter is simply the **target floor** for GMIN stepping. When `gshunt > 0`, GMIN stepping ramps `diagGmin` down to `gshunt` instead of to 0.
 
 **Defaults** (from `cktntask.c`):
 - `numGminSteps = 1` → use `dynamic_gmin` (adaptive)
 - `numSrcSteps = 1` → use `gillespie_src` (adaptive)
+- `gmin = 1e-12` (device-level)
+- `gshunt = 0` (matrix diagonal target)
 
 #### 1.2.1 GMIN Stepping (diagGmin homotopy)
 
-This is a **matrix regularization homotopy**:
+This is a **matrix diagonal regularization homotopy** — it does NOT change device-level gmin.
+
+**Where diagGmin is applied** (from `spsmp.c:LoadGmin`):
+```c
+// Called before matrix factorization in SMPluFac() and SMPreorder()
+if (Gmin != 0.0) {
+    for (I = Matrix->Size; I > 0; I--) {
+        if ((diag = Diag[I]) != NULL)
+            diag->Real += Gmin;  // Add diagGmin to matrix diagonal
+    }
+}
+```
+
+**Three separate things**:
+| Parameter | Default | What it controls |
+|-----------|---------|------------------|
+| `CKTgmin` | 1e-12 | Device-level: `gd += gmin` in device load functions |
+| `CKTdiagGmin` | 0 | Matrix diagonal: added during LU factorization |
+| `CKTgshunt` | 0 | Target floor for diagGmin after stepping completes |
+
+**During GMIN stepping**: `diagGmin` ramps from 0.01 → MAX(gmin, gshunt)
+**After stepping**: `diagGmin = gshunt` (default 0, so no matrix diagonal shunt)
+**Always**: Native devices use `gmin` (1e-12) in their load functions
+
 - **Homotopy parameter**: `diagGmin` ∈ [0.01, MAX(gmin, gshunt)]
-- **Effect**: Adds `diagGmin` to every diagonal element of G matrix
+- **Effect**: Adds `diagGmin` to every diagonal element of G matrix via `LoadGmin()`
 - **Physics**: Equivalent to shunt resistor `1/diagGmin` from each node to ground
 
 Two variants:
@@ -227,9 +252,19 @@ Algorithm (dynamic_gmin):
 
 #### 1.2.2 Source Stepping (srcFact homotopy)
 
-This is a **parameter continuation homotopy**:
+This is a **parameter continuation homotopy** — it scales the RHS (b vector).
+
+**Where srcFact is applied** (from device load functions):
+```c
+// isrcload.c:53 - current sources
+value = here->ISRCdcValue * ckt->CKTsrcFact;
+
+// vsrcload.c - voltage sources
+value = here->VSRCdcValue * ckt->CKTsrcFact;
+```
+
 - **Homotopy parameter**: `srcFact` ∈ [0, 1]
-- **Effect**: All source values multiplied by `srcFact`
+- **Effect**: All source values multiplied by `srcFact` (scales b vector contributions)
 - **Physics**: Gradually "turns on" the circuit from zero-source state
 
 Two variants:
