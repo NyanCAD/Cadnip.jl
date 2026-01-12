@@ -21,14 +21,16 @@ using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
+using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
 # Solvers to test
+# All solvers use KLU sparse linear solver for optimal circuit simulation performance
 const SOLVERS = [
-    ("IDA", () -> IDA(max_error_test_failures=20)),
-    ("FBDF", () -> FBDF()),
-    ("Rodas5P", () -> Rodas5P()),
+    ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20)),
+    ("FBDF", () -> FBDF(linsolve=KLUFactorization())),
+    ("Rodas5P", () -> Rodas5P(linsolve=KLUFactorization())),
 ]
 
 # Results storage

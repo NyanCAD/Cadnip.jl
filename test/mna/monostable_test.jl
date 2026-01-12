@@ -35,6 +35,7 @@ using CedarSim.MNA: voltage, assemble!, CedarDCOp, CedarUICOp
 using SciMLBase
 using CedarSim: tran!, parse_spice_to_mna
 using OrdinaryDiffEq: Rodas5P
+using LinearSolve: KLUFactorization
 
 #==============================================================================#
 # Define simplified Ebers-Moll BJT (no internal nodes)
@@ -123,7 +124,7 @@ eval(monostable_code)
 
         # Use CedarDCOp - works reliably for simple BJT model
         sol = tran!(circuit, tspan;
-                    solver=Rodas5P(),
+                    solver=Rodas5P(linsolve=KLUFactorization()),
                     initializealg=CedarDCOp(),
                     abstol=1e-8, reltol=1e-6,
                     dtmax=1e-4)

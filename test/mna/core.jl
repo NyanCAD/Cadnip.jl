@@ -37,6 +37,7 @@ using CedarSim
 using CedarSim: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
 using CedarSim.MNA: MNACircuit, MNASpec, CedarUICOp
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+using LinearSolve: KLUFactorization
 import Sundials
 using VerilogAParser
 
@@ -856,7 +857,7 @@ using VerilogAParser
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
         # Solve with stiff solver (Rodas5 handles mass matrices well)
-        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -976,7 +977,7 @@ using VerilogAParser
                         jac_prototype = prob_data.jac_prototype)
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
-        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1052,7 +1053,7 @@ using VerilogAParser
                         jac_prototype = prob_data.jac_prototype)
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
-        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1104,7 +1105,7 @@ using VerilogAParser
                             jac = prob_ode.jac,
                             jac_prototype = prob_ode.jac_prototype)
         ode_prob = ODEProblem(f_ode, prob_ode.u0, prob_ode.tspan)
-        sol_ode = solve(ode_prob, Rodas5P(); reltol=1e-10, abstol=1e-12)
+        sol_ode = solve(ode_prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-10, abstol=1e-12)
 
         # Solve with DAE using Brown's initialization
         dae_data = make_dae_problem(sys, tspan; u0=u0)
@@ -1246,7 +1247,7 @@ using VerilogAParser
                         jac = ode_data.jac,
                         jac_prototype = ode_data.jac_prototype)
         prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
-        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1361,8 +1362,8 @@ using VerilogAParser
         τ_fast = circuit.params.R * circuit.params.C  # 1ms
         τ_slow = circuit_modified.params.R * circuit_modified.params.C  # 4ms
 
-        sol_fast = tran!(circuit, (0.0, 5τ_fast); solver=Rodas5P())
-        sol_slow = tran!(circuit_modified, (0.0, 5τ_slow); solver=Rodas5P())
+        sol_fast = tran!(circuit, (0.0, 5τ_fast); solver=Rodas5P(linsolve=KLUFactorization()))
+        sol_slow = tran!(circuit_modified, (0.0, 5τ_slow); solver=Rodas5P(linsolve=KLUFactorization()))
 
         # Both should start at steady state (DC-initialized)
         @test sol_fast(0.0)[2] ≈ 5.0 rtol=1e-3
@@ -1492,7 +1493,7 @@ using VerilogAParser
 
         ode_fn = ODEFunction(f!; mass_matrix=M, jac=jac!, jac_prototype=jac_proto)
         prob = ODEProblem(ode_fn, u0, tspan)
-        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1686,7 +1687,7 @@ using VerilogAParser
         @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
 
         # Test tran!(circuit, tspan) with ODE solver (Rodas5P)
-        ode_sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P())
+        ode_sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(linsolve=KLUFactorization()))
         @test ode_sol.retcode == ReturnCode.Success
 
         # Wrap for symbolic access
@@ -1749,7 +1750,7 @@ using VerilogAParser
         @test node_ref.path == [:x1]
 
         # Test with tran! using ODE solver
-        ode_sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P())
+        ode_sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P(linsolve=KLUFactorization()))
         acc = MNASolutionAccessor(ode_sol, sys)
 
         # Access via NodeRef
@@ -1905,7 +1906,7 @@ using VerilogAParser
         circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0))
         prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
-        sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1952,7 +1953,7 @@ using VerilogAParser
         circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0))
         prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
-        sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
         @test sol.retcode == ReturnCode.Success
 
@@ -2013,7 +2014,7 @@ using VerilogAParser
         @test sol_ida.retcode == ReturnCode.Success
 
         # Test with Rodas5P (Rosenbrock ODE solver)
-        sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
+        sol_rodas = tran!(circuit, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-10, reltol=1e-8)
         @test sol_rodas.retcode == ReturnCode.Success
 
         # Test with QNDF (BDF ODE solver - supports variable mass matrices)
@@ -2069,7 +2070,7 @@ using VerilogAParser
         τ = 1e-9 * 1000.0  # RC time constant = 1μs
 
         @testset "ODE path (Rodas5P)" begin
-            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(), initializealg=CedarUICOp())
+            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(linsolve=KLUFactorization()), initializealg=CedarUICOp())
             @test sol.retcode == ReturnCode.Success
             # After 5τ, capacitor should be mostly charged to 5V (>99%)
             @test sol(5τ)[2] > 4.9  # out voltage
@@ -2082,7 +2083,7 @@ using VerilogAParser
         end
 
         @testset "Custom parameters" begin
-            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(),
+            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(linsolve=KLUFactorization()),
                         initializealg=CedarUICOp(warmup_steps=20, dt=1e-11))
             @test sol.retcode == ReturnCode.Success
         end

@@ -1,6 +1,7 @@
 using Accessors
 using AxisKeys
 using OrdinaryDiffEq, SciMLBase, Sundials
+using LinearSolve: KLUFactorization
 using Base.Iterators
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
@@ -489,11 +490,12 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
     # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
     # Key settings:
+    # - linear_solver=:KLU: Sparse direct solver, much faster than dense for circuits
     # - max_error_test_failures=20: Allows more retries at difficult points (like t=0 with
     #   time-dependent sources). Default of 7 is often too low for circuits.
     # - max_nonlinear_iters=10: More Newton iterations for nonlinear devices
     if solver === nothing
-        solver = Sundials.IDA(max_error_test_failures=20, max_nonlinear_iters=10)
+        solver = Sundials.IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=10)
     end
 
     # Dispatch based on solver type

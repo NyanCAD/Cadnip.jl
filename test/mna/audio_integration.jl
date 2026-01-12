@@ -25,6 +25,7 @@ using CedarSim.MNA: voltage, current, assemble!
 using CedarSim: tran!, parse_spice_to_mna, CircuitSweep, Sweep
 using OrdinaryDiffEq
 using SciMLBase
+using LinearSolve: KLUFactorization
 
 include(joinpath(@__DIR__, "..", "common.jl"))
 
@@ -180,7 +181,7 @@ eval(ce_amplifier_code)
         period = 1.0 / freq
         tspan = (0.0, 5 * period)
 
-        sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
+        sol = tran!(circuit, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
         @test sol.retcode == ReturnCode.Success
 
         # Access results
@@ -232,7 +233,7 @@ eval(ce_amplifier_code)
         cs = CircuitSweep(ce_amplifier, sweep; vac=0.001, freq=freq)
 
         # Run transient sweep - returns vector of solutions
-        solutions = tran!(cs, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
+        solutions = tran!(cs, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
 
         gains = Float64[]
         for (sol, circuit) in zip(solutions, cs)
@@ -286,7 +287,7 @@ eval(ce_amplifier_code)
             period = 1.0 / freq
             tspan = (0.0, 10 * period)
 
-            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
+            sol = tran!(circuit, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
 
             if sol.retcode == ReturnCode.Success
                 sys = assemble!(circuit)

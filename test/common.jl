@@ -8,6 +8,7 @@ using Random
 using OrdinaryDiffEq
 using SciMLBase
 using Sundials
+using LinearSolve: KLUFactorization
 
 const deftol = 1e-8
 
@@ -150,7 +151,7 @@ function solve_mna_circuit(builder; params=(;), temp::Real=27.0)
 end
 
 """
-    tran_mna_circuit(builder, tspan; params=(;), temp=27.0, solver=Rodas5P()) -> (ctx, sol)
+    tran_mna_circuit(builder, tspan; params=(;), temp=27.0, solver=Rodas5P(linsolve=KLUFactorization())) -> (ctx, sol)
 
 Build and solve a transient simulation using MNA backend.
 
@@ -168,7 +169,7 @@ end
 ctx, sol = tran_mna_circuit(rc_circuit, (0.0, 1e-3); params=(V=5.0, R=1000.0, C=1e-6))
 ```
 """
-function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, solver=Rodas5P())
+function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, solver=Rodas5P(linsolve=KLUFactorization()))
     spec = MNASpec(temp=Float64(temp), mode=:tran)
     ctx = builder(params, spec)
     sys = assemble!(ctx)

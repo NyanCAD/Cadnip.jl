@@ -7,6 +7,7 @@ using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Capacitor, MNACircuit
 using CedarSim: dc!
 using OrdinaryDiffEq
+using LinearSolve: KLUFactorization
 using Test
 
 # Simple Verilog-A Resistor for smoke testing
@@ -62,7 +63,7 @@ endmodule
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
     # At t=0, V_out = 0
     @test isapprox(sol_tran.u[1][out_idx], 0.0; atol=1e-6)
@@ -131,7 +132,7 @@ endmodule
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
 
     # Current through resistor should still be non-negative
     # (The reversed I(n,p) <+ V(n,p)/R is mathematically equivalent)

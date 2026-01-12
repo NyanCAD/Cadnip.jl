@@ -20,6 +20,7 @@ using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
+using LinearSolve: KLUFactorization
 using VerilogAParser
 
 const deftol = 1e-6
@@ -117,7 +118,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                             jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
             prob = ODEProblem(f, u0, prob_data.tspan)
-            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+            sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
             # Check RC charging: V_cap(t) = V * (1 - e^(-t/τ))
             @test isapprox(sol.u[1][cap_idx], 0.0; atol=1e-6)
@@ -460,7 +461,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 jac=prob_data.jac,
                 jac_prototype=prob_data.jac_prototype)
             prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
-            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+            sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
             @test sol.retcode == SciMLBase.ReturnCode.Success
         end
@@ -601,7 +602,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 jac=prob_data.jac,
                 jac_prototype=prob_data.jac_prototype)
             prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
-            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+            sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
             @test sol.retcode == SciMLBase.ReturnCode.Success
         end

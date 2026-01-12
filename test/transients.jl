@@ -57,7 +57,7 @@ const r_val_pwl = 2
     spec = MNASpec(temp=27.0, mode=:tran, time=0.0)
     circuit = Base.invokelatest(MNACircuit, builder, (;), spec)
     prob = Base.invokelatest(ODEProblem, circuit, tspan)
-    sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6)
+    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6)
 
     # Get node index for vout
     dc_spec = MNASpec(temp=27.0, mode=:dcop, time=0.0)
@@ -90,7 +90,7 @@ const r_val_pwl = 2
 
     circuit2 = MNACircuit(PWLIRcircuit, (;), MNASpec(temp=27.0))
     prob2 = ODEProblem(circuit2, tspan)
-    sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
+    sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Check direct API matches
     for (i, t) in enumerate(sol2.t)
@@ -177,7 +177,7 @@ const ω_val = 1
     n = CedarSim.MNA.system_size(circuit)
     u0 = zeros(n)
     prob = Base.invokelatest(ODEProblem, circuit, tspan; u0=u0)
-    sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
+    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get node index for vout
     vout_idx = findfirst(n -> n == :vout, sys.node_names)
@@ -215,7 +215,7 @@ const ω_val = 1
     n2 = CedarSim.MNA.system_size(circuit2)
     u0_2 = zeros(n2)
     prob2 = ODEProblem(circuit2, tspan; u0=u0_2)
-    sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
+    sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get vout index from direct API circuit
     ctx2 = butterworth_circuit((;), CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0), 0.0)

@@ -1,6 +1,7 @@
 module sensitivity
 using Test
 using CedarSim, OrdinaryDiffEq, SciMLSensitivity, DAECompiler
+using LinearSolve: KLUFactorization
 using CedarSim.VectorPrisms: AbstractRecordVector
 using CedarSim.SpectreEnvironment
 using SpectreNetlistParser
@@ -29,7 +30,7 @@ const V(v) = CedarSim.VoltageSource(dc=v)
     sys = CircuitIRODESystem(circuit);
 
     sprob = ODEForwardSensitivityProblem(sys, nothing, (0.0, 1e-5), circuit)
-    sol = solve(sprob, Rodas5P(autodiff=false))
+    sol = solve(sprob, Rodas5P(autodiff=false, linsolve=KLUFactorization()))
     dt, (dR1, dR2) = extract_local_sensitivities(sol)
 
     # Sensibility tests
@@ -55,7 +56,7 @@ end
     sys = CircuitIRODESystem(circuit);
 
     sprob = ODEForwardSensitivityProblem(sys, nothing, (0.0, 1e-5), circuit)
-    sol = solve(sprob, Rodas5P(autodiff=false))
+    sol = solve(sprob, Rodas5P(autodiff=false, linsolve=KLUFactorization()))
     dt, (dR1,) = extract_local_sensitivities(sol)
     
     # Sensibility tests
@@ -83,7 +84,7 @@ end
     circuit = ParamSim(eval(circuit_code), var"i_val" = 20e-12)
     sys = CircuitIRODESystem(circuit)
     sprob = ODEForwardSensitivityProblem(sys, nothing, (0.0, 8e-3), circuit)
-    sol = solve(sprob, Rodas5P(autodiff=false))
+    sol = solve(sprob, Rodas5P(autodiff=false, linsolve=KLUFactorization()))
 
     # TODO: write better tests for this
     @test length(sol.t) > 0
