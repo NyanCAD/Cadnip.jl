@@ -411,12 +411,24 @@ From test files:
 
 ### 4.3 Comparison of Failure Modes
 
+**DC Initialization Issues**:
+
 | Issue | ngspice Handling | Cadnip.jl Current |
 |-------|------------------|-------------------|
-| Singular Jacobian | GMIN to devices + diagonal | GMIN diagonal only |
-| No DC equilibrium | Source stepping to ramp | PseudoTransient, CedarUICOp warmup |
-| Exponential overflow | Junction voltage limiting | Backtracking linesearch |
+| Singular Jacobian | GMIN to devices + diagGmin | GMIN to gmin_stamp only |
+| No DC equilibrium | diagGmin stepping + source stepping | PseudoTransient (not equivalent) |
 | Metastable states | NODESET hints | Not implemented |
+
+**Runtime (Transient) Issues**:
+
+| Issue | ngspice Handling | Cadnip.jl Current |
+|-------|------------------|-------------------|
+| Exponential overflow | Per-iteration limiting (pnjlim/fetlim) | **Not implemented** |
+| Large Newton steps | Per-device voltage limiting | Backtracking linesearch (global only) |
+| Non-convergence | Timestep cut by 8x | DiffEq adaptive stepping |
+
+**Key gap**: ngspice's per-iteration limiting is device-aware (limits Vbe, Vbc, Vds separately).
+Our backtracking linesearch is global and doesn't know which voltages are junction voltages.
 
 ## 5. Proposed Improvements
 
@@ -570,30 +582,62 @@ function stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
 end
 ```
 
-### 5.4 Junction Voltage Limiting (Priority: Medium)
+### 5.4 Runtime Convergence: Per-Iteration Voltage Limiting (Priority: High)
 
-ngspice uses `DEVpnjlim()` to limit voltage changes across PN junctions to prevent exponential overflow:
+**This is critical for transient simulation, not just DC init.**
+
+ngspice calls limiting functions **every Newton iteration** in device load functions:
+
+```c
+// bjtload.c:384-391 - called EVERY Newton iteration
+vbe = DEVpnjlim(vbe, *(ckt->CKTstate0 + here->BJTvbe), vt, vcrit, &icheck);
+vbc = DEVpnjlim(vbc, *(ckt->CKTstate0 + here->BJTvbc), vt, vcrit, &ichk1);
+```
+
+The `vold` comes from the **state vector** (previous iteration), not initial guess.
+
+**Three limiting functions** (from `devsup.c`):
+
+| Function | What it limits | Used by |
+|----------|----------------|---------|
+| `DEVpnjlim()` | PN junction voltage | Diodes, BJTs |
+| `DEVfetlim()` | FET gate voltage | MOSFETs |
+| `DEVlimvds()` | Drain-source voltage | MOSFETs |
+
+**Why this matters for ring oscillator**: During transient, large Newton steps can push internal BJT/diode voltages to extreme values, causing `exp(V/Vt)` overflow. Limiting prevents this.
+
+**Implementation approach for Cadnip.jl**:
+
+1. **Implement `$limit()` in vasim.jl** - VA models can use `$limit(V, "pnjlim", Vt, Vcrit)`
+2. **Store previous iteration voltages** - Need state vector for `vold`
+3. **Implement `limexp()` in va_env.jl** - Limited exponential function
 
 ```julia
+# limexp: limited exponential to prevent overflow
+limexp(x) = x < 80.0 ? exp(x) : exp(80.0) * (1.0 + x - 80.0)
+
+# pnjlim: limit PN junction voltage change per iteration
 function pnjlim(vnew, vold, vt, vcrit)
-    # Limit voltage change to ~2-3 thermal voltages per iteration
     if vnew > vcrit && abs(vnew - vold) > 2 * vt
         if vold > 0
             arg = (vnew - vold) / vt
-            if arg > 0
-                vnew = vold + vt * (2 + log(arg - 2))
-            else
-                vnew = vold - vt * (2 + log(2 - arg))
-            end
+            vnew = arg > 0 ? vold + vt * (2 + log(arg - 2)) : vold - vt * (2 + log(2 - arg))
         else
             vnew = vt * log(vnew / vt)
         end
+    elseif vnew < 0
+        arg = vold > 0 ? -vold - 1 : 2 * vold - 1
+        vnew = max(vnew, arg)
     end
-    return vnew, vnew != vold
+    return vnew
 end
 ```
 
-This should be integrated into the Backtracking linesearch or as a separate step.
+**Also needed: timestep control on non-convergence** (from `dctran.c:802`):
+```c
+ckt->CKTdelta = ckt->CKTdelta / 8;  // Cut timestep by 8x on non-convergence
+```
+DifferentialEquations.jl handles this automatically via adaptive stepping.
 
 ### 5.5 Implement NODESET Support (Priority: Low)
 
