@@ -4,6 +4,113 @@
 
 This document analyzes homotopy methods used in ngspice and VACASK, compares them with Cadnip.jl's current implementation, and proposes improvements for solving challenging circuits like ring oscillators and astable multivibrators.
 
+## 0. Key Questions and Answers
+
+### Q1: Is the `gmin_stamp` in vasim.jl a hack that should be removed?
+
+**Context**: In `vasim.jl:1789-1794`, GMIN (1e-12 S) is stamped from internal VA nodes to ground:
+
+```julia
+# vasim.jl:1791-1794
+if $int_param != 0
+    CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, 1e-12)
+end
+```
+
+**Analysis**: This is actually correct SPICE behavior for *internal* nodes:
+- Internal nodes (created by the VA model, not user-visible) often have no DC path
+- Example: Excess phase modeling nodes, noise correlation nodes
+- Without GMIN, these create singular Jacobians
+
+**Recommendation**: Keep it, but consider making it spec-controlled:
+```julia
+CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
+```
+
+This is different from the **device-level GMIN** ngspice adds to junction conductances. That should be done in the device model itself via `$simparam("gmin")`.
+
+### Q2: Does our GMIN/source stepping have advantages over SciML methods?
+
+**Short answer**: They solve different problems at different levels.
+
+| Level | ngspice/SPICE | SciML/Cadnip.jl | Equivalent? |
+|-------|---------------|-----------------|-------------|
+| **Device-level GMIN** | `gd += gmin` in device code | `$simparam("gmin")` in VA models | Yes, VA models can access gmin |
+| **Matrix-level GMIN** | `CKTdiagGmin` added to diagonal | `assemble_G(...; gmin=1e-12)` | Yes, but unused currently |
+| **GMIN stepping** | Ramp GMIN from 0.01→1e-12 | `LevenbergMarquardt` damping | Similar effect, different mechanism |
+| **Source stepping** | Ramp srcFact from 0→1 | `PseudoTransient` continuation | Similar but not identical |
+
+**Key insight**: LevenbergMarquardt's `(J + λI)⁻¹` regularization and ngspice's GMIN stepping `(J + gmin·I)⁻¹` are mathematically similar. LM actually provides more sophisticated adaptive damping.
+
+**Advantages of SciML approach**:
+1. **Automatic adaptation**: LM adjusts damping based on trust region, not fixed geometric progression
+2. **Multiple algorithm fallback**: RobustMultiNewton tries 6 variants before LM and PseudoTransient
+3. **No circuit modification**: Doesn't require rebuilding circuit with different gmin values
+
+**Advantages of SPICE approach**:
+1. **Physics-based**: Device-level GMIN maintains physical interpretation (leakage current)
+2. **Separate control**: Can tune GMIN stepping independently of Newton damping
+3. **Proven reliability**: 40+ years of production use
+
+**Recommendation**: Leverage SciML solvers, but add device-level GMIN support for models that expect it (via `$simparam("gmin")`).
+
+### Q3: Where should pnjlim be implemented?
+
+**ngspice implementation**: `DEVpnjlim()` is a **C helper function** in `devsup.c` called by device load functions:
+
+```c
+// bjtload.c example
+vbe = DEVpnjlim(vbe, *(ckt->CKTstate0 + here->BJTvbe),
+                vt, here->BJTtVcrit, &Check);
+```
+
+This limits voltage **before** evaluating the exponential - it's a Newton step limiter, not a math function.
+
+**Verilog-A has `$limit`**: The `$limit` system function is the VA equivalent:
+```verilog
+Vd = $limit(V(anode, cathode), "pnjlim", Vt, Vcrit);
+```
+
+**Cadnip.jl current state**:
+- `$limit` is parsed but **not implemented** (returns voltage unchanged in `vasim.jl:662-668`)
+- `limexp` is a reserved keyword but **not implemented**
+
+**Implementation levels**:
+
+| Function | Level | Where to implement |
+|----------|-------|-------------------|
+| `DEVpnjlim()` | SPICE device code | N/A - we use VA not SPICE models |
+| `$limit(V, "pnjlim", ...)` | Verilog-A | `vasim.jl` - implement properly |
+| `limexp(x)` | Verilog-A | `va_env.jl` - simple function |
+| Backtracking linesearch | SciML solver | Already have via NonlinearSolve.jl |
+
+**Recommendation**:
+
+1. **Implement `limexp()` in `va_env.jl`** - trivial:
+   ```julia
+   limexp(x) = x < 90.0 ? exp(x) : exp(90.0) * (1.0 + x - 90.0)
+   ```
+
+2. **Implement `$limit()` properly in `vasim.jl`** - medium effort:
+   ```julia
+   # For "pnjlim" limiter:
+   function va_pnjlim(vnew, vold, vt, vcrit)
+       if vnew > vcrit && abs(vnew - vold) > 2*vt
+           if vold > 0
+               arg = (vnew - vold) / vt
+               vnew = arg > 0 ? vold + vt*(2 + log(arg - 2)) : vold - vt*(2 + log(2 - arg))
+           else
+               vnew = vt * log(vnew / vt)
+           end
+       end
+       return vnew
+   end
+   ```
+
+3. **Let SciML handle global limiting** - The backtracking linesearch in NonlinearSolve already provides step limiting; `$limit` is for per-variable control within device models.
+
+**Not needed for SciML**: Contributing pnjlim to SciML is not appropriate - it's a circuit-domain heuristic, not a general numerical technique. SciML's trust regions and line searches serve the same purpose more generally.
+
 ## 1. ngspice Default Tolerances and Homotopy Methods
 
 ### 1.1 Default Tolerance Values (from `cktntask.c`)
