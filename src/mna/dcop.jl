@@ -186,13 +186,13 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     copyto!(integrator.uprev, integrator.u)
     integrator.u_modified = true
 
-    # Use Shampine or CheckInit for final consistency
+    # Use Shampine or DefaultInit for final consistency
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
         return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
     else
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+        return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
 end
 
@@ -237,13 +237,13 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
         integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
     end
 
-    # Use Shampine or CheckInit for final consistency
+    # Use Shampine or DefaultInit for final consistency
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
         return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
     else
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+        return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
     end
 end
 
@@ -299,14 +299,13 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     copyto!(integrator.uprev, integrator.u)
     integrator.u_modified = true
 
-    # Apply final consistency check: CheckInit or ShampineCollocationInit
+    # Apply final consistency: Shampine or DefaultInit
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         # Good for oscillators where we need to refine the approximated derivatives
         return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
     else
-        # CheckInit validates without modifying - may fail for oscillators with high residual
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+        return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
 end
 
@@ -332,12 +331,11 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     # For mass matrix ODE, we use the finite difference from the last step as du estimate
     integrator.u .= warmup_int.u
 
-    # Apply final consistency check: CheckInit or ShampineCollocationInit
+    # Apply final consistency: Shampine or DefaultInit
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
     else
-        # CheckInit validates without modifying
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+        return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
     end
 end
