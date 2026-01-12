@@ -1,178 +1,832 @@
-# Implementing PCNR for circuit simulation in Julia's SciML ecosystem
+# Implementing PCNR for Circuit Simulation in Cadnip.jl
 
-A Predictor/Corrector Newton-Raphson (PCNR) solver for circuit simulation can be cleanly architected in Julia using NonlinearSolve.jl's iterator interface as the primary extensibility point, combined with BlockArrays.jl for Schur complement reduction. The key insight is that NonlinearSolve.jl lacks built-in per-iteration callbacks, but its `init`/`step!` pattern provides complete control over the Newton iteration loop, enabling custom corrector phases and device-specific refinement callbacks.
+A Predictor/Corrector Newton-Raphson (PCNR) solver for circuit simulation, designed to integrate with Cadnip.jl's MNA backend and Julia's SciML ecosystem. This refined plan is based on analysis of NonlinearSolve.jl, OrdinaryDiffEqNonlinearSolve, ACME.jl, and Cadnip.jl's existing architecture.
 
-## NonlinearSolve.jl provides the foundation through its iterator interface
+## Algorithm Summary (from Reference Paper)
 
-The `NewtonRaphson` solver in NonlinearSolve.jl is implemented as a `GeneralizedFirstOrderAlgorithm` with pluggable descent methods and globalization strategies. For PCNR, the critical extensibility mechanism is the **iterator interface**:
+The PCNR method augments standard MNA with **limiting variables** for robust convergence:
+
+```
+State vector:     x = [x_MNA; x_lim]
+Residual:         g(x) = [g_MNA; g_lim]
+Jacobian blocks:  [J_MNA/MNA  J_MNA/lim]
+                  [J_lim/MNA  J_lim/lim]
+```
+
+**Key insight:** When limiting equations are `g_lim = v_D - V_junction` (where V_junction is a node voltage difference), then `J_lim/lim = I` (identity), making Schur complement trivial.
+
+### PCNR Flow
+
+```
+Start → Initialize → Predict → Correct → Converged? → Return
+              ↑                    |
+              └────── No ──────────┘
+```
+
+**Initialize:** `x_0 = [x_0,MNA; x_0,lim]` — independent initialization by device type
+
+**Predict (Schur Complement):**
+```
+(i)   Δx_MNA = -((J_MNA/MNA - J_MNA/lim · J_lim/MNA)⁻¹ · (g_MNA - J_MNA/lim · g_lim))|_{x_i}
+(ii)  Δx_lim = -(g_lim|_{x_i} + J_lim/MNA|_{x_i} · Δx_MNA)
+(iii) x_{i+1} = x_i + [Δx_MNA; Δx_lim]
+```
+
+**Correct:** `x_{i+1,lim} = refine(x_i, x_{i+1})` — device-specific limiting
+
+---
+
+## Part 1: Integration with Cadnip.jl's MNA Architecture
+
+### 1.1 Current Cadnip.jl Structure (Code References)
+
+| Component | File | Lines | Description |
+|-----------|------|-------|-------------|
+| **MNAContext** | `src/mna/context.jl` | 109-238 | COO-format matrix accumulator |
+| **DirectStampContext** | `src/mna/value_only.jl` | - | Zero-allocation restamping |
+| **CompiledStructure** | `src/mna/precompile.jl` | 86-119 | Immutable circuit structure |
+| **EvalWorkspace** | `src/mna/precompile.jl` | 141-199 | Per-iteration mutable state |
+| **fast_rebuild!** | `src/mna/precompile.jl` | 200-280 | Zero-allocation matrix update |
+| **_dc_newton_compiled** | `src/mna/solve.jl` | 319-356 | Current Newton solver |
+| **CedarRobustNLSolve** | `src/mna/solve.jl` | 273-305 | Multi-algorithm fallback |
+
+### 1.2 Extending MNAContext for Limiting Variables
+
+Add limiting variable allocation to `MNAContext`:
 
 ```julia
-cache = init(prob, NewtonRaphson())
-while cache.retcode == SciMLBase.ReturnCode.Default
-    step!(cache; recompute_jacobian = nothing)
-    # PCNR corrector phase injects HERE
-    apply_corrector!(cache.u, limiter_state)
+# src/mna/context.jl — extend existing struct
+@kwdef mutable struct MNAContext
+    # ... existing fields from lines 109-238 ...
+
+    # NEW: Limiting variable support
+    n_lim::Int = 0                           # Number of limiting variables
+    lim_names::Vector{Symbol} = Symbol[]     # e.g., :D1_vd, :Q1_vbe
+    lim_device_idx::Vector{Int} = Int[]      # Maps lim_var → device registry index
+    lim_junction_p::Vector{Int} = Int[]      # Positive node of junction
+    lim_junction_n::Vector{Int} = Int[]      # Negative node of junction
+end
+
+"""
+    alloc_lim!(ctx, name, device_idx, p, n) -> lim_idx
+
+Allocate a limiting variable for a junction between nodes p and n.
+The limiting equation is: g_lim = v_lim - (V_p - V_n) = 0
+"""
+function alloc_lim!(ctx::MNAContext, name::Symbol, device_idx::Int, p::Int, n::Int)
+    ctx.n_lim += 1
+    push!(ctx.lim_names, name)
+    push!(ctx.lim_device_idx, device_idx)
+    push!(ctx.lim_junction_p, p)
+    push!(ctx.lim_junction_n, n)
+    return ctx.n_lim  # 1-based index into x_lim partition
 end
 ```
 
-The cache exposes `cache.u` (current solution), `cache.fu` (residual), and `cache.nsteps`. After `step!`, you can directly modify `cache.u` before the next iteration—this is where device limiting and corrector refinement occur. For deeper integration, NonlinearSolve.jl provides two abstract interfaces: `AbstractDescentDirection` for custom step computation, and `AbstractTrustRegionMethod` for globalization. A PCNR-style solver could implement a custom descent that wraps the Newton step with Schur complement reduction:
+### 1.3 System Size with Limiting Variables
 
 ```julia
-struct PCNRDescent <: NonlinearSolveBase.AbstractDescentDirection
-    inner::NewtonDescent
+# Total system: x = [x_MNA; x_lim]
+function system_size(ctx::MNAContext)
+    n_mna = ctx.n_nodes + ctx.n_currents + ctx.n_charges
+    return n_mna + ctx.n_lim
+end
+
+function mna_size(ctx::MNAContext)
+    return ctx.n_nodes + ctx.n_currents + ctx.n_charges
+end
+
+function lim_offset(ctx::MNAContext)
+    return mna_size(ctx)  # Limiting vars start after MNA vars
+end
+```
+
+### 1.4 Device Stamping Pattern for PCNR
+
+Each nonlinear device stamps both MNA and limiting equations:
+
+```julia
+abstract type LimitableDevice end
+
+"""
+Device must implement:
+- stamp_mna!(device, ctx, x_mna, x_lim) → stamps G, C, b
+- stamp_lim!(device, ctx, x_mna, x_lim) → returns (g_lim, J_lim_mna)
+- refine(device, v_old, v_new, vt) → limited voltage
+- vcrit(device) → critical voltage for limiting
+"""
+
+struct DiodeDevice <: LimitableDevice
+    Is::Float64
+    n::Float64
+    Vt::Float64  # Thermal voltage ≈ 26mV
+    p::Int       # Positive node
+    n_node::Int  # Negative node
+    lim_idx::Int # Index into x_lim
+end
+
+function stamp_mna!(d::DiodeDevice, ctx, x_mna, x_lim)
+    # Get limited junction voltage from x_lim
+    v_lim = x_lim[d.lim_idx]
+
+    # Diode model at limited operating point
+    I_d = d.Is * (exp(v_lim / (d.n * d.Vt)) - 1)
+    G_d = d.Is / (d.n * d.Vt) * exp(v_lim / (d.n * d.Vt))
+
+    # Stamp linearized companion model into MNA
+    # Current source: I_eq = I_d - G_d * v_lim
+    stamp_conductance!(ctx, d.p, d.n_node, G_d)
+    stamp_b!(ctx, d.p, -(I_d - G_d * v_lim))
+    stamp_b!(ctx, d.n_node, I_d - G_d * v_lim)
+
+    # J_MNA/lim: derivative of MNA equations w.r.t. v_lim
+    # ∂I_stamp/∂v_lim = G_d (stamps coupling to limiting var)
+end
+
+function stamp_lim!(d::DiodeDevice, ctx, x_mna, x_lim)
+    # g_lim = v_lim - (V_p - V_n)
+    v_lim = x_lim[d.lim_idx]
+    V_p = d.p == 0 ? 0.0 : x_mna[d.p]
+    V_n = d.n_node == 0 ? 0.0 : x_mna[d.n_node]
+
+    g_lim = v_lim - (V_p - V_n)
+
+    # J_lim/MNA: [-1, +1] at positions [p, n]
+    # J_lim/lim: [1] (identity for this limiting var)
+
+    return g_lim
+end
+```
+
+---
+
+## Part 2: NonlinearSolve.jl Integration
+
+### 2.1 NonlinearSolve.jl Iterator Interface (Code References)
+
+| Component | File | Lines | Description |
+|-----------|------|-------|-------------|
+| **solve!** | `lib/NonlinearSolveBase/src/solve.jl` | 295-305 | Main loop with `step!` |
+| **step!** | `lib/NonlinearSolveBase/src/solve.jl` | 603-626 | Single Newton iteration |
+| **init** | `lib/NonlinearSolveBase/src/solve.jl` | 195-237 | Cache initialization |
+| **NewtonRaphson** | `lib/NonlinearSolveFirstOrder/src/raphson.jl` | 1-43 | Algorithm definition |
+| **NewtonDescent** | `lib/NonlinearSolveBase/src/descent/newton.jl` | 1-139 | Descent direction |
+| **AbstractDescentDirection** | `lib/NonlinearSolveBase/src/abstract_types.jl` | 39-90 | Extension interface |
+
+### 2.2 Custom PCNR Descent Direction
+
+Implement PCNR as a custom `AbstractDescentDirection`:
+
+```julia
+# src/mna/pcnr.jl
+
+using NonlinearSolveBase: AbstractDescentDirection, AbstractDescentCache
+using NonlinearSolveBase: InternalAPI, DescentResult
+
+"""
+    PCNRDescent
+
+Custom descent direction implementing Schur complement predictor step.
+"""
+@kwdef @concrete struct PCNRDescent <: AbstractDescentDirection
+    linsolve = nothing          # Linear solver for Schur complement
     device_registry::DeviceRegistry
 end
-```
 
-## DiffEq uses a parallel nonlinear solve infrastructure optimized for implicit stepping
+@concrete mutable struct PCNRDescentCache <: AbstractDescentCache
+    δu_mna::Vector{Float64}     # MNA step direction
+    δu_lim::Vector{Float64}     # Limiting step direction
+    δu::Vector{Float64}         # Combined [δu_mna; δu_lim]
 
-OrdinaryDiffEq.jl does **not** directly call NonlinearSolve.jl for implicit methods—it uses `OrdinaryDiffEqNonlinearSolve`, a specialized sublibrary with `NLNewton`, `NLAnderson`, and `NLFunctional` algorithms. These are purpose-built for implicit ODE stepping, with quasi-Newton Jacobian reuse across time steps. The integration point is the `nlsolve` keyword:
+    # Schur complement components
+    S::SparseMatrixCSC{Float64,Int}  # J_MNA/MNA - J_MNA/lim * J_lim/MNA
+    g_mna_hat::Vector{Float64}       # g_MNA - J_MNA/lim * g_lim
 
-```julia
-ImplicitEuler(nlsolve = NLNewton(κ = 1//100, max_iter = 10))
-```
+    # Block matrices (views into full Jacobian)
+    J_mna_mna::SubArray            # J[1:n_mna, 1:n_mna]
+    J_mna_lim::SubArray            # J[1:n_mna, n_mna+1:end]
+    J_lim_mna::SubArray            # J[n_mna+1:end, 1:n_mna]
+    # J_lim_lim is identity, not stored
 
-For PCNR integration with transient simulation, you have two paths. First, implement PCNR within `OrdinaryDiffEqNonlinearSolve` by creating a new `NLPCNR` type that extends the internal nonlinear solver. Second, use `NonlinearSolveAlg` wrapper to pass a custom NonlinearSolve.jl algorithm:
+    # Linear solver cache
+    lincache
 
-```julia
-ImplicitEuler(nlsolve = NonlinearSolveAlg(PCNRSolver(device_registry)))
-```
+    # Device registry
+    registry::DeviceRegistry
+    n_mna::Int
+    n_lim::Int
+end
 
-The second approach is cleaner but loses some ODE-specific optimizations. For DAE initialization (finding consistent initial conditions), NonlinearSolve.jl is used directly via `BrownFullBasicInit` or `ShampineCollocationInit`—PCNR would naturally apply here since initialization often requires robust convergence aids for nonlinear devices.
+function InternalAPI.init(
+    prob, alg::PCNRDescent, J, fu, u;
+    stats, shared = nothing, pre_inverted = Val(false),
+    linsolve_kwargs = (;), abstol = nothing, reltol = nothing,
+    timer = get_timer_output(), kwargs...
+)
+    n_mna = alg.device_registry.n_mna
+    n_lim = alg.device_registry.n_lim
+    n_total = n_mna + n_lim
 
-## No CadNIP.jl exists, but CedarSim.jl and MOSLab.jl provide circuit simulation patterns
+    @assert length(u) == n_total "State vector size mismatch"
 
-The closest Julia packages to MNA-based circuit simulation are **CedarSim.jl** (commercial, comprehensive SPICE-like simulator with Verilog-A support), **ACME.jl** (audio circuits using state-space formulation rather than MNA), and **MOSLab.jl** (MOSFET modeling with evidence of MNA stamping in `stampTest.jl`). None implement explicit SPICE-style limiting functions like `pnjlim`.
+    # Allocate step directions
+    δu_mna = similar(u, n_mna)
+    δu_lim = similar(u, n_lim)
+    δu = similar(u)
 
-For MNA formulation, ModelingToolkit.jl offers the most idiomatic approach. Devices are defined as acausal components with symbolic equations:
+    # Schur complement (same sparsity as J_MNA/MNA)
+    S = copy(J[1:n_mna, 1:n_mna])
+    g_mna_hat = similar(fu, n_mna)
 
-```julia
-@mtkmodel Diode begin
-    @extend OnePort()
-    @parameters begin Is = 1e-14; n = 1.0; Vt = 0.026 end
-    @equations begin i ~ Is * (exp(v/(n*Vt)) - 1) end
+    # Block views
+    J_mna_mna = @view J[1:n_mna, 1:n_mna]
+    J_mna_lim = @view J[1:n_mna, n_mna+1:end]
+    J_lim_mna = @view J[n_mna+1:end, 1:n_mna]
+
+    # Linear solver for Schur complement
+    linprob = LinearProblem(S, g_mna_hat)
+    lincache = init(linprob, alg.linsolve; abstol, reltol, linsolve_kwargs...)
+
+    return PCNRDescentCache(
+        δu_mna, δu_lim, δu,
+        S, g_mna_hat,
+        J_mna_mna, J_mna_lim, J_lim_mna,
+        lincache,
+        alg.device_registry,
+        n_mna, n_lim
+    )
+end
+
+function InternalAPI.solve!(
+    cache::PCNRDescentCache, J, fu, u, idx::Val = Val(1);
+    new_jacobian = true, kwargs...
+)
+    (; δu_mna, δu_lim, δu, S, g_mna_hat, lincache, n_mna, n_lim) = cache
+
+    # Extract residual blocks
+    g_mna = @view fu[1:n_mna]
+    g_lim = @view fu[n_mna+1:end]
+
+    # --- PREDICTOR: Schur Complement Solve ---
+
+    # Since J_lim/lim = I, the Schur complement simplifies:
+    # S = J_MNA/MNA - J_MNA/lim * I⁻¹ * J_lim/MNA
+    #   = J_MNA/MNA - J_MNA/lim * J_lim/MNA
+
+    J_mna_mna = @view J[1:n_mna, 1:n_mna]
+    J_mna_lim = @view J[1:n_mna, n_mna+1:end]
+    J_lim_mna = @view J[n_mna+1:end, 1:n_mna]
+
+    # Compute Schur complement (sparse matrix operations)
+    # S = J_MNA/MNA - J_MNA/lim * J_lim/MNA
+    copyto!(S, J_mna_mna)
+
+    # For identity J_lim/lim, J_lim/MNA has specific structure:
+    # Row i of J_lim/MNA has -1 at col p_i, +1 at col n_i
+    # This makes J_MNA/lim * J_lim/MNA sparse with known pattern
+    for i in 1:n_lim
+        device = cache.registry.devices[i]
+        p, n = device.lim_junction_p, device.lim_junction_n
+
+        # J_MNA/lim[:, i] * J_lim/MNA[i, :] = J_MNA/lim[:, i] * [-1 at p, +1 at n]
+        # Subtract this outer product from S
+        for row in 1:n_mna
+            if p > 0
+                S[row, p] += J_mna_lim[row, i]  # -(-1) = +1
+            end
+            if n > 0
+                S[row, n] -= J_mna_lim[row, i]  # -(+1) = -1
+            end
+        end
+    end
+
+    # Compute modified RHS: g_MNA_hat = g_MNA - J_MNA/lim * g_lim
+    # Since J_lim/lim = I: g_MNA_hat = g_MNA - J_MNA/lim * g_lim
+    copyto!(g_mna_hat, g_mna)
+    mul!(g_mna_hat, J_mna_lim, g_lim, -1.0, 1.0)
+
+    # Solve: S * Δx_MNA = -g_MNA_hat
+    g_mna_hat .*= -1
+    lincache.b = g_mna_hat
+    lincache.A = S
+    sol = solve!(lincache)
+    copyto!(δu_mna, sol.u)
+
+    # Back-substitute for limiting: Δx_lim = -(g_lim + J_lim/MNA * Δx_MNA)
+    # Since J_lim/lim = I, no inversion needed
+    mul!(δu_lim, J_lim_mna, δu_mna)
+    δu_lim .+= g_lim
+    δu_lim .*= -1
+
+    # Assemble full step
+    δu[1:n_mna] .= δu_mna
+    δu[n_mna+1:end] .= δu_lim
+
+    return DescentResult(; δu, success = Val(true), linsolve_success = Val(true))
 end
 ```
 
-For PCNR, each device would stamp **two** sets of equations: the standard MNA constitutive relation (g_MNA) plus limiting constraint equations (g_lim). A diode stamps its exponential I-V into the MNA block, plus an equation like `V_d - V_lim = 0` where `V_lim` is a limited auxiliary variable. The Jacobian has block structure:
+### 2.3 PCNR Solver with Corrector Phase
 
-| Block | Description |
-|-------|-------------|
-| **J_vv** | Standard MNA Jacobian (∂g_MNA/∂v) |
-| **J_vl** | Coupling from limited quantities to MNA (∂g_MNA/∂l) |
-| **J_lv** | Coupling from node voltages to limiting (∂g_lim/∂v) |
-| **J_ll** | Limiting self-Jacobian—often diagonal or block-diagonal |
-
-## Schur complement reduction exploits the diagonal structure of limiting equations
-
-The PCNR linear solve uses Schur complement to avoid doubling the system size. Given the block system `[J_vv B; C D][Δv; Δl] = [r_v; r_l]`, where D = J_ll is typically diagonal (one limiting equation per junction), the reduced system is:
-
-```
-S = J_vv - B * D⁻¹ * C    # Schur complement (same size as original MNA!)
-Δv = S⁻¹ * (r_v - B * D⁻¹ * r_l)
-Δl = D⁻¹ * (r_l - C * Δv)
-```
-
-When D is diagonal—the common case where each limiting variable has an independent constraint—D⁻¹ is trivially `Diagonal(1 ./ diag(D))`, making the overhead O(m) rather than O(m³). BlockArrays.jl provides efficient block indexing via `view(M, Block(i,j))`, while LinearSolve.jl handles the reduced system solve with appropriate algorithm selection (KLU for sparse, RecursiveFactorization for dense systems under **500×500**):
+Wrap the iterator interface with device-specific correction:
 
 ```julia
-function schur_solve_diagonal_D(A, B, C, d_diag::Vector, f, g)
-    d_inv = 1.0 ./ d_diag
-    D_inv_C = d_inv .* C              # Scale rows of C
-    S = A - B * D_inv_C               # Schur complement
-    f_hat = f - B * (d_inv .* g)      # Modified RHS
-    
-    x = S \ f_hat                      # Solve reduced system
-    y = d_inv .* (g - C * x)          # Back-substitute
-    return x, y
-end
-```
+"""
+    PCNRSolver
 
-For block-diagonal D (when devices have multiple coupled limiting variables), pre-factorize each small block and apply in parallel:
-
-```julia
-struct BlockDiagD{T}
-    factorizations::Vector{LU{T, Matrix{T}, Vector{Int}}}
-    block_size::Int
-end
-```
-
-## Device-specific refinement uses a registry pattern with the iterator interface
-
-Since NonlinearSolve.jl lacks built-in per-iteration callbacks, the idiomatic approach is a **device registry** where each device registers a `refine!` function called after every `step!`:
-
-```julia
-abstract type CircuitDevice end
-function refine!(device::CircuitDevice, u_proposed, u_prev) end
-
-struct DeviceRegistry
-    devices::Vector{CircuitDevice}
-    lim_indices::Dict{CircuitDevice, UnitRange{Int}}  # Maps device → limiting variable indices
+PCNR solver that wraps NonlinearSolve.jl's NewtonRaphson with:
+1. Custom PCNRDescent for Schur complement predictor
+2. Post-step corrector phase with device limiting
+"""
+struct PCNRSolver{R<:DeviceRegistry} <: NonlinearSolve.AbstractNonlinearSolveAlgorithm
+    registry::R
+    max_iter::Int
+    abstol::Float64
+    linsolve::Any
 end
 
-function refine_all!(registry::DeviceRegistry, u, u_prev)
-    for device in registry.devices
-        idx = registry.lim_indices[device]
-        @views u[idx] .= refine!(device, u[idx], u_prev[idx])
+function PCNRSolver(registry; max_iter=100, abstol=1e-10, linsolve=nothing)
+    linsolve = linsolve === nothing ? LinearSolve.KLUFactorization() : linsolve
+    return PCNRSolver(registry, max_iter, abstol, linsolve)
+end
+
+function CommonSolve.solve(prob::NonlinearProblem, alg::PCNRSolver; kwargs...)
+    # Build inner Newton solver with PCNR descent
+    descent = PCNRDescent(; linsolve=alg.linsolve, device_registry=alg.registry)
+    inner_alg = GeneralizedFirstOrderAlgorithm(;
+        descent = descent,
+        linesearch = nothing,  # PCNR uses corrector instead
+        trustregion = nothing,
+    )
+
+    # Initialize solver cache
+    cache = init(prob, inner_alg; abstol=alg.abstol, kwargs...)
+
+    u_prev = copy(cache.u)
+
+    for iter in 1:alg.max_iter
+        copyto!(u_prev, cache.u)
+
+        # PREDICTOR: Schur complement Newton step
+        step!(cache)
+
+        # CORRECTOR: Device-specific limiting
+        apply_corrector!(cache.u, u_prev, alg.registry)
+
+        # Recompute residual after correction
+        prob.f(cache.fu, cache.u, prob.p)
+
+        # Check convergence
+        if maximum(abs, cache.fu) < alg.abstol
+            return SciMLBase.build_solution(
+                prob, alg, cache.u, cache.fu;
+                retcode = ReturnCode.Success
+            )
+        end
+    end
+
+    return SciMLBase.build_solution(
+        prob, alg, cache.u, cache.fu;
+        retcode = ReturnCode.MaxIters
+    )
+end
+
+"""
+Apply device-specific limiting to the solution.
+"""
+function apply_corrector!(u, u_prev, registry::DeviceRegistry)
+    n_mna = registry.n_mna
+
+    for (i, device) in enumerate(registry.devices)
+        lim_idx = n_mna + i
+        v_new = u[lim_idx]
+        v_old = u_prev[lim_idx]
+
+        # Device-specific limiting
+        u[lim_idx] = refine(device, v_old, v_new)
     end
 end
 ```
 
-For DiffEq integration, this maps to the `CallbackSet` pattern where each device contributes a `DiscreteCallback`. However, since implicit stepping calls the nonlinear solver internally, the cleaner integration is to pass the device registry into a custom nonlinear solver via `NonlinearSolveAlg`.
+---
 
-SPICE-style limiting computes a critical voltage `V_CRIT = n*Vt*ln(n*Vt/(Is*√2))` ≈ **0.6V for silicon** and bounds voltage changes logarithmically when exceeded:
+## Part 3: Device Limiting Functions
+
+### 3.1 SPICE-Style PN Junction Limiting (pnjlim)
+
+From SPICE3 source and reference paper:
 
 ```julia
-function pnjlim(v_new, v_old, vt, vcrit)
+"""
+    pnjlim(v_new, v_old, vt, vcrit) -> v_limited
+
+SPICE-style PN junction voltage limiting.
+
+The critical voltage vcrit ≈ n*Vt*ln(n*Vt/(Is*√2)) ≈ 0.6V for silicon.
+"""
+function pnjlim(v_new::Real, v_old::Real, vt::Real, vcrit::Real)
     if v_new > vcrit && abs(v_new - v_old) > 2*vt
-        return v_old + vt * log1p((v_new - v_old) / vt)
+        if v_old > 0
+            arg = (v_new - v_old) / vt
+            if arg > 0
+                return v_old + vt * (2 + log(arg - 2))
+            else
+                return v_old - vt * (2 + log(2 - arg))
+            end
+        else
+            return vt * log(v_new / vt)
+        end
+    else
+        # Large negative change - use log limiting
+        if v_new < 0 && abs(v_new - v_old) > 2*vt
+            return v_old - vt * log1p(-v_new/vt + 1)
+        end
+    end
+    return v_new
+end
+
+"""
+    vcrit(Is, n, vt) -> Float64
+
+Compute critical voltage for PN junction limiting.
+"""
+function vcrit(Is::Real, n::Real, vt::Real)
+    return n * vt * log(n * vt / (sqrt(2.0) * Is))
+end
+```
+
+### 3.2 Device-Specific Refine Methods
+
+```julia
+# Diode limiting
+function refine(d::DiodeDevice, v_old, v_new)
+    vc = vcrit(d.Is, d.n, d.Vt)
+    return pnjlim(v_new, v_old, d.Vt, vc)
+end
+
+# BJT limiting (two junctions)
+function refine(q::BJTDevice, v_old::Tuple, v_new::Tuple)
+    vbe_old, vbc_old = v_old
+    vbe_new, vbc_new = v_new
+
+    vc_be = vcrit(q.Is_be, q.n_be, q.Vt)
+    vc_bc = vcrit(q.Is_bc, q.n_bc, q.Vt)
+
+    vbe_lim = pnjlim(vbe_new, vbe_old, q.Vt, vc_be)
+    vbc_lim = pnjlim(vbc_new, vbc_old, q.Vt, vc_bc)
+
+    return (vbe_lim, vbc_lim)
+end
+
+# MOSFET limiting (typically less critical than BJT/diode)
+function refine(m::MOSFETDevice, v_old, v_new)
+    # MOSFET often uses simpler voltage clamping
+    # or relies on the Schur complement alone
+    δv = v_new - v_old
+    max_step = 0.5  # Limit to 500mV per iteration
+
+    if abs(δv) > max_step
+        return v_old + sign(δv) * max_step
     end
     return v_new
 end
 ```
 
-## Complete PCNR architecture for SciML integration
+---
 
-The recommended architecture combines these elements into a cohesive solver:
+## Part 4: OrdinaryDiffEq Integration for Transient Analysis
+
+### 4.1 OrdinaryDiffEqNonlinearSolve Structure (Code References)
+
+| Component | File | Lines | Description |
+|-----------|------|-------|-------------|
+| **NLNewton** | `lib/OrdinaryDiffEqNonlinearSolve/src/type.jl` | 28-51 | Newton for implicit methods |
+| **NonlinearSolveAlg** | `lib/OrdinaryDiffEqNonlinearSolve/src/type.jl` | 53-72 | External solver wrapper |
+| **nlsolve!** | `lib/OrdinaryDiffEqNonlinearSolve/src/nlsolve.jl` | 1-172 | Main solve loop |
+| **compute_step!** | `lib/OrdinaryDiffEqNonlinearSolve/src/newton.jl` | 192-322 | Newton step |
+| **BrownFullBasicInit** | `lib/OrdinaryDiffEqNonlinearSolve/src/initialize_dae.jl` | 462-632 | DAE initialization |
+| **ShampineCollocationInit** | `lib/OrdinaryDiffEqNonlinearSolve/src/initialize_dae.jl` | 99-458 | Collocation init |
+
+### 4.2 PCNR as OrdinaryDiffEq Nonlinear Solver
 
 ```julia
-struct PCNRSolver{D<:DeviceRegistry, B<:BlockSolverCache}
-    devices::D
-    block_cache::B
-    max_iter::Int
-    tol::Float64
+"""
+    NLPCNR
+
+PCNR nonlinear solver for OrdinaryDiffEq implicit methods.
+Compatible with `ImplicitEuler(nlsolve=NLPCNR(...))`.
+"""
+@kwdef struct NLPCNR{R<:DeviceRegistry} <: OrdinaryDiffEqCore.AbstractNLSolverAlgorithm
+    κ::Rational{Int} = 1//100
+    max_iter::Int = 10
+    fast_convergence_cutoff::Rational{Int} = 1//5
+    registry::R
 end
 
-function solve!(solver::PCNRSolver, prob)
-    # Initialize with inner Newton solver
-    cache = init(prob, NewtonRaphson(linsolve = nothing))
-    
-    for iter in 1:solver.max_iter
-        u_prev = copy(cache.u)
-        
-        # PREDICTOR: Schur complement Newton step
-        J_blocks = compute_jacobian_blocks(cache.u, solver.devices)
-        r_blocks = compute_residual_blocks(cache.u, solver.devices)
-        Δu = schur_solve(solver.block_cache, J_blocks, r_blocks)
-        cache.u .+= Δu
-        
-        # CORRECTOR: Device-specific refinement
-        refine_all!(solver.devices, cache.u, u_prev)
-        
-        # Convergence check
-        cache.fu .= compute_residual(cache.u)
-        if norm(cache.fu) < solver.tol
-            return SciMLBase.build_solution(prob, solver, cache.u, cache.fu; retcode=Success)
-        end
-    end
-    return SciMLBase.build_solution(prob, solver, cache.u, cache.fu; retcode=MaxIters)
+# Build PCNR solver cache for OrdinaryDiffEq
+function OrdinaryDiffEqNonlinearSolve.build_nlsolver(
+    alg, nlalg::NLPCNR, u, uprev, p, t, dt, f, rate_prototype,
+    uEltypeNoUnits, uBottomEltypeNoUnits, tTypeNoUnits,
+    γ, c, ::Val{iip}
+) where {iip}
+    # ... initialize PCNR-specific cache with device registry
 end
 ```
 
-For transient simulation, wrap this as an `AbstractNLSolver` compatible with OrdinaryDiffEq's `nlsolve` interface, or use `NonlinearSolveAlg(PCNRSolver(...))` to pass it through the existing machinery. The device registry naturally extends—each new device type (diode, BJT, MOSFET) implements `stamp_mna!`, `stamp_limiting!`, and `refine!` methods, with the solver orchestrating the predictor-corrector iteration transparently.
+### 4.3 Alternative: Using NonlinearSolveAlg Wrapper
 
-## Key implementation recommendations
+For simpler integration, wrap PCNRSolver:
 
-The path forward involves three main components. First, build the Schur complement solver using LinearSolve.jl with cached factorizations—exploit diagonal D structure for O(m) limiting overhead. Second, implement device models with dual stamping (MNA + limiting constraints) using a trait-based interface that ModelingToolkit could potentially auto-generate from symbolic device equations. Third, wrap the complete PCNR iteration in either a custom `AbstractDescentDirection` for pure NonlinearSolve.jl use, or a new `NLPCNR` type for tight OrdinaryDiffEq integration.
+```julia
+# In tran! function
+function tran!(circuit::MNACircuit, tspan;
+               solver=IDA(nlsolve=NonlinearSolveAlg(PCNRSolver(registry))),
+               kwargs...)
+    # ... existing transient setup from src/sweeps.jl:423-503
+end
+```
 
-The existing SciML infrastructure provides all necessary primitives—the innovation is in the PCNR-specific device interface and the block-structured solve. No existing Julia package implements this pattern, making it a novel contribution to the ecosystem.
+### 4.4 Integration with Cadnip.jl's CedarDCOp
+
+Extend `CedarDCOp` (from `src/mna/dcop.jl:28-248`) to use PCNR:
+
+```julia
+struct CedarDCOpPCNR{R} <: DiffEqBase.DAEInitializationAlgorithm
+    abstol::Float64
+    maxiters::Int
+    registry::R
+end
+
+function CedarDCOpPCNR(registry; abstol=1e-9, maxiters=500)
+    return CedarDCOpPCNR(abstol, maxiters, registry)
+end
+
+function SciMLBase.initialize_dae!(integrator, initializealg::CedarDCOpPCNR, x...)
+    # Use PCNRSolver instead of CedarRobustNLSolve
+    solver = PCNRSolver(initializealg.registry;
+                        abstol=initializealg.abstol,
+                        max_iter=initializealg.maxiters)
+
+    # ... rest similar to CedarDCOp implementation at src/mna/dcop.jl:145-248
+end
+```
+
+---
+
+## Part 5: Device Registry and Circuit Builder Integration
+
+### 5.1 Device Registry
+
+```julia
+"""
+Registry of all limitable devices in a circuit.
+Populated during circuit structure discovery.
+"""
+struct DeviceRegistry
+    devices::Vector{LimitableDevice}
+    n_mna::Int
+    n_lim::Int
+
+    # Mapping from limiting variable index to device
+    lim_to_device::Vector{Int}
+end
+
+function DeviceRegistry(ctx::MNAContext, devices::Vector{LimitableDevice})
+    n_mna = mna_size(ctx)
+    n_lim = ctx.n_lim
+    lim_to_device = ctx.lim_device_idx
+
+    return DeviceRegistry(devices, n_mna, n_lim, lim_to_device)
+end
+```
+
+### 5.2 Extended Circuit Builder Pattern
+
+Modify Cadnip.jl's builder pattern to support limiting variables:
+
+```julia
+# Example circuit with PCNR-enabled devices
+function diode_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+    ctx = ctx === nothing ? MNAContext() : ctx
+
+    # Standard MNA stamping
+    vdd = get_node!(ctx, :vdd)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(1.0; name=:Vin), ctx, vdd, 0)
+    stamp!(Resistor(1000.0; name=:R), ctx, vdd, out)
+
+    # PCNR-enabled diode with limiting variable
+    device_idx = 1  # First limitable device
+    lim_idx = alloc_lim!(ctx, :D1_vd, device_idx, out, 0)
+
+    # Get voltages from solution vector
+    n_mna = mna_size(ctx)
+    v_lim = isempty(x) ? 0.6 : x[n_mna + lim_idx]  # Default to ~Vf
+
+    # Stamp diode at limited operating point
+    diode = DiodeDevice(Is=1e-14, n=1.0, Vt=0.026,
+                        p=out, n_node=0, lim_idx=lim_idx)
+    stamp_mna!(diode, ctx, x, [v_lim])
+
+    return ctx
+end
+```
+
+### 5.3 Integration with Existing VA Device Infrastructure
+
+Extend Verilog-A contribution stamping (from `src/mna/contrib.jl`):
+
+```julia
+# Detect if VA device needs limiting
+function needs_limiting(va_device)
+    # Devices with exponential I-V (diodes, BJTs) benefit from limiting
+    # Detect via contribution analysis or device annotation
+end
+
+# Auto-generate limiting equations from VA model
+function stamp_va_with_limiting!(device, ctx, x; enable_pcnr=true)
+    if enable_pcnr && needs_limiting(device)
+        # Allocate limiting variables for each junction
+        for junction in device.junctions
+            lim_idx = alloc_lim!(ctx, junction.name, device.idx,
+                                 junction.p, junction.n)
+            # ... stamp with limiting
+        end
+    else
+        # Standard stamping without limiting
+        stamp_va!(device, ctx, x)
+    end
+end
+```
+
+---
+
+## Part 6: ACME.jl Comparison and Lessons
+
+ACME.jl (`/home/user/ACME.jl`) provides valuable patterns:
+
+### 6.1 Homotopy Continuation (Alternative to PCNR)
+
+**File:** `/home/user/ACME.jl/src/solvers.jl:238-302`
+
+ACME uses homotopy as backup when Newton fails:
+- Interpolate: `p(λ) = (1-λ)*p_start + λ*p_target`
+- Binary search for intermediate λ values
+- Each point provides warm start for next
+
+This could complement PCNR for extremely difficult convergence cases.
+
+### 6.2 Solution Caching
+
+**File:** `/home/user/ACME.jl/src/solvers.jl:304-405`
+
+ACME caches solutions in k-d tree for fast nearest-neighbor lookup:
+- Useful for parameter sweeps where adjacent points are similar
+- Could accelerate PCNR initialization
+
+### 6.3 Device Residual Pattern
+
+**File:** `/home/user/ACME.jl/src/elements.jl:226-245`
+
+Each device returns `(res, J)` tuple:
+```julia
+nonlinear_eq = @inline function(q)
+    v, i = q
+    ex = exp(v*(1 / (25e-3 * η)))
+    res = @SVector [is * (ex - 1) - i]
+    J = @SMatrix [is/(25e-3 * η) * ex -1]
+    return (res, J)
+end
+```
+
+This aligns well with PCNR's device-centric structure.
+
+---
+
+## Part 7: Implementation Roadmap
+
+### Phase 1: Foundation (Modify Existing Code)
+
+1. **Extend MNAContext** (`src/mna/context.jl`)
+   - Add `n_lim`, `lim_names`, `lim_device_idx`, `lim_junction_p`, `lim_junction_n`
+   - Implement `alloc_lim!`, `system_size`, `mna_size`, `lim_offset`
+
+2. **Create DeviceRegistry** (`src/mna/pcnr.jl` - new file)
+   - `LimitableDevice` abstract type
+   - `DeviceRegistry` struct
+   - `refine`, `vcrit`, `pnjlim` functions
+
+3. **Update fast_rebuild!** (`src/mna/precompile.jl`)
+   - Handle augmented state vector `[x_MNA; x_lim]`
+   - Stamp limiting equations into residual
+
+### Phase 2: PCNR Solver
+
+4. **Implement PCNRDescent** (`src/mna/pcnr.jl`)
+   - Schur complement computation
+   - Integration with NonlinearSolve.jl
+
+5. **Implement PCNRSolver** (`src/mna/pcnr.jl`)
+   - Iterator wrapper with corrector phase
+   - Device registry integration
+
+6. **Add limiting to existing devices** (`src/mna/devices.jl`)
+   - `DiodeDevice` with limiting
+   - `BJTDevice` with BE/BC junction limiting
+
+### Phase 3: Integration
+
+7. **Extend tran!** (`src/sweeps.jl`)
+   - Option to use PCNR for transient analysis
+   - Auto-detect circuits that benefit from limiting
+
+8. **Extend CedarDCOp** (`src/mna/dcop.jl`)
+   - `CedarDCOpPCNR` variant
+
+9. **VA integration** (`src/mna/contrib.jl`)
+   - Auto-detect exponential devices
+   - Generate limiting equations from VA models
+
+### Phase 4: Testing and Validation
+
+10. **Unit tests** (`test/mna/pcnr.jl` - new file)
+    - Schur complement correctness
+    - Limiting function accuracy
+    - Convergence comparison with/without PCNR
+
+11. **Integration tests**
+    - Diode rectifier circuits
+    - BJT amplifiers
+    - CMOS inverters
+    - Ring oscillators
+
+12. **Benchmark**
+    - Newton iteration count comparison
+    - Wall-clock time for difficult circuits
+    - Memory usage
+
+---
+
+## Appendix A: Jacobian Block Structure Details
+
+For the example circuit in the reference (two diodes D1, D2):
+
+```
+x_MNA = [e1, e2, i]       (node voltages + source current)
+x_lim = [v_D1, v_D2]      (limiting variables)
+
+g_MNA = [i + Is1*(exp(v_D1/Vt)-1) + Is2*(exp(v_D2/Vt)-1),
+         -Is1*(exp(v_D1/Vt)-1) - Is2*(exp(v_D2/Vt)-1) + e2/R,
+         e1 - v_src]
+
+g_lim = [v_D1 - (e1 - e2),
+         v_D2 - (e1 - e2)]
+
+J_MNA/MNA = [0,    0,    1;
+             0,    1/R,  0;
+             1,    0,    0]
+
+J_MNA/lim = [Is1/Vt*exp(v_D1/Vt),  Is2/Vt*exp(v_D2/Vt);
+             -Is1/Vt*exp(v_D1/Vt), -Is2/Vt*exp(v_D2/Vt);
+             0,                     0]
+
+J_lim/MNA = [-1,  1,  0;
+             -1,  1,  0]
+
+J_lim/lim = [1, 0;
+             0, 1]  (identity!)
+```
+
+The Schur complement `S = J_MNA/MNA - J_MNA/lim * J_lim/MNA` is 3×3 (same as original MNA), not 5×5.
+
+---
+
+## Appendix B: Key File References
+
+| File | Lines | Component |
+|------|-------|-----------|
+| **Cadnip.jl** | | |
+| `src/mna/context.jl` | 109-238 | MNAContext (extend for limiting) |
+| `src/mna/precompile.jl` | 86-119 | CompiledStructure |
+| `src/mna/precompile.jl` | 200-280 | fast_rebuild! |
+| `src/mna/solve.jl` | 273-305 | CedarRobustNLSolve |
+| `src/mna/solve.jl` | 319-356 | _dc_newton_compiled |
+| `src/mna/dcop.jl` | 28-248 | CedarDCOp |
+| `src/mna/devices.jl` | 124-183 | Basic device types |
+| `src/mna/contrib.jl` | 1-74 | VA contribution stamping |
+| `src/sweeps.jl` | 423-503 | tran!/dc! API |
+| **NonlinearSolve.jl** | | |
+| `lib/NonlinearSolveBase/src/solve.jl` | 295-305 | Main solve loop |
+| `lib/NonlinearSolveBase/src/solve.jl` | 603-626 | step! function |
+| `lib/NonlinearSolveBase/src/abstract_types.jl` | 39-90 | AbstractDescentDirection |
+| `lib/NonlinearSolveBase/src/descent/newton.jl` | 1-139 | NewtonDescent |
+| **OrdinaryDiffEq.jl** | | |
+| `lib/OrdinaryDiffEqNonlinearSolve/src/type.jl` | 28-51 | NLNewton |
+| `lib/OrdinaryDiffEqNonlinearSolve/src/type.jl` | 53-72 | NonlinearSolveAlg |
+| `lib/OrdinaryDiffEqNonlinearSolve/src/nlsolve.jl` | 1-172 | nlsolve! |
+| `lib/OrdinaryDiffEqNonlinearSolve/src/initialize_dae.jl` | 462-632 | BrownFullBasicInit |
+| **ACME.jl** | | |
+| `src/solvers.jl` | 151-236 | SimpleSolver (Newton) |
+| `src/solvers.jl` | 238-302 | HomotopySolver |
+| `src/elements.jl` | 226-245 | Diode implementation |
