@@ -183,44 +183,80 @@ F(x) = G · x - b
 
 ### 1.2 ngspice Homotopy Methods (from `cktop.c`)
 
-ngspice implements a fallback chain:
-
-1. **Direct Newton** (`NIiter`) - Standard Newton-Raphson
-2. **GMIN Stepping** - Two variants:
-   - `dynamic_gmin`: Adaptive stepping with factor adjustment
-   - `spice3_gmin`: Fixed-step geometric progression
-3. **Source Stepping** - Two variants:
-   - `gillespie_src`: Adaptive source ramping
-   - `spice3_src`: Fixed-step source scaling
-
-#### 1.2.1 Dynamic GMIN Stepping Algorithm
+ngspice implements a **sequential fallback chain** in `CKTop()`:
 
 ```
-1. Start with GMIN = 0.01 S (100Ω to ground on all nodes)
-2. Solve at current GMIN level
+1. Direct Newton (NIiter)
+   ↓ (if failed)
+2. GMIN Stepping (diagGmin: 0.01 → MAX(gmin, gshunt))
+   ↓ (if failed)
+3. Source Stepping (srcFact: 0 → 1)
+```
+
+**Key clarification**: There is no separate "gshunt stepping". The `gshunt` parameter is simply the **target floor** for GMIN stepping. When `gshunt > 0`, GMIN stepping ramps `diagGmin` down to `gshunt` instead of `gmin`.
+
+**Defaults** (from `cktntask.c`):
+- `numGminSteps = 1` → use `dynamic_gmin` (adaptive)
+- `numSrcSteps = 1` → use `gillespie_src` (adaptive)
+
+#### 1.2.1 GMIN Stepping (diagGmin homotopy)
+
+This is a **matrix regularization homotopy**:
+- **Homotopy parameter**: `diagGmin` ∈ [0.01, MAX(gmin, gshunt)]
+- **Effect**: Adds `diagGmin` to every diagonal element of G matrix
+- **Physics**: Equivalent to shunt resistor `1/diagGmin` from each node to ground
+
+Two variants:
+- `dynamic_gmin`: Adaptive stepping with factor adjustment based on iteration count
+- `spice3_gmin`: Fixed geometric progression (divide by `gminFactor` each step)
+
+```
+Algorithm (dynamic_gmin):
+1. Start with diagGmin = 0.01 S (100Ω shunt to ground)
+2. Solve at current diagGmin level
 3. If converged:
-   - If iteration count < maxiters/4: increase factor (faster stepping)
-   - If iteration count > 3*maxiters/4: decrease factor (more careful)
-   - GMIN = GMIN / factor
+   - Fast convergence (iters < maxiters/4): increase factor
+   - Slow convergence (iters > 3*maxiters/4): decrease factor
+   - diagGmin = diagGmin / factor
 4. If failed:
    - Reduce stepping factor: factor = sqrt(sqrt(factor))
-   - Restore previous solution
-   - Try again with smaller step
-5. Continue until GMIN reaches target (gmin or gshunt)
-6. Final solve without GMIN homotopy
+   - Restore previous solution, try smaller step
+5. Continue until diagGmin reaches MAX(gmin, gshunt)
+6. Final solve at target diagGmin
 ```
 
-#### 1.2.2 Source Stepping Algorithm
+#### 1.2.2 Source Stepping (srcFact homotopy)
+
+This is a **parameter continuation homotopy**:
+- **Homotopy parameter**: `srcFact` ∈ [0, 1]
+- **Effect**: All source values multiplied by `srcFact`
+- **Physics**: Gradually "turns on" the circuit from zero-source state
+
+Two variants:
+- `gillespie_src`: Adaptive stepping based on convergence speed
+- `spice3_src`: Fixed stepping
 
 ```
+Algorithm (gillespie_src):
 1. Set srcFact = 0 (all sources at 0V/0A)
-2. Solve with zero sources (often uses GMIN stepping too)
+2. Solve with zero sources (may use GMIN stepping too if this fails)
 3. Gradually increase srcFact toward 1.0:
-   - If converged quickly: increase step size (raise *= 1.5)
-   - If converged slowly: decrease step size (raise *= 0.5)
-   - If failed: reduce step size, restore previous solution
+   - Fast convergence: raise *= 1.5
+   - Slow convergence: raise *= 0.5
+   - Failed: reduce raise by 10x, restore previous solution
 4. Continue until srcFact = 1.0 (full source values)
 ```
+
+#### 1.2.3 Comparison of Homotopy Methods
+
+| Aspect | GMIN Stepping | Source Stepping | PseudoTransient |
+|--------|---------------|-----------------|-----------------|
+| Homotopy parameter | diagGmin ∈ [0.01, 1e-12] | srcFact ∈ [0, 1] | pseudo-time Δt |
+| What changes | Matrix diagonal (shunts) | RHS (source values) | Adds C·dx/dt term |
+| Initial state | All nodes shunted to 0V | All sources = 0 | Initial guess |
+| Path to solution | Remove shunts gradually | Turn on sources gradually | Time evolution |
+| For oscillators | Creates fake equilibrium | srcFact=0 gives trivial x=0 | May oscillate |
+| Equilibrium found | Shifted by residual gshunt | True (if srcFact reaches 1) | True (if steady state exists) |
 
 ### 1.3 GMIN Application in Devices
 
@@ -255,29 +291,37 @@ VACASK focuses on performance optimization rather than convergence robustness, a
 ```julia
 CedarRobustNLSolve() = NonlinearSolvePolyAlgorithm((
     RobustMultiNewton.algs...,  # 6 trust region variants
-    LevenbergMarquardt(),       # GMIN-like regularization
-    PseudoTransient()           # Continuation method
+    LevenbergMarquardt(),       # Jacobian regularization (NOT same as GMIN stepping)
+    PseudoTransient()           # Time-like continuation (NOT same as source stepping)
 ))
 ```
 
-**Mapping to ngspice**:
+**Mapping to ngspice** (with important distinctions):
 
-| ngspice Method | Cadnip.jl Equivalent | Notes |
-|----------------|----------------------|-------|
-| Newton-Raphson | `NewtonRaphson()` | Part of RobustMultiNewton |
-| Junction limiting | `BackTracking()` linesearch | Similar damping effect |
-| GMIN stepping | `LevenbergMarquardt(damping_initial=1.0)` | Regularizes Jacobian |
-| Source stepping | `PseudoTransient()` | Similar homotopy approach |
-| Dynamic GMIN | Not implemented | Need adaptive GMIN |
+| ngspice Method | Cadnip.jl | Equivalent? | Key Difference |
+|----------------|-----------|-------------|----------------|
+| Newton-Raphson | `NewtonRaphson()` | ✓ Yes | Same algorithm |
+| Junction limiting (pnjlim) | `BackTracking()` linesearch | ~ Partial | Backtracking is global, pnjlim is per-device |
+| **GMIN stepping** | `LevenbergMarquardt()` | **✗ No** | LM regularizes Jacobian only, doesn't change residual |
+| **Source stepping** | `PseudoTransient()` | **✗ No** | Different homotopy parameters (see §1.2.3) |
+| diagGmin homotopy | Not implemented | - | Need explicit GMIN stepping |
+| srcFact homotopy | Not implemented | - | Need source scaling parameter |
 
-### 3.2 GMIN in Cadnip.jl (`build.jl`)
+**Critical distinction** (see Q4 above):
+- **LevenbergMarquardt**: Step = `(J'J + λI)⁻¹ J' F` — regularizes *inversion*, residual unchanged
+- **GMIN stepping**: Residual = `(G + diagGmin·I)·x - b` — changes the *problem* being solved
 
-Currently, GMIN is added only to the **diagonal** of G matrix during assembly:
+For oscillators with no DC equilibrium, LM cannot help because there's no solution to converge to.
+GMIN stepping creates a fake equilibrium by adding shunt resistors.
+
+### 3.2 GSHUNT in Cadnip.jl (`build.jl`)
+
+Currently, matrix diagonal shunt is available but **not connected** to MNASpec:
 
 ```julia
-function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
+function assemble_G(ctx::MNAContext; gmin::Float64=0.0)  # Should rename to gshunt
     if gmin > 0
-        # Add GMIN from each voltage node to ground
+        # Add shunt from each voltage node to ground (ngspice calls this gshunt)
         gmin_I = collect(1:ctx.n_nodes)
         gmin_J = collect(1:ctx.n_nodes)
         gmin_V = fill(gmin, ctx.n_nodes)
@@ -286,7 +330,15 @@ function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
 end
 ```
 
-This is fundamentally different from ngspice's approach of adding GMIN to the **device conductance**.
+**Two different things** (ngspice terminology):
+1. **gmin** (device-level): Added inside device models to junction conductance: `gd += gmin`
+   - Available via `$simparam("gmin")` in VA models
+   - Correct for physics (models leakage current)
+
+2. **gshunt** (matrix diagonal): Added to G matrix diagonal during assembly
+   - Currently the `gmin` kwarg in `assemble_G` (should rename)
+   - Used for homotopy stepping and oscillator initialization
+   - Not connected to MNASpec yet
 
 ### 3.3 Charge Formulation vs Companion Models
 
