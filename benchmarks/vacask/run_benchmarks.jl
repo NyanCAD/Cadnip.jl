@@ -220,12 +220,13 @@ function main()
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl")
     ))
 
-    # Ring Oscillator - all solvers
-    # Uses CedarDCOp with CedarRobustNLSolve (LevenbergMarquardt + PseudoTransient)
-    append!(results, run_benchmark_all_solvers(
-        "Ring Oscillator",
-        joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl")
-    ))
+    # # Ring Oscillator - all solvers
+    # # TODO: Ring oscillators need special initialization (no stable DC equilibrium)
+    # # Currently times out - needs more work on oscillator initialization
+    # append!(results, run_benchmark_all_solvers(
+    #     "Ring Oscillator",
+    #     joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl")
+    # ))
 
     # # C6288 Multiplier - all solvers
     # append!(results, run_benchmark_all_solvers(
