@@ -542,37 +542,56 @@ function source_stepping(solve_fn, u0; raise=0.001)
 end
 ```
 
-### 5.3 Improve Charge State Scaling (Priority: Medium)
+### 5.3 Improve Charge State Scaling (Priority: High)
 
-The charge formulation may create ill-conditioned systems because:
-- Voltages: O(1-10) V
-- Charges: O(1e-12 - 1e-15) C (femtocoulombs)
+**Why scaling matters**: MNA with charge states creates ill-conditioned systems because
+residuals span many orders of magnitude:
+
+| Equation Type | Residual Units | Typical Magnitude |
+|---------------|----------------|-------------------|
+| KCL (node) | Amperes | 1e-3 to 1 A |
+| Voltage source | Volts | ~1 V |
+| Charge constraint `q = Q(V)` | Coulombs | ~1e-12 C |
+| If `V = dV/dt` appears | V/s | ~1e9 V/s (for ns timescales!) |
+
+**VADistiller experience**: During MOS1 model compilation, the equation `v_x = dv_y/dt`
+appeared when the compiler restructured charge conservation equations. With dt ~ 1 ns,
+dV/dt ~ 1 GV/s, causing residuals 12+ orders of magnitude larger than current residuals.
+Scaling resolved the convergence problems.
+
+**Two scaling issues**:
+
+1. **Charge state magnitude**: q ~ 1e-12 C vs V ~ 1 V
+   - Solution: Use `q_scaled = q / CHARGE_SCALE` where CHARGE_SCALE ~ 1e-12
+
+2. **Time derivative magnitude**: dV/dt ~ V/dt ~ 1V / 1ns = 1e9 V/s
+   - Solution: Scale time-related equations or use proper companion model formulation
 
 **Proposal**: Scale charge states to similar magnitude as voltages
 
 ```julia
 # During stamp_charge_state!
-# Instead of q in Coulombs, use q_scaled = q / charge_scale
+# Instead of q in Coulombs, use q_scaled = q / CHARGE_SCALE
 const CHARGE_SCALE = 1e-12  # Scale factor to bring charges to ~O(1)
 
 function stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
     q_idx = alloc_charge!(ctx, charge_name, p, n)
 
-    # Store unscaled charge function, but scale the state variable
-    # q_scaled = q / CHARGE_SCALE
-    # dq/dt = I  =>  d(q_scaled)/dt = I / CHARGE_SCALE
+    # State variable: q_scaled = q / CHARGE_SCALE (dimensionless, ~O(1))
+    # Differential: d(q_scaled)/dt = I / CHARGE_SCALE
+    # Constraint: q_scaled = Q(V) / CHARGE_SCALE
 
-    # KCL: I = dq/dt enters node equations
-    # Scale: q_idx column gets scaled by 1/CHARGE_SCALE
+    # KCL: I = dq/dt = CHARGE_SCALE * d(q_scaled)/dt
+    # Stamps into C matrix with scale factor
     if p != 0
-        stamp_C!(ctx, p, q_idx, 1.0 / CHARGE_SCALE)
+        stamp_C!(ctx, p, q_idx, CHARGE_SCALE)  # I enters KCL at node p
     end
     if n != 0
-        stamp_C!(ctx, n, q_idx, -1.0 / CHARGE_SCALE)
+        stamp_C!(ctx, n, q_idx, -CHARGE_SCALE)  # I leaves KCL at node n
     end
 
-    # Constraint: q_scaled = Q(V) / CHARGE_SCALE
-    # Jacobian entries also scaled
+    # Constraint row: q_scaled - Q(V)/CHARGE_SCALE = 0
+    # This residual is now O(1), not O(1e-12)
     stamp_G!(ctx, q_idx, q_idx, 1.0)
     stamp_G!(ctx, q_idx, p, -result.dq_dVp / CHARGE_SCALE)
     stamp_G!(ctx, q_idx, n, -result.dq_dVn / CHARGE_SCALE)
@@ -581,6 +600,17 @@ function stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
     stamp_b!(ctx, q_idx, b_constraint)
 end
 ```
+
+**Alternative: Equation scaling** (as used in VADistiller)
+Instead of scaling state variables, scale entire rows of the Jacobian:
+```julia
+# After assembling J, scale rows by equation type
+for eq in charge_equations
+    J[eq, :] ./= CHARGE_SCALE
+    b[eq] /= CHARGE_SCALE
+end
+```
+This is mathematically equivalent but may be simpler to implement.
 
 ### 5.4 Runtime Convergence: Per-Iteration Voltage Limiting (Priority: High)
 
