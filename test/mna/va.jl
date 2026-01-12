@@ -14,6 +14,7 @@ using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, 
 using CedarSim.MNA: VoltageSource, Resistor  # Use MNA versions explicitly
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
+using LinearSolve: KLUFactorization
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -304,7 +305,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                         jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
         prob = ODEProblem(f, u0, prob_data.tspan)
-        sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+        sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-8)
 
         # Check RC charging behavior
         # At t=0: V_cap = 0

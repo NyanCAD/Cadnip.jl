@@ -2,6 +2,7 @@ module MTK_extension_tests
 using Test
 using CedarSim, ModelingToolkit, ModelingToolkitStandardLibrary.Electrical
 using OrdinaryDiffEq
+using LinearSolve: KLUFactorization
 
 @mtkmodel MyResistor begin
     @parameters begin
@@ -32,7 +33,7 @@ circuit()  # check it doesn't error
 circuit_sim = DefaultSim(circuit)
 circuit_sys = CircuitIRODESystem(circuit_sim)  #, debug_config = (; store_ir_levels = true, verify_ir_levels = true, store_ss_levels = true))
 circuit_prob = ODEProblem(circuit_sys, nothing, (0.0, 1.0), circuit_sim; jac=true)
-circuit_sol = solve(circuit_prob, Rodas5P())
+circuit_sol = solve(circuit_prob, Rodas5P(linsolve=KLUFactorization()))
 
 @test circuit_sol(0.0, idxs=circuit_sys.xres.R.i) == 0.1  # ohms law: i=v/r
 

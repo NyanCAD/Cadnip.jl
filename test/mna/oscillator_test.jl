@@ -17,6 +17,7 @@ using VerilogAParser
 using SciMLBase
 using CedarSim: tran!, parse_spice_to_mna
 using OrdinaryDiffEq: Rodas5P
+using LinearSolve: KLUFactorization
 
 #==============================================================================#
 # Load sp_mos1 model from vadistiller
@@ -95,7 +96,7 @@ eval(ring_osc_code)
         # CedarUICOp uses pseudo-transient relaxation for oscillators without stable DC equilibrium
         @info "Running ring oscillator transient simulation" tspan
         sol = tran!(circuit, tspan;
-                    solver=Rodas5P(),
+                    solver=Rodas5P(linsolve=KLUFactorization()),
                     initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
                     abstol=1e-9, reltol=1e-6,
                     dtmax=1e-9)

@@ -118,7 +118,7 @@ const c_val = 1e-6
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=deftol, abstol=deftol)
+    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=deftol, abstol=deftol)
 
     # At t=0, capacitor voltage should be 0
     # At t=10τ, capacitor voltage approaches v_val (within ~0.005%)

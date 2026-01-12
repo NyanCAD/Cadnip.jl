@@ -22,6 +22,7 @@ using CedarSim.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
+using LinearSolve: KLUFactorization
 using SciMLBase
 using CedarSim: tran!, dc!, parse_spice_to_mna
 
@@ -243,7 +244,7 @@ eval(monostable_code)
                 # sp_bjt has internal nodes (excess phase) that can't converge to tight
                 # tolerances, so use abstol=1e-3 for DC initialization
                 sol = tran!(circuit, tspan;
-                            solver=Rodas5P(),
+                            solver=Rodas5P(linsolve=KLUFactorization()),
                             initializealg=CedarDCOp(abstol=1e-3),
                             abstol=1e-6, reltol=1e-4,
                             dtmax=1e-4)
@@ -476,7 +477,7 @@ eval(monostable_code)
 
                 # Use CedarUICOp for oscillator initialization (no stable DC point)
                 sol = tran!(circuit, tspan;
-                            solver=Rodas5P(),
+                            solver=Rodas5P(linsolve=KLUFactorization()),
                             initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
                             abstol=1e-9, reltol=1e-6,
                             dtmax=1e-9)
