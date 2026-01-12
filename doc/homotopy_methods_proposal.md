@@ -113,12 +113,19 @@ Vd = $limit(V(anode, cathode), "pnjlim", Vt, Vcrit);
 
 ### Q4: Should the `gmin` kwarg in `assemble_G` be connected to `MNASpec.gmin`?
 
-**Short answer**: No - these are different things with different purposes.
+**Short answer**: No - ngspice uses separate `gmin` and `gshunt` parameters for exactly this reason.
 
-**Matrix-level GMIN** (`assemble_G(...; gmin=x)`):
+**ngspice terminology** (from `cktdefs.h` and `cktop.c`):
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `CKTgmin` | 1e-12 | Device-level: `gd += gmin` inside device models |
+| `CKTgshunt` | 0 | Matrix diagonal: permanent shunt to ground on all nodes |
+| `CKTdiagGmin` | (homotopy) | Temporary: starts at 0.01, steps down to `MAX(gmin, gshunt)` |
+
+**GSHUNT** (`assemble_G(...; gmin=x)` - should rename to `gshunt`):
 ```julia
 # Changes the problem being solved:
-F(x) = (G + gmin·I) · x - b
+F(x) = (G + gshunt·I) · x - b
 # Every node has a shunt resistor to ground
 # The equilibrium point is DIFFERENT from the original circuit
 ```
@@ -133,26 +140,27 @@ F(x) = G · x - b
 ```
 
 **Critical distinction**:
-| Aspect | Matrix GMIN | LM Damping |
-|--------|-------------|------------|
+| Aspect | GSHUNT (matrix diagonal) | LM Damping |
+|--------|--------------------------|------------|
 | Changes residual | Yes | No |
 | Changes equilibrium | Yes (pulls nodes to 0V) | No |
 | Oscillators (no DC solution) | Creates fake equilibrium | Can't help - no solution exists |
 | Singular Jacobian | Regularizes problem | Regularizes inversion |
 
-**Why this matters for oscillators**: Ring oscillators have no DC equilibrium - LM can iterate forever because there's no solution to converge to. Matrix GMIN creates a fake (but stable) equilibrium by adding shunt resistors.
+**Why this matters for oscillators**: Ring oscillators have no DC equilibrium - LM can iterate forever because there's no solution to converge to. GSHUNT creates a fake (but stable) equilibrium by adding shunt resistors.
 
 **Recommendation**:
-1. **Keep `MNASpec.gmin`** for device-level GMIN (accessed via `$simparam("gmin")`) - this is physics-correct
-2. **Add a separate `matrix_gmin` parameter** for creating initial conditions:
+1. **Rename `assemble_G`'s `gmin` kwarg to `gshunt`** to match ngspice terminology
+2. **Keep `MNASpec.gmin`** for device-level GMIN (accessed via `$simparam("gmin")`)
+3. **Add `MNASpec.gshunt`** for matrix diagonal (default 0, like ngspice):
    ```julia
    Base.@kwdef struct MNASpec{T<:Real}
        gmin::Float64 = 1e-12       # Device-level GMIN (for VA models)
-       matrix_gmin::Float64 = 0.0  # Matrix diagonal GMIN (for oscillator init)
+       gshunt::Float64 = 0.0       # Matrix diagonal shunt (ngspice: gshunt)
        # ...
    end
    ```
-3. **Use matrix_gmin only for `:dcop` mode** when finding initial conditions for oscillators
+4. **Use gshunt for oscillator initialization** when no DC solution exists
 
 ## 1. ngspice Default Tolerances and Homotopy Methods
 
@@ -163,7 +171,8 @@ F(x) = G · x - b
 | `abstol` | 1e-12 | 1e-12 | Current tolerance (Amperes) |
 | `reltol` | 1e-3 | 1e-3 | Relative tolerance |
 | `vntol` | 1e-6 | 1e-6 | Voltage tolerance (Volts) |
-| `gmin` | 1e-12 | 1e-12 | Minimum conductance (Siemens) |
+| `gmin` | 1e-12 | 1e-12 | Device-level minimum conductance (Siemens) |
+| `gshunt` | 0 | N/A | Matrix diagonal shunt conductance (Siemens) |
 | `chgtol` | 1e-14 | N/A | Charge tolerance |
 | `trtol` | 7 | N/A | Truncation error factor |
 | `gminFactor` | 10 | N/A | GMIN stepping factor |
