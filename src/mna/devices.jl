@@ -155,32 +155,61 @@ end
 Inductor(l::Real; name::Symbol=:L) = Inductor(Float64(l), name)
 
 """
-    VoltageSource(v::Float64; name::Symbol=:V)
+    VoltageSource(v::Float64; ac=0.0+0.0im, name::Symbol=:V)
 
-An independent DC voltage source with voltage `v` volts.
+An independent voltage source with DC value `v` volts and optional AC magnitude/phase.
 
 MNA requires a current variable (current through source is unknown).
-Stamps G matrix (KCL and voltage constraint) and b vector (source value).
+Stamps G matrix (KCL and voltage constraint), b vector (DC value), and
+b_ac vector (AC excitation for small-signal analysis).
+
+# AC Specification
+The `ac` parameter is a complex number: `mag * exp(im * phase_rad)`.
+For SPICE-style specification (magnitude and phase in degrees):
+    VoltageSource(1.0; ac=1.0*exp(im*45*π/180))  # 1V DC, 1∠45° AC
+
+# Example
+```julia
+# DC only
+v1 = VoltageSource(5.0; name=:V1)
+
+# DC + AC for small-signal analysis
+v2 = VoltageSource(0.0; ac=1.0, name=:Vac)  # AC source with 1V magnitude, 0° phase
+```
 """
 struct VoltageSource <: AbstractVoltageSource
     v::Float64
+    ac::ComplexF64
     name::Symbol
 end
-VoltageSource(v::Real; name::Symbol=:V) = VoltageSource(Float64(v), name)
+VoltageSource(v::Real; ac::Number=0.0, name::Symbol=:V) = VoltageSource(Float64(v), ComplexF64(ac), name)
 
 """
-    CurrentSource(i::Float64; name::Symbol=:I)
+    CurrentSource(i::Float64; ac=0.0+0.0im, name::Symbol=:I)
 
-An independent DC current source with current `i` amperes.
+An independent current source with DC value `i` amperes and optional AC magnitude/phase.
 
-Stamps b vector only (source current into KCL equations).
+Stamps b vector (DC current into KCL equations) and b_ac vector (AC excitation).
 Positive current flows from n to p (into the positive terminal).
+
+# AC Specification
+The `ac` parameter is a complex number: `mag * exp(im * phase_rad)`.
+
+# Example
+```julia
+# DC only
+i1 = CurrentSource(1e-3; name=:I1)
+
+# DC + AC for small-signal analysis
+i2 = CurrentSource(0.0; ac=1e-6, name=:Iac)  # AC source with 1µA magnitude
+```
 """
 struct CurrentSource <: AbstractCurrentSource
     i::Float64
+    ac::ComplexF64
     name::Symbol
 end
-CurrentSource(i::Real; name::Symbol=:I) = CurrentSource(Float64(i), name)
+CurrentSource(i::Real; ac::Number=0.0, name::Symbol=:I) = CurrentSource(Float64(i), ComplexF64(ac), name)
 
 #==============================================================================#
 # Time-Dependent Sources (Mode-Aware)
@@ -683,7 +712,8 @@ Matrix pattern:
 G = I_V[+1  -1   .  ]     Voltage constraint: Vp - Vn
 
     I_V
-b = V_dc                  Source voltage value
+b = V_dc                  Source voltage value (DC)
+b_ac = V_ac               Source voltage value (AC small-signal)
 ```
 """
 function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
@@ -698,6 +728,11 @@ function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
     stamp_b!(ctx, I_idx, V.v)
+
+    # AC excitation (for small-signal analysis)
+    if V.ac != 0
+        stamp_b_ac!(ctx, I_idx, V.ac)
+    end
 
     return I_idx
 end
@@ -722,9 +757,14 @@ the positive terminal.
 RHS pattern:
 ```
     p
-b = +I   (current enters p)
+b = +I      (DC current enters p)
     n
-    -I   (current leaves n)
+    -I      (DC current leaves n)
+
+    p
+b_ac = +I_ac   (AC current enters p)
+    n
+       -I_ac   (AC current leaves n)
 ```
 """
 function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
@@ -733,6 +773,13 @@ function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
     # KCL at n: current I leaves (subtract from RHS)
     stamp_b!(ctx, p,  I.i)
     stamp_b!(ctx, n, -I.i)
+
+    # AC excitation (for small-signal analysis)
+    if I.ac != 0
+        stamp_b_ac!(ctx, p,  I.ac)
+        stamp_b_ac!(ctx, n, -I.ac)
+    end
+
     return nothing
 end
 

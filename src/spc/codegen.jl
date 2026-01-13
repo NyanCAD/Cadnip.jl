@@ -1877,15 +1877,30 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
     # Parse source values - check for DC, AC, and transient
     dc_val = nothing
+    ac_mag = nothing
+    ac_phase = nothing
     tran_source = nothing
 
     for val in instance.vals
         if val isa SNode{SP.DCSource}
             dc_val = cg_expr!(state, val.dcval)
+        elseif val isa SNode{SP.ACSource}
+            ac_mag = cg_expr!(state, val.acmag)
+            # Note: acphase not currently supported in parser
         elseif val isa SNode{SP.TranSource}
             tran_source = val
         end
-        # AC sources not handled in MNA transient (yet)
+    end
+
+    # Build AC expression: mag * exp(im * phase_deg * π/180)
+    ac_expr = if ac_mag !== nothing
+        if ac_phase !== nothing
+            :($ac_mag * exp(im * $ac_phase * π / 180))
+        else
+            :($ac_mag + 0.0im)
+        end
+    else
+        :(0.0 + 0.0im)
     end
 
     # If we have a transient source, generate appropriate device
@@ -2078,18 +2093,18 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
         end
     end
 
-    # No transient source - use DC value
+    # No transient source - use DC value with optional AC
     dc_val_actual = dc_val !== nothing ? dc_val : 0.0
     if is_voltage
         return quote
-            let v = $dc_val_actual
-                stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            let v = $dc_val_actual, ac = $ac_expr
+                stamp!(VoltageSource(v; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
             end
         end
     else
         return quote
-            let i = $dc_val_actual
-                stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            let i = $dc_val_actual, ac = $ac_expr
+                stamp!(CurrentSource(i; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
             end
         end
     end
@@ -2142,7 +2157,12 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         if net_name in skip_nets
             continue
         end
-        push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
+        # Ground (net "0") is special - use literal 0 instead of creating a node
+        if net_name === Symbol("0")
+            push!(block.args, :($net_name = 0))
+        else
+            push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
+        end
     end
 
     # Parameters from lens - set up lens for parameter access
