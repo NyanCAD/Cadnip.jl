@@ -73,6 +73,8 @@ end
 export stamp!
 export Resistor, Capacitor, Inductor
 export VoltageSource, CurrentSource
+export SinVoltageSource, SinCurrentSource, PWLVoltageSource, PWLCurrentSource
+export TimeDependentVoltageSource
 export VCVS, VCCS, CCVS, CCCS
 
 #==============================================================================#
@@ -154,365 +156,264 @@ struct Inductor <: AbstractPassiveDevice
 end
 Inductor(l::Real; name::Symbol=:L) = Inductor(Float64(l), name)
 
-"""
-    VoltageSource(v::Float64; ac=0.0+0.0im, name::Symbol=:V)
-
-An independent voltage source with DC value `v` volts and optional AC magnitude/phase.
-
-MNA requires a current variable (current through source is unknown).
-Stamps G matrix (KCL and voltage constraint), b vector (DC value), and
-b_ac vector (AC excitation for small-signal analysis).
-
-# AC Specification
-The `ac` parameter is a complex number: `mag * exp(im * phase_rad)`.
-For SPICE-style specification (magnitude and phase in degrees):
-    VoltageSource(1.0; ac=1.0*exp(im*45*π/180))  # 1V DC, 1∠45° AC
-
-# Example
-```julia
-# DC only
-v1 = VoltageSource(5.0; name=:V1)
-
-# DC + AC for small-signal analysis
-v2 = VoltageSource(0.0; ac=1.0, name=:Vac)  # AC source with 1V magnitude, 0° phase
-```
-"""
-struct VoltageSource <: AbstractVoltageSource
-    v::Float64
-    ac::ComplexF64
-    name::Symbol
-end
-VoltageSource(v::Real; ac::Number=0.0, name::Symbol=:V) = VoltageSource(Float64(v), ComplexF64(ac), name)
-
-"""
-    CurrentSource(i::Float64; ac=0.0+0.0im, name::Symbol=:I)
-
-An independent current source with DC value `i` amperes and optional AC magnitude/phase.
-
-Stamps b vector (DC current into KCL equations) and b_ac vector (AC excitation).
-Positive current flows from n to p (into the positive terminal).
-
-# AC Specification
-The `ac` parameter is a complex number: `mag * exp(im * phase_rad)`.
-
-# Example
-```julia
-# DC only
-i1 = CurrentSource(1e-3; name=:I1)
-
-# DC + AC for small-signal analysis
-i2 = CurrentSource(0.0; ac=1e-6, name=:Iac)  # AC source with 1µA magnitude
-```
-"""
-struct CurrentSource <: AbstractCurrentSource
-    i::Float64
-    ac::ComplexF64
-    name::Symbol
-end
-CurrentSource(i::Real; ac::Number=0.0, name::Symbol=:I) = CurrentSource(Float64(i), ComplexF64(ac), name)
-
 #==============================================================================#
-# Time-Dependent Sources (Mode-Aware)
+# Transient Waveform Types (Callable structs for use as tran parameter)
 #==============================================================================#
 
 """
-    TimeDependentVoltageSource{F}
+    SinWaveform
 
-A voltage source with time-dependent value, respecting simulation mode.
-
-In `:dcop` mode, returns `dc_value` (steady state).
-In `:tran` mode, calls `value_fn(t)` for time-dependent behavior.
-
-# Example
-```julia
-# Pulse source: 0V at t<1ms, 5V at t>=1ms
-pulse = TimeDependentVoltageSource(
-    t -> t < 1e-3 ? 0.0 : 5.0,
-    dc_value = 0.0,  # DC operating point value
-    name = :Vpulse
-)
-```
-"""
-struct TimeDependentVoltageSource{F} <: AbstractVoltageSource
-    value_fn::F      # Function t -> voltage
-    dc_value::Float64  # Value for DC analysis (mode = :dcop)
-    name::Symbol
-end
-
-function TimeDependentVoltageSource(value_fn::F; dc_value::Real=0.0, name::Symbol=:V) where {F}
-    TimeDependentVoltageSource{F}(value_fn, Float64(dc_value), name)
-end
-
-export TimeDependentVoltageSource
-
-"""
-    get_source_value(src::TimeDependentVoltageSource, t::Real, mode::Symbol) -> Float64
-
-Get the source value at time `t` for the given simulation mode.
-"""
-function get_source_value(src::TimeDependentVoltageSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        return src.dc_value
-    else
-        return src.value_fn(t)
-    end
-end
-
-export get_source_value
-
-#==============================================================================#
-# PWL Voltage Source
-#==============================================================================#
-
-"""
-    PWLVoltageSource{T,V}
-
-Piecewise-linear voltage source defined by time-value pairs.
-
-Parameterized on storage type to support both heap-allocated vectors and
-stack-allocated tuples for zero-allocation operation.
-
-# Type Parameters
-- `T`: Storage type for times (e.g., Vector{Float64}, NTuple{N,Float64})
-- `V`: Storage type for values
-
-# Examples
-```julia
-# Vector-based (for dynamic PWL data)
-pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vramp)
-
-# Tuple-based (zero allocation, for constant PWL data)
-pwl = PWLVoltageSource((0.0, 1e-3), (0.0, 5.0); name=:Vramp)
-```
-"""
-struct PWLVoltageSource{T,V} <: AbstractVoltageSource
-    times::T
-    values::V
-    name::Symbol
-end
-
-# Constructor for regular vectors (copies to Vector{Float64})
-function PWLVoltageSource(times::Vector, values::Vector; name::Symbol=:V)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLVoltageSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
-end
-
-# Constructor for SVector (zero-copy, preserves type for zero-allocation)
-@inline function PWLVoltageSource(times::SVector{N,Float64}, values::SVector{N,Float64}; name::Symbol=:V) where N
-    PWLVoltageSource{SVector{N,Float64},SVector{N,Float64}}(times, values, name)
-end
-
-# Constructor for Float64 tuples (zero-copy, stack-allocated)
-@inline function PWLVoltageSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:V) where N
-    PWLVoltageSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
-end
-
-# Fallback for other AbstractVector (converts to Vector{Float64})
-function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLVoltageSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
-end
-
-export PWLVoltageSource
-
-"""
-    pwl_value(src::PWLVoltageSource, t::Real) -> Float64
-
-Evaluate PWL voltage source at time t.
-"""
-@inline function pwl_value(src::PWLVoltageSource, t::Real)
-    pwl_at_time(src.times, src.values, t)
-end
-
-@inline function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
-    mode === :dcop && return pwl_value(src, 0.0)
-    return pwl_value(src, t)
-end
-
-export pwl_value
-
-#==============================================================================#
-# PWL Current Source
-#==============================================================================#
-
-"""
-    PWLCurrentSource{T,V}
-
-Piecewise-linear current source defined by time-value pairs.
-
-Parameterized on storage type - see PWLVoltageSource for details.
-
-# Examples
-```julia
-# Vector-based
-pwl = PWLCurrentSource([0.0, 1e-3], [0.0, 1e-3]; name=:Iramp)
-
-# Tuple-based (zero allocation)
-pwl = PWLCurrentSource((0.0, 1e-3), (0.0, 1e-3); name=:Iramp)
-```
-"""
-struct PWLCurrentSource{T,V} <: AbstractCurrentSource
-    times::T
-    values::V
-    name::Symbol
-end
-
-# Constructor for regular vectors (copies to Vector{Float64})
-function PWLCurrentSource(times::Vector, values::Vector; name::Symbol=:I)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLCurrentSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
-end
-
-# Constructor for SVector (zero-copy, preserves type for zero-allocation)
-@inline function PWLCurrentSource(times::SVector{N,Float64}, values::SVector{N,Float64}; name::Symbol=:I) where N
-    PWLCurrentSource{SVector{N,Float64},SVector{N,Float64}}(times, values, name)
-end
-
-# Constructor for Float64 tuples (zero-copy, stack-allocated)
-@inline function PWLCurrentSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:I) where N
-    PWLCurrentSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
-end
-
-# Fallback for other AbstractVector (converts to Vector{Float64})
-function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLCurrentSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
-end
-
-export PWLCurrentSource
-
-@inline pwl_value(src::PWLCurrentSource, t::Real) = pwl_at_time(src.times, src.values, t)
-
-@inline function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
-    mode === :dcop && return pwl_value(src, 0.0)
-    return pwl_value(src, t)
-end
-
-#==============================================================================#
-# Sinusoidal Sources
-#==============================================================================#
-
-"""
-    SinVoltageSource
-
-Sinusoidal voltage source with SPICE-compatible parameters.
+Callable struct representing a sinusoidal waveform.
 
 V(t) = vo + va * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
 
 For t < td: V(t) = vo + va * sin(phase)
 
-# Fields
-- `vo::Float64`: DC offset voltage
-- `va::Float64`: Amplitude
-- `freq::Float64`: Frequency in Hz
-- `td::Float64`: Delay time (default: 0)
-- `theta::Float64`: Damping factor (default: 0)
-- `phase::Float64`: Phase in degrees (default: 0)
-- `name::Symbol`: Source name
-
-# Example
-```julia
-# 1kHz sine wave, 1V amplitude, 0.5V offset
-sin_src = SinVoltageSource(0.5, 1.0, 1000.0; name=:Vsin)
-```
+Called as `waveform(t)` to get value at time t.
 """
-struct SinVoltageSource <: AbstractVoltageSource
+struct SinWaveform
     vo::Float64      # DC offset
     va::Float64      # Amplitude
     freq::Float64    # Frequency (Hz)
     td::Float64      # Delay
     theta::Float64   # Damping factor
     phase::Float64   # Phase (degrees)
+end
+
+function SinWaveform(vo::Real, va::Real, freq::Real;
+                     td::Real=0.0, theta::Real=0.0, phase::Real=0.0)
+    SinWaveform(Float64(vo), Float64(va), Float64(freq),
+                Float64(td), Float64(theta), Float64(phase))
+end
+
+@inline function (w::SinWaveform)(t::Real)
+    if t < w.td
+        return w.vo + w.va * sind(w.phase)
+    else
+        t_eff = t - w.td
+        damping = w.theta == 0.0 ? 1.0 : exp(-t_eff * w.theta)
+        return w.vo + w.va * damping * sind(360.0 * w.freq * t_eff + w.phase)
+    end
+end
+
+export SinWaveform
+
+"""
+    PWLWaveform{T,V}
+
+Callable struct representing a piecewise-linear waveform.
+
+Parameterized on storage type to support both heap-allocated vectors and
+stack-allocated tuples/SVectors for zero-allocation operation.
+
+Called as `waveform(t)` to get interpolated value at time t.
+"""
+struct PWLWaveform{T,V}
+    times::T
+    values::V
+end
+
+# Constructors for different storage types
+function PWLWaveform(times::Vector, values::Vector)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLWaveform{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values))
+end
+
+@inline function PWLWaveform(times::SVector{N,Float64}, values::SVector{N,Float64}) where N
+    PWLWaveform{SVector{N,Float64},SVector{N,Float64}}(times, values)
+end
+
+@inline function PWLWaveform(times::NTuple{N,Float64}, values::NTuple{N,Float64}) where N
+    PWLWaveform{NTuple{N,Float64},NTuple{N,Float64}}(times, values)
+end
+
+function PWLWaveform(times::AbstractVector, values::AbstractVector)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLWaveform{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values))
+end
+
+@inline (w::PWLWaveform)(t::Real) = pwl_at_time(w.times, w.values, t)
+
+# Also support raw (times, values, t) form for backward compatibility
+pwl_value(times, values, t) = pwl_at_time(times, values, t)
+
+export PWLWaveform
+
+#==============================================================================#
+# Unified VoltageSource
+#==============================================================================#
+
+"""
+    VoltageSource{T}(dc; ac=0.0, tran=nothing, name=:V)
+
+Unified independent voltage source with DC, AC, and transient support.
+
+MNA requires a current variable (current through source is unknown).
+Stamps G matrix (KCL and voltage constraint), b vector (DC/transient value),
+and b_ac vector (AC excitation for small-signal analysis).
+
+# Fields
+- `dc::Float64`: DC value used in DC analysis (dcop mode)
+- `ac::ComplexF64`: AC excitation for small-signal analysis
+- `tran::T`: Transient waveform - can be:
+  - `nothing`: use `dc` value in transient mode
+  - `SinWaveform`: sinusoidal waveform
+  - `PWLWaveform`: piecewise-linear waveform
+  - Any callable `f(t) -> value`
+
+# Mode Behavior
+- `:dcop`: returns `dc`
+- `:tran`: returns `tran(t)` if tran is callable, else `dc`
+- AC analysis uses `dc` as operating point and `ac` for small-signal excitation
+
+# Examples
+```julia
+# DC only
+v1 = VoltageSource(5.0; name=:V1)
+
+# DC + AC for small-signal analysis
+v2 = VoltageSource(0.0; ac=1.0, name=:Vac)
+
+# DC + transient SIN
+v3 = VoltageSource(0.0; tran=SinWaveform(0.0, 1.0, 1000.0), name=:Vsin)
+
+# DC + AC + SIN (for AC analysis at operating point with transient waveform)
+v4 = VoltageSource(0.0; ac=1.0, tran=SinWaveform(0.0, 1.0, 1000.0), name=:V4)
+```
+"""
+struct VoltageSource{T} <: AbstractVoltageSource
+    dc::Float64
+    ac::ComplexF64
+    tran::T
     name::Symbol
 end
 
+# Main constructor
+function VoltageSource(dc::Real; ac::Number=0.0, tran=nothing, name::Symbol=:V)
+    VoltageSource{typeof(tran)}(Float64(dc), ComplexF64(ac), tran, name)
+end
+
+# Backward compatible: VoltageSource(v) where v is the DC value
+VoltageSource(dc::Real, ac::ComplexF64, name::Symbol) = VoltageSource{Nothing}(Float64(dc), ac, nothing, name)
+
+"""
+    get_source_value(V::VoltageSource, t::Real, mode::Symbol) -> Float64
+
+Get the source value at time t for the given simulation mode.
+"""
+@inline function get_source_value(V::VoltageSource, t::Real, mode::Symbol)
+    if mode === :dcop
+        return V.dc
+    elseif V.tran === nothing
+        return V.dc
+    else
+        return V.tran(t)
+    end
+end
+
+"""
+    CurrentSource{T}(dc; ac=0.0, tran=nothing, name=:I)
+
+Unified independent current source with DC, AC, and transient support.
+
+Stamps b vector (DC/transient current into KCL equations) and b_ac vector (AC excitation).
+Positive current flows from n to p (into the positive terminal).
+
+# Fields
+- `dc::Float64`: DC value used in DC analysis (dcop mode)
+- `ac::ComplexF64`: AC excitation for small-signal analysis
+- `tran::T`: Transient waveform (Nothing, SinWaveform, PWLWaveform, or callable)
+
+# Examples
+```julia
+# DC only
+i1 = CurrentSource(1e-3; name=:I1)
+
+# DC + AC for small-signal analysis
+i2 = CurrentSource(0.0; ac=1e-6, name=:Iac)
+
+# DC + transient SIN
+i3 = CurrentSource(0.0; tran=SinWaveform(0.0, 1e-3, 1000.0), name=:Isin)
+```
+"""
+struct CurrentSource{T} <: AbstractCurrentSource
+    dc::Float64
+    ac::ComplexF64
+    tran::T
+    name::Symbol
+end
+
+# Main constructor
+function CurrentSource(dc::Real; ac::Number=0.0, tran=nothing, name::Symbol=:I)
+    CurrentSource{typeof(tran)}(Float64(dc), ComplexF64(ac), tran, name)
+end
+
+# Backward compatible
+CurrentSource(dc::Real, ac::ComplexF64, name::Symbol) = CurrentSource{Nothing}(Float64(dc), ac, nothing, name)
+
+"""
+    get_source_value(I::CurrentSource, t::Real, mode::Symbol) -> Float64
+
+Get the source value at time t for the given simulation mode.
+"""
+@inline function get_source_value(I::CurrentSource, t::Real, mode::Symbol)
+    if mode === :dcop
+        return I.dc
+    elseif I.tran === nothing
+        return I.dc
+    else
+        return I.tran(t)
+    end
+end
+
+# Legacy type aliases for backward compatibility during transition
+# These will be removed in a future version
+const SinVoltageSource = VoltageSource{SinWaveform}
+const SinCurrentSource = CurrentSource{SinWaveform}
+const PWLVoltageSource{T,V} = VoltageSource{PWLWaveform{T,V}}
+const PWLCurrentSource{T,V} = CurrentSource{PWLWaveform{T,V}}
+
+# Legacy constructors for backward compatibility
+# SinVoltageSource(vo, va, freq; kwargs...) -> VoltageSource with SinWaveform
 function SinVoltageSource(vo::Real, va::Real, freq::Real;
                           td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
                           name::Symbol=:V)
-    SinVoltageSource(Float64(vo), Float64(va), Float64(freq),
-                     Float64(td), Float64(theta), Float64(phase), name)
-end
-
-export SinVoltageSource
-
-"""
-    sin_value(src::SinVoltageSource, t::Real) -> Float64
-
-Evaluate sinusoidal source at time t.
-"""
-function sin_value(src::SinVoltageSource, t::Real)
-    if t < src.td
-        # Before delay: DC offset + initial phase
-        return src.vo + src.va * sind(src.phase)
-    else
-        # Damped sinusoid
-        t_eff = t - src.td
-        damping = src.theta == 0.0 ? 1.0 : exp(-t_eff * src.theta)
-        return src.vo + src.va * damping * sind(360.0 * src.freq * t_eff + src.phase)
-    end
-end
-
-function get_source_value(src::SinVoltageSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        # DC: use value at t=0 (before delay)
-        return src.vo + src.va * sind(src.phase)
-    else
-        return sin_value(src, t)
-    end
-end
-
-export sin_value
-
-"""
-    SinCurrentSource
-
-Sinusoidal current source with SPICE-compatible parameters.
-
-I(t) = io + ia * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
-
-# Fields
-Same as SinVoltageSource but for current.
-"""
-struct SinCurrentSource <: AbstractCurrentSource
-    io::Float64      # DC offset
-    ia::Float64      # Amplitude
-    freq::Float64    # Frequency (Hz)
-    td::Float64      # Delay
-    theta::Float64   # Damping factor
-    phase::Float64   # Phase (degrees)
-    name::Symbol
+    VoltageSource(vo; tran=SinWaveform(vo, va, freq; td=td, theta=theta, phase=phase), name=name)
 end
 
 function SinCurrentSource(io::Real, ia::Real, freq::Real;
                           td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
                           name::Symbol=:I)
-    SinCurrentSource(Float64(io), Float64(ia), Float64(freq),
-                     Float64(td), Float64(theta), Float64(phase), name)
+    CurrentSource(io; tran=SinWaveform(io, ia, freq; td=td, theta=theta, phase=phase), name=name)
 end
 
-export SinCurrentSource
-
-function sin_value(src::SinCurrentSource, t::Real)
-    if t < src.td
-        return src.io + src.ia * sind(src.phase)
-    else
-        t_eff = t - src.td
-        damping = src.theta == 0.0 ? 1.0 : exp(-t_eff * src.theta)
-        return src.io + src.ia * damping * sind(360.0 * src.freq * t_eff + src.phase)
-    end
+# PWLVoltageSource(times, values; name) -> VoltageSource with PWLWaveform
+function PWLVoltageSource(times::T, values::V; name::Symbol=:V) where {T,V}
+    dc = length(values) > 0 ? first(values) : 0.0
+    VoltageSource(dc; tran=PWLWaveform(times, values), name=name)
 end
 
-function get_source_value(src::SinCurrentSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        return src.io + src.ia * sind(src.phase)
-    else
-        return sin_value(src, t)
-    end
+function PWLCurrentSource(times::T, values::V; name::Symbol=:I) where {T,V}
+    dc = length(values) > 0 ? first(values) : 0.0
+    CurrentSource(dc; tran=PWLWaveform(times, values), name=name)
 end
+
+# TimeDependentVoltageSource(f; dc_value, name) -> VoltageSource with custom function
+function TimeDependentVoltageSource(f::F; dc_value::Real=0.0, name::Symbol=:V) where {F}
+    VoltageSource(dc_value; tran=f, name=name)
+end
+
+# Legacy function for evaluating SinVoltageSource at time t
+sin_value(src::VoltageSource{SinWaveform}, t::Real) = src.tran(t)
+sin_value(src::CurrentSource{SinWaveform}, t::Real) = src.tran(t)
+
+# Legacy function for evaluating PWLVoltageSource at time t
+pwl_value(src::VoltageSource{<:PWLWaveform}, t::Real) = src.tran(t)
+pwl_value(src::CurrentSource{<:PWLWaveform}, t::Real) = src.tran(t)
+
+export get_source_value, sin_value, pwl_value
 
 """
     VCVS(gain::Float64; name::Symbol=:E)
@@ -727,7 +628,33 @@ function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
     # Voltage equation: Vp - Vn = V_dc
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
-    stamp_b!(ctx, I_idx, V.v)
+    stamp_b!(ctx, I_idx, V.dc)
+
+    # AC excitation (for small-signal analysis)
+    if V.ac != 0
+        stamp_b_ac!(ctx, I_idx, V.ac)
+    end
+
+    return I_idx
+end
+
+"""
+    stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
+
+Stamp a voltage source with time-dependent evaluation (for transient analysis).
+Uses positional arguments for zero-allocation.
+"""
+@inline function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int,
+                        t::Real, mode::Symbol)
+    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    v = get_source_value(V, t, mode)
+    stamp_b!(ctx, I_idx, v)
 
     # AC excitation (for small-signal analysis)
     if V.ac != 0
@@ -771,8 +698,29 @@ function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
     # Current flows from n to p (into positive terminal)
     # KCL at p: current I enters (add to RHS)
     # KCL at n: current I leaves (subtract from RHS)
-    stamp_b!(ctx, p,  I.i)
-    stamp_b!(ctx, n, -I.i)
+    stamp_b!(ctx, p,  I.dc)
+    stamp_b!(ctx, n, -I.dc)
+
+    # AC excitation (for small-signal analysis)
+    if I.ac != 0
+        stamp_b_ac!(ctx, p,  I.ac)
+        stamp_b_ac!(ctx, n, -I.ac)
+    end
+
+    return nothing
+end
+
+"""
+    stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
+
+Stamp a current source with time-dependent evaluation (for transient analysis).
+Uses positional arguments for zero-allocation.
+"""
+@inline function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int,
+                        t::Real, mode::Symbol)
+    i = get_source_value(I, t, mode)
+    stamp_b!(ctx, p,  i)
+    stamp_b!(ctx, n, -i)
 
     # AC excitation (for small-signal analysis)
     if I.ac != 0
@@ -1016,104 +964,6 @@ function stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::C
     return nothing
 end
 
-#------------------------------------------------------------------------------#
-# Time-Dependent Voltage Sources
-#------------------------------------------------------------------------------#
-
-"""
-    stamp!(V::TimeDependentVoltageSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
-
-Stamp a time-dependent voltage source.
-"""
-function stamp!(V::TimeDependentVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
-                t::Real=0.0, _sim_mode_::Symbol=:dcop)
-    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
-
-    stamp_G!(ctx, p, I_idx,  1.0)
-    stamp_G!(ctx, n, I_idx, -1.0)
-    stamp_G!(ctx, I_idx, p,  1.0)
-    stamp_G!(ctx, I_idx, n, -1.0)
-
-    v = get_source_value(V, t, _sim_mode_)
-    stamp_b!(ctx, I_idx, v)
-
-    return I_idx
-end
-
-"""
-    stamp!(V::PWLVoltageSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
-
-Stamp a PWL voltage source evaluated at time t.
-Uses positional arguments for zero-allocation.
-"""
-@inline function stamp!(V::PWLVoltageSource, ctx::AnyMNAContext, p::Int, n::Int,
-                        t::Real, mode::Symbol)
-    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
-
-    stamp_G!(ctx, p, I_idx,  1.0)
-    stamp_G!(ctx, n, I_idx, -1.0)
-    stamp_G!(ctx, I_idx, p,  1.0)
-    stamp_G!(ctx, I_idx, n, -1.0)
-
-    v = get_source_value(V, t, mode)
-    stamp_b!(ctx, I_idx, v)
-
-    return I_idx
-end
-
-"""
-    stamp!(V::SinVoltageSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
-
-Stamp a sinusoidal voltage source evaluated at time t.
-Uses positional arguments for zero-allocation.
-"""
-@inline function stamp!(V::SinVoltageSource, ctx::AnyMNAContext, p::Int, n::Int,
-                        t::Real, mode::Symbol)
-    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
-
-    stamp_G!(ctx, p, I_idx,  1.0)
-    stamp_G!(ctx, n, I_idx, -1.0)
-    stamp_G!(ctx, I_idx, p,  1.0)
-    stamp_G!(ctx, I_idx, n, -1.0)
-
-    v = get_source_value(V, t, mode)
-    stamp_b!(ctx, I_idx, v)
-
-    return I_idx
-end
-
-#------------------------------------------------------------------------------#
-# Time-Dependent Current Sources
-#------------------------------------------------------------------------------#
-
-"""
-    stamp!(I::PWLCurrentSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
-
-Stamp a PWL current source evaluated at time t.
-Uses positional arguments for zero-allocation.
-"""
-@inline function stamp!(I::PWLCurrentSource, ctx::AnyMNAContext, p::Int, n::Int,
-                        t::Real, mode::Symbol)
-    i = get_source_value(I, t, mode)
-    stamp_b!(ctx, p,  i)
-    stamp_b!(ctx, n, -i)
-    return nothing
-end
-
-"""
-    stamp!(I::SinCurrentSource, ctx::AnyMNAContext, p::Int, n::Int, t::Real, mode::Symbol)
-
-Stamp a sinusoidal current source evaluated at time t.
-Uses positional arguments for zero-allocation.
-"""
-@inline function stamp!(I::SinCurrentSource, ctx::AnyMNAContext, p::Int, n::Int,
-                        t::Real, mode::Symbol)
-    i = get_source_value(I, t, mode)
-    stamp_b!(ctx, p,  i)
-    stamp_b!(ctx, n, -i)
-    return nothing
-end
-
 #==============================================================================#
 # Convenience: Stamp by node names
 #==============================================================================#
@@ -1134,8 +984,7 @@ function stamp!(device, ctx::AnyMNAContext, out_p::Symbol, out_n::Symbol, in_p::
 end
 
 # Convenience for time-dependent sources with symbols (positional args)
-function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinVoltageSource,
-                              PWLCurrentSource, SinCurrentSource},
+function stamp!(device::Union{VoltageSource, CurrentSource},
                 ctx::AnyMNAContext, p::Symbol, n::Symbol, t::Real, mode::Symbol)
     stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n), t, mode)
 end

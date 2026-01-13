@@ -1920,50 +1920,59 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
                 times_vals = Float64[Float64(vals[i]) for i in 1:2:length(vals)]
                 value_vals = Float64[Float64(vals[i]) for i in 2:2:length(vals)]
+                dc_val_pwl = value_vals[1]  # DC value is first PWL value
 
                 # Build SVector expression inside quote to avoid serialization issues
-                # We create explicit calls to SVector with literal values
                 times_exprs = [:($(t)) for t in times_vals]
                 values_exprs = [:($(v)) for v in value_vals]
 
-                # Use positional arguments for zero-allocation
+                # Use unified VoltageSource with PWLWaveform
                 if is_voltage
                     return quote
-                        stamp!(PWLVoltageSource(
-                            $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
-                            name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n, t, spec.mode)
-                    end
-                else
-                    return quote
-                        stamp!(PWLCurrentSource(
-                            $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
-                            name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n, t, spec.mode)
-                    end
-                end
-            else
-                # FALLBACK PATH: Dynamic arrays (allocates per iteration)
-                # Still use positional arguments to minimize overhead
-                if is_voltage
-                    return quote
-                        let vals = [$(vals...)]
-                            n_points = div(length(vals), 2)
-                            times = vals[1:2:end]
-                            values = vals[2:2:end]
-                            stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                        let ac = $ac_expr
+                            stamp!(VoltageSource($dc_val_pwl; ac=ac,
+                                                 tran=PWLWaveform(
+                                                     $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
+                                                     $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...))),
+                                                 name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
                     return quote
-                        let vals = [$(vals...)]
-                            n_points = div(length(vals), 2)
+                        let ac = $ac_expr
+                            stamp!(CurrentSource($dc_val_pwl; ac=ac,
+                                                 tran=PWLWaveform(
+                                                     $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
+                                                     $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...))),
+                                                 name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n, t, spec.mode)
+                        end
+                    end
+                end
+            else
+                # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                if is_voltage
+                    return quote
+                        let vals = [$(vals...)], ac = $ac_expr
                             times = vals[1:2:end]
                             values = vals[2:2:end]
-                            stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                            dc_val = values[1]  # DC value is first PWL value
+                            stamp!(VoltageSource(dc_val; ac=ac,
+                                                 tran=PWLWaveform(times, values),
+                                                 name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n, t, spec.mode)
+                        end
+                    end
+                else
+                    return quote
+                        let vals = [$(vals...)], ac = $ac_expr
+                            times = vals[1:2:end]
+                            values = vals[2:2:end]
+                            dc_val = values[1]
+                            stamp!(CurrentSource(dc_val; ac=ac,
+                                                 tran=PWLWaveform(times, values),
+                                                 name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -1983,22 +1992,25 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             theta_expr = n_vals >= 5 ? vals[5] : 0.0
             phase_expr = n_vals >= 6 ? vals[6] : 0.0
 
-            # Use positional arguments for zero-allocation
+            # Use unified VoltageSource with SinWaveform for transient
+            # DC value for operating point is vo (the offset)
             if is_voltage
                 return quote
                     let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
-                        stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
-                                                name=$(QuoteNode(Symbol(name)))),
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, ac = $ac_expr
+                        stamp!(VoltageSource(vo; ac=ac,
+                                             tran=SinWaveform(vo, va, freq; td=td, theta=theta, phase=phase),
+                                             name=$(QuoteNode(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
                 return quote
                     let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
-                        stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
-                                                name=$(QuoteNode(Symbol(name)))),
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, ac = $ac_expr
+                        stamp!(CurrentSource(io; ac=ac,
+                                             tran=SinWaveform(io, ia, freq; td=td, theta=theta, phase=phase),
+                                             name=$(QuoteNode(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2032,45 +2044,53 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
                 if is_voltage
                     # Build SVector expression inside quote to avoid serialization issues
-                    # Use positional arguments for zero-allocation
+                    # Use unified VoltageSource with PWLWaveform
                     return quote
-                        stamp!(PWLVoltageSource(
-                            $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
-                            name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n, t, spec.mode)
+                        let ac = $ac_expr
+                            stamp!(VoltageSource($v1; ac=ac,
+                                tran=PWLWaveform(
+                                    $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
+                                    $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6)),
+                                name=$(QuoteNode(Symbol(name)))),
+                                ctx, $p, $n, t, spec.mode)
+                        end
                     end
                 else
-                    # Use positional arguments for zero-allocation
+                    # Use unified CurrentSource with PWLWaveform
                     return quote
-                        stamp!(PWLCurrentSource(
-                            $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
-                            name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n, t, spec.mode)
+                        let ac = $ac_expr
+                            stamp!(CurrentSource($v1; ac=ac,
+                                tran=PWLWaveform(
+                                    $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
+                                    $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6)),
+                                name=$(QuoteNode(Symbol(name)))),
+                                ctx, $p, $n, t, spec.mode)
+                        end
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
-                # Still use positional arguments to minimize overhead
+                # Use unified VoltageSource/CurrentSource with PWLWaveform
                 if is_voltage
                     return quote
                         let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, ac = $ac_expr
                             # PWL approximation of pulse for first period
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [v1, v1, v2, v2, v1, v1]
-                            stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                            stamp!(VoltageSource(v1; ac=ac, tran=PWLWaveform(times, values),
+                                                 name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
                     return quote
                         let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, ac = $ac_expr
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [i1, i1, i2, i2, i1, i1]
-                            stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                            stamp!(CurrentSource(i1; ac=ac, tran=PWLWaveform(times, values),
+                                                 name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2559,7 +2579,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     return quote
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-        using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
+        using CedarSim.MNA: SinWaveform, PWLWaveform  # Waveform types for transient sources
         using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
         using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim.MNA: get_current_idx  # For CCVS/CCCS current sensing
