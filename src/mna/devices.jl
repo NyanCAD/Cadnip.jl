@@ -465,7 +465,8 @@ Matrix pattern:
 G = I_V[+1  -1   .  ]     Voltage constraint: Vp - Vn
 
     I_V
-b = V_dc                  Source voltage value
+b = V_dc                  Source voltage value (DC)
+b_ac = V_ac               Source voltage value (AC small-signal)
 ```
 """
 function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
@@ -504,6 +505,11 @@ For DC/AC analysis, uses the DC value.
     v = get_source_value(V, t, mode)
     stamp_b!(ctx, I_idx, v)
 
+    # AC excitation (for small-signal analysis)
+    if V.ac != 0
+        stamp_b_ac!(ctx, I_idx, V.ac)
+    end
+
     return I_idx
 end
 
@@ -530,9 +536,14 @@ the positive terminal.
 RHS pattern:
 ```
     p
-b = +I   (current enters p)
+b = +I      (DC current enters p)
     n
-    -I   (current leaves n)
+    -I      (DC current leaves n)
+
+    p
+b_ac = +I_ac   (AC current enters p)
+    n
+       -I_ac   (AC current leaves n)
 ```
 """
 function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
@@ -557,6 +568,13 @@ For DC/AC analysis, uses the DC value.
     i = get_source_value(I, t, mode)
     stamp_b!(ctx, p,  i)
     stamp_b!(ctx, n, -i)
+
+    # AC excitation (for small-signal analysis)
+    if I.ac != 0
+        stamp_b_ac!(ctx, p,  I.ac)
+        stamp_b_ac!(ctx, n, -I.ac)
+    end
+
     return nothing
 end
 

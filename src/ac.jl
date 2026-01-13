@@ -1,295 +1,245 @@
+#==============================================================================#
+# AC Small-Signal Analysis
+#
+# Performs frequency-domain analysis by linearizing the circuit around
+# a DC operating point and computing transfer functions.
+#
+# Key concepts:
+# - DC operating point is found via Newton iteration
+# - Linearized G (conductance) and C (capacitance) matrices at operating point
+# - AC excitation vector b_ac from sources with AC specification
+# - DescriptorStateSpace system: E·dx = A·x + B·u, y = C·x
+#
+# For MNA: C·dx/dt + G·x = b
+# DSS form: E·dx = A·x + B·u  where E=C, A=-G, B=b_ac
+#==============================================================================#
+
 using DescriptorSystems
-using OrdinaryDiffEq
 using LinearAlgebra
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    import DAECompiler: get_transformed_sys, IRODESystem
-else
-    using ..DAECompilerStubs: get_transformed_sys, IRODESystem
-end
-
-export ac!, acdec, freqresp, noise!
+export ac!, acdec, freqresp
 
 abstract type FreqSol end
 
+"""
+    ACSol <: FreqSol
+
+AC small-signal solution for MNA circuits.
+
+Contains the linearized descriptor state-space system and DC operating point.
+
+# Fields
+- `dss`: DescriptorStateSpace system (E·dx = A·x + B·u, y = C·x)
+- `dc_x`: DC operating point solution vector
+- `node_names`: Names of voltage nodes
+- `current_names`: Names of current variables
+- `n_nodes`: Number of voltage nodes
+
+# Usage
+```julia
+ac_sol = ac!(circuit)
+ωs = 2π .* acdec(20, 0.01, 10)  # frequencies in rad/s
+resp = freqresp(ac_sol, :vout, ωs)  # frequency response at node :vout
+```
+"""
 struct ACSol <: FreqSol
     dss::DescriptorStateSpace{Float64, Matrix{Float64}}
-    sol::SciMLBase.AbstractODESolution
-end
-
-struct NoiseSol <: FreqSol
-    dss::DescriptorStateSpace{Float64, Matrix{Float64}}
-    pwr::Vector{Float64}
-    exp::Vector{Float64}
-    sol::SciMLBase.AbstractODESolution
-end
-
-# Convenience function to get our tsys from an `ACSol` object
-# this will also make `DAECompiler.get_sys` work to get the IRODESystem
-# Phase 0: Guard DAECompiler method extensions
-@static if CedarSim.USE_DAECOMPILER
-    DAECompiler.get_transformed_sys(ac::ACSol) = ac.sol.prob.f.sys
-    DAECompiler.get_transformed_sys(ac::NoiseSol) = ac.sol.prob.f.sys
-end
-
-
-
-function determine_tangents(@nospecialize(T))
-    res = []
-    for (name, type) in zip(fieldnames(T), fieldtypes(T))
-        if type <: Number
-            push!(res, name)
-        else
-            tup = determine_tangents(type)
-            if !isempty(tup)
-                push!(res, (name => tup))
-            end
-        end
-    end
-    res
-end
-
-function check_prob_for_ac(prob)
-    if !isa(prob.p, ParamSim)
-        throw(ArgumentError("Solutions must be `ParamSim`!"))
-    end
-    if prob.p.mode != :ac
-        throw(ArgumentError("Solutions must be compiled with `mode == :ac`!"))
-    end
-    if prob.f.jac === nothing || prob.f.paramjac === nothing
-        throw(ArgumentError("Solutions must be compiled with `jac = true` and `paramjac = true`!"))
-    end
-end
-
-function check_prob_for_noise(prob)
-    if !isa(prob.p, ParamSim)
-        throw(ArgumentError("Solutions must be `ParamSim`!"))
-    end
-    if prob.p.mode != :ac
-        throw(ArgumentError("Solutions must be compiled with `mode == :ac`!"))
-    end
-    if prob.f.jac === nothing
-        throw(ArgumentError("Solutions must be compiled with `jac = true`"))
-    end
+    dc_x::Vector{Float64}
+    node_names::Vector{Symbol}
+    current_names::Vector{Symbol}
+    n_nodes::Int
 end
 
 """
-    ACSol(sol::SciMLBase.AbstractODESolution)
+    ac!(circuit::MNA.MNACircuit; gmin=1e-12) -> ACSol
 
-Given a DC analysis result (which must be parameterized on `ϵω` and use `:ac`
-mode), construct an `ACSol` object representing the linearization of the
-circuit around that DC operating point.  Also see `ac!()`.
+Perform AC small-signal analysis on an MNA circuit.
+
+# Algorithm
+1. Solve DC operating point via Newton iteration
+2. Extract linearized G, C matrices at operating point
+3. Assemble AC excitation vector b_ac from sources
+4. Build DescriptorStateSpace: E=C, A=-G, B=b_ac, C=I, D=0
+
+# Arguments
+- `circuit::MNACircuit`: Circuit with builder function and parameters
+- `gmin`: Minimum conductance for numerical stability
+
+# Returns
+`ACSol` containing the linearized DSS system and DC solution.
+
+# Example
+```julia
+circuit = MNACircuit(build_filter; R=1000.0, C=1e-6)
+ac_sol = ac!(circuit)
+ωs = 2π .* acdec(20, 0.01, 10)
+resp = freqresp(ac_sol, :vout, ωs)
+```
 """
-function ACSol(sol::SciMLBase.AbstractODESolution)
-    prob = sol.prob
-    check_prob_for_ac(prob)
-    if !hasproperty(prob.p.spec, :ϵω)
-        throw(ArgumentError("AC Solutions must be parameterized on `ϵω`!"))
+function ac!(circuit::MNA.MNACircuit; gmin=1e-12)
+    # Build circuit with structure discovery
+    ctx = MNA.MNAContext()
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=MNA.ZERO_VECTOR, ctx=ctx)
+
+    # Solve DC operating point using the MNA solve_dc
+    dc_sol = MNA.solve_dc(circuit)
+    dc_x = dc_sol.x
+
+    # Rebuild at DC solution to get linearized matrices
+    MNA.reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=dc_x, ctx=ctx)
+
+    # Assemble matrices
+    G = Matrix(MNA.assemble_G(ctx; gmin=gmin))
+    C = Matrix(MNA.assemble_C(ctx))
+    b_ac = MNA.get_rhs_ac(ctx)
+
+    n = MNA.system_size(ctx)
+
+    # Build DescriptorStateSpace
+    # MNA: C·dx/dt + G·x = b
+    # Standard DSS: E·dx/dt = A·x + B·u
+    # Rewrite: C·dx/dt = -G·x + b_ac
+    # So: E = C, A = -G, B = b_ac (as column vector)
+    #
+    # Transfer function: H(jω) = C·(jωE - A)⁻¹·B = I·(jωC + G)⁻¹·b_ac
+    # This gives voltage/current at each node for AC excitation
+
+    # Handle case where there's no AC excitation
+    if all(iszero, b_ac)
+        @warn "No AC sources found in circuit"
+        B = zeros(n, 1)
+    else
+        B = reshape(real.(b_ac), n, 1)
     end
 
-    M = prob.f.mass_matrix
-    num_params = DAECompiler.determine_num_tangents(DAECompiler.parameter_type(get_sys(sol)))
-    num_eqs = length(prob.u0)
-
-    Jp = zeros(num_eqs, num_params)
-    prob.f.paramjac(Jp, sol.u[1], prob.p, 0.0)
-    Ju = zeros(num_eqs, num_eqs)
-    prob.f.jac(Ju, sol.u[1], prob.p, 0.0)
-
-    # Note that in control systems x is the state and u is the input
-    # Edx = Ax + Bu
-    #   y = Cx + Du
-    # C*((w[i]*E - A)^-1)*B + D
-
-    acidx = findfirst(==(:ϵω), propertynames(prob.p.spec))
-    B = Jp[:, acidx]
-    C = I(num_eqs)
-    dsys = dss(Ju, M, B, C, 0)
-
-    return ACSol(dsys, sol)
-end
-
-function noise_exp(sol, sys)
-    T = Union{Nothing, Float64, DAECompiler.ScopeRef}
-    result = getfield(sys, :result)
-    pwr = Vector{T}(undef, result.neps)
-    exp = Vector{T}(undef, result.neps)
-    noise_exp(pwr, exp, result.names, sys)
-    @assert length(pwr) == length(exp)
-    pwridxs = isa.(pwr, DAECompiler.ScopeRef)
-    expidxs = isa.(exp, DAECompiler.ScopeRef)
-    pwrrefs = convert(Vector{DAECompiler.ScopeRef}, pwr[pwridxs])
-    exprefs = convert(Vector{DAECompiler.ScopeRef}, exp[expidxs])
-    obs = vcat(pwrrefs, exprefs)
-    rec = DAECompiler.batch_reconstruct(sol, obs)
-    pwr[pwridxs] = rec[begin:length(pwrrefs)]
-    exp[expidxs] = rec[length(pwrrefs)+1:end]
-    return convert(Vector{Float64}, pwr), convert(Vector{Float64}, exp)
-end
-function noise_exp(pwr, exp, names, scope)
-    for (k, v) in pairs(names)
-        if v.children !== nothing
-            noise_exp(pwr, exp, v.children, getproperty(scope, k))
-        end
-        v.eps !== nothing || continue
-        expk = Symbol(k, :exp)
-        pwrk = Symbol(k, :pwr)
-        @assert hasproperty(scope, pwrk)
-        pwr[v.eps] = getproperty(scope, pwrk)
-        if hasproperty(scope, expk)
-            exp[v.eps] = getproperty(scope, expk)
-        else
-            exp[v.eps] = 0.
-        end
+    # Handle complex AC excitation (with phase)
+    # The DSS library expects real matrices, so include both real and imag parts
+    has_complex_ac = any(x -> imag(x) != 0, b_ac)
+    if has_complex_ac
+        B = hcat(real.(b_ac), imag.(b_ac))
     end
-end
 
-function NoiseSol(sol::SciMLBase.AbstractODESolution)
-    prob = sol.prob
-    check_prob_for_noise(prob)
+    # Identity output matrix (observe all states)
+    C_out = Matrix{Float64}(I, n, n)
+    D = zeros(n, size(B, 2))
 
-    M = prob.f.mass_matrix
-    tsys = DAECompiler.get_transformed_sys(sol)
-    num_epsilons = tsys.state.neps
-    num_eqs = length(prob.u0)
+    dss_sys = dss(-G, C, B, C_out, D)
 
-    Jε = zeros(num_eqs, num_epsilons)
-    epsjac! = get_epsjac(prob)
-    epsjac!(Jε, sol.u[1], prob.p, 0.0)
-    Ju = zeros(num_eqs, num_eqs)
-    prob.f.jac(Ju, sol.u[1], prob.p, 0.0)
-
-    # Note that in control systems x is the state and u is the input
-    # Edx = Ax + Bu
-    #   y = Cx + Du
-    # C*((w[i]*E - A)^-1)*B + D
-
-    C = I(num_eqs)
-    dsys = dss(Ju, M, Jε, C, 0)
-
-    pwr, exp = noise_exp(sol, get_sys(sol))
-
-    return NoiseSol(dsys, pwr, exp, sol)
+    return ACSol(dss_sys, dc_x, copy(ctx.node_names), copy(ctx.current_names), ctx.n_nodes)
 end
 
 """
-    ac!(circ; debug_config = (;), kwargs...)
+    freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real}) -> Vector{ComplexF64}
 
-Construct an `ACSol` object for the given circuit, allowing solution of
-AC analysis for observables within the circuit.
+Compute frequency response at specified node across frequencies.
+
+# Arguments
+- `ac`: AC solution from `ac!()`
+- `node`: Node name (Symbol) to observe
+- `ωs`: Angular frequencies in rad/s
+
+# Returns
+Vector of complex frequency response values.
+
+# Example
+```julia
+ac_sol = ac!(circuit)
+ωs = 2π .* acdec(20, 1, 1e6)  # 1 Hz to 1 MHz
+resp = freqresp(ac_sol, :vout, ωs)
+mag_dB = 20 .* log10.(abs.(resp))
+phase_deg = angle.(resp) .* 180 ./ π
+```
 """
-function ac!(circ; debug_config = (;), u0=nothing, kwargs...)
-    # Parameterize circ on `ϵω` and set `mode` to `:ac`
-    circ = CedarSim.ParamSim(circ; mode=:ac, ϵω=0.0)
-    sys = CircuitIRODESystem(circ; debug_config)
-    prob = ODEProblem(sys, u0, (0.0, 1.0), circ, jac=true, paramjac=true, initializealg=CedarDCOp())
-    integ = init(prob, FBDF(autodiff=false); kwargs...)
-    return ACSol(integ.sol)
-end
+function freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real})
+    idx = _get_node_index(ac, node)
+    idx == 0 && error("Cannot compute frequency response at ground (node 0)")
 
-function noise!(circ; debug_config = (;), u0=nothing, kwargs...)
-    # Parameterize circ on all noise parameters and set `mode` to `:ac`
-    np = noiseparams(circ)
-    circ = CedarSim.ParamSim(circ; mode=:ac)
-    sys = CircuitIRODESystem(circ; debug_config)
-    prob = ODEProblem(sys, u0, (0.0, 1.0), circ, jac=true, initializealg=CedarDCOp())
-    integ = init(prob, FBDF(autodiff=false); kwargs...)
-    return NoiseSol(integ.sol)
-end
+    # Get DSS data
+    A, E, B, C_out, D = dssdata(ac.dss)
+    n = size(A, 1)
+    n_inputs = size(B, 2)
 
-"""
-    acjac(ac::ACSol, syms)
+    # Compute frequency response for this output
+    result = Vector{ComplexF64}(undef, length(ωs))
 
-Given a list of `syms`, calculate the linearized AC sensitivities (e.g. the
-derivative about that operating point) for those variables/observables.
-"""
-function acjac(ac::FreqSol, syms)
-    var_inds, obs_inds = DAECompiler.split_and_sort_syms(syms)
-    transformed_sys = DAECompiler.get_transformed_sys(ac)
-    dreconstruct! = get!(ac.sol.prob.f.observed.derivative_cache, (var_inds, obs_inds, true)) do
-        DAECompiler.compile_batched_reconstruct_derivatives(transformed_sys, var_inds, obs_inds, true, false;)
-    end
-    u = ac.sol.u[1]
-    num_params = DAECompiler.determine_num_tangents(typeof(ac.sol.prob.p))
-    neps = getfield(transformed_sys.state.sys, :result).neps
-    dvars_du = similar(u, length(var_inds), length(u))
-    dvars_dp = similar(u, length(var_inds), num_params)
-    dvars_deps = similar(u, length(var_inds), neps)
-    dobs_du = similar(u, length(obs_inds), length(u))
-    dobs_dp = similar(u, length(obs_inds), num_params)
-    dobs_deps = similar(u, length(obs_inds), neps)
-    dreconstruct!(dvars_du, dvars_dp, dvars_deps, dobs_du, dobs_dp, dobs_deps, u, ac.sol.prob.p, 0.0)
-
-    return dvars_du, dvars_dp, dvars_deps, dobs_du, dobs_dp, dobs_deps
-end
-
-"""
-    getindex(ac::ACSol, ref::ScopeRef)
-
-Calculate the descriptor state-space model of the given AC Solution with
-respect to the indicated `ScopeRef`.
-"""
-function Base.getindex(ac::NoiseSol, ref::DAECompiler.ScopeRef)
-    # We `vcat` these, knowing that there will be only one return value
-    # as we only allow a single `sym` through at once.  We call that `dvarobs_du`
-    # as we're not making a distinction between variables and observables here.
-    dvars_du, dvars_dp, dvars_deps, dobs_du, dobs_dp, dobs_deps = acjac(ac, [ref])
-    dvarobs_du = vcat(dvars_du, dobs_du)
-    dvarobs_dp = vcat(dvars_dp, dobs_dp)
-    dvarobs_deps = vcat(dvars_deps, dobs_deps)
-
-    # Construct DescriptorStateSpace object that we can then sample at the given frequencies
-    A, E, B, C, D = dssdata(ac.dss)
-    return dss(A, E, B, dvarobs_du, dvarobs_deps)
-end
-
-function Base.getindex(ac::ACSol, ref::DAECompiler.ScopeRef)
-    # We `vcat` these, knowing that there will be only one return value
-    # as we only allow a single `sym` through at once.  We call that `dvarobs_du`
-    # as we're not making a distinction between variables and observables here.
-    dvars_du, dvars_dp, _, dobs_du, dobs_dp, _ = acjac(ac, [ref])
-    dvarobs_du = vcat(dvars_du, dobs_du)
-    dvarobs_dp = vcat(dvars_dp, dobs_dp)
-
-    # Construct DescriptorStateSpace object that we can then sample at the given frequencies
-    A, E, B, C, D = dssdata(ac.dss)
-    prob = ac.sol.prob
-    paths = VectorPrisms.paths(typeof(prob.p))
-    idxs = findall(contains('ϵ'), paths)
-    return dss(A, E, B, dvarobs_du, dvarobs_dp[:, idxs])
-end
-
-
-"""
-    freqresp(sol::ACSol, sym::ScopeRef, ωs::Vector{Float64})
-
-Calculate the frequency response of the given AC Solution for `sym` across the
-frequencies listed in `ωs`.  Returns a `Vector{ComplexF64}`.
-"""
-function DescriptorSystems.freqresp(ac::ACSol,
-                                    sym::DAECompiler.ScopeRef,
-                                    ωs::Vector{Float64})
-    return vec(DescriptorSystems.freqresp(ac[sym], ωs))
-end
-
-function PSD(dss::DescriptorStateSpace, ωs::Vector{Float64}, pwr, exp)
-    fr = DescriptorSystems.freqresp(dss, ωs)
-    out = similar(fr, eltype(fr), (size(fr, 1), size(fr, 1), length(ωs)))
-    # out = similar(fr)
     for (i, ω) in enumerate(ωs)
-        f = ω/(2π)
-        S = Diagonal(@. pwr/f^exp)
-        out[:, :, i] = fr[:, :, i] * S * fr[:, :, i]'
+        # H(jω) = C·(jωE - A)⁻¹·B + D
+        # For single output at index idx: H_idx = e_idx' · (jωE - A)⁻¹ · B
+        jωE_minus_A = (im * ω) .* E .- A
+
+        # Solve (jωE - A) * x = B for x
+        x = jωE_minus_A \ B
+
+        # Output at node idx
+        if n_inputs == 1
+            result[i] = x[idx, 1]
+        else
+            # Complex excitation: result = x[:,1] + im*x[:,2]
+            result[i] = x[idx, 1] + im * x[idx, 2]
+        end
     end
-    vec(out)
+
+    return result
 end
-function PSD(ac::NoiseSol,
-             sym::DAECompiler.ScopeRef,
-             ωs::Vector{Float64})
-    # sysbal, D1, D1 = gprescale(ac[sym])
-    sysbal = ac[sym]
-    PSD(sysbal, ωs, ac.pwr, ac.exp)
+
+# DescriptorSystems.freqresp integration
+function DescriptorSystems.freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real})
+    return freqresp(ac, node, ωs)
+end
+
+"""
+    _get_node_index(ac::ACSol, node::Symbol) -> Int
+
+Get the system index for a node by name. Returns 0 for ground.
+"""
+function _get_node_index(ac::ACSol, node::Symbol)
+    (node === :gnd || node === Symbol("0")) && return 0
+    idx = findfirst(==(node), ac.node_names)
+    idx === nothing && error("Unknown node: $node. Available: $(ac.node_names)")
+    return idx
+end
+
+"""
+    _get_current_index(ac::ACSol, name::Symbol) -> Int
+
+Get the system index for a current variable by name.
+"""
+function _get_current_index(ac::ACSol, name::Symbol)
+    idx = findfirst(==(name), ac.current_names)
+    idx === nothing && error("Unknown current: $name. Available: $(ac.current_names)")
+    return ac.n_nodes + idx
+end
+
+"""
+    Base.getindex(ac::ACSol, node::Symbol) -> DescriptorStateSpace
+
+Get the descriptor state-space subsystem for observing a specific node.
+
+This returns a SISO (single-input single-output) system from AC excitation
+to the specified node voltage.
+
+# Example
+```julia
+ac_sol = ac!(circuit)
+dss_vout = ac_sol[:vout]
+# Can use with ControlSystemsBase for bode plots, etc.
+```
+"""
+function Base.getindex(ac::ACSol, node::Symbol)
+    idx = _get_node_index(ac, node)
+    idx == 0 && error("Cannot create subsystem for ground")
+
+    A, E, B, C_out, D = dssdata(ac.dss)
+    n = size(A, 1)
+
+    # Single-row C matrix for this output
+    C_row = zeros(1, n)
+    C_row[1, idx] = 1.0
+
+    D_row = zeros(1, size(B, 2))
+
+    return dss(A, E, B, C_row, D_row)
 end
 
 """

@@ -3,6 +3,7 @@ CMCModels = "8a844b39-05e3-4819-8383-f5fae2d66f33"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
+ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
 DescriptorSystems = "a81e2ce2-54d1-11eb-2c75-db236b00f339"
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
@@ -22,8 +23,8 @@ VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
 VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
 
 [sources]
-CedarSim = {path = ".."}
 CMCModels = {path = "../models/CMCModels.jl"}
+CedarSim = {path = ".."}
 Lexers = {path = "../Lexers.jl"}
 PSPModels = {path = "../models/PSPModels.jl"}
 SpectreNetlistParser = {path = "../SpectreNetlistParser.jl"}

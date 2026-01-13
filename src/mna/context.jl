@@ -13,7 +13,7 @@ export ZeroVector, ZERO_VECTOR
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
-export stamp_G!, stamp_C!, stamp_b!
+export stamp_G!, stamp_C!, stamp_b!, stamp_b_ac!
 export stamp_conductance!, stamp_capacitance!
 export system_size
 
@@ -119,7 +119,8 @@ where:
     - Iⱼ are current variables (for V-sources, inductors)
 
 Matrix entries are accumulated in COO (coordinate) format for efficient
-sparse matrix construction.
+sparse matrix construction. All stamps are deferred and resolved at assembly
+time when the system size is finalized.
 
 # Fields
 - `node_names::Vector{Symbol}`: Names of nodes (for debugging/output)
@@ -131,6 +132,7 @@ sparse matrix construction.
 - `G_I, G_J, G_V`: COO format for conductance matrix G
 - `C_I, C_J, C_V`: COO format for capacitance matrix C
 - `b_I, b_V`: COO format for RHS vector b (source terms)
+- `b_ac_I, b_ac_V`: COO format for AC excitation vector (complex, for AC analysis)
 
 # Ground Convention
 Ground (node 0) is implicit and not included in the system.
@@ -178,6 +180,11 @@ mutable struct MNAContext
     b_I::Vector{MNAIndex}
     b_V::Vector{Float64}
 
+    # AC excitation vector - fully deferred (for AC small-signal analysis)
+    # Complex values: magnitude * exp(im * phase)
+    b_ac_I::Vector{MNAIndex}
+    b_ac_V::Vector{ComplexF64}
+
     # Charge state variables (for voltage-dependent capacitors)
     # See doc/voltage_dependent_capacitors.md
     # These are differential variables with dq/dt = I and constraint q = Q(V)
@@ -223,6 +230,8 @@ function MNAContext()
         Float64[],          # C_V
         MNAIndex[],         # b_I (COO format for b vector)
         Float64[],          # b_V (COO format for b vector)
+        MNAIndex[],         # b_ac_I (deferred AC stamps)
+        ComplexF64[],       # b_ac_V (deferred AC stamps)
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -671,12 +680,23 @@ This provides a consistent COO-style interface matching G and C stamping.
 """
 @inline function stamp_b!(ctx::MNAContext, i, val)
     iszero(i) && return nothing
-    v = extract_value(val)
-    typed = _to_typed(i)
+    push!(ctx.b_I, _to_typed(i))
+    push!(ctx.b_V, extract_value(val))
+    return nothing
+end
 
-    # All b stamps are deferred - resolved at assembly time in get_rhs()
-    push!(ctx.b_I, typed)
-    push!(ctx.b_V, v)
+"""
+    stamp_b_ac!(ctx::MNAContext, i, val::Complex)
+
+Stamp AC small-signal excitation at index i.
+Used by independent sources to specify their AC magnitude/phase.
+
+All stamps are deferred and resolved at assembly time via `get_rhs_ac()`.
+"""
+@inline function stamp_b_ac!(ctx::MNAContext, i, val)
+    iszero(i) && return nothing
+    push!(ctx.b_ac_I, _to_typed(i))
+    push!(ctx.b_ac_V, ComplexF64(val))
     return nothing
 end
 
@@ -734,6 +754,7 @@ function reset_values!(ctx::MNAContext)
     fill!(ctx.G_V, 0.0)
     fill!(ctx.C_V, 0.0)
     fill!(ctx.b_V, 0.0)
+    fill!(ctx.b_ac_V, 0.0 + 0.0im)
     return nothing
 end
 
@@ -782,6 +803,10 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.b_I)
     empty!(ctx.b_V)
 
+    # Deferred AC stamps
+    empty!(ctx.b_ac_I)
+    empty!(ctx.b_ac_V)
+
     # Charge state variables
     empty!(ctx.charge_names)
     ctx.n_charges = 0
@@ -816,6 +841,8 @@ function clear!(ctx::MNAContext)
     empty!(ctx.C_V)
     empty!(ctx.b_I)
     empty!(ctx.b_V)
+    empty!(ctx.b_ac_I)
+    empty!(ctx.b_ac_V)
     empty!(ctx.charge_names)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
