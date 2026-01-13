@@ -12,6 +12,29 @@
 #
 # For MNA: C·dx/dt + G·x = b
 # DSS form: E·dx = A·x + B·u  where E=C, A=-G, B=b_ac
+#
+# Current Limitations:
+# --------------------
+# 1. Device observables: Cannot observe internal device variables (e.g., voltage
+#    across an inductor like `sys.l3.V`). Only top-level node voltages and branch
+#    currents are accessible via symbol names. Would require hierarchical scope
+#    tracking in MNAContext to map device paths to system indices.
+#
+# 2. AC source phase: Only magnitude is supported (`V1 in 0 AC 1`). Phase
+#    specification (`V1 in 0 AC 1 45`) is parsed but ignored because
+#    SpectreNetlistParser's ACSource node doesn't expose the acphase field.
+#
+# 3. Noise analysis: The `noise!()` function is not implemented. Requires:
+#    - Per-device noise source modeling (thermal, shot, flicker)
+#    - Noise correlation matrix assembly
+#    - Output noise spectral density computation
+#
+# 4. Combined AC+transient sources: When a source has both AC and transient
+#    specifications (e.g., `V1 in 0 AC 1 SIN(0 1 1k)`), only the transient
+#    source is generated. Use separate sources or AC-only specification.
+#
+# Bode plots: Use RobustAndOptimalControl to convert DescriptorStateSpace to
+# standard StateSpace: `bode(ss(ac[:vout]), ωs)`
 #==============================================================================#
 
 using DescriptorSystems
