@@ -17,8 +17,11 @@
 # --------------------
 # 1. Hierarchical device observables: Cannot observe internal device variables via
 #    hierarchical path syntax (e.g., `sys.l3.V`). Only top-level node voltages and
-#    branch currents are accessible via symbol names. However, device voltages CAN
-#    be computed as node differences: `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`.
+#    branch currents are accessible via symbol names:
+#      - Node voltages: `freqresp(ac, :vout, ωs)` or `ac[:vout]`
+#      - Branch currents: `freqresp(ac, :I_V1, ωs)` or `ac[:I_V1]`
+#    Device voltages can be computed as node differences:
+#      `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`
 #
 # 2. AC source phase: Only magnitude is supported (`V1 in 0 AC 1`). Phase
 #    specification (`V1 in 0 AC 1 45`) is parsed but ignored because
@@ -153,13 +156,13 @@ function ac!(circuit::MNA.MNACircuit; gmin=1e-12)
 end
 
 """
-    freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real}) -> Vector{ComplexF64}
+    freqresp(ac::ACSol, name::Symbol, ωs::AbstractVector{<:Real}) -> Vector{ComplexF64}
 
-Compute frequency response at specified node across frequencies.
+Compute frequency response at specified node or current across frequencies.
 
 # Arguments
 - `ac`: AC solution from `ac!()`
-- `node`: Node name (Symbol) to observe
+- `name`: Node or current name (Symbol) to observe (e.g., `:vout`, `:I_V1`)
 - `ωs`: Angular frequencies in rad/s
 
 # Returns
@@ -169,13 +172,14 @@ Vector of complex frequency response values.
 ```julia
 ac_sol = ac!(circuit)
 ωs = 2π .* acdec(20, 1, 1e6)  # 1 Hz to 1 MHz
-resp = freqresp(ac_sol, :vout, ωs)
+resp = freqresp(ac_sol, :vout, ωs)      # Node voltage
+resp_i = freqresp(ac_sol, :I_V1, ωs)    # Voltage source current
 mag_dB = 20 .* log10.(abs.(resp))
 phase_deg = angle.(resp) .* 180 ./ π
 ```
 """
-function freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real})
-    idx = _get_node_index(ac, node)
+function freqresp(ac::ACSol, name::Symbol, ωs::AbstractVector{<:Real})
+    idx = _get_index(ac, name)
     idx == 0 && error("Cannot compute frequency response at ground (node 0)")
 
     # Get DSS data
@@ -207,50 +211,73 @@ function freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real})
 end
 
 # DescriptorSystems.freqresp integration
-function DescriptorSystems.freqresp(ac::ACSol, node::Symbol, ωs::AbstractVector{<:Real})
-    return freqresp(ac, node, ωs)
+function DescriptorSystems.freqresp(ac::ACSol, name::Symbol, ωs::AbstractVector{<:Real})
+    return freqresp(ac, name, ωs)
 end
 
 """
     _get_node_index(ac::ACSol, node::Symbol) -> Int
 
 Get the system index for a node by name. Returns 0 for ground.
+Returns `nothing` if not found (doesn't error).
 """
 function _get_node_index(ac::ACSol, node::Symbol)
     (node === :gnd || node === Symbol("0")) && return 0
     idx = findfirst(==(node), ac.node_names)
-    idx === nothing && error("Unknown node: $node. Available: $(ac.node_names)")
-    return idx
+    return idx  # nothing if not found
 end
 
 """
     _get_current_index(ac::ACSol, name::Symbol) -> Int
 
 Get the system index for a current variable by name.
+Returns `nothing` if not found (doesn't error).
 """
 function _get_current_index(ac::ACSol, name::Symbol)
     idx = findfirst(==(name), ac.current_names)
-    idx === nothing && error("Unknown current: $name. Available: $(ac.current_names)")
+    idx === nothing && return nothing
     return ac.n_nodes + idx
 end
 
 """
-    Base.getindex(ac::ACSol, node::Symbol) -> DescriptorStateSpace
+    _get_index(ac::ACSol, name::Symbol) -> Int
 
-Get the descriptor state-space subsystem for observing a specific node.
+Get the system index for a node or current variable by name.
+Tries node lookup first, then current lookup.
+Returns 0 for ground, errors if not found.
+"""
+function _get_index(ac::ACSol, name::Symbol)
+    # Try node first
+    idx = _get_node_index(ac, name)
+    idx !== nothing && return idx
+
+    # Try current
+    idx = _get_current_index(ac, name)
+    idx !== nothing && return idx
+
+    # Not found
+    error("Unknown node or current: $name. Available nodes: $(ac.node_names), currents: $(ac.current_names)")
+end
+
+"""
+    Base.getindex(ac::ACSol, name::Symbol) -> DescriptorStateSpace
+
+Get the descriptor state-space subsystem for observing a specific node voltage
+or branch current.
 
 This returns a SISO (single-input single-output) system from AC excitation
-to the specified node voltage.
+to the specified output.
 
 # Example
 ```julia
 ac_sol = ac!(circuit)
-dss_vout = ac_sol[:vout]
+dss_vout = ac_sol[:vout]     # Node voltage
+dss_iv1 = ac_sol[:I_V1]      # Voltage source current
 # Can use with ControlSystemsBase for bode plots, etc.
 ```
 """
-function Base.getindex(ac::ACSol, node::Symbol)
-    idx = _get_node_index(ac, node)
+function Base.getindex(ac::ACSol, name::Symbol)
+    idx = _get_index(ac, name)
     idx == 0 && error("Cannot create subsystem for ground")
 
     A, E, B, C_out, D = dssdata(ac.dss)
