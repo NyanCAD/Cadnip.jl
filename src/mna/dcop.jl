@@ -45,6 +45,9 @@ devices (diodes, MOSFETs, voltage-dependent capacitors).
 - `use_shampine`: Use ShampineCollocationInit after DC solve (default: false).
   This can help oscillators where DC solve gets close but doesn't fully satisfy
   the DAE constraints - Shampine takes a small step to find a consistent state.
+- `use_stepping`: Enable ngspice-style fallback chain (default: true).
+  If regular solve fails, tries GMIN stepping (gshunt homotopy) then
+  source stepping (srcFact homotopy) for robust convergence.
 
 # Example
 ```julia
@@ -53,21 +56,29 @@ sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(abstol=1e-8))  # Tight
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(maxiters=1000))  # More iters
 # For oscillators - DC solve + Shampine refinement:
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(use_shampine=true))
+# Disable stepping for faster failure on known-difficult circuits:
+sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(use_stepping=false))
 ```
 
 # Solver Details
 Uses `CedarRobustNLSolve()` by default which combines RobustMultiNewton algorithms
 with LevenbergMarquardt and PseudoTransient for maximum robustness on difficult
 circuits (oscillators, singular Jacobians).
+
+When `use_stepping=true` (default), the fallback chain is:
+1. Regular solve with polyalgorithm
+2. GMIN stepping: add large gshunt to voltage nodes, step down to 0
+3. Source stepping: scale all sources from 0 to 1
 """
 struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     maxiters::Int
     nlsolve::NLSOLVE
     use_shampine::Bool
+    use_stepping::Bool
 end
-CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false) =
-    CedarDCOp(abstol, maxiters, nlsolve, use_shampine)
+CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false, use_stepping=true) =
+    CedarDCOp(abstol, maxiters, nlsolve, use_shampine, use_stepping)
 
 """
     CedarTranOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -80,15 +91,18 @@ operating-point-dependent behavior.
 - `maxiters`: Maximum Newton iterations (default: 500)
 - `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
 - `use_shampine`: Use ShampineCollocationInit after DC solve (default: false)
+- `use_stepping`: Enable ngspice-style fallback chain (default: true).
+  If regular solve fails, tries GMIN stepping then source stepping.
 """
 struct CedarTranOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     maxiters::Int
     nlsolve::NLSOLVE
     use_shampine::Bool
+    use_stepping::Bool
 end
-CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false) =
-    CedarTranOp(abstol, maxiters, nlsolve, use_shampine)
+CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false, use_stepping=true) =
+    CedarTranOp(abstol, maxiters, nlsolve, use_shampine, use_stepping)
 
 """
     CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -172,10 +186,11 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     # Use zeros as initial guess (same as dc_solve_with_ctx)
     u0_zeros = zeros(length(u0))
 
-    # Call the shared Newton iteration
-    u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, u0_zeros;
-                                                abstol=abstol, maxiters=alg.maxiters,
-                                                nlsolve=alg.nlsolve)
+    # Call the shared DC solve with optional fallback chain
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, u0_zeros;
+                                                     abstol=abstol, maxiters=alg.maxiters,
+                                                     nlsolve=alg.nlsolve,
+                                                     use_stepping=alg.use_stepping)
 
     integrator.u .= u_sol
     if !converged
@@ -226,10 +241,11 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
     mode = alg isa CedarDCOp ? :dcop : :tranop
     cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
-    # Solve DC operating point using the simulation workspace
-    u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, zeros(length(u0));
-                                                abstol=abstol, maxiters=alg.maxiters,
-                                                nlsolve=alg.nlsolve)
+    # Solve DC operating point with optional fallback chain
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, zeros(length(u0));
+                                                     abstol=abstol, maxiters=alg.maxiters,
+                                                     nlsolve=alg.nlsolve,
+                                                     use_stepping=alg.use_stepping)
 
     integrator.u .= u_sol
     if !converged

@@ -116,6 +116,11 @@ struct CompiledStructure{F,P,S}
     # Pre-computed during compilation for zero-allocation value-only mode
     b_deferred_resolved::Vector{Int}
     n_b_deferred::Int
+
+    # Precomputed G diagonal nzval indices for voltage nodes (for gshunt application)
+    # G_diag_nz[i] = index into G.nzval for diagonal element G[i,i], or 0 if not present
+    # Only computed for voltage nodes (1:n_nodes), not current variables
+    G_diag_nz::Vector{Int}
 end
 
 """
@@ -303,7 +308,8 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
             Int[], Int[],
             0, 0,
             spzeros(0, 0), spzeros(0, 0),
-            Int[], 0
+            Int[], 0,
+            Int[]  # G_diag_nz
         )
     end
 
@@ -354,6 +360,10 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
         end
     end
 
+    # Compute G diagonal nzval indices for voltage nodes (for gshunt application)
+    # This finds where G[i,i] is stored in G.nzval for each voltage node i
+    G_diag_nz = _compute_diag_nz_indices(G, ctx0.n_nodes)
+
     return CompiledStructure{F,P,S}(
         builder, params, spec,
         n, ctx0.n_nodes, ctx0.n_currents,
@@ -361,8 +371,33 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
         G_coo_to_nz, C_coo_to_nz,
         n_G, n_C,
         G, C,
-        b_deferred_resolved, n_b_deferred
+        b_deferred_resolved, n_b_deferred,
+        G_diag_nz
     )
+end
+
+"""
+    _compute_diag_nz_indices(A::SparseMatrixCSC, n_diag::Int) -> Vector{Int}
+
+Compute nzval indices for diagonal elements A[i,i] for i in 1:n_diag.
+Returns vector where result[i] = nzval index for A[i,i], or 0 if not present.
+"""
+function _compute_diag_nz_indices(A::SparseMatrixCSC, n_diag::Int)
+    diag_nz = zeros(Int, n_diag)
+    colptr = A.colptr
+    rowval = A.rowval
+
+    for col in 1:n_diag
+        # Find diagonal element in this column (row == col)
+        for nz_idx in colptr[col]:(colptr[col+1]-1)
+            if rowval[nz_idx] == col
+                diag_nz[col] = nz_idx
+                break
+            end
+        end
+    end
+
+    return diag_nz
 end
 
 
@@ -404,6 +439,26 @@ function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVect
         idx = dctx.b_resolved[k]
         if idx > 0
             dctx.b[idx] += dctx.b_V[k]
+        end
+    end
+
+    # Apply srcFact scaling to b vector (for source stepping homotopy)
+    # This scales all sources (independent voltage/current sources) by srcFact
+    srcFact = cs.spec.srcFact
+    if srcFact < 1.0
+        dctx.b .*= srcFact
+    end
+
+    # Apply gshunt to voltage node diagonals (for GMIN stepping / floating node stabilization)
+    gshunt = cs.spec.gshunt
+    if gshunt != 0.0
+        G_nzval = dctx.G_nzval
+        G_diag_nz = cs.G_diag_nz
+        @inbounds for i in 1:cs.n_nodes
+            nz_idx = G_diag_nz[i]
+            if nz_idx > 0
+                G_nzval[nz_idx] += gshunt
+            end
         end
     end
 

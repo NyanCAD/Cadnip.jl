@@ -56,7 +56,9 @@ Base.@kwdef struct MNASpec{T<:Real}
     mode::Symbol = :tran
     time::T = 0.0
     # Common simulator parameters (for $simparam access)
-    gmin::Float64 = 1e-12      # Minimum conductance
+    gmin::Float64 = 1e-12      # Device-level minimum conductance (used in device models)
+    gshunt::Float64 = 0.0      # Node-to-ground shunt conductance (for stepping/floating nodes)
+    srcFact::Float64 = 1.0     # Source scaling factor (for source stepping, 0→1)
     tnom::Float64 = 27.0       # Nominal temperature (Celsius)
     abstol::Float64 = 1e-12    # Absolute tolerance
     reltol::Float64 = 1e-3     # Relative tolerance
@@ -72,8 +74,8 @@ export MNASpec
 Create new spec with different temperature.
 """
 with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
@@ -81,8 +83,8 @@ with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mod
 Create new spec with different mode.
 """
 with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_time(spec::MNASpec, t::Real) -> MNASpec
@@ -91,10 +93,31 @@ Create new spec with different time.
 Note: time type is preserved to support ForwardDiff Dual numbers.
 """
 with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
-export with_temp, with_mode, with_time
+"""
+    with_gshunt(spec::MNASpec, gshunt::Real) -> MNASpec
+
+Create new spec with different gshunt (node-to-ground shunt conductance).
+Used for GMIN stepping and floating node stabilization.
+"""
+with_gshunt(spec::MNASpec, gshunt::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, gshunt=Float64(gshunt), srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
+
+"""
+    with_srcfact(spec::MNASpec, srcFact::Real) -> MNASpec
+
+Create new spec with different srcFact (source scaling factor).
+Used for source stepping homotopy: scale all sources by srcFact (0→1).
+When srcFact < 1.0, the b vector is scaled by srcFact after stamping.
+"""
+with_srcfact(spec::MNASpec, srcFact::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=Float64(srcFact), tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
+
+export with_temp, with_mode, with_time, with_gshunt, with_srcfact
 
 #==============================================================================#
 # Solution Types
@@ -353,6 +376,211 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
     converged = sol.retcode == SciMLBase.ReturnCode.Success
 
     return sol.u, converged
+end
+
+#==============================================================================#
+# GMIN Stepping (gshunt homotopy)
+#
+# Steps gshunt from a large value down to 0 (or target gshunt).
+# Large gshunt adds conductance to ground from every voltage node,
+# making the matrix more diagonal dominant and easier to solve.
+#==============================================================================#
+
+"""
+    _gshunt_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                     abstol=1e-10, maxiters=100, nlsolve=CedarRobustNLSolve(),
+                     gshunt_start=1e-3, gshunt_factor=10.0, max_steps=20)
+
+GMIN stepping: step gshunt from large value down to target (usually 0).
+
+Similar to ngspice's GMIN stepping but uses node-to-ground shunt conductance
+only on voltage nodes (more physically correct).
+
+Returns (solution, converged, final_gshunt).
+"""
+function _gshunt_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                          abstol::Real=1e-10, maxiters::Int=100,
+                          nlsolve=CedarRobustNLSolve(),
+                          gshunt_start::Float64=1e-3, gshunt_factor::Float64=10.0,
+                          max_steps::Int=20)
+    target_gshunt = cs.spec.gshunt  # Usually 0
+    gshunt_current = gshunt_start
+
+    u = copy(u0)
+    u_saved = copy(u0)
+    converged = false
+
+    for step in 1:max_steps
+        # Create modified spec with current gshunt
+        cs_step = @set cs.spec = with_gshunt(cs.spec, gshunt_current)
+
+        # Try to solve at this gshunt level
+        u_new, step_converged = _dc_newton_compiled(cs_step, ws, u;
+                                                     abstol=abstol, maxiters=maxiters,
+                                                     nlsolve=nlsolve)
+
+        if step_converged
+            u .= u_new
+            u_saved .= u
+
+            # Check if we've reached target
+            if gshunt_current <= target_gshunt
+                converged = true
+                break
+            end
+
+            # Reduce gshunt for next step
+            gshunt_current /= gshunt_factor
+            if gshunt_current < target_gshunt
+                gshunt_current = target_gshunt
+            end
+        else
+            # Failed - try smaller step
+            if gshunt_factor <= 1.5
+                # Can't make progress - give up
+                break
+            end
+            gshunt_factor = sqrt(gshunt_factor)  # Smaller steps
+            u .= u_saved  # Restore last good solution
+        end
+    end
+
+    # Final validation at target gshunt
+    if converged && gshunt_current != target_gshunt
+        cs_final = @set cs.spec = with_gshunt(cs.spec, target_gshunt)
+        u, converged = _dc_newton_compiled(cs_final, ws, u;
+                                           abstol=abstol, maxiters=maxiters,
+                                           nlsolve=nlsolve)
+    end
+
+    return u, converged
+end
+
+#==============================================================================#
+# Source Stepping (srcFact homotopy)
+#
+# Steps srcFact from 0 to 1, scaling all independent sources.
+# At srcFact=0, circuit has no sources and solution is trivial (u=0).
+# Gradually increasing srcFact lets nonlinear devices turn on smoothly.
+#==============================================================================#
+
+"""
+    _source_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                     abstol=1e-10, maxiters=100, nlsolve=CedarRobustNLSolve(),
+                     srcFact_start=0.0, raise=0.1, max_steps=50)
+
+Source stepping: ramp all independent sources from 0 to full value.
+
+The b vector is scaled by srcFact in fast_rebuild!, so this doesn't require
+modifying individual source stamps.
+
+Returns (solution, converged).
+"""
+function _source_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                          abstol::Real=1e-10, maxiters::Int=100,
+                          nlsolve=CedarRobustNLSolve(),
+                          srcFact_start::Float64=0.0, raise::Float64=0.1,
+                          max_steps::Int=50)
+    srcFact = srcFact_start
+    conv_srcFact = srcFact_start  # Last converged srcFact
+
+    u = copy(u0)
+    u_saved = copy(u0)
+
+    for step in 1:max_steps
+        # Create modified spec with current srcFact
+        cs_step = @set cs.spec = with_srcfact(cs.spec, srcFact)
+
+        # Try to solve at this srcFact level
+        u_new, step_converged = _dc_newton_compiled(cs_step, ws, u;
+                                                     abstol=abstol, maxiters=maxiters,
+                                                     nlsolve=nlsolve)
+
+        if step_converged
+            conv_srcFact = srcFact
+            u .= u_new
+            u_saved .= u
+
+            # Check if we've reached full sources
+            if srcFact >= 1.0
+                return u, true
+            end
+
+            # Increase srcFact for next step
+            srcFact = min(srcFact + raise, 1.0)
+        else
+            # Failed - try smaller step
+            if srcFact - conv_srcFact < 1e-6
+                # Can't make progress - give up
+                break
+            end
+            raise /= 2.0  # Smaller steps
+            srcFact = conv_srcFact + raise
+            u .= u_saved  # Restore last good solution
+        end
+    end
+
+    return u, false
+end
+
+#==============================================================================#
+# DC Solve with Fallback Chain
+#
+# Tries: regular solve → gshunt stepping → source stepping
+# This is the ngspice-style fallback chain for robust convergence.
+#==============================================================================#
+
+"""
+    _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                              abstol=1e-10, maxiters=100, nlsolve=CedarRobustNLSolve(),
+                              use_stepping=true)
+
+DC solve with ngspice-style fallback chain:
+1. Try regular solve (with robust polyalgorithm)
+2. If that fails and use_stepping=true, try GMIN stepping (gshunt homotopy)
+3. If that fails, try source stepping (srcFact homotopy)
+
+Returns (solution, converged).
+"""
+function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                                   abstol::Real=1e-10, maxiters::Int=100,
+                                   nlsolve=CedarRobustNLSolve(),
+                                   use_stepping::Bool=true)
+    n = length(u0)
+    if n == 0
+        return u0, true
+    end
+
+    # 1. Try regular solve first
+    u, converged = _dc_newton_compiled(cs, ws, u0; abstol=abstol, maxiters=maxiters, nlsolve=nlsolve)
+    if converged
+        return u, true
+    end
+
+    if !use_stepping
+        return u, false
+    end
+
+    # 2. Try GMIN stepping (gshunt homotopy)
+    @debug "Regular DC solve failed, trying GMIN stepping..."
+    u, converged = _gshunt_stepping(cs, ws, zeros(n);
+                                    abstol=abstol, maxiters=maxiters, nlsolve=nlsolve)
+    if converged
+        @debug "GMIN stepping succeeded"
+        return u, true
+    end
+
+    # 3. Try source stepping (srcFact homotopy)
+    @debug "GMIN stepping failed, trying source stepping..."
+    u, converged = _source_stepping(cs, ws, zeros(n);
+                                    abstol=abstol, maxiters=maxiters, nlsolve=nlsolve)
+    if converged
+        @debug "Source stepping succeeded"
+        return u, true
+    end
+
+    @debug "All DC solve methods failed"
+    return u, false
 end
 
 """
