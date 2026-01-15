@@ -504,6 +504,11 @@ For DC/AC analysis, uses the DC value.
     v = get_source_value(V, t, mode)
     stamp_b!(ctx, I_idx, v)
 
+    # Record AC excitation for AC analysis
+    if mode === :ac && !iszero(V.ac)
+        stamp_ac!(ctx, I_idx, V.ac)
+    end
+
     return I_idx
 end
 

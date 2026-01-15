@@ -1889,15 +1889,17 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
     # Parse source values - check for DC, AC, and transient
     dc_val = nothing
+    ac_val = nothing
     tran_source = nothing
 
     for val in instance.vals
         if val isa SNode{SP.DCSource}
             dc_val = cg_expr!(state, val.dcval)
+        elseif val isa SNode{SP.ACSource}
+            ac_val = cg_expr!(state, val.acmag)
         elseif val isa SNode{SP.TranSource}
             tran_source = val
         end
-        # AC sources not handled in MNA transient (yet)
     end
 
     # If we have a transient source, generate appropriate device
@@ -2096,18 +2098,19 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
         end
     end
 
-    # No transient source - use DC value
+    # No transient source - use DC value (and AC if present)
     dc_val_actual = dc_val !== nothing ? dc_val : 0.0
+    ac_val_actual = ac_val !== nothing ? ac_val : 0.0
     if is_voltage
         return quote
-            let v = $dc_val_actual
-                stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+            let v = $dc_val_actual, ac = ComplexF64($ac_val_actual)
+                stamp!(VoltageSource(v; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     else
         return quote
-            let i = $dc_val_actual
-                stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+            let i = $dc_val_actual, ac = ComplexF64($ac_val_actual)
+                stamp!(CurrentSource(i; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     end

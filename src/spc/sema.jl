@@ -203,6 +203,10 @@ function sema_visit_ids!(f, expr::SNode{SP.DCSource})
     sema_visit_ids!(f, expr.dcval)
 end
 
+function sema_visit_ids!(f, expr::SNode{SP.ACSource})
+    sema_visit_ids!(f, expr.acmag)
+end
+
 function sema_visit_ids!(f, expr::SNode{SP.TranSource})
     for val in expr.values
         sema_visit_ids!(f, val)

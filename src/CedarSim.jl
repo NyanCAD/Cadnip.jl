@@ -89,7 +89,6 @@ include("spc/query.jl")
 include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
-# AC analysis (MNA-based, no DAECompiler dependency)
 include("ac.jl")
 include("ModelLoader.jl")
 # aliasextract.jl requires old DAECompiler types - not needed for MNA

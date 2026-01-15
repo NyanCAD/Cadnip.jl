@@ -178,6 +178,11 @@ mutable struct MNAContext
     b_I::Vector{MNAIndex}
     b_V::Vector{Float64}
 
+    # AC source tracking - for building b_ac in AC analysis
+    # These track voltage/current sources with non-zero AC phasors
+    ac_I::Vector{MNAIndex}      # Current variable indices for voltage sources, node indices for current sources
+    ac_V::Vector{ComplexF64}    # AC phasor values
+
     # Charge state variables (for voltage-dependent capacitors)
     # See doc/voltage_dependent_capacitors.md
     # These are differential variables with dq/dt = I and constraint q = Q(V)
@@ -223,6 +228,8 @@ function MNAContext()
         Float64[],          # C_V
         MNAIndex[],         # b_I (COO format for b vector)
         Float64[],          # b_V (COO format for b vector)
+        MNAIndex[],         # ac_I (AC source indices)
+        ComplexF64[],       # ac_V (AC source phasors)
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -680,6 +687,26 @@ This provides a consistent COO-style interface matching G and C stamping.
     return nothing
 end
 
+"""
+    stamp_ac!(ctx::MNAContext, i, ac_val::ComplexF64)
+
+Record an AC source excitation for AC small-signal analysis.
+Used by VoltageSource and CurrentSource when they have non-zero AC phasor.
+
+For voltage sources, i is the current variable index (the constraint equation row).
+For current sources, i is the node where current is injected.
+"""
+@inline function stamp_ac!(ctx::MNAContext, i, ac_val::ComplexF64)
+    iszero(i) && return nothing
+    iszero(ac_val) && return nothing
+    typed = _to_typed(i)
+    push!(ctx.ac_I, typed)
+    push!(ctx.ac_V, ac_val)
+    return nothing
+end
+
+export stamp_ac!
+
 #==============================================================================#
 # Conductance Stamping Helpers (2-terminal pattern)
 #==============================================================================#
@@ -781,6 +808,10 @@ function reset_for_restamping!(ctx::MNAContext)
     # COO arrays for b vector
     empty!(ctx.b_I)
     empty!(ctx.b_V)
+
+    # AC source tracking
+    empty!(ctx.ac_I)
+    empty!(ctx.ac_V)
 
     # Charge state variables
     empty!(ctx.charge_names)
