@@ -146,6 +146,22 @@ static void LoadGmin(SMPmatrix *eMatrix, double Gmin) {
 
 This is called during `SMPreorder()` and `SMPluFac()` before matrix factorization.
 
+**Important:** This adds gmin to ALL diagonals including branch current equations!
+The code comment says: "use of this routine is not recommended. It is included here simply for compatibility with Spice3."
+
+For a voltage source, the MNA branch equation is `Vp - Vn = Vs` (diagonal = 0).
+After LoadGmin: `Vp - Vn + gmin*Ibr = Vs` - physically meaningless but provides regularization.
+
+### Voltage-Only vs Full-Diagonal Stepping
+
+| Approach | What it does | Physical meaning |
+|----------|--------------|------------------|
+| **Full diagonal** (ngspice LoadGmin) | Adds to ALL diagonals | Regularization hack, not physical |
+| **Voltage node only** | Adds to voltage diagonals (1:n_nodes) | Physical: shunt resistor to ground |
+| **Device gmin** | In device equations | Physical: minimum conductance |
+
+For Cadnip.jl, voltage-node-only gshunt is more physically correct. The ngspice full-diagonal approach is a sledgehammer that "works" but adds spurious terms to branch current equations.
+
 ---
 
 ## Cadnip.jl Implementation
