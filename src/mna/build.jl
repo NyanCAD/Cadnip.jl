@@ -68,20 +68,23 @@ system_size(data::MNAData) = data.n_nodes + data.n_currents + data.n_charges
 #==============================================================================#
 
 """
-    assemble_G(ctx::MNAContext; gmin::Float64=0.0) -> SparseMatrixCSC{Float64,Int}
+    assemble_G(ctx::MNAContext; gshunt::Float64=0.0) -> SparseMatrixCSC{Float64,Int}
 
 Assemble the G (conductance) matrix from COO format stamps.
 Duplicate entries are summed (standard sparse matrix behavior).
 
-If gmin > 0, GMIN (minimum conductance) is added from each voltage node
+If gshunt > 0, a shunt conductance is added from each voltage node
 to ground to prevent singular matrices from floating nodes. This is
-standard SPICE practice for circuit simulation stability with complex
-device models.
+standard SPICE practice for circuit simulation stability.
+
+Note: gshunt is applied only to voltage node diagonals (1:n_nodes),
+not to current variable rows. This is physically correct (shunt resistor
+to ground) unlike ngspice's LoadGmin which adds to ALL matrix diagonals.
 
 Note: Negative indices (representing current variables) are resolved
 to actual indices using resolve_index before assembly.
 """
-function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
+function assemble_G(ctx::MNAContext; gshunt::Float64=0.0)
     n = system_size(ctx)
     if n == 0
         return spzeros(Float64, 0, 0)
@@ -89,12 +92,12 @@ function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
 
     # Resolve any negative indices (current variables)
     if isempty(ctx.G_I)
-        if gmin > 0
-            # Only GMIN stamps
-            gmin_I = collect(1:ctx.n_nodes)
-            gmin_J = collect(1:ctx.n_nodes)
-            gmin_V = fill(gmin, ctx.n_nodes)
-            return sparse(gmin_I, gmin_J, gmin_V, n, n)
+        if gshunt > 0
+            # Only gshunt stamps
+            shunt_I = collect(1:ctx.n_nodes)
+            shunt_J = collect(1:ctx.n_nodes)
+            shunt_V = fill(gshunt, ctx.n_nodes)
+            return sparse(shunt_I, shunt_J, shunt_V, n, n)
         else
             return spzeros(Float64, n, n)
         end
@@ -103,18 +106,17 @@ function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
     I_resolved = Int[resolve_index(ctx, i) for i in ctx.G_I]
     J_resolved = Int[resolve_index(ctx, j) for j in ctx.G_J]
 
-    if gmin > 0
-        # Add GMIN from each voltage node to ground
-        # This is standard SPICE practice to prevent singular matrices
-        # GMIN is only added to voltage nodes (1:n_nodes), not current variables
-        gmin_I = collect(1:ctx.n_nodes)
-        gmin_J = collect(1:ctx.n_nodes)
-        gmin_V = fill(gmin, ctx.n_nodes)
+    if gshunt > 0
+        # Add gshunt from each voltage node to ground
+        # Only voltage nodes (1:n_nodes), not current variables
+        shunt_I = collect(1:ctx.n_nodes)
+        shunt_J = collect(1:ctx.n_nodes)
+        shunt_V = fill(gshunt, ctx.n_nodes)
 
-        # Combine stamps with GMIN
-        all_I = vcat(I_resolved, gmin_I)
-        all_J = vcat(J_resolved, gmin_J)
-        all_V = vcat(ctx.G_V, gmin_V)
+        # Combine stamps with gshunt
+        all_I = vcat(I_resolved, shunt_I)
+        all_J = vcat(J_resolved, shunt_J)
+        all_V = vcat(ctx.G_V, shunt_V)
 
         return sparse(all_I, all_J, all_V, n, n)
     else

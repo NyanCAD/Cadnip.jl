@@ -56,7 +56,8 @@ Base.@kwdef struct MNASpec{T<:Real}
     mode::Symbol = :tran
     time::T = 0.0
     # Common simulator parameters (for $simparam access)
-    gmin::Float64 = 1e-12      # Minimum conductance
+    gmin::Float64 = 1e-12      # Device-level minimum conductance (used in device models)
+    gshunt::Float64 = 0.0      # Node-to-ground shunt conductance (for stepping/floating nodes)
     tnom::Float64 = 27.0       # Nominal temperature (Celsius)
     abstol::Float64 = 1e-12    # Absolute tolerance
     reltol::Float64 = 1e-3     # Relative tolerance
@@ -72,7 +73,7 @@ export MNASpec
 Create new spec with different temperature.
 """
 with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
     vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
@@ -81,7 +82,7 @@ with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mod
 Create new spec with different mode.
 """
 with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
     vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
@@ -91,10 +92,20 @@ Create new spec with different time.
 Note: time type is preserved to support ForwardDiff Dual numbers.
 """
 with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t,
-    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
     vntol=spec.vntol, iabstol=spec.iabstol)
 
-export with_temp, with_mode, with_time
+"""
+    with_gshunt(spec::MNASpec, gshunt::Real) -> MNASpec
+
+Create new spec with different gshunt (node-to-ground shunt conductance).
+Used for GMIN stepping and floating node stabilization.
+"""
+with_gshunt(spec::MNASpec, gshunt::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, gshunt=Float64(gshunt), tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    vntol=spec.vntol, iabstol=spec.iabstol)
+
+export with_temp, with_mode, with_time, with_gshunt
 
 #==============================================================================#
 # Solution Types
