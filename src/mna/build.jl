@@ -8,7 +8,7 @@
 using SparseArrays
 using LinearAlgebra
 
-export MNAData, assemble!, assemble_G, assemble_C, get_rhs
+export MNAData, assemble!, assemble_G, assemble_C, get_rhs, get_rhs_ac
 
 """
     MNAData{T}
@@ -150,16 +150,15 @@ end
 """
     get_rhs(ctx::MNAContext) -> Vector{Float64}
 
-Get the RHS vector b, properly sized.
+Assemble the RHS vector b from deferred stamps.
 
 All b stamps are stored in COO format (b_I, b_V) and resolved here.
 This matches the G and C matrix assembly pattern for consistency.
 """
 function get_rhs(ctx::MNAContext)
     n = system_size(ctx)
-    if n == 0
-        return Float64[]
-    end
+    n == 0 && return Float64[]
+    isempty(ctx.b_I) && return zeros(n)
 
     # Create result vector and apply all deferred stamps
     result = zeros(Float64, n)
@@ -169,7 +168,29 @@ function get_rhs(ctx::MNAContext)
             result[idx] += v
         end
     end
+    return result
+end
 
+"""
+    get_rhs_ac(ctx::MNAContext) -> Vector{ComplexF64}
+
+Assemble the AC excitation vector from deferred stamps.
+
+Returns a complex vector representing AC small-signal excitation.
+For AC analysis, this becomes the B matrix input to the DSS system.
+"""
+function get_rhs_ac(ctx::MNAContext)
+    n = system_size(ctx)
+    n == 0 && return ComplexF64[]
+    isempty(ctx.b_ac_I) && return zeros(ComplexF64, n)
+
+    result = zeros(ComplexF64, n)
+    for (i, v) in zip(ctx.b_ac_I, ctx.b_ac_V)
+        idx = resolve_index(ctx, i)
+        if 1 <= idx <= n
+            result[idx] += v
+        end
+    end
     return result
 end
 

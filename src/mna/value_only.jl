@@ -309,6 +309,17 @@ This provides a consistent interface matching G and C stamping.
 end
 
 """
+    stamp_b_ac!(dctx::DirectStampContext, i, val)
+
+No-op for DirectStampContext. AC analysis uses MNAContext, not DirectStampContext.
+DirectStampContext is optimized for transient restamping where AC stamps are not needed.
+"""
+@inline function stamp_b_ac!(dctx::DirectStampContext, i, val)
+    # AC stamps are not used in transient analysis (DirectStampContext's purpose)
+    return nothing
+end
+
+"""
     stamp_conductance!(dctx::DirectStampContext, p, n, G)
 
 Stamp conductance pattern for 2-terminal element.
