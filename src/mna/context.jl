@@ -130,7 +130,7 @@ sparse matrix construction.
 - `n_currents::Int`: Number of current variables
 - `G_I, G_J, G_V`: COO format for conductance matrix G
 - `C_I, C_J, C_V`: COO format for capacitance matrix C
-- `b::Vector{Float64}`: Right-hand side vector (source terms)
+- `b_I, b_V`: COO format for RHS vector b (source terms)
 
 # Ground Convention
 Ground (node 0) is implicit and not included in the system.
@@ -173,10 +173,8 @@ mutable struct MNAContext
     C_J::Vector{MNAIndex}
     C_V::Vector{Float64}
 
-    # RHS vector (pre-allocated for known size, or extended dynamically)
-    b::Vector{Float64}
-
-    # Deferred b vector stamps (resolved at assembly time when n_nodes is final)
+    # COO format for b vector (RHS stamps) - resolved at assembly time
+    # All stamps are deferred, matching G and C matrix stamping pattern
     b_I::Vector{MNAIndex}
     b_V::Vector{Float64}
 
@@ -223,9 +221,8 @@ function MNAContext()
         MNAIndex[],         # C_I
         MNAIndex[],         # C_J
         Float64[],          # C_V
-        Float64[],          # b
-        MNAIndex[],         # b_I (deferred b stamps)
-        Float64[],          # b_V (deferred b stamps)
+        MNAIndex[],         # b_I (COO format for b vector)
+        Float64[],          # b_V (COO format for b vector)
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -284,17 +281,6 @@ function get_node!(ctx::MNAContext, name::Symbol)::Int
 
     # Extend internal_node_flags (default: not internal)
     push!(ctx.internal_node_flags, false)
-
-    # Extend b vector if needed
-    if length(ctx.b) < system_size(ctx)
-        old_len = length(ctx.b)
-        new_len = system_size(ctx)
-        resize!(ctx.b, new_len)
-        # Zero-initialize all new elements (resize! leaves them uninitialized)
-        for j in (old_len+1):new_len
-            ctx.b[j] = 0.0
-        end
-    end
 
     return ctx.n_nodes
 end
@@ -679,29 +665,18 @@ Accepts typed indices (NodeIndex, CurrentIndex, ChargeIndex) or integers.
 The b vector contains source terms:
 - Independent current sources: stamp into KCL equations
 - Independent voltage sources: stamp voltage value into constraint equation
+
+All stamps are deferred to b_I/b_V arrays and resolved at assembly time.
+This provides a consistent COO-style interface matching G and C stamping.
 """
 @inline function stamp_b!(ctx::MNAContext, i, val)
     iszero(i) && return nothing
     v = extract_value(val)
     typed = _to_typed(i)
 
-    # CurrentIndex/ChargeIndex are deferred until n_nodes is final
-    if typed isa CurrentIndex || typed isa ChargeIndex
-        push!(ctx.b_I, typed)
-        push!(ctx.b_V, v)
-        return nothing
-    end
-
-    # NodeIndex can be applied immediately
-    idx = typed.idx
-    if idx > length(ctx.b)
-        old_len = length(ctx.b)
-        resize!(ctx.b, idx)
-        for j in (old_len+1):idx
-            ctx.b[j] = 0.0
-        end
-    end
-    ctx.b[idx] += v
+    # All b stamps are deferred - resolved at assembly time in get_rhs()
+    push!(ctx.b_I, typed)
+    push!(ctx.b_V, v)
     return nothing
 end
 
@@ -758,7 +733,7 @@ Useful for re-stamping at a new operating point (Newton iteration).
 function reset_values!(ctx::MNAContext)
     fill!(ctx.G_V, 0.0)
     fill!(ctx.C_V, 0.0)
-    fill!(ctx.b, 0.0)
+    fill!(ctx.b_V, 0.0)
     return nothing
 end
 
@@ -795,7 +770,7 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.current_names)
     ctx.n_currents = 0
 
-    # COO arrays
+    # COO arrays for G and C matrices
     empty!(ctx.G_I)
     empty!(ctx.G_J)
     empty!(ctx.G_V)
@@ -803,12 +778,7 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.C_J)
     empty!(ctx.C_V)
 
-    # Reset b vector to zeros (keep the allocation but resize to 0 and regrow)
-    # Note: We empty! here because the size depends on n_nodes + n_currents + n_charges
-    # which will be rebuilt
-    empty!(ctx.b)
-
-    # Deferred b stamps
+    # COO arrays for b vector
     empty!(ctx.b_I)
     empty!(ctx.b_V)
 
@@ -844,7 +814,6 @@ function clear!(ctx::MNAContext)
     empty!(ctx.C_I)
     empty!(ctx.C_J)
     empty!(ctx.C_V)
-    empty!(ctx.b)
     empty!(ctx.b_I)
     empty!(ctx.b_V)
     empty!(ctx.charge_names)
