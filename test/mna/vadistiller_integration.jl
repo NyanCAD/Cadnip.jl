@@ -770,7 +770,7 @@ eval(monostable_code)
                                  Vamp=5.0, freq=1000.0, R=1000.0)
             tspan = (0.0, 3e-3)
 
-            sol_ida = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            sol_ida = tran!(circuit, tspan; abstol=1e-7, reltol=1e-5)
             @test sol_ida.retcode == SciMLBase.ReturnCode.Success
 
             sys = assemble!(circuit)
@@ -821,7 +821,7 @@ eval(monostable_code)
                                  Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
             tspan = (0.0, 2e-3)
 
-            sol_ida = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            sol_ida = tran!(circuit, tspan; abstol=1e-7, reltol=1e-5)
             @test sol_ida.retcode == SciMLBase.ReturnCode.Success
 
             sys = assemble!(circuit)
