@@ -12,6 +12,25 @@
   - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
   - Don't add compatibility hacks for older Julia versions
 
+### gVisor Runtime Workaround
+
+If running in a gVisor-sandboxed environment (check with `uname -r` showing `runsc` or kernel 4.4.0),
+Julia's precompilation may segfault during `@compile_workload` execution due to gVisor's syscall
+emulation limitations.
+
+**Fix:** Create `test/LocalPreferences.toml` to disable precompile workloads:
+
+```toml
+[PSPModels]
+precompile_workload = false
+
+[VADistillerModels]
+precompile_workload = false
+```
+
+This file is gitignored. The packages will still work but with slower first-call latency.
+See [PrecompileTools docs](https://julialang.github.io/PrecompileTools.jl/stable/) for details.
+
 ## Development Guidelines
 
 ### Code Modification Philosophy
