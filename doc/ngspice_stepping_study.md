@@ -426,3 +426,134 @@ end
 4. **State save/restore is essential** - Both stepping algorithms need to backtrack on failure
 
 5. **Final validation without helpers** - After stepping completes, do one more solve with gshunt=0 and srcFact=1 to confirm the solution works for the actual circuit
+
+---
+
+## Integration with CedarDCOp
+
+The stepping algorithms should be integrated into the existing `CedarDCOp` initialization framework rather than as standalone functions. This keeps all DC initialization logic in one place.
+
+### Proposed CedarDCOp Enhancement
+
+```julia
+"""
+    CedarDCOp with homotopy support
+
+Fields:
+- `abstol`: Newton convergence tolerance
+- `maxiters`: Max Newton iterations per step
+- `nlsolve`: Base nonlinear solver (fallback)
+- `use_shampine`: Use ShampineCollocationInit after DC solve
+- `gmin_stepping`: Enable GMIN stepping homotopy
+- `source_stepping`: Enable source stepping homotopy
+- `gmin_factor`: Factor for GMIN stepping (default: 10)
+- `num_gmin_steps`: Number of GMIN steps (default: 10)
+"""
+struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
+    abstol::Float64
+    maxiters::Int
+    nlsolve::NLSOLVE
+    use_shampine::Bool
+    # Homotopy options
+    gmin_stepping::Bool
+    source_stepping::Bool
+    gmin_factor::Float64
+    num_gmin_steps::Int
+end
+
+CedarDCOp(; abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(),
+          use_shampine=false, gmin_stepping=false, source_stepping=false,
+          gmin_factor=10.0, num_gmin_steps=10) =
+    CedarDCOp(abstol, maxiters, nlsolve, use_shampine,
+              gmin_stepping, source_stepping, gmin_factor, num_gmin_steps)
+```
+
+### Homotopy Integration Flow
+
+```julia
+function SciMLBase.initialize_dae!(integrator, alg::CedarDCOp)
+    ws = integrator.sol.prob.p::EvalWorkspace
+    u0 = zeros(length(integrator.u))
+
+    converged = false
+
+    # 1. First try direct Newton (like ngspice NIiter)
+    u0, converged = _dc_newton_compiled(ws, u0; abstol=alg.abstol, maxiters=alg.maxiters)
+
+    if !converged && alg.gmin_stepping
+        # 2. Try GMIN stepping (homotopy on gshunt)
+        u0, converged = _gmin_stepping(ws, u0;
+            abstol=alg.abstol, maxiters=alg.maxiters,
+            factor=alg.gmin_factor, num_steps=alg.num_gmin_steps)
+    end
+
+    if !converged && alg.source_stepping
+        # 3. Try source stepping (homotopy on srcFact)
+        u0, converged = _source_stepping(ws, u0;
+            abstol=alg.abstol, maxiters=alg.maxiters)
+    end
+
+    if !converged
+        # 4. Fall back to poly-algorithm (LM, PseudoTransient)
+        u0, converged = _dc_newton_compiled(ws, u0;
+            abstol=alg.abstol, maxiters=alg.maxiters,
+            nlsolve=alg.nlsolve)
+    end
+
+    integrator.u .= u0
+    # ... rest of initialization
+end
+```
+
+### Required Infrastructure Changes
+
+1. **Add gshunt to MNASpec** (separate from gmin):
+   ```julia
+   struct MNASpec{T<:Real}
+       temp::Float64 = 27.0
+       mode::Symbol = :tran
+       time::T = 0.0
+       gmin::Float64 = 1e-12      # Device-level (used in device models)
+       gshunt::Float64 = 0.0      # Node-to-ground shunt (for stepping)
+       srcFact::Float64 = 1.0     # Source scaling factor (for stepping)
+       # ... other fields
+   end
+   ```
+
+2. **Modify fast_rebuild! to apply gshunt**:
+   ```julia
+   function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
+       # ... existing stamping code ...
+
+       # Apply gshunt to voltage node diagonals
+       gshunt = ws.structure.spec.gshunt
+       if gshunt > 0
+           G = ws.structure.G
+           for i in 1:ws.structure.n_nodes
+               G[i, i] += gshunt
+           end
+       end
+   end
+   ```
+
+3. **Modify source stamps to use srcFact**:
+   ```julia
+   function stamp!(src::VoltageSource, ctx::MNAContext, p::Int, n::Int)
+       v = src.v * ctx.spec.srcFact  # Scale by srcFact
+       # ... existing stamping
+   end
+   ```
+
+4. **Add with_gshunt and with_srcfact helpers**:
+   ```julia
+   with_gshunt(spec::MNASpec, gshunt::Real) = MNASpec(spec; gshunt=Float64(gshunt))
+   with_srcfact(spec::MNASpec, srcFact::Real) = MNASpec(spec; srcFact=Float64(srcFact))
+   ```
+
+### Why Integrate with CedarDCOp?
+
+1. **Single entry point** - All DC initialization goes through CedarDCOp
+2. **Consistent state management** - EvalWorkspace already tracks everything needed
+3. **Composable** - Can combine gmin stepping, source stepping, and poly-algorithm fallback
+4. **Debugging** - Single place to add logging/diagnostics for convergence issues
+5. **User control** - Users can enable/disable homotopy methods via kwargs
