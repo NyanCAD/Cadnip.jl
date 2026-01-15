@@ -222,11 +222,11 @@ For difficult circuits, Cadnip.jl provides:
 
 | Feature | ngspice | Cadnip.jl |
 |---------|---------|-----------|
-| **GMIN Stepping** | Explicit stepping algorithms | LevenbergMarquardt damping |
-| **Source Stepping** | Scale sources 0→1 | Not implemented (uses continuation) |
+| **GMIN Stepping** | Explicit stepping algorithms | gshunt in MNASpec + LM damping |
+| **Source Stepping** | Scale sources 0→1 | srcFact in MNASpec (scales b vector) |
 | **Adaptive Step Size** | Yes (Gillespie variants) | Built into LM/trust region |
 | **State Save/Restore** | Manual (OldRhsOld arrays) | Handled by NonlinearSolve |
-| **Matrix GMIN** | Added to all diagonals | Only voltage nodes |
+| **Matrix GMIN** | Added to all diagonals | Only voltage nodes (gshunt) |
 | **Fallback Chain** | gmin→source→transientOP | polyalgorithm + CedarUICOp |
 
 ### Advantages of ngspice Approach
@@ -241,7 +241,7 @@ For difficult circuits, Cadnip.jl provides:
 1. **Simpler code** - delegates to NonlinearSolve.jl
 2. **Modern algorithms** - trust region, LM, pseudo-transient in one package
 3. **Automatic fallback** via poly-algorithm
-4. **No need for srcFact** infrastructure in device models
+4. **srcFact scales b vector globally** - no need to modify individual source stamps
 
 ---
 
@@ -260,25 +260,26 @@ This conflates two different concepts:
 ### Missing Features
 
 1. **No device-level gmin by default** - VA models use `$simparam("gmin")` but it's not automatically applied to built-in devices like Diode
-2. **No source stepping** - LM provides some regularization but doesn't scale sources 0→1
-3. **No explicit GMIN stepping** - Relies on LM damping which works differently
-4. **Matrix gmin adds to wrong locations** - `assemble_G()` only adds to voltage nodes (1:n_nodes), but ngspice's `LoadGmin()` adds to ALL diagonals including current variables
+2. ~~**No source stepping**~~ - **IMPLEMENTED**: `srcFact` in MNASpec scales the b vector when < 1.0
+3. ~~**No explicit GMIN stepping**~~ - **IMPLEMENTED**: `gshunt` in MNASpec, applied in `fast_rebuild!`
+4. ~~**Matrix gmin adds to wrong locations**~~ - **FIXED**: `gshunt` only adds to voltage nodes (1:n_nodes), not current variables. This is more physically correct than ngspice's approach.
 
 ### Recommended Changes
 
-1. **Separate gmin and gshunt** in MNASpec:
+1. ✅ **Separate gmin and gshunt** in MNASpec:
    ```julia
    struct MNASpec
        gmin::Float64 = 1e-12    # Device-level (used in device models)
        gshunt::Float64 = 0.0    # Node-to-ground shunt (optional)
+       srcFact::Float64 = 1.0   # Source scaling factor (for source stepping)
    end
    ```
 
 2. **Always apply gmin in device models** - Add `+ spec.gmin` to junction conductances in built-in Diode, BJT, etc.
 
-3. **Apply gshunt correctly** - Only to voltage node diagonals, not current variables
+3. ✅ **Apply gshunt correctly** - Only to voltage node diagonals, not current variables. Implemented in `fast_rebuild!`.
 
-4. **Consider adding srcFact** - For difficult circuits, source stepping can be more robust than LM
+4. ✅ **srcFact implemented** - Scales b vector when < 1.0. Applied in `fast_rebuild!` after all stamps.
 
 ---
 
@@ -431,13 +432,7 @@ end
 
 2. **gshunt applies only to voltage nodes** - Don't add gshunt to current variable rows (branch currents in voltage sources, inductors, etc.)
 
-3. **srcFact requires source modification** - Each independent source must multiply its value by srcFact:
-   ```julia
-   function stamp!(src::VoltageSource, ctx, p, n)
-       v = src.v * ctx.spec.srcFact  # Scale by srcFact
-       # ... rest of stamping
-   end
-   ```
+3. ~~**srcFact requires source modification**~~ - **SIMPLIFIED**: In Cadnip.jl, srcFact scales the entire b vector in `fast_rebuild!`, so individual sources don't need modification. This is simpler and more maintainable than ngspice's approach.
 
 4. **State save/restore is essential** - Both stepping algorithms need to backtrack on failure
 

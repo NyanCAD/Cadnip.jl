@@ -441,6 +441,13 @@ function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVect
         end
     end
 
+    # Apply srcFact scaling to b vector (for source stepping homotopy)
+    # This scales all sources (independent voltage/current sources) by srcFact
+    srcFact = cs.spec.srcFact
+    if srcFact < 1.0
+        dctx.b .*= srcFact
+    end
+
     # Apply gshunt to voltage node diagonals (for GMIN stepping / floating node stabilization)
     gshunt = cs.spec.gshunt
     if gshunt != 0.0

@@ -58,6 +58,7 @@ Base.@kwdef struct MNASpec{T<:Real}
     # Common simulator parameters (for $simparam access)
     gmin::Float64 = 1e-12      # Device-level minimum conductance (used in device models)
     gshunt::Float64 = 0.0      # Node-to-ground shunt conductance (for stepping/floating nodes)
+    srcFact::Float64 = 1.0     # Source scaling factor (for source stepping, 0→1)
     tnom::Float64 = 27.0       # Nominal temperature (Celsius)
     abstol::Float64 = 1e-12    # Absolute tolerance
     reltol::Float64 = 1e-3     # Relative tolerance
@@ -73,8 +74,8 @@ export MNASpec
 Create new spec with different temperature.
 """
 with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time,
-    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
@@ -82,8 +83,8 @@ with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mod
 Create new spec with different mode.
 """
 with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time,
-    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_time(spec::MNASpec, t::Real) -> MNASpec
@@ -92,8 +93,8 @@ Create new spec with different time.
 Note: time type is preserved to support ForwardDiff Dual numbers.
 """
 with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t,
-    gmin=spec.gmin, gshunt=spec.gshunt, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_gshunt(spec::MNASpec, gshunt::Real) -> MNASpec
@@ -102,10 +103,21 @@ Create new spec with different gshunt (node-to-ground shunt conductance).
 Used for GMIN stepping and floating node stabilization.
 """
 with_gshunt(spec::MNASpec, gshunt::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
-    gmin=spec.gmin, gshunt=Float64(gshunt), tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
-    vntol=spec.vntol, iabstol=spec.iabstol)
+    gmin=spec.gmin, gshunt=Float64(gshunt), srcFact=spec.srcFact, tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
 
-export with_temp, with_mode, with_time, with_gshunt
+"""
+    with_srcfact(spec::MNASpec, srcFact::Real) -> MNASpec
+
+Create new spec with different srcFact (source scaling factor).
+Used for source stepping homotopy: scale all sources by srcFact (0→1).
+When srcFact < 1.0, the b vector is scaled by srcFact after stamping.
+"""
+with_srcfact(spec::MNASpec, srcFact::Real) = MNASpec(temp=spec.temp, mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, gshunt=spec.gshunt, srcFact=Float64(srcFact), tnom=spec.tnom, abstol=spec.abstol,
+    reltol=spec.reltol, vntol=spec.vntol, iabstol=spec.iabstol)
+
+export with_temp, with_mode, with_time, with_gshunt, with_srcfact
 
 #==============================================================================#
 # Solution Types
