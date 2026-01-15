@@ -57,21 +57,27 @@ mag_an, phase_an, w_an = bode(H, ωs)
 @test phase_sim ≈ phase_an
 @test w_sim ≈ w_an
 
+# Test inductor voltage via node difference
+# L3 connects n1 to vout, so V_L3 = V(n1) - V(vout)
+# For an inductor: V = L * dI/dt, and I = H(s) * I_in
+# So V_L3 = s * L3 * H(s) in the frequency domain
+resp_n1 = CedarSim.freqresp(ac, :n1, ωs)
+resp_vout = CedarSim.freqresp(ac, :vout, ωs)
+V_L3 = resp_n1 .- resp_vout
+
+G = s * L3_val * H
+an_L3 = ControlSystemsBase.freqrespv(G, ωs)
+@test V_L3 ≈ an_L3
+
 #==============================================================================#
-# Skipped Tests - Functionality Not Yet Implemented in MNA AC
+# Limitations - Functionality Not Yet Implemented in MNA AC
 #==============================================================================#
 
-# LIMITATION 1: Device observable access
-# --------------------------------------
-# Cannot observe internal device variables like inductor voltage (sys.l3.V).
-# MNA tracks flat node/current names without hierarchical device scope.
-# Original test verified: voltage across L3 = s*L3*H(s) where H is transfer function.
-#
-# Original test code:
-# obs = DescriptorSystems.freqresp(ac, sys.l3.V, ωs)
-# G = s*L3_val*H
-# an = ControlSystemsBase.freqrespv(G, ωs)
-# @test obs ≈ an
+# LIMITATION 1: Hierarchical device observable access
+# ---------------------------------------------------
+# Cannot observe internal device variables via hierarchical path (sys.l3.V).
+# MNA tracks flat node/current names. However, for devices connected between
+# top-level nodes, we CAN compute the voltage as node difference (shown above).
 
 # LIMITATION 2: Noise analysis
 # ----------------------------

@@ -15,10 +15,10 @@
 #
 # Current Limitations:
 # --------------------
-# 1. Device observables: Cannot observe internal device variables (e.g., voltage
-#    across an inductor like `sys.l3.V`). Only top-level node voltages and branch
-#    currents are accessible via symbol names. Would require hierarchical scope
-#    tracking in MNAContext to map device paths to system indices.
+# 1. Hierarchical device observables: Cannot observe internal device variables via
+#    hierarchical path syntax (e.g., `sys.l3.V`). Only top-level node voltages and
+#    branch currents are accessible via symbol names. However, device voltages CAN
+#    be computed as node differences: `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`.
 #
 # 2. AC source phase: Only magnitude is supported (`V1 in 0 AC 1`). Phase
 #    specification (`V1 in 0 AC 1 45`) is parsed but ignored because
