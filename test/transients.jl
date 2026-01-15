@@ -4,7 +4,7 @@ include("common.jl")
 
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: PWLVoltageSource, PWLCurrentSource, SinVoltageSource
+using CedarSim.MNA: pwl_at_time
 using CedarSim.MNA: voltage, current, MNACircuit
 using SciMLBase: ODEProblem
 
@@ -72,7 +72,7 @@ const r_val_pwl = 2
         @test isapprox(actual, expected; atol=0.1)
     end
 
-    # Also test using direct MNA API with PWLCurrentSource
+    # Also test using direct MNA API with unified CurrentSource
     function PWLIRcircuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
@@ -83,7 +83,9 @@ const r_val_pwl = 2
         # PWL: 0->0 at 1ms, 0->i_max at 9ms
         times = [1e-3, 9e-3]
         values = [0.0, Float64(i_max)]
-        stamp!(PWLCurrentSource(times, values; name=:I), ctx, vout, 0, t, spec.mode)
+        # Use unified CurrentSource with transient function
+        stamp!(CurrentSource(values[1]; tran=_t -> pwl_at_time(times, values, _t), name=:I),
+               ctx, vout, 0, t, spec.mode)
         stamp!(Resistor(Float64(r_val_pwl); name=:R), ctx, vout, 0)
         return ctx
     end
@@ -191,7 +193,7 @@ const ω_val = 1
     steady_state_vout = [sol.u[i][vout_idx] for i in (length(sol.u)÷2):length(sol.u)]
     @test isapprox(rms(steady_state_vout), 0.5; atol=0.15, rtol=0.15)
 
-    # Test using direct MNA API with SinVoltageSource
+    # Test using direct MNA API with unified VoltageSource
     function butterworth_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
@@ -202,8 +204,9 @@ const ω_val = 1
         n1 = get_node!(ctx, :n1)
         vout = get_node!(ctx, :vout)
 
-        # SIN source: V(t) = sin(ω*t)
-        stamp!(SinVoltageSource(0.0, 1.0, ω_val/2π; name=:V), ctx, vin, 0, t, spec.mode)
+        # SIN source: V(t) = sin(ω*t) using unified VoltageSource with transient function
+        freq = ω_val / 2π
+        stamp!(VoltageSource(0.0; tran=_t -> sin(2π * freq * _t), name=:V), ctx, vin, 0, t, spec.mode)
         stamp!(Inductor(L1_val; name=:L1), ctx, vin, n1)
         stamp!(Capacitor(C2_val; name=:C2), ctx, n1, 0)
         stamp!(Inductor(L3_val; name=:L3), ctx, n1, vout)
