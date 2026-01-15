@@ -336,8 +336,9 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
     n_G = length(ctx0.G_I)
     n_C = length(ctx0.C_I)
 
-    # Resolve deferred b stamp indices (CurrentIndex/ChargeIndex → actual b vector positions)
-    # These are fixed after the first build and can be reused in value-only mode
+    # Resolve ALL b stamp indices to actual b vector positions
+    # All b stamps are now deferred (stored in b_I/b_V during stamping)
+    # Pre-resolving enables zero-allocation value-only restamping
     n_b_deferred = length(ctx0.b_I)
     b_deferred_resolved = Vector{Int}(undef, n_b_deferred)
     for k in 1:n_b_deferred

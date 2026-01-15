@@ -211,12 +211,14 @@ using VerilogAParser
         stamp_C!(ctx, n1, n1, 1e-6)
         @test length(ctx.C_V) == 1
 
-        # Stamp RHS
+        # Stamp RHS (all b stamps are deferred, check via get_rhs)
         stamp_b!(ctx, n1, 5.0)
-        @test ctx.b[n1] == 5.0
+        b = get_rhs(ctx)
+        @test b[n1] == 5.0
 
         stamp_b!(ctx, n1, 3.0)  # Accumulates
-        @test ctx.b[n1] == 8.0
+        b = get_rhs(ctx)
+        @test b[n1] == 8.0
 
         # Ground stamps are ignored
         stamp_G!(ctx, 0, n1, 1.0)

@@ -150,8 +150,8 @@ end
 
 Get the RHS vector b, properly sized.
 
-Note: Deferred b stamps (for current variables with negative indices)
-are resolved and applied here.
+All b stamps are stored in COO format (b_I, b_V) and resolved here.
+This matches the G and C matrix assembly pattern for consistency.
 """
 function get_rhs(ctx::MNAContext)
     n = system_size(ctx)
@@ -159,15 +159,8 @@ function get_rhs(ctx::MNAContext)
         return Float64[]
     end
 
-    # Create result vector
+    # Create result vector and apply all deferred stamps
     result = zeros(Float64, n)
-
-    # Copy existing direct stamps
-    for i in 1:min(length(ctx.b), n)
-        result[i] = ctx.b[i]
-    end
-
-    # Apply deferred stamps (negative indices for current variables)
     for (i, v) in zip(ctx.b_I, ctx.b_V)
         idx = resolve_index(ctx, i)
         if 1 <= idx <= n

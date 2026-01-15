@@ -294,23 +294,17 @@ end
 """
     stamp_b!(dctx::DirectStampContext, i, val)
 
-Stamp b vector value. Direct for nodes, deferred for currents/charges.
+Stamp b vector value. All stamps are deferred and applied via pre-resolved indices.
+This provides a consistent interface matching G and C stamping.
 """
 @inline function stamp_b!(dctx::DirectStampContext, i, val)
     iszero(i) && return nothing
     v = extract_value(val)
-    typed = _to_typed(i)
 
-    if typed isa CurrentIndex || typed isa ChargeIndex
-        # Deferred stamp: store value, apply later with pre-resolved index
-        pos = dctx.b_deferred_pos
-        dctx.b_V[pos] = v
-        dctx.b_deferred_pos = pos + 1
-    else
-        # NodeIndex: direct stamp
-        idx = typed.idx
-        dctx.b[idx] += v
-    end
+    # All b stamps are deferred - applied via pre-resolved indices after stamping
+    pos = dctx.b_deferred_pos
+    dctx.b_V[pos] = v
+    dctx.b_deferred_pos = pos + 1
     return nothing
 end
 
