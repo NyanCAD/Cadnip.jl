@@ -74,6 +74,7 @@ export stamp!
 export Resistor, Capacitor, Inductor
 export VoltageSource, CurrentSource
 export VCVS, VCCS, CCVS, CCCS
+export pwl_at_time
 
 #==============================================================================#
 # Device Type Hierarchy
@@ -109,128 +110,6 @@ abstract type AbstractCurrentSource <: AbstractMNADevice end
 abstract type AbstractPassiveDevice <: AbstractMNADevice end
 
 export AbstractMNADevice, AbstractVoltageSource, AbstractCurrentSource, AbstractPassiveDevice
-
-#==============================================================================#
-# Transient Waveform Specifications
-#
-# These structs define different waveform types for the unified source model.
-# Each waveform type can be combined with dc/ac values in VoltageSource/CurrentSource.
-#==============================================================================#
-
-"""No explicit transient waveform - use DC value during transient analysis."""
-struct ConstantWaveform end
-
-"""
-    PWLWaveform{T,V}
-
-Piecewise-linear waveform specification.
-
-Parameterized on storage type to support both heap-allocated vectors and
-stack-allocated tuples for zero-allocation operation.
-
-# Type Parameters
-- `T`: Storage type for times (e.g., Vector{Float64}, SVector{N,Float64})
-- `V`: Storage type for values
-"""
-struct PWLWaveform{T,V}
-    times::T
-    values::V
-end
-
-# Constructors for PWLWaveform
-function PWLWaveform(times::Vector, values::Vector)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLWaveform{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values))
-end
-
-@inline function PWLWaveform(times::SVector{N,Float64}, values::SVector{N,Float64}) where N
-    PWLWaveform{SVector{N,Float64},SVector{N,Float64}}(times, values)
-end
-
-@inline function PWLWaveform(times::NTuple{N,Float64}, values::NTuple{N,Float64}) where N
-    PWLWaveform{NTuple{N,Float64},NTuple{N,Float64}}(times, values)
-end
-
-function PWLWaveform(times::AbstractVector, values::AbstractVector)
-    @assert length(times) == length(values) "times and values must have same length"
-    @assert issorted(times) "times must be sorted"
-    PWLWaveform{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values))
-end
-
-export PWLWaveform
-
-"""
-    SinWaveform
-
-Sinusoidal waveform specification with SPICE-compatible parameters.
-
-V(t) = vo + va * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
-
-For t < td: V(t) = vo + va * sin(phase)
-
-# Fields
-- `vo::Float64`: DC offset (added to source's dc field during transient)
-- `va::Float64`: Amplitude
-- `freq::Float64`: Frequency in Hz
-- `td::Float64`: Delay time (default: 0)
-- `theta::Float64`: Damping factor (default: 0)
-- `phase::Float64`: Phase in degrees (default: 0)
-"""
-struct SinWaveform
-    vo::Float64      # DC offset
-    va::Float64      # Amplitude
-    freq::Float64    # Frequency (Hz)
-    td::Float64      # Delay
-    theta::Float64   # Damping factor
-    phase::Float64   # Phase (degrees)
-end
-
-function SinWaveform(vo::Real, va::Real, freq::Real;
-                     td::Real=0.0, theta::Real=0.0, phase::Real=0.0)
-    SinWaveform(Float64(vo), Float64(va), Float64(freq),
-                Float64(td), Float64(theta), Float64(phase))
-end
-
-export SinWaveform
-
-#==============================================================================#
-# Waveform Evaluation
-#==============================================================================#
-
-"""Evaluate PWL waveform at time t."""
-@inline function eval_waveform(w::PWLWaveform, t::Real)
-    pwl_at_time(w.times, w.values, t)
-end
-
-"""Evaluate sinusoidal waveform at time t."""
-function eval_waveform(w::SinWaveform, t::Real)
-    if t < w.td
-        # Before delay: DC offset + initial phase
-        return w.vo + w.va * sind(w.phase)
-    else
-        # Damped sinusoid
-        t_eff = t - w.td
-        damping = w.theta == 0.0 ? 1.0 : exp(-t_eff * w.theta)
-        return w.vo + w.va * damping * sind(360.0 * w.freq * t_eff + w.phase)
-    end
-end
-
-"""Constant waveform just returns dc value."""
-@inline eval_waveform(::ConstantWaveform, t::Real, dc::Real) = dc
-
-"""Get DC value from waveform (for dcop analysis)."""
-@inline function waveform_dc(w::PWLWaveform)
-    pwl_at_time(w.times, w.values, 0.0)
-end
-
-@inline function waveform_dc(w::SinWaveform)
-    w.vo + w.va * sind(w.phase)
-end
-
-@inline waveform_dc(::ConstantWaveform) = nothing  # Use source's dc field
-
-export eval_waveform, waveform_dc
 
 #==============================================================================#
 # Device Types
@@ -281,23 +160,20 @@ Inductor(l::Real; name::Symbol=:L) = Inductor(Float64(l), name)
 #==============================================================================#
 
 """
-    VoltageSource{W}
+    VoltageSource{F}
 
 Unified voltage source with dc/ac/tran support.
 
-This single type replaces the old separate DC, PWL, and SIN voltage source types.
-It contains all information needed for DC, AC, and transient analysis in one struct.
-
 # Fields
 - `dc::Float64`: DC value for DC operating point analysis
-- `ac::ComplexF64`: AC phasor for small-signal AC analysis (magnitude and phase)
-- `tran::W`: Transient waveform specification (ConstantWaveform, PWLWaveform, SinWaveform, or Function)
+- `ac::ComplexF64`: AC phasor for small-signal AC analysis
+- `tran::F`: Transient function `t -> value`, or `nothing` to use dc
 - `name::Symbol`: Source name
 
 # Analysis Modes
-- `:dcop` -> returns `dc` (or waveform's DC value if tran has one)
-- `:ac` -> returns `dc` (AC phasor handled separately by AC solve infrastructure)
-- `:tran` -> evaluates transient waveform at time t
+- `:dcop` -> returns `dc`
+- `:ac` -> returns `dc` (AC phasor handled separately by AC solve)
+- `:tran` -> calls `tran(t)` if not nothing, else returns `dc`
 
 # Examples
 ```julia
@@ -307,52 +183,20 @@ v1 = VoltageSource(5.0; name=:V1)
 # DC + AC source (for AC analysis)
 v2 = VoltageSource(0.0; ac=1.0, name=:Vin)
 
-# PWL source (uses first value as DC)
-v3 = VoltageSource(pwl=([0.0, 1e-3, 2e-3], [0.0, 5.0, 0.0]); name=:Vpwl)
-
-# Sinusoidal source
-v4 = VoltageSource(sin=(0.0, 1.0, 1e3); name=:Vsin)  # vo, va, freq
+# Transient source with function
+v3 = VoltageSource(0.0; tran=t -> 5.0 * sin(2π * 1000 * t), name=:Vsin)
 ```
 """
-struct VoltageSource{W} <: AbstractVoltageSource
+struct VoltageSource{F} <: AbstractVoltageSource
     dc::Float64
     ac::ComplexF64
-    tran::W
+    tran::F
     name::Symbol
 end
 
 # Simple DC source: VoltageSource(5.0)
-function VoltageSource(v::Real; ac::Number=0.0+0.0im, name::Symbol=:V)
-    VoltageSource{ConstantWaveform}(Float64(v), ComplexF64(ac), ConstantWaveform(), name)
-end
-
-# Full constructor with keyword arguments
-function VoltageSource(; dc::Real=0.0, ac::Number=0.0+0.0im,
-                        pwl::Union{Nothing, Tuple{<:Any, <:Any}}=nothing,
-                        sin::Union{Nothing, Tuple}=nothing,
-                        tran::Union{Nothing, Function}=nothing,
-                        name::Symbol=:V)
-    if pwl !== nothing
-        times, values = pwl
-        w = PWLWaveform(times, values)
-        # Use PWL's initial value as DC if dc not explicitly set
-        effective_dc = dc == 0.0 ? waveform_dc(w) : Float64(dc)
-        return VoltageSource{typeof(w)}(effective_dc, ComplexF64(ac), w, name)
-    elseif sin !== nothing
-        vo, va, freq = sin[1], sin[2], sin[3]
-        td = length(sin) > 3 ? sin[4] : 0.0
-        theta = length(sin) > 4 ? sin[5] : 0.0
-        phase = length(sin) > 5 ? sin[6] : 0.0
-        w = SinWaveform(vo, va, freq; td=td, theta=theta, phase=phase)
-        # Use sine's DC offset as DC if dc not explicitly set
-        effective_dc = dc == 0.0 ? waveform_dc(w) : Float64(dc)
-        return VoltageSource{SinWaveform}(effective_dc, ComplexF64(ac), w, name)
-    elseif tran !== nothing
-        # Function-based transient
-        return VoltageSource{typeof(tran)}(Float64(dc), ComplexF64(ac), tran, name)
-    else
-        return VoltageSource{ConstantWaveform}(Float64(dc), ComplexF64(ac), ConstantWaveform(), name)
-    end
+function VoltageSource(v::Real; ac::Number=0.0+0.0im, tran=nothing, name::Symbol=:V)
+    VoltageSource{typeof(tran)}(Float64(v), ComplexF64(ac), tran, name)
 end
 
 export VoltageSource
@@ -364,26 +208,13 @@ Get the source value at time `t` for the given simulation mode.
 
 - `:dcop` -> returns DC value
 - `:ac` -> returns DC value (AC phasor handled by AC solve)
-- `:tran` -> evaluates transient waveform
+- `:tran` -> calls tran(t) if not nothing, else returns dc
 """
-@inline function get_source_value(src::VoltageSource{ConstantWaveform}, t::Real, mode::Symbol)
+@inline function get_source_value(src::VoltageSource{Nothing}, t::Real, mode::Symbol)
     return src.dc
 end
 
-@inline function get_source_value(src::VoltageSource{<:PWLWaveform}, t::Real, mode::Symbol)
-    mode === :dcop && return src.dc
-    mode === :ac && return src.dc
-    return eval_waveform(src.tran, t)
-end
-
-@inline function get_source_value(src::VoltageSource{SinWaveform}, t::Real, mode::Symbol)
-    mode === :dcop && return src.dc
-    mode === :ac && return src.dc
-    return eval_waveform(src.tran, t)
-end
-
-# Function-based transient
-@inline function get_source_value(src::VoltageSource{F}, t::Real, mode::Symbol) where {F<:Function}
+@inline function get_source_value(src::VoltageSource{F}, t::Real, mode::Symbol) where {F}
     mode === :dcop && return src.dc
     mode === :ac && return src.dc
     return src.tran(t)
@@ -396,192 +227,42 @@ export get_source_value
 #==============================================================================#
 
 """
-    CurrentSource{W}
+    CurrentSource{F}
 
 Unified current source with dc/ac/tran support.
-
-This single type replaces the old separate DC, PWL, and SIN current source types.
 
 # Fields
 - `dc::Float64`: DC value for DC operating point analysis
 - `ac::ComplexF64`: AC phasor for small-signal AC analysis
-- `tran::W`: Transient waveform specification
+- `tran::F`: Transient function `t -> value`, or `nothing` to use dc
 - `name::Symbol`: Source name
 
 Stamps b vector only (source current into KCL equations).
 Positive current flows from n to p (into the positive terminal).
 """
-struct CurrentSource{W} <: AbstractCurrentSource
+struct CurrentSource{F} <: AbstractCurrentSource
     dc::Float64
     ac::ComplexF64
-    tran::W
+    tran::F
     name::Symbol
 end
 
 # Simple DC source: CurrentSource(1e-3)
-function CurrentSource(i::Real; ac::Number=0.0+0.0im, name::Symbol=:I)
-    CurrentSource{ConstantWaveform}(Float64(i), ComplexF64(ac), ConstantWaveform(), name)
-end
-
-# Full constructor with keyword arguments
-function CurrentSource(; dc::Real=0.0, ac::Number=0.0+0.0im,
-                         pwl::Union{Nothing, Tuple{<:Any, <:Any}}=nothing,
-                         sin::Union{Nothing, Tuple}=nothing,
-                         tran::Union{Nothing, Function}=nothing,
-                         name::Symbol=:I)
-    if pwl !== nothing
-        times, values = pwl
-        w = PWLWaveform(times, values)
-        effective_dc = dc == 0.0 ? waveform_dc(w) : Float64(dc)
-        return CurrentSource{typeof(w)}(effective_dc, ComplexF64(ac), w, name)
-    elseif sin !== nothing
-        io, ia, freq = sin[1], sin[2], sin[3]
-        td = length(sin) > 3 ? sin[4] : 0.0
-        theta = length(sin) > 4 ? sin[5] : 0.0
-        phase = length(sin) > 5 ? sin[6] : 0.0
-        w = SinWaveform(io, ia, freq; td=td, theta=theta, phase=phase)
-        effective_dc = dc == 0.0 ? waveform_dc(w) : Float64(dc)
-        return CurrentSource{SinWaveform}(effective_dc, ComplexF64(ac), w, name)
-    elseif tran !== nothing
-        return CurrentSource{typeof(tran)}(Float64(dc), ComplexF64(ac), tran, name)
-    else
-        return CurrentSource{ConstantWaveform}(Float64(dc), ComplexF64(ac), ConstantWaveform(), name)
-    end
+function CurrentSource(i::Real; ac::Number=0.0+0.0im, tran=nothing, name::Symbol=:I)
+    CurrentSource{typeof(tran)}(Float64(i), ComplexF64(ac), tran, name)
 end
 
 export CurrentSource
 
-@inline function get_source_value(src::CurrentSource{ConstantWaveform}, t::Real, mode::Symbol)
+@inline function get_source_value(src::CurrentSource{Nothing}, t::Real, mode::Symbol)
     return src.dc
 end
 
-@inline function get_source_value(src::CurrentSource{<:PWLWaveform}, t::Real, mode::Symbol)
-    mode === :dcop && return src.dc
-    mode === :ac && return src.dc
-    return eval_waveform(src.tran, t)
-end
-
-@inline function get_source_value(src::CurrentSource{SinWaveform}, t::Real, mode::Symbol)
-    mode === :dcop && return src.dc
-    mode === :ac && return src.dc
-    return eval_waveform(src.tran, t)
-end
-
-@inline function get_source_value(src::CurrentSource{F}, t::Real, mode::Symbol) where {F<:Function}
+@inline function get_source_value(src::CurrentSource{F}, t::Real, mode::Symbol) where {F}
     mode === :dcop && return src.dc
     mode === :ac && return src.dc
     return src.tran(t)
 end
-
-#==============================================================================#
-# Legacy Type Aliases (for backward compatibility during transition)
-#
-# These allow existing code using PWLVoltageSource, SinVoltageSource, etc.
-# to continue working while we migrate to the unified types.
-#==============================================================================#
-
-"""
-    PWLVoltageSource(times, values; name=:V)
-
-Create a VoltageSource with PWL transient waveform.
-
-This is an alias for the unified VoltageSource with a PWLWaveform.
-"""
-function PWLVoltageSource(times, values; name::Symbol=:V)
-    w = PWLWaveform(times, values)
-    dc = waveform_dc(w)
-    VoltageSource{typeof(w)}(dc, 0.0+0.0im, w, name)
-end
-
-export PWLVoltageSource
-
-"""
-    PWLCurrentSource(times, values; name=:I)
-
-Create a CurrentSource with PWL transient waveform.
-
-This is an alias for the unified CurrentSource with a PWLWaveform.
-"""
-function PWLCurrentSource(times, values; name::Symbol=:I)
-    w = PWLWaveform(times, values)
-    dc = waveform_dc(w)
-    CurrentSource{typeof(w)}(dc, 0.0+0.0im, w, name)
-end
-
-export PWLCurrentSource
-
-"""
-    SinVoltageSource(vo, va, freq; td=0.0, theta=0.0, phase=0.0, name=:V)
-
-Create a VoltageSource with sinusoidal transient waveform.
-
-This is an alias for the unified VoltageSource with a SinWaveform.
-"""
-function SinVoltageSource(vo::Real, va::Real, freq::Real;
-                          td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
-                          name::Symbol=:V)
-    w = SinWaveform(vo, va, freq; td=td, theta=theta, phase=phase)
-    dc = waveform_dc(w)
-    VoltageSource{SinWaveform}(dc, 0.0+0.0im, w, name)
-end
-
-export SinVoltageSource
-
-"""
-    SinCurrentSource(io, ia, freq; td=0.0, theta=0.0, phase=0.0, name=:I)
-
-Create a CurrentSource with sinusoidal transient waveform.
-
-This is an alias for the unified CurrentSource with a SinWaveform.
-"""
-function SinCurrentSource(io::Real, ia::Real, freq::Real;
-                          td::Real=0.0, theta::Real=0.0, phase::Real=0.0,
-                          name::Symbol=:I)
-    w = SinWaveform(io, ia, freq; td=td, theta=theta, phase=phase)
-    dc = waveform_dc(w)
-    CurrentSource{SinWaveform}(dc, 0.0+0.0im, w, name)
-end
-
-export SinCurrentSource
-
-"""
-    TimeDependentVoltageSource(value_fn; dc_value=0.0, name=:V)
-
-Create a VoltageSource with a function-based transient waveform.
-
-This is an alias for the unified VoltageSource with a Function.
-"""
-function TimeDependentVoltageSource(value_fn::F; dc_value::Real=0.0, name::Symbol=:V) where {F}
-    VoltageSource{F}(Float64(dc_value), 0.0+0.0im, value_fn, name)
-end
-
-export TimeDependentVoltageSource
-
-#==============================================================================#
-# Legacy helper functions (for backward compatibility)
-#==============================================================================#
-
-"""Evaluate PWL waveform at time t (legacy API)."""
-@inline function pwl_value(src::VoltageSource{<:PWLWaveform}, t::Real)
-    eval_waveform(src.tran, t)
-end
-
-@inline function pwl_value(src::CurrentSource{<:PWLWaveform}, t::Real)
-    eval_waveform(src.tran, t)
-end
-
-export pwl_value
-
-"""Evaluate sinusoidal waveform at time t (legacy API)."""
-function sin_value(src::VoltageSource{SinWaveform}, t::Real)
-    eval_waveform(src.tran, t)
-end
-
-function sin_value(src::CurrentSource{SinWaveform}, t::Real)
-    eval_waveform(src.tran, t)
-end
-
-export sin_value
 
 """
     VCVS(gain::Float64; name::Symbol=:E)

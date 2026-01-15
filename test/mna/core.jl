@@ -23,7 +23,7 @@ using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capa
 using CedarSim.MNA: stamp!, system_size
 using CedarSim.MNA: MNAIndex, NodeIndex, CurrentIndex, ChargeIndex
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: TimeDependentVoltageSource, PWLVoltageSource, get_source_value, pwl_value
+using CedarSim.MNA: get_source_value, pwl_at_time
 using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS
 using CedarSim.MNA: assemble!, assemble_G, assemble_C, get_rhs
 using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
@@ -1386,14 +1386,14 @@ using VerilogAParser
     @testset "Time-dependent source with mode" begin
         using OrdinaryDiffEq
 
-        # Test TimeDependentVoltageSource behavior
-        pulse_src = TimeDependentVoltageSource(
-            t -> t < 1e-3 ? 0.0 : 5.0;  # Step at t=1ms
-            dc_value = 2.5,  # DC value for :dcop mode
+        # Test unified VoltageSource with transient function behavior
+        pulse_src = VoltageSource(
+            2.5;  # DC value for :dcop mode
+            tran = t -> t < 1e-3 ? 0.0 : 5.0,  # Step at t=1ms
             name = :Vpulse
         )
 
-        # In :dcop mode, should return dc_value
+        # In :dcop mode, should return dc value
         @test get_source_value(pulse_src, 0.0, :dcop) == 2.5
         @test get_source_value(pulse_src, 1e-3, :dcop) == 2.5
         @test get_source_value(pulse_src, 5e-3, :dcop) == 2.5
@@ -1403,18 +1403,15 @@ using VerilogAParser
         @test get_source_value(pulse_src, 0.5e-3, :tran) == 0.0
         @test get_source_value(pulse_src, 1.5e-3, :tran) == 5.0
 
-        # Test PWLVoltageSource behavior
-        pwl_src = PWLVoltageSource(
-            [0.0, 1e-3, 2e-3],  # times
-            [0.0, 5.0, 5.0];    # values (ramp then hold)
-            name = :Vramp
-        )
+        # Test pwl_at_time function directly
+        times = [0.0, 1e-3, 2e-3]
+        values = [0.0, 5.0, 5.0]  # ramp then hold
 
-        @test pwl_value(pwl_src, 0.0) == 0.0
-        @test pwl_value(pwl_src, 0.5e-3) ≈ 2.5  # midpoint of ramp
-        @test pwl_value(pwl_src, 1e-3) == 5.0
-        @test pwl_value(pwl_src, 1.5e-3) == 5.0  # hold
-        @test pwl_value(pwl_src, 5e-3) == 5.0   # after last point
+        @test pwl_at_time(times, values, 0.0) == 0.0
+        @test pwl_at_time(times, values, 0.5e-3) ≈ 2.5  # midpoint of ramp
+        @test pwl_at_time(times, values, 1e-3) == 5.0
+        @test pwl_at_time(times, values, 1.5e-3) == 5.0  # hold
+        @test pwl_at_time(times, values, 5e-3) == 5.0   # after last point
     end
 
     @testset "Mode-aware parameterized simulation" begin
@@ -1770,70 +1767,72 @@ using VerilogAParser
     # PWL and SIN Time-Dependent Sources
     #==========================================================================#
 
-    using CedarSim.MNA: SinVoltageSource, SinCurrentSource
-    using CedarSim.MNA: PWLCurrentSource, sin_value
-
     @testset "SinVoltageSource evaluation" begin
         # SIN(vo, va, freq, [td, theta, phase])
         # V(t) = vo + va * sin(2π*freq*t + phase)  (simplified, no damping)
 
         # Simple sine: 1V offset, 2V amplitude, 1kHz
-        sin_src = SinVoltageSource(1.0, 2.0, 1000.0; name=:Vsin)
+        sin_fn = t -> 1.0 + 2.0 * sin(2π * 1000.0 * t)
+        sin_src = VoltageSource(1.0; tran=sin_fn, name=:Vsin)
 
         # At t=0 (phase=0), V = vo + va*sin(0) = 1 + 0 = 1
-        @test sin_value(sin_src, 0.0) ≈ 1.0
+        @test sin_fn(0.0) ≈ 1.0
 
         # At t=0.25ms (quarter period), V = 1 + 2*sin(90°) = 3
-        @test sin_value(sin_src, 0.25e-3) ≈ 3.0 atol=1e-10
+        @test sin_fn(0.25e-3) ≈ 3.0 atol=1e-10
 
         # At t=0.5ms (half period), V = 1 + 2*sin(180°) = 1
-        @test sin_value(sin_src, 0.5e-3) ≈ 1.0 atol=1e-10
+        @test sin_fn(0.5e-3) ≈ 1.0 atol=1e-10
 
         # At t=0.75ms (3/4 period), V = 1 + 2*sin(270°) = -1
-        @test sin_value(sin_src, 0.75e-3) ≈ -1.0 atol=1e-10
+        @test sin_fn(0.75e-3) ≈ -1.0 atol=1e-10
 
         # Test with delay
-        sin_delayed = SinVoltageSource(0.0, 1.0, 1000.0; td=1e-3, name=:Vdelay)
-        # Before delay: V = vo + va*sin(phase) = 0
-        @test sin_value(sin_delayed, 0.0) ≈ 0.0
-        @test sin_value(sin_delayed, 0.5e-3) ≈ 0.0
-        # After delay: starts oscillating
-        @test sin_value(sin_delayed, 1.25e-3) ≈ 1.0 atol=1e-10  # peak at t=1.25ms
+        sin_delayed_fn = t -> t < 1e-3 ? 0.0 : sin(2π * 1000.0 * (t - 1e-3))
+        sin_delayed = VoltageSource(0.0; tran=sin_delayed_fn, name=:Vdelay)
+        # Before delay: V = 0
+        @test sin_delayed_fn(0.0) ≈ 0.0
+        @test sin_delayed_fn(0.5e-3) ≈ 0.0
+        # After delay: starts oscillating (t=1.25ms is 0.25ms into cycle = peak)
+        @test sin_delayed_fn(1.25e-3) ≈ 1.0 atol=1e-10
 
         # Test with phase
-        sin_phase = SinVoltageSource(0.0, 1.0, 1000.0; phase=90.0, name=:Vphase)
+        sin_phase_fn = t -> sind(360 * 1000.0 * t + 90.0)
+        sin_phase = VoltageSource(0.0; tran=sin_phase_fn, name=:Vphase)
         # At t=0, V = sin(90°) = 1
-        @test sin_value(sin_phase, 0.0) ≈ 1.0 atol=1e-10
+        @test sin_phase_fn(0.0) ≈ 1.0 atol=1e-10
 
-        # Test DC mode
-        @test get_source_value(sin_src, 0.0, :dcop) ≈ 1.0  # vo + va*sin(phase) = 1 + 0
+        # Test DC mode - should return dc value, not tran function
+        @test get_source_value(sin_src, 0.0, :dcop) ≈ 1.0  # dc value
         @test get_source_value(sin_src, 0.5e-3, :dcop) ≈ 1.0  # Same DC regardless of t
     end
 
     @testset "PWLVoltageSource evaluation" begin
         # Ramp from 0 to 5V over 1ms, then hold
-        pwl = PWLVoltageSource([0.0, 1e-3, 2e-3], [0.0, 5.0, 5.0]; name=:Vramp)
+        times = [0.0, 1e-3, 2e-3]
+        values = [0.0, 5.0, 5.0]
+        pwl = VoltageSource(0.0; tran=t -> pwl_at_time(times, values, t), name=:Vramp)
 
-        @test pwl_value(pwl, 0.0) ≈ 0.0
-        @test pwl_value(pwl, 0.5e-3) ≈ 2.5  # midpoint
-        @test pwl_value(pwl, 1e-3) ≈ 5.0
-        @test pwl_value(pwl, 1.5e-3) ≈ 5.0  # hold
-        @test pwl_value(pwl, 5e-3) ≈ 5.0    # after last point
+        @test pwl_at_time(times, values, 0.0) ≈ 0.0
+        @test pwl_at_time(times, values, 0.5e-3) ≈ 2.5  # midpoint
+        @test pwl_at_time(times, values, 1e-3) ≈ 5.0
+        @test pwl_at_time(times, values, 1.5e-3) ≈ 5.0  # hold
+        @test pwl_at_time(times, values, 5e-3) ≈ 5.0    # after last point
 
         # Before first point
-        @test pwl_value(pwl, -1e-3) ≈ 0.0
+        @test pwl_at_time(times, values, -1e-3) ≈ 0.0
 
-        # DC mode: use value at t=0
+        # DC mode: use dc value (0.0)
         @test get_source_value(pwl, 0.0, :dcop) ≈ 0.0
-        @test get_source_value(pwl, 1e-3, :dcop) ≈ 0.0  # t=0 value regardless of t
+        @test get_source_value(pwl, 1e-3, :dcop) ≈ 0.0  # dc value regardless of t
 
-        # Tran mode: use actual value
+        # Tran mode: use transient function
         @test get_source_value(pwl, 0.0, :tran) ≈ 0.0
         @test get_source_value(pwl, 1e-3, :tran) ≈ 5.0
     end
 
     @testset "PWL/SIN stamp! methods" begin
-        using CedarSim.MNA: MNASpec, SinVoltageSource
+        using CedarSim.MNA: MNASpec
 
         # Test PWL voltage source stamping via builder pattern
         # The builder stamps a PWL at t=0.5ms where the value is 2.5V
@@ -1844,7 +1843,9 @@ using VerilogAParser
                 reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
-            pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
+            times = [0.0, 1e-3]
+            values = [0.0, 5.0]
+            pwl = VoltageSource(0.0; tran=_t -> pwl_at_time(times, values, _t), name=:Vpwl)
             stamp!(pwl, ctx, vcc, 0, 0.5e-3, :tran)
             return ctx
         end
@@ -1863,7 +1864,7 @@ using VerilogAParser
                 reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
-            sin_src = SinVoltageSource(0.0, 5.0, 1000.0; name=:Vsin)
+            sin_src = VoltageSource(0.0; tran=_t -> 5.0 * sin(2π * 1000.0 * _t), name=:Vsin)
             stamp!(sin_src, ctx, vcc, 0, 0.25e-3, :tran)
             return ctx
         end
@@ -1887,11 +1888,9 @@ using VerilogAParser
             out = get_node!(ctx, :out)
 
             # PWL: ramp from 0 to Vmax over ramp_time, then hold
-            pwl = PWLVoltageSource(
-                [0.0, params.ramp_time],
-                [0.0, params.Vmax];
-                name=:Vpwl
-            )
+            times = [0.0, params.ramp_time]
+            values = [0.0, params.Vmax]
+            pwl = VoltageSource(0.0; tran=_t -> pwl_at_time(times, values, _t), name=:Vpwl)
             stamp!(pwl, ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
@@ -1932,8 +1931,10 @@ using VerilogAParser
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
-            sin_src = SinVoltageSource(
-                params.vo, params.va, params.freq;
+            # Use unified VoltageSource with transient function
+            sin_src = VoltageSource(
+                params.vo;
+                tran = _t -> params.vo + params.va * sin(2π * params.freq * _t),
                 name=:Vsin
             )
             stamp!(sin_src, ctx, vcc, 0, t, spec.mode)
@@ -1980,8 +1981,6 @@ using VerilogAParser
         # This ensures both ODE and DAE paths work correctly
         # Use SIN source to create a dynamic circuit with actual transient behavior
 
-        using CedarSim.MNA: SinVoltageSource
-
         function build_rc_sin(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing
                 ctx = MNAContext()
@@ -1992,8 +1991,10 @@ using VerilogAParser
             out = get_node!(ctx, :out)
 
             # SIN source: DC offset + AC amplitude at given frequency
-            stamp!(SinVoltageSource(params.vo, params.va, params.freq; name=:Vin),
-                   ctx, vcc, 0, t, spec.mode)
+            sin_src = VoltageSource(params.vo;
+                tran = _t -> params.vo + params.va * sin(2π * params.freq * _t),
+                name=:Vin)
+            stamp!(sin_src, ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
