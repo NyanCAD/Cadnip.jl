@@ -798,7 +798,7 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.V
 
     return quote
         let v = $dc_val
-            stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
         end
     end
 end
@@ -827,7 +827,7 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.C
     # Swap nodes: MNA injects into first arg, SPICE injects into neg
     return quote
         let i = $dc_val
-            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $neg, $pos)
+            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $neg, $pos, t, spec.mode)
         end
     end
 end
@@ -1650,7 +1650,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # PWL source with wave parameter
             wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
             return quote
-                stamp!(PWLVoltageSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(PWLVoltageSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         elseif src_type == "sine" || src_type == "sin"
             # Sinusoidal source
@@ -1658,12 +1658,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             va = hasparam(instance.params, "va") ? cg_expr!(state, getparam(instance.params, "va")) : 1.0
             freq = hasparam(instance.params, "freq") ? cg_expr!(state, getparam(instance.params, "freq")) : 1e3
             return quote
-                stamp!(SinVoltageSource($vo, $va, $freq; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(SinVoltageSource($vo, $va, $freq; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         else
-            # DC source
+            # DC source - still use time/mode for consistency (DC sources return dc in all modes)
             return quote
-                stamp!(VoltageSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(VoltageSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
 
@@ -1686,12 +1686,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
         if src_type == "pwl" && hasparam(instance.params, "wave")
             wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
             return quote
-                stamp!(PWLCurrentSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(PWLCurrentSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         else
-            # DC source
+            # DC source - still use time/mode for consistency
             return quote
-                stamp!(CurrentSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(CurrentSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
 
@@ -2068,11 +2068,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             dc_val_actual = dc_val !== nothing ? dc_val : 0.0
             if is_voltage
                 return quote
-                    stamp!(VoltageSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                    stamp!(VoltageSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
             else
                 return quote
-                    stamp!(CurrentSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                    stamp!(CurrentSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
             end
         end
@@ -2083,13 +2083,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
     if is_voltage
         return quote
             let v = $dc_val_actual
-                stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     else
         return quote
             let i = $dc_val_actual
-                stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     end
