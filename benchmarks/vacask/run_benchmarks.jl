@@ -20,23 +20,24 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: QNDF, Rodas3, ImplicitEuler
+using OrdinaryDiffEq: ABDF2, Rodas3, ImplicitEuler
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
 # Solver definitions - one from each family
-# Based on benchmarks: QNDF is fastest BDF, Rodas3 is fastest Rosenbrock
+# Based on benchmarks: ABDF2 is fastest BDF, Rodas3 is fastest Rosenbrock
+# All use KLU sparse solver (3-4x faster than dense LU for these circuits)
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
-const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization()))
+const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization()))
 const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization()))
 
 # Per-benchmark solver configurations
 # RC Circuit (linear): ImplicitEuler 2.6x faster than IDA (1.0s vs 2.6s)
-const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_QNDF, SOLVER_RODAS3]
-# Graetz/Mul (nonlinear): QNDF 1.5x faster than IDA (3.3s vs 5.0s)
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_QNDF, SOLVER_RODAS3]
+const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_ABDF2, SOLVER_RODAS3]
+# Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
 
 # Results storage
 struct BenchmarkResult
