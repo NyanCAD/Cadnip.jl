@@ -509,17 +509,13 @@ end
     end
 
     @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
-        # Get ODE functions - pass ws directly as p parameter
-        f!, jac! = MNA.make_ode_functions(ws)
-
         # Get initial condition from DC solve
         dc_result = dc!(circuit)
         u0 = copy(dc_result.x)
 
-        # Create ODE problem - ws is the p parameter
-        jac_proto = zeros(n, n)
-        odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
-        prob = ODEProblem(odef, u0, (0.0, 1e-6), ws)
+        # Use simplified ODEProblem API with dense=true for zero-allocation
+        # This is the recommended pattern: ODEProblem(circuit, tspan; dense=true, u0=...)
+        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true, u0=u0)
 
         # Create integrator with zero-allocation settings
         integrator = init(prob, ImplicitEuler(autodiff=false),

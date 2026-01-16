@@ -166,25 +166,20 @@ end
 Julia's compiler optimizes away the ReturnCode allocation when it sees the value is unused.
 This is much simpler than calling internal functions directly.
 
-**Using the API**: The `make_ode_functions` helper creates properly typed ODE functions:
+**Using the API**: Use `ODEProblem(circuit, tspan; dense=true)` for the simplest setup:
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 
-# Compile with dense matrices for zero-allocation Jacobian
-ws = MNA.compile(circuit; dense=true)
-n = MNA.system_size(ws)
-
-# Get ODE functions - pass ws directly as p parameter
-f!, jac! = MNA.make_ode_functions(ws)
+# Create circuit
+circuit = MNACircuit(builder; params...)
 
 # Get initial condition
 u0 = copy(dc!(circuit).x)
 
-# Create ODE problem - ws is the p parameter (no wrapper needed)
-jac_proto = zeros(n, n)
-odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
-prob = ODEProblem(odef, u0, tspan, ws)
+# Create ODE problem with dense matrices for zero-allocation
+# The dense=true option enables zero-allocation stepping
+prob = ODEProblem(circuit, (0.0, 1e-3); dense=true, u0=u0)
 
 # Create integrator with minimal overhead
 integrator = init(prob, ImplicitEuler(autodiff=false),
@@ -198,7 +193,7 @@ while running
 end
 ```
 
-For the simplest zero-allocation approach without ODE solvers, use the manual stepper below.
+For maximum control or the simplest zero-allocation approach without ODE solvers, use the manual stepper below.
 
 ## Manual Transient Stepper (Zero-Allocation)
 
