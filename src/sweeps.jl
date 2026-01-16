@@ -476,6 +476,9 @@ iteration, ensuring correct handling of nonlinear devices.
 
 # Default IDA Configuration
 The default IDA solver is configured for circuit simulation with:
+- `linear_solver=:KLU`: Sparse direct solver. For long simulations with many timesteps,
+  KLU has lower memory pressure than Dense, reducing GC overhead. For short simulations
+  (< 100k timesteps), use `IDA(linear_solver=:Dense)` for 1.3-2.5x speedup.
 - `max_error_test_failures=20`: More retries for difficult points (e.g., t=0 with
   time-dependent sources). The standard default of 7 is often too low.
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
@@ -493,7 +496,9 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
     # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
     # Key settings:
-    # - linear_solver=:KLU: Sparse direct solver, much faster than dense for circuits
+    # - linear_solver=:KLU: Sparse direct solver. For long simulations with many timesteps,
+    #   KLU has lower memory pressure than Dense, reducing GC overhead.
+    #   For short simulations (< 100k timesteps), Dense can be 1.3-2.5x faster.
     # - max_error_test_failures=20: Allows more retries at difficult points (like t=0 with
     #   time-dependent sources). Default of 7 is often too low for circuits.
     # - max_nonlinear_iters=10: More Newton iterations for nonlinear devices

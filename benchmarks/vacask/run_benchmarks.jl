@@ -20,17 +20,20 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, Rodas5P
+using OrdinaryDiffEq: FBDF
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
 # Solvers to test
-# All solvers use KLU sparse linear solver for optimal circuit simulation performance
+# For small circuits:
+# - IDA-KLU: Best for long simulations (lower memory pressure, less GC)
+# - IDA-Dense: 1.3-2.5x faster for short simulations (< 100k timesteps)
+# - FBDF-KLU: Lowest allocation count, competitive performance
 const SOLVERS = [
-    ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20)),
-    ("FBDF", () -> FBDF(linsolve=KLUFactorization())),
-    ("Rodas5P", () -> Rodas5P(linsolve=KLUFactorization())),
+    ("IDA-KLU", () -> IDA(linear_solver=:KLU, max_error_test_failures=20)),
+    ("IDA-Dense", () -> IDA(linear_solver=:Dense, max_error_test_failures=20)),
+    ("FBDF-KLU", () -> FBDF(linsolve=KLUFactorization())),
 ]
 
 # Results storage
