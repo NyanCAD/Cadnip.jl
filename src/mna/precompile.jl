@@ -607,3 +607,115 @@ end
 Get the b vector from an EvalWorkspace.
 """
 b_vector(ws::EvalWorkspace) = ws.dctx.b
+
+#==============================================================================#
+# OrdinaryDiffEq Integration Helpers
+#
+# These helpers make it easy to use compiled MNA circuits with OrdinaryDiffEq
+# for zero-allocation transient simulation.
+#==============================================================================#
+
+export make_ode_functions, blind_step!
+
+"""
+    ODEWorkspace{W<:EvalWorkspace}
+
+Wrapper struct for passing EvalWorkspace through ODE solver's `p` parameter.
+
+This avoids closure boxing which would cause allocations. The ODE functions
+access the workspace through `p.ws` and use `p.du_work` as scratch space.
+
+# Example
+```julia
+ws = MNA.compile(circuit; dense=true)
+ode_ws = MNA.ODEWorkspace(ws)
+prob = ODEProblem(f!, u0, tspan, ode_ws)
+```
+"""
+struct ODEWorkspace{W<:EvalWorkspace}
+    ws::W
+    du_work::Vector{Float64}
+end
+
+function ODEWorkspace(ws::EvalWorkspace)
+    n = system_size(ws)
+    ODEWorkspace(ws, zeros(n))
+end
+
+"""
+    make_ode_functions(ws::EvalWorkspace) -> (f!, jac!, ODEWorkspace)
+
+Create ODE functions for use with OrdinaryDiffEq from a compiled workspace.
+
+Returns a tuple of:
+- `f!(du, u, p, t)`: ODE right-hand side function
+- `jac!(J, u, p, t)`: Jacobian function
+- `ode_ws::ODEWorkspace`: Workspace wrapper to pass as `p` parameter
+
+# Example
+```julia
+using OrdinaryDiffEq
+
+circuit = MNACircuit(builder; params...)
+ws = MNA.compile(circuit; dense=true)
+f!, jac!, ode_ws = MNA.make_ode_functions(ws)
+
+# Get initial condition
+u0 = copy(dc!(circuit).x)
+
+# Create ODE problem
+n = MNA.system_size(ws)
+jac_proto = zeros(n, n)
+odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
+prob = ODEProblem(odef, u0, tspan, ode_ws)
+
+# Create zero-allocation integrator
+integrator = init(prob, ImplicitEuler(autodiff=false),
+    adaptive=false, dt=1e-6, callback=nothing,
+    save_on=false, dense=false, maxiters=10_000_000)
+
+# Step with zero allocation
+MNA.blind_step!(integrator)  # 0 bytes/call
+```
+"""
+function make_ode_functions(ws::EvalWorkspace)
+    ode_ws = ODEWorkspace(ws)
+
+    function f!(du, u, p, t)
+        fast_rebuild!(p.ws, u, t)
+        fast_residual!(du, p.du_work, u, p.ws, t)
+        return nothing
+    end
+
+    function jac!(J, u, p, t)
+        fast_rebuild!(p.ws, u, t)
+        fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
+        return nothing
+    end
+
+    return (f!, jac!, ode_ws)
+end
+
+"""
+    blind_step!(integrator)
+
+Zero-allocation step for OrdinaryDiffEq integrators.
+
+This wrapper discards the return value from `step!()`, which allows Julia's
+compiler to optimize away the 16-byte ReturnCode allocation.
+
+# Example
+```julia
+# Instead of:
+step!(integrator)  # 16 bytes/call
+
+# Use:
+MNA.blind_step!(integrator)  # 0 bytes/call
+```
+
+Access the solution state via `integrator.u` after stepping.
+"""
+function blind_step!(integrator)
+    step!(integrator)
+    return nothing
+end

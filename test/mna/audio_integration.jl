@@ -509,26 +509,8 @@ end
     end
 
     @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
-        # Workspace passed through p parameter (avoids closure boxing)
-        struct BJTWorkspaceParams{W, D}
-            ws::W
-            du_work::D
-        end
-        du_work = zeros(n)
-        ode_params = BJTWorkspaceParams(ws, du_work)
-
-        # ODE functions access workspace through p parameter
-        function bjt_ode_f!(du, u, p, t)
-            MNA.fast_rebuild!(p.ws, u, t)
-            MNA.fast_residual!(du, p.du_work, u, p.ws, t)
-            return nothing
-        end
-
-        function bjt_ode_jac!(J, u, p, t)
-            MNA.fast_rebuild!(p.ws, u, t)
-            MNA.fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
-            return nothing
-        end
+        # Use the new API - much cleaner!
+        f!, jac!, ode_ws = MNA.make_ode_functions(ws)
 
         # Get initial condition from DC solve
         dc_result = dc!(circuit)
@@ -536,8 +518,8 @@ end
 
         # Create ODE problem with dense Jacobian prototype
         jac_proto = zeros(n, n)
-        odef = ODEFunction(bjt_ode_f!; jac=bjt_ode_jac!, jac_prototype=jac_proto)
-        prob = ODEProblem(odef, u0, (0.0, 1e-6), ode_params)
+        odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
+        prob = ODEProblem(odef, u0, (0.0, 1e-6), ode_ws)
 
         # Create integrator with zero-allocation settings
         integrator = init(prob, ImplicitEuler(autodiff=false),
@@ -549,22 +531,16 @@ end
             maxiters=10_000_000
         )
 
-        # Zero-allocation step wrapper (discards ReturnCode to avoid 16-byte alloc)
-        function blind_step!(integrator)
-            step!(integrator)
-            return nothing
-        end
-
         # Warmup
         for _ in 1:1000
-            blind_step!(integrator)
+            MNA.blind_step!(integrator)
         end
         GC.gc()
 
         # Measure allocations
         reinit!(integrator, u0)
         allocs = measure_allocations(; warmup=100, iters=10000) do
-            blind_step!(integrator)
+            MNA.blind_step!(integrator)
         end
         @test allocs == 0
         @info "OrdinaryDiffEq step (SPICE BJT, dense): $(allocs) bytes/call"
@@ -572,7 +548,7 @@ end
         # Verify solution remains reasonable after many steps
         reinit!(integrator, u0)
         for _ in 1:1000
-            blind_step!(integrator)
+            MNA.blind_step!(integrator)
         end
         @test all(isfinite, integrator.u)
 
