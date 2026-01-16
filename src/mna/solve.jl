@@ -1834,11 +1834,17 @@ ws.structure.C   # Capacitance matrix
 fast_rebuild!(ws, u, t)
 fast_residual!(resid, du, u, ws, t)
 ```
+
+# Zero-allocation dense Jacobian (for OrdinaryDiffEq ImplicitEuler)
+```julia
+ws = compile(circuit; dense=true)  # Pre-allocate dense caches
+# Now fast_jacobian!(J_dense, du, u, ws, gamma, t) is zero-allocation
+```
 """
-function compile(circuit::MNACircuit)
+function compile(circuit::MNACircuit; dense::Bool=false)
     ctx = build_with_detection(circuit)
     cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
-    return create_workspace(cs; ctx=ctx)
+    return create_workspace(cs; ctx=ctx, dense=dense)
 end
 
 export compile

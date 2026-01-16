@@ -154,15 +154,19 @@ This is the fastest path for all circuits.
 - `structure::CS`: Compiled circuit structure
 - `dctx::DirectStampContext`: Direct stamping context with sparse refs
 - `resid_tmp::Vector{T}`: Working storage for residual computation
+- `G_dense::Union{Matrix{T}, Nothing}`: Dense G cache for zero-alloc dense Jacobian
+- `C_dense::Union{Matrix{T}, Nothing}`: Dense C cache for zero-alloc dense Jacobian
 """
 struct EvalWorkspace{T,CS<:CompiledStructure}
     structure::CS
     dctx::DirectStampContext
     resid_tmp::Vector{T}
+    G_dense::Union{Matrix{T}, Nothing}
+    C_dense::Union{Matrix{T}, Nothing}
 end
 
 """
-    create_workspace(cs::CompiledStructure{F,P,S}; ctx=nothing) -> EvalWorkspace
+    create_workspace(cs::CompiledStructure{F,P,S}; ctx=nothing, dense=false) -> EvalWorkspace
 
 Create a workspace that stamps directly to sparse matrices.
 
@@ -171,12 +175,21 @@ This is the single recommended API - it works optimally for all circuit sizes:
 - Stamps go straight to sparse nzval
 - Deferred b stamps resolved using precomputed mapping
 
+# Arguments
+- `cs`: Compiled structure to create workspace for
+- `ctx`: Optional MNAContext to use (for voltage-dependent capacitor detection)
+- `dense`: If true, pre-allocate dense matrix caches for zero-allocation dense Jacobian operations
+
 If `ctx` is provided, it will be used for the DirectStampContext (including its
 detection cache). This is important for voltage-dependent capacitor detection:
 if ZERO_VECTOR is used to build the context, reactive branches like ddt(Q(V))
 may return scalars instead of Duals, causing incorrect detection cache.
+
+If `dense=true`, the workspace will pre-allocate dense G and C matrices that are
+updated during `fast_rebuild!`. This enables zero-allocation `fast_jacobian!` with
+dense ODE solvers like OrdinaryDiffEq's ImplicitEuler.
 """
-function create_workspace(cs::CompiledStructure{F,P,S}; ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+function create_workspace(cs::CompiledStructure{F,P,S}; ctx::Union{MNAContext, Nothing}=nothing, dense::Bool=false) where {F,P,S}
     # Use provided context or rebuild (fallback for backward compatibility)
     if ctx === nothing
         ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
@@ -196,10 +209,16 @@ function create_workspace(cs::CompiledStructure{F,P,S}; ctx::Union{MNAContext, N
         cs.b_deferred_resolved
     )
 
+    # Optionally create dense matrix caches for zero-allocation dense Jacobian
+    G_dense = dense ? Matrix(cs.G) : nothing
+    C_dense = dense ? Matrix(cs.C) : nothing
+
     EvalWorkspace{Float64,typeof(cs)}(
         cs,
         dctx,
-        zeros(Float64, cs.n)
+        zeros(Float64, cs.n),
+        G_dense,
+        C_dense
     )
 end
 
@@ -462,6 +481,40 @@ function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVect
         end
     end
 
+    # Sync dense caches if they exist (for zero-allocation dense Jacobian)
+    if ws.G_dense !== nothing
+        G_sp = cs.G
+        G_dense = ws.G_dense
+        rows = rowvals(G_sp)
+        vals = nonzeros(G_sp)
+        n = size(G_sp, 2)
+        # Zero the dense matrix first
+        fill!(G_dense, 0.0)
+        # Copy sparse values to dense
+        @inbounds for j in 1:n
+            for k in nzrange(G_sp, j)
+                i = rows[k]
+                G_dense[i, j] = vals[k]
+            end
+        end
+    end
+    if ws.C_dense !== nothing
+        C_sp = cs.C
+        C_dense = ws.C_dense
+        rows = rowvals(C_sp)
+        vals = nonzeros(C_sp)
+        n = size(C_sp, 2)
+        # Zero the dense matrix first
+        fill!(C_dense, 0.0)
+        # Copy sparse values to dense
+        @inbounds for j in 1:n
+            for k in nzrange(C_sp, j)
+                i = rows[k]
+                C_dense[i, j] = vals[k]
+            end
+        end
+    end
+
     return nothing
 end
 
@@ -518,10 +571,22 @@ function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
     fast_rebuild!(ws, u, t)
     cs = ws.structure
 
-    # J = G + gamma*C via dense matrix operations
-    # This path allocates but is used for dense solvers
-    copyto!(J, Matrix(cs.G))
-    J .+= gamma .* Matrix(cs.C)
+    # Use cached dense matrices if available (zero allocation)
+    # Otherwise fall back to Matrix() conversion (allocates)
+    G_dense = ws.G_dense
+    C_dense = ws.C_dense
+
+    if G_dense !== nothing && C_dense !== nothing
+        # Zero-allocation path using pre-allocated dense caches
+        # J = G + gamma*C
+        @inbounds for i in eachindex(J)
+            J[i] = G_dense[i] + gamma * C_dense[i]
+        end
+    else
+        # Fallback path (allocates) for workspaces without dense caches
+        copyto!(J, Matrix(cs.G))
+        J .+= gamma .* Matrix(cs.C)
+    end
 
     return nothing
 end

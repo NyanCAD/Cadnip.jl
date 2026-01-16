@@ -111,28 +111,91 @@ builder(params, spec, t; ctx=dctx, x=u)
 The `EvalWorkspace` wraps both contexts and provides the fast path:
 
 ```julia
+# Standard compilation (sparse Jacobian zero-alloc, dense allocates)
 ws = MNA.compile(circuit)
+
+# Compilation with dense caches (ALL operations zero-alloc)
+ws = MNA.compile(circuit; dense=true)
 
 # Zero-allocation operations
 MNA.fast_rebuild!(ws, u, t)
 MNA.fast_residual!(resid, du, u, ws, t)
-MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+MNA.fast_jacobian!(J, du, u, ws, gamma, t)  # Zero-alloc if dense=true
 ```
+
+When `dense=true`, the workspace pre-allocates dense versions of G and C matrices
+that are updated during `fast_rebuild!`. This enables zero-allocation dense
+Jacobian computation for use with OrdinaryDiffEq's ImplicitEuler solver.
 
 ## OrdinaryDiffEq Integration
 
-**Finding**: OrdinaryDiffEq's `step!()` allocates ~600-700 bytes per call regardless of solver configuration. This is due to internal bookkeeping that cannot be disabled.
+**Finding**: OrdinaryDiffEq's `step!()` can achieve near-zero allocation (16 bytes/call) with proper configuration:
 
 | Configuration | Allocation | Notes |
 |--------------|------------|-------|
-| `ImplicitEuler + KLUFactorization` (sparse) | ~160 bytes/call | Best ODE config |
-| `ImplicitEuler + LUFactorization` (dense) | ~686 bytes/call | |
-| `Euler` (explicit) | ~110 bytes/call | Unstable for stiff |
-| Manual backward Euler | **0 bytes/call** | Required for true zero-alloc |
+| `ImplicitEuler (default) + dense=true` | **16 bytes/call** | Best config for small circuits |
+| `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK allocation unavoidable |
+| `ImplicitEuler + LUFactorization` (explicit) | ~624 bytes/call | LinearSolve wrapper overhead |
+| Manual backward Euler | **0 bytes/call** | True zero-alloc |
 
-The ~160 bytes/call floor comes from 8 internal allocations in OrdinaryDiffEq's bookkeeping that cannot be disabled.
+### Achieving 16 bytes/call with OrdinaryDiffEq
 
-**For true zero-allocation**, use the manual stepper pattern below instead of OrdinaryDiffEq.
+The key is to:
+1. Use `compile(circuit; dense=true)` to enable zero-allocation dense Jacobian
+2. Pass workspace through `p` parameter (not closure capture)
+3. Use `ImplicitEuler(autodiff=false)` with default linear solver
+4. Disable all saving and callbacks
+
+```julia
+using CedarSim, CedarSim.MNA, OrdinaryDiffEq
+
+# Compile with dense caches for zero-allocation Jacobian
+ws = MNA.compile(circuit; dense=true)
+n = length(ws.dctx.b)
+du_work = zeros(n)
+
+# Use a struct to pass workspace (avoids closure boxing)
+struct WorkspaceParams{W, D}
+    ws::W
+    du_work::D
+end
+params = WorkspaceParams(ws, du_work)
+
+# ODE functions access workspace through p parameter
+function ode_f!(du, u, p, t)
+    MNA.fast_rebuild!(p.ws, u, t)
+    MNA.fast_residual!(du, p.du_work, u, p.ws, t)
+    return nothing
+end
+
+function ode_jac!(J, u, p, t)
+    MNA.fast_rebuild!(p.ws, u, t)
+    MNA.fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
+    return nothing
+end
+
+# Create ODE problem with workspace as p
+jac_proto = zeros(n, n)
+odef = ODEFunction(ode_f!; jac=ode_jac!, jac_prototype=jac_proto)
+prob = ODEProblem(odef, u0, tspan, params)
+
+# Create integrator with minimal overhead
+integrator = init(prob, ImplicitEuler(autodiff=false),
+    adaptive=false,
+    dt=1e-5,
+    callback=nothing,
+    save_on=false,
+    dense=false,
+    maxiters=10_000_000
+)
+
+# Real-time loop (16 bytes/call)
+while running
+    step!(integrator)
+end
+```
+
+**For true zero-allocation (0 bytes)**, use the manual stepper pattern below.
 
 ## Manual Transient Stepper (Zero-Allocation)
 
