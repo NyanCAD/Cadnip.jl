@@ -1837,14 +1837,14 @@ fast_residual!(resid, du, u, ws, t)
 
 # Zero-allocation dense Jacobian (for OrdinaryDiffEq ImplicitEuler)
 ```julia
-ws = compile(circuit; dense=true)  # Pre-allocate dense caches
+ws = compile(circuit; dense=true)  # Use dense matrices
 # Now fast_jacobian!(J_dense, du, u, ws, gamma, t) is zero-allocation
 ```
 """
 function compile(circuit::MNACircuit; dense::Bool=false)
     ctx = build_with_detection(circuit)
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
-    return create_workspace(cs; ctx=ctx, dense=dense)
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx, dense=dense)
+    return create_workspace(cs; ctx=ctx)
 end
 
 export compile
