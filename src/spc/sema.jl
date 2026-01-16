@@ -103,7 +103,12 @@ end
 
 sema_nets(instance::TwoTerminal) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.MOSFET}) = (instance.d, instance.g, instance.s, instance.b)
-sema_nets(instance::SNode{SP.BipolarTransistor}) = (instance.c, instance.b, instance.e, instance.s)
+# BJT: substrate (s) and thermal (t) nodes are optional - filter out nothing
+function sema_nets(instance::SNode{SP.BipolarTransistor})
+    nets = [instance.c, instance.b, instance.e]
+    instance.s !== nothing && push!(nets, instance.s)
+    return Tuple(nets)
+end
 sema_nets(instance::SNode{SP.SubcktCall}) = instance.nodes
 # Spectre instance: nodes are in nodelist.nodes
 sema_nets(instance::SNode{SC.Instance}) = Tuple(n.node for n in instance.nodelist.nodes)

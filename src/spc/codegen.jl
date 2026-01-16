@@ -1869,6 +1869,53 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     end
 end
 
+"""
+    cg_mna_instance!(state, instance::SNode{SP.BipolarTransistor})
+
+Generate MNA builder code for BJT instances (Q elements).
+
+For MNA, BJTs are VA-generated devices. The model (e.g., npn1 from sp_bjt)
+is a type with a `stamp!` method. Instance parameters are passed
+as keyword arguments to construct the device.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransistor})
+    nets = sema_nets(instance)
+    # BJT ports: collector, base, emitter (substrate optional)
+    c = cg_net_name!(state, nets[1])
+    b = cg_net_name!(state, nets[2])
+    e = cg_net_name!(state, nets[3])
+    # Substrate is optional - use 0 (ground) if not specified
+    s = length(nets) >= 4 ? cg_net_name!(state, nets[4]) : 0
+    name = LString(instance.name)
+
+    # Get the model reference
+    model_name = cg_model_name!(state, instance.model)
+
+    # Build instance parameter kwargs
+    param_kwargs = Expr[]
+    for p in instance.params
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        push!(param_kwargs, Expr(:kw, param_name, param_val))
+    end
+
+    # Generate code to create device instance and stamp it
+    if isempty(param_kwargs)
+        device_expr = :($model_name())
+    else
+        device_expr = Expr(:call, model_name, param_kwargs...)
+    end
+
+    # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    return quote
+        let dev = $device_expr
+            $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
+                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_instance_ = $(QuoteNode(Symbol(name))))
+        end
+    end
+end
+
 # Fallback for unhandled instance types - generate nothing
 function cg_mna_instance!(state::CodegenState, instance)
     return :(nothing)  # Skip unimplemented devices
