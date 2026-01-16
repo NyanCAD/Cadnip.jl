@@ -258,4 +258,4 @@ end
 - `src/mna/context.jl`: Component-based `alloc_current!` APIs
 - `src/mna/value_only.jl`: `DirectStampContext` and `stamp_voltage_contribution!`
 - `src/mna/contrib.jl`: Zero-allocation ForwardDiff contribution stamping
-- `test/mna/zero_alloc.jl`: Comprehensive zero-allocation tests
+- `test/mna/audio_integration.jl`: Zero-allocation OrdinaryDiffEq integration tests
