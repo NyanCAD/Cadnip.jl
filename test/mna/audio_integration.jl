@@ -509,13 +509,9 @@ end
     end
 
     @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
-        # Get initial condition from DC solve
-        dc_result = dc!(circuit)
-        u0 = copy(dc_result.x)
-
         # Use simplified ODEProblem API with dense=true for zero-allocation
-        # This is the recommended pattern: ODEProblem(circuit, tspan; dense=true, u0=...)
-        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true, u0=u0)
+        # DC operating point is computed automatically when u0 not provided
+        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
 
         # Create integrator with zero-allocation settings
         integrator = init(prob, ImplicitEuler(autodiff=false),
@@ -534,7 +530,7 @@ end
         GC.gc()
 
         # Measure allocations
-        reinit!(integrator, u0)
+        reinit!(integrator, prob.u0)
         allocs = measure_allocations(; warmup=100, iters=10000) do
             MNA.blind_step!(integrator)
         end
@@ -542,7 +538,7 @@ end
         @info "OrdinaryDiffEq step (SPICE BJT, dense): $(allocs) bytes/call"
 
         # Verify solution remains reasonable after many steps
-        reinit!(integrator, u0)
+        reinit!(integrator, prob.u0)
         for _ in 1:1000
             MNA.blind_step!(integrator)
         end

@@ -174,12 +174,9 @@ using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 # Create circuit
 circuit = MNACircuit(builder; params...)
 
-# Get initial condition
-u0 = copy(dc!(circuit).x)
-
 # Create ODE problem with dense matrices for zero-allocation
-# The dense=true option enables zero-allocation stepping
-prob = ODEProblem(circuit, (0.0, 1e-3); dense=true, u0=u0)
+# DC operating point is computed automatically
+prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
 # Create integrator with minimal overhead
 integrator = init(prob, ImplicitEuler(autodiff=false),

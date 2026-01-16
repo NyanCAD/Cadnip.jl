@@ -1700,12 +1700,18 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     cs = compile_structure(builder, params, base_spec; ctx=ctx, dense=dense)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
+    # Compute DC operating point if u0 not provided
     if u0 === nothing
-        u0 = zeros(n)
+        u0_result, converged = dc_solve_with_ctx(builder, params, base_spec, ctx)
+        if !converged
+            @warn "DC operating point did not converge, using zeros"
+            u0 = zeros(n)
+        else
+            u0 = u0_result
+        end
     end
 
-    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
+    # Initialize workspace at t=0 with DC operating point
     fast_rebuild!(ws, u0, 0.0)
 
     # RHS function using EvalWorkspace with DirectStampContext
@@ -1739,7 +1745,7 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         jac_prototype = -cs.G
     )
 
-    # Pass workspace as p for CedarDCOp initialization
+    # Pass workspace as p parameter
     return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws; kwargs...)
 end
 
