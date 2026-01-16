@@ -433,13 +433,10 @@ end  # testset "Audio Integration Tests"
 # Demonstrates TRUE zero allocation for nonlinear circuit simulation with:
 # - SPICE-generated circuit (parse_spice_to_mna + eval)
 # - Nonlinear Verilog-A BJT model (uses ForwardDiff AD)
-# - Dense LAPACK solver (getrf!/getrs!)
+# - OrdinaryDiffEq ImplicitEuler with blind_step!() wrapper
 #
 # Uses bjt_with_rc circuit defined at top of file via parse_spice_to_mna.
 #==============================================================================#
-
-using LinearAlgebra
-using LinearAlgebra.LAPACK
 
 """
 Helper function to measure allocations correctly.
@@ -469,15 +466,17 @@ end
     # Use SPICE-generated bjt_with_rc circuit (defined at top of file)
     # This tests the actual SPICE codegen path for zero allocation
     circuit = MNACircuit(bjt_with_rc)
-    ws = MNA.compile(circuit)
+
+    # Compile with dense matrices for zero-allocation OrdinaryDiffEq integration
+    ws = MNA.compile(circuit; dense=true)
     cs = ws.structure
     n = MNA.system_size(cs)
 
-    @testset "MNA fast path with SPICE-generated BJT circuit" begin
+    @testset "MNA fast path with SPICE-generated BJT circuit (dense)" begin
         u = zeros(n)
         du = zeros(n)
         resid = zeros(n)
-        J = copy(cs.G)
+        J = zeros(n, n)  # Dense Jacobian
         t = 0.0
         gamma = 1.0
 
@@ -494,82 +493,93 @@ end
             MNA.fast_rebuild!(ws, u, t)
         end
         @test allocs_rebuild == 0
-        @info "fast_rebuild! (SPICE BJT): $(allocs_rebuild) bytes/call"
+        @info "fast_rebuild! (SPICE BJT, dense): $(allocs_rebuild) bytes/call"
 
         allocs_residual = measure_allocations() do
             MNA.fast_residual!(resid, du, u, ws, t)
         end
         @test allocs_residual == 0
-        @info "fast_residual! (SPICE BJT): $(allocs_residual) bytes/call"
+        @info "fast_residual! (SPICE BJT, dense): $(allocs_residual) bytes/call"
 
         allocs_jacobian = measure_allocations() do
             MNA.fast_jacobian!(J, du, u, ws, gamma, t)
         end
         @test allocs_jacobian == 0
-        @info "fast_jacobian! (SPICE BJT): $(allocs_jacobian) bytes/call"
+        @info "fast_jacobian! (SPICE BJT, dense): $(allocs_jacobian) bytes/call"
     end
 
-    @testset "Dense LAPACK transient step with SPICE BJT" begin
-        G_dense = Matrix(cs.G)
-        C_dense = Matrix(cs.C)
-        A_work = similar(G_dense)
-        ipiv = Vector{LinearAlgebra.BlasInt}(undef, n)
-        b_work = zeros(n)
-        u = zeros(n)
-
-        # Initialize with converged DC solution
-        MNA.fast_rebuild!(ws, u, 0.0)
-        for _ in 1:50  # Newton iterations for DC
-            J = Matrix(ws.structure.G)
-            MNA.fast_jacobian!(J, zeros(n), u, ws, 1.0, 0.0)
-            resid = zeros(n)
-            MNA.fast_residual!(resid, zeros(n), u, ws, 0.0)
-            u .-= J \ resid
+    @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
+        # Workspace passed through p parameter (avoids closure boxing)
+        struct BJTWorkspaceParams{W, D}
+            ws::W
+            du_work::D
         end
+        du_work = zeros(n)
+        ode_params = BJTWorkspaceParams(ws, du_work)
 
-        # Use backward Euler with smaller timestep for stability
-        dt = 1e-9
-        inv_dt = 1.0 / dt
-
-        function transient_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
-            # Rebuild (handles nonlinear devices)
-            MNA.fast_rebuild!(ws, u, t)
-
-            # A = G + C/dt (backward Euler)
-            @inbounds for i in eachindex(A_work)
-                A_work[i] = G[i] + inv_dt * C[i]
-            end
-
-            # LU factorize
-            LAPACK.getrf!(A_work, ipiv)
-
-            # b = C*u/dt + sources
-            mul!(b, C, u)
-            @inbounds for i in eachindex(b)
-                b[i] = b[i] * inv_dt + ws.dctx.b[i]
-            end
-
-            # Solve
-            LAPACK.getrs!('N', A_work, ipiv, b)
-            copyto!(u, b)
+        # ODE functions access workspace through p parameter
+        function bjt_ode_f!(du, u, p, t)
+            MNA.fast_rebuild!(p.ws, u, t)
+            MNA.fast_residual!(du, p.du_work, u, p.ws, t)
             return nothing
         end
 
-        # Verify zero allocation (the main test)
-        allocs = measure_allocations() do
-            transient_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, 0.0)
+        function bjt_ode_jac!(J, u, p, t)
+            MNA.fast_rebuild!(p.ws, u, t)
+            MNA.fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
+            return nothing
+        end
+
+        # Get initial condition from DC solve
+        dc_result = dc!(circuit)
+        u0 = copy(dc_result.x)
+
+        # Create ODE problem with dense Jacobian prototype
+        jac_proto = zeros(n, n)
+        odef = ODEFunction(bjt_ode_f!; jac=bjt_ode_jac!, jac_prototype=jac_proto)
+        prob = ODEProblem(odef, u0, (0.0, 1e-6), ode_params)
+
+        # Create integrator with zero-allocation settings
+        integrator = init(prob, ImplicitEuler(autodiff=false),
+            adaptive=false,
+            dt=1e-9,
+            callback=nothing,
+            save_on=false,
+            dense=false,
+            maxiters=10_000_000
+        )
+
+        # Zero-allocation step wrapper (discards ReturnCode to avoid 16-byte alloc)
+        function blind_step!(integrator)
+            step!(integrator)
+            return nothing
+        end
+
+        # Warmup
+        for _ in 1:1000
+            blind_step!(integrator)
+        end
+        GC.gc()
+
+        # Measure allocations
+        reinit!(integrator, u0)
+        allocs = measure_allocations(; warmup=100, iters=10000) do
+            blind_step!(integrator)
         end
         @test allocs == 0
-        @info "Transient step (SPICE BJT, dense LAPACK): $(allocs) bytes/call"
+        @info "OrdinaryDiffEq step (SPICE BJT, dense): $(allocs) bytes/call"
 
-        # Run a few steps and verify solution remains reasonable
-        # (nonlinear circuits may need Newton iteration per step for full accuracy,
-        # but this tests the zero-allocation property of the linear solve)
-        u_before = copy(u)
-        for i in 1:10
-            transient_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, i * dt)
+        # Verify solution remains reasonable after many steps
+        reinit!(integrator, u0)
+        for _ in 1:1000
+            blind_step!(integrator)
         end
-        @test all(isfinite, u)
+        @test all(isfinite, integrator.u)
+
+        # Check voltages are in reasonable range for BJT circuit
+        # bjt_with_rc has: Vcc=12V at vcc, Vb=0.65V at base, collector through 4.7k resistor
+        @test integrator.u[1] > 0.0  # Some positive voltage
+        @test integrator.u[1] < 15.0  # Below supply + margin
     end
 
 end  # testset "Zero-Allocation BJT Transient"
