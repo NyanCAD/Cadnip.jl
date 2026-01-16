@@ -135,21 +135,38 @@ output matrices, required for optimal OrdinaryDiffEq integration.
 
 | Configuration | Allocation | Notes |
 |--------------|------------|-------|
-| `step!()` with `dense=true` | 16 bytes/call | ReturnCode boxing |
-| **Internal functions directly** | **0 bytes/call** | True zero-alloc |
+| `step!()` directly | 16 bytes/call | ReturnCode boxing |
+| **`blind_step!()` wrapper** | **0 bytes/call** | Simplest zero-alloc |
+| Internal functions directly | **0 bytes/call** | More control |
 | `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK unavoidable |
 | Manual backward Euler | **0 bytes/call** | No ODE solver overhead |
 
 ### Why `step!()` allocates 16 bytes
 
 The standard `step!(integrator)` returns `integrator.sol.retcode` (a `SciMLBase.ReturnCode.T` enum),
-which causes 16 bytes of boxing allocation per call. This is unavoidable when using the
-public `step!` API.
+which causes 16 bytes of boxing allocation per call when the return value is used or escapes.
 
 ### Achieving TRUE zero allocation (0 bytes/call)
 
-To achieve true zero allocation, call OrdinaryDiffEq's internal functions directly
-instead of `step!`:
+**Simple approach**: Wrap `step!()` in a function that discards the return value:
+
+```julia
+function blind_step!(integrator)
+    step!(integrator)
+    return nothing
+end
+
+# Real-time loop (TRUE 0 bytes/call)
+while running
+    blind_step!(integrator)
+    # Access state: integrator.u
+end
+```
+
+Julia's compiler optimizes away the ReturnCode allocation when it sees the value is unused.
+This is much simpler than calling internal functions directly.
+
+**Alternative**: Call OrdinaryDiffEq's internal functions directly (more control, same result):
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
@@ -214,8 +231,8 @@ while running
 end
 ```
 
-**Key insight**: The 16-byte allocation comes entirely from returning the `ReturnCode` enum.
-By using the internal functions and returning `nothing`, we achieve true zero allocation.
+**Key insight**: The 16-byte allocation comes from the `ReturnCode` enum escaping the function.
+Wrapping `step!()` in a function that returns `nothing` lets the compiler optimize it away.
 
 For the simplest zero-allocation approach without ODE solvers, use the manual stepper below.
 
