@@ -119,11 +119,38 @@ MNA.fast_residual!(resid, du, u, ws, t)
 MNA.fast_jacobian!(J, du, u, ws, gamma, t)
 ```
 
-## Transient Simulation Example
+## OrdinaryDiffEq Integration
+
+**Finding**: OrdinaryDiffEq's `step!()` allocates ~600-700 bytes per call regardless of solver configuration. This is due to internal bookkeeping that cannot be disabled.
+
+| Configuration | Allocation | Notes |
+|--------------|------------|-------|
+| `ImplicitEuler + KLUFactorization` (sparse) | ~160 bytes/call | Best ODE config |
+| `ImplicitEuler + LUFactorization` (dense) | ~686 bytes/call | |
+| `Euler` (explicit) | ~110 bytes/call | Unstable for stiff |
+| Manual backward Euler | **0 bytes/call** | Required for true zero-alloc |
+
+The ~160 bytes/call floor comes from 8 internal allocations in OrdinaryDiffEq's bookkeeping that cannot be disabled.
+
+**For true zero-allocation**, use the manual stepper pattern below instead of OrdinaryDiffEq.
+
+## Manual Transient Stepper (Zero-Allocation)
 
 ```julia
-function dense_lapack_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
-    # Rebuild circuit (0 bytes)
+using LinearAlgebra
+using LinearAlgebra.LAPACK
+
+# Setup (allocates - done once)
+G_dense = Matrix(ws.structure.G)
+C_dense = Matrix(ws.structure.C)
+A_work = similar(G_dense)
+ipiv = Vector{LinearAlgebra.BlasInt}(undef, n)
+b_work = zeros(n)
+inv_dt = 1.0 / dt
+
+# Step function (zero allocation)
+function backward_euler_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
+    # Rebuild circuit matrices (0 bytes)
     MNA.fast_rebuild!(ws, u, t)
 
     # Form A = G + C/dt (0 bytes)
@@ -143,6 +170,12 @@ function dense_lapack_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
     # Solve (0 bytes with LAPACK)
     LAPACK.getrs!('N', A_work, ipiv, b)
     copyto!(u, b)
+end
+
+# Real-time loop
+while running
+    backward_euler_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, t)
+    t += dt
 end
 ```
 
