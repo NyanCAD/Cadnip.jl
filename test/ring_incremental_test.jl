@@ -11,7 +11,8 @@
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarDCOp, CedarTranOp, CedarUICOp
-using OrdinaryDiffEq: Rodas5P
+using OrdinaryDiffEq: Rodas5P, ImplicitEuler
+using LinearSolve
 using Printf
 using Logging
 
@@ -103,6 +104,68 @@ try
     end
 catch e
     println("  UICOp transient failed: $e")
+    showerror(stdout, e, catch_backtrace())
+end
+
+println("\n" * "="^60)
+println("Step 8: ImplicitEuler with force_dtmin=true...")
+println("="^60)
+circuit5 = MNACircuit(ring_circuit)
+MNA.assemble!(circuit5)
+try
+    sol = tran!(circuit5, (0.0, 1e-9); dt=0.01e-9, dtmax=0.1e-9,
+                solver=ImplicitEuler(autodiff=false),
+                initializealg=CedarTranOp(),
+                force_dtmin=true, maxiters=50000, dense=false)
+    println("  Status: $(sol.retcode)")
+    println("  Timepoints: $(length(sol.t))")
+    println("  Final time: $(sol.t[end])")
+    if sol.stats !== nothing
+        println("  NR iters: $(sol.stats.nnonliniter)")
+    end
+catch e
+    println("  ImplicitEuler failed: $e")
+    showerror(stdout, e, catch_backtrace())
+end
+
+println("\n" * "="^60)
+println("Step 9: ImplicitEuler adaptive=false, fixed dt...")
+println("="^60)
+circuit6 = MNACircuit(ring_circuit)
+MNA.assemble!(circuit6)
+try
+    sol = tran!(circuit6, (0.0, 1e-9); dt=0.001e-9,
+                solver=ImplicitEuler(autodiff=false),
+                initializealg=CedarTranOp(),
+                adaptive=false, force_dtmin=true, maxiters=100000, dense=false)
+    println("  Status: $(sol.retcode)")
+    println("  Timepoints: $(length(sol.t))")
+    println("  Final time: $(sol.t[end])")
+    if sol.stats !== nothing
+        println("  NR iters: $(sol.stats.nnonliniter)")
+    end
+catch e
+    println("  ImplicitEuler fixed dt failed: $e")
+    showerror(stdout, e, catch_backtrace())
+end
+
+println("\n" * "="^60)
+println("Step 10: Rodas5P with SVDFactorization...")
+println("="^60)
+circuit7 = MNACircuit(ring_circuit)
+MNA.assemble!(circuit7)
+try
+    sol = tran!(circuit7, (0.0, 1e-9); dtmax=0.1e-9,
+                solver=Rodas5P(linsolve=SVDFactorization()),
+                initializealg=CedarTranOp(), maxiters=50000, dense=false)
+    println("  Status: $(sol.retcode)")
+    println("  Timepoints: $(length(sol.t))")
+    println("  Final time: $(sol.t[end])")
+    if sol.stats !== nothing
+        println("  NR iters: $(sol.stats.nnonliniter)")
+    end
+catch e
+    println("  Rodas5P+SVD failed: $e")
     showerror(stdout, e, catch_backtrace())
 end
 
