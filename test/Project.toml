@@ -1,4 +1,5 @@
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CMCModels = "8a844b39-05e3-4819-8383-f5fae2d66f33"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"

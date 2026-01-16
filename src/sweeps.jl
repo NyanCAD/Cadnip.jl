@@ -434,7 +434,10 @@ voltage(sol, :out)  # Voltage at output node
 ```
 """
 function dc!(circuit::MNA.MNACircuit)
-    return MNA.solve_dc(circuit)
+    # Use :dcop mode for DC operating point - this ensures transient sources
+    # use their DC values (from dc= parameter) instead of transient waveforms
+    dcop_circuit = MNA.with_mode(circuit, :dcop)
+    return MNA.solve_dc(dcop_circuit)
 end
 
 """
@@ -507,15 +510,15 @@ end
 # OrdinaryDiffEq DAE solvers (DFBDF, DABDF2, DImplicitEuler) need explicit_jacobian=false
 # because their internal W matrix computation is incompatible with our custom Jacobian.
 #
-# Default initializealg is CedarDCOp which:
-# 1. Switches to :dcop mode (turns off time dependence)
+# Default initializealg is CedarTranOp which:
+# 1. Switches to :tranop mode (evaluates transient sources at t=0)
 # 2. Solves DC steady state with robust nonlinear solver
 # 3. Uses BrownFullBasicInit to fix differential vars
-# This mirrors the original CedarSim approach and handles voltage-dependent capacitors.
+# This matches SPICE behavior where transient initialization evaluates sources at t=0.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
-                        initializealg=MNA.CedarDCOp(), kwargs...)
+                        initializealg=MNA.CedarTranOp(), kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
     if explicit_jacobian === nothing
@@ -527,11 +530,11 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
-# Uses CedarDCOp for consistent initialization across both ODE and DAE paths.
-# CedarDCOp performs a full DC solve to ensure proper operating point.
+# Uses CedarTranOp for consistent initialization across both ODE and DAE paths.
+# CedarTranOp evaluates transient sources at t=0, matching SPICE behavior.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarDCOp(), kwargs...)
+                        abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(), kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
