@@ -131,17 +131,18 @@ const ngspice_inverter = [
     1.000000e+08  -4.32594e+00   3.011701e+01
 ]
 
-# CedarSim AC analysis with equivalent circuit
-const inverter_cedar = CedarSim.parse_spice_to_mna("""
+# CedarSim AC analysis with equivalent circuit (using model cards)
+const cmos_inverter = sp"""
 * CMOS Inverter for AC analysis (CedarSim)
+.model pmos1 pmos level=1 vto=-0.7 kp=50e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15
+.model nmos1 nmos level=1 vto=0.7 kp=100e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15
 Vdd vdd 0 DC 3.3
 Vin vin 0 DC 1.65 AC 1
-XMP vout vin vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15 w=2e-6 l=1e-6
-XMN vout vin 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15 w=1e-6 l=1e-6
+MP vout vin vdd vdd pmos1 w=2e-6 l=1e-6
+MN vout vin 0 0 nmos1 w=1e-6 l=1e-6
 Cload vout 0 10f
 .END
-"""; circuit_name=:cmos_inverter, imported_hdl_modules=[sp_mos1_module])
-eval(inverter_cedar)
+"""i
 
 inverter_circ = MNACircuit(cmos_inverter)
 inverter_ac = ac!(inverter_circ)

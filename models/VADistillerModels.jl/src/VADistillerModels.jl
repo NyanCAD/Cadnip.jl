@@ -16,6 +16,15 @@ vcc = get_node!(ctx, :vcc)
 stamp!(sp_resistor(resistance=1000.0), ctx, vcc, 0; _mna_spec_=spec, _mna_x_=Float64[])
 ```
 
+# Model Registration
+This package registers models with CedarSim.ModelRegistry for automatic
+device type resolution. SPICE netlists can use standard model cards:
+
+```spice
+.model mymos nmos level=1 vto=0.7 kp=100e-6
+M1 d g s b mymos w=10u l=1u
+```
+
 # Exported Models
 - `sp_resistor`: Basic resistor
 - `sp_capacitor`: Basic capacitor
@@ -35,6 +44,7 @@ using CedarSim
 using CedarSim: VAFile
 using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
+using CedarSim.ModelRegistry: getmodel, getparams, AbstractSimulator
 using VerilogAParser
 using PrecompileTools: @compile_workload
 # Model directory
@@ -86,6 +96,88 @@ export sp_diode_module, sp_bjt_module
 export sp_jfet1_module, sp_jfet2_module, sp_mes1_module
 export sp_mos1_module, sp_mos2_module, sp_mos3_module, sp_mos6_module, sp_mos9_module
 export sp_vdmos_module, sp_bsim3v3_module, sp_bsim4v8_module
+
+#==============================================================================#
+# Model Registry: Register SPICE device type mappings
+#
+# Maps SPICE device types (nmos, pmos, npn, pnp, etc.) with levels to the
+# corresponding VADistiller model types. This enables automatic device
+# resolution via .model statements in SPICE netlists.
+#==============================================================================#
+
+# MOSFET level 1 (Shichman-Hodges)
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# MOSFET level 2
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# MOSFET level 3
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# MOSFET level 6
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# MOSFET level 9
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# BSIM3v3 (levels 8, 49 in ngspice)
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+
+# BSIM4v8 (levels 14, 54 in ngspice)
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+
+# BJT (Gummel-Poon) - default level (1 or no level)
+CedarSim.ModelRegistry.getmodel(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+CedarSim.ModelRegistry.getmodel(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+CedarSim.ModelRegistry.getmodel(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+CedarSim.ModelRegistry.getmodel(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+CedarSim.ModelRegistry.getparams(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+CedarSim.ModelRegistry.getparams(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+
+# JFET (levels 1, 2)
+CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
+CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
+CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # Precompile stamp! methods for all three method variants:
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)

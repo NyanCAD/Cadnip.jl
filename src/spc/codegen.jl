@@ -1844,7 +1844,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
 
     # Build instance parameter kwargs
     param_kwargs = Expr[]
-    for p in instance.params
+    for p in instance.parameters
         param_name = LSymbol(p.name)
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
