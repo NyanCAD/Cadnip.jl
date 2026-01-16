@@ -24,6 +24,9 @@ export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
 
 
 include("util.jl")
+include("model_registry.jl")
+using .ModelRegistry
+export ModelRegistry, getmodel, getparams, AbstractSimulator
 include("vasim.jl")
 
 # Minimal simulation environment (previously in simulate_ir.jl)
@@ -79,6 +82,20 @@ ParamSim(circuit, mode, spec, params) = ParamSim{typeof(circuit), typeof(mode), 
 
 include("spectre_env.jl")
 include("spectre.jl")
+
+#==============================================================================#
+# Model Registry: Base Device Registrations
+#
+# Register MNA device types for SPICE device mapping. External packages
+# (e.g., BSIM4.jl, VADistillerModels.jl) register their own models by
+# defining additional getmodel/getparams methods.
+#==============================================================================#
+
+# Simple passive devices (no level required)
+ModelRegistry.getmodel(::Val{:r}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Resistor
+ModelRegistry.getmodel(::Val{:c}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Capacitor
+ModelRegistry.getmodel(::Val{:l}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Inductor
+ModelRegistry.getmodel(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Diode
 
 # Phase 4: New SPC SPICE codegen (used by MNA backend)
 include("spc/cache.jl")  # Must be before sema.jl (CedarParseCache)

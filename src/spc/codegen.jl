@@ -458,9 +458,14 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
         push!(params, Expr(:kw, :version, Expr(:call, CedarSim.mknondefault, version)))
     end
 
-    if mosfet_type !== nothing
-        param = devtype_param(modelref, mosfet_type)
-        param !== nothing && push!(params, Expr(:kw, param[1], Expr(:call, CedarSim.mknondefault, param[2])))
+    # Query the model registry for type parameters (polarity, etc.)
+    # Use the device type (mosfet_type for MOSFETs, or typ for other devices)
+    device_type = mosfet_type !== nothing ? mosfet_type : typ
+    level_int = level === nothing ? nothing : Int(level)
+    version_str = version === nothing ? nothing : string(Int(version))
+    type_params = CedarSim.getparams(device_type, level_int, version_str)
+    for (param_name, param_val) in pairs(type_params)
+        push!(params, Expr(:kw, param_name, Expr(:call, CedarSim.mknondefault, param_val)))
     end
 
     m = match(binning_rx, LString(model.name))
