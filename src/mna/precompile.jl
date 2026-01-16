@@ -610,66 +610,9 @@ b_vector(ws::EvalWorkspace) = ws.dctx.b
 
 #==============================================================================#
 # OrdinaryDiffEq Integration Helpers
-#
-# These helpers make it easy to use compiled MNA circuits with OrdinaryDiffEq
-# for zero-allocation transient simulation.
 #==============================================================================#
 
-export make_ode_functions, blind_step!
-
-"""
-    make_ode_functions(ws::EvalWorkspace) -> (f!, jac!)
-
-Create ODE functions for use with OrdinaryDiffEq from a compiled workspace.
-
-Returns a tuple of:
-- `f!(du, u, p, t)`: ODE right-hand side function
-- `jac!(J, u, p, t)`: Jacobian function
-
-Pass `ws` directly as the `p` parameter to ODEProblem. The functions use
-`ws.resid_tmp` as scratch space internally.
-
-# Example
-```julia
-using OrdinaryDiffEq
-
-circuit = MNACircuit(builder; params...)
-ws = MNA.compile(circuit; dense=true)
-f!, jac! = MNA.make_ode_functions(ws)
-
-# Get initial condition
-u0 = copy(dc!(circuit).x)
-
-# Create ODE problem - pass ws as p parameter
-n = MNA.system_size(ws)
-jac_proto = zeros(n, n)
-odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
-prob = ODEProblem(odef, u0, tspan, ws)
-
-# Create zero-allocation integrator
-integrator = init(prob, ImplicitEuler(autodiff=false),
-    adaptive=false, dt=1e-6, callback=nothing,
-    save_on=false, dense=false, maxiters=10_000_000)
-
-# Step with zero allocation
-MNA.blind_step!(integrator)  # 0 bytes/call
-```
-"""
-function make_ode_functions(ws::EvalWorkspace)
-    function f!(du, u, p::EvalWorkspace, t)
-        fast_rebuild!(p, u, t)
-        fast_residual!(du, p.resid_tmp, u, p, t)
-        return nothing
-    end
-
-    function jac!(J, u, p::EvalWorkspace, t)
-        fast_rebuild!(p, u, t)
-        fast_jacobian!(J, p.resid_tmp, u, p, 1.0, t)
-        return nothing
-    end
-
-    return (f!, jac!)
-end
+export blind_step!
 
 """
     blind_step!(integrator)
