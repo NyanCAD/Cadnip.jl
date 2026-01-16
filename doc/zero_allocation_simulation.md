@@ -106,52 +106,57 @@ dctx = create_direct_stamp_context(ctx, G_nzval, C_nzval, b)
 builder(params, spec, t; ctx=dctx, x=u)
 ```
 
-### EvalWorkspace
+### EvalWorkspace and Parameterized Matrix Types
 
-The `EvalWorkspace` wraps both contexts and provides the fast path:
+The `CompiledStructure{F,P,S,M}` is parameterized on matrix type `M`:
+- `SparseMatrixCSC{Float64,Int}`: sparse storage (default, for large circuits)
+- `Matrix{Float64}`: dense storage (for small circuits, enables zero-alloc OrdinaryDiffEq)
 
 ```julia
-# Standard compilation (sparse Jacobian zero-alloc, dense allocates)
-ws = MNA.compile(circuit)
+# Standard compilation with sparse matrices
+ws = MNA.compile(circuit)          # M = SparseMatrixCSC
 
-# Compilation with dense caches (ALL operations zero-alloc)
-ws = MNA.compile(circuit; dense=true)
+# Compilation with dense matrices (ALL operations zero-alloc)
+ws = MNA.compile(circuit; dense=true)  # M = Matrix{Float64}
 
 # Zero-allocation operations
 MNA.fast_rebuild!(ws, u, t)
 MNA.fast_residual!(resid, du, u, ws, t)
-MNA.fast_jacobian!(J, du, u, ws, gamma, t)  # Zero-alloc if dense=true
+MNA.fast_jacobian!(J, du, u, ws, gamma, t)  # Zero-alloc with matching J type
 ```
 
-When `dense=true`, the workspace pre-allocates dense versions of G and C matrices
-that are updated during `fast_rebuild!`. This enables zero-allocation dense
-Jacobian computation for use with OrdinaryDiffEq's ImplicitEuler solver.
+With `dense=true`, the G and C matrices are stored as dense `Matrix{Float64}` directly
+in the `CompiledStructure`. This enables zero-allocation `fast_jacobian!` with dense
+output matrices, required for optimal OrdinaryDiffEq integration.
 
 ## OrdinaryDiffEq Integration
 
-**Finding**: OrdinaryDiffEq's `step!()` can achieve near-zero allocation (16 bytes/call) with proper configuration:
+**Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach:
 
 | Configuration | Allocation | Notes |
 |--------------|------------|-------|
-| `ImplicitEuler (default) + dense=true` | **16 bytes/call** | Best config for small circuits |
-| `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK allocation unavoidable |
-| `ImplicitEuler + LUFactorization` (explicit) | ~624 bytes/call | LinearSolve wrapper overhead |
-| Manual backward Euler | **0 bytes/call** | True zero-alloc |
+| `step!()` with `dense=true` | 16 bytes/call | ReturnCode boxing |
+| **Internal functions directly** | **0 bytes/call** | True zero-alloc |
+| `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK unavoidable |
+| Manual backward Euler | **0 bytes/call** | No ODE solver overhead |
 
-### Achieving 16 bytes/call with OrdinaryDiffEq
+### Why `step!()` allocates 16 bytes
 
-The key is to:
-1. Use `compile(circuit; dense=true)` to enable zero-allocation dense Jacobian
-2. Pass workspace through `p` parameter (not closure capture)
-3. Use `ImplicitEuler(autodiff=false)` with default linear solver
-4. Disable all saving and callbacks
+The standard `step!(integrator)` returns `integrator.sol.retcode` (a `SciMLBase.ReturnCode.T` enum),
+which causes 16 bytes of boxing allocation per call. This is unavoidable when using the
+public `step!` API.
+
+### Achieving TRUE zero allocation (0 bytes/call)
+
+To achieve true zero allocation, call OrdinaryDiffEq's internal functions directly
+instead of `step!`:
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 
-# Compile with dense caches for zero-allocation Jacobian
+# Compile with dense matrices for zero-allocation Jacobian
 ws = MNA.compile(circuit; dense=true)
-n = length(ws.dctx.b)
+n = MNA.system_size(ws)
 du_work = zeros(n)
 
 # Use a struct to pass workspace (avoids closure boxing)
@@ -189,27 +194,58 @@ integrator = init(prob, ImplicitEuler(autodiff=false),
     maxiters=10_000_000
 )
 
-# Real-time loop (16 bytes/call)
+# Access internal module
+ODECore = OrdinaryDiffEq.OrdinaryDiffEqCore
+cache = integrator.cache
+
+# Zero-allocation step function (0 bytes/call)
+function zero_alloc_step!(integrator, cache)
+    ODECore.loopheader!(integrator)
+    ODECore.perform_step!(integrator, cache)
+    ODECore.loopfooter!(integrator)
+    ODECore.handle_tstop!(integrator)
+    return nothing  # Do not return retcode - that's what allocates!
+end
+
+# Real-time loop (TRUE 0 bytes/call)
 while running
-    step!(integrator)
+    zero_alloc_step!(integrator, cache)
+    # Access state: integrator.u
 end
 ```
 
-**For true zero-allocation (0 bytes)**, use the manual stepper pattern below.
+**Key insight**: The 16-byte allocation comes entirely from returning the `ReturnCode` enum.
+By using the internal functions and returning `nothing`, we achieve true zero allocation.
+
+For the simplest zero-allocation approach without ODE solvers, use the manual stepper below.
 
 ## Manual Transient Stepper (Zero-Allocation)
+
+For the simplest zero-allocation transient simulation without any ODE solver overhead:
 
 ```julia
 using LinearAlgebra
 using LinearAlgebra.LAPACK
 
-# Setup (allocates - done once)
-G_dense = Matrix(ws.structure.G)
-C_dense = Matrix(ws.structure.C)
-A_work = similar(G_dense)
+# Compile with dense matrices
+ws = MNA.compile(circuit; dense=true)
+n = MNA.system_size(ws)
+
+# Get dense matrices directly (no conversion needed with dense=true)
+G = ws.structure.G  # Already Matrix{Float64}
+C = ws.structure.C  # Already Matrix{Float64}
+
+# Allocate working arrays once
+A_work = similar(G)
 ipiv = Vector{LinearAlgebra.BlasInt}(undef, n)
 b_work = zeros(n)
+u = zeros(n)  # State vector
+dt = 1e-6
 inv_dt = 1.0 / dt
+
+# Initialize with DC solution
+MNA.fast_rebuild!(ws, u, 0.0)
+u .= G \ ws.dctx.b
 
 # Step function (zero allocation)
 function backward_euler_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
@@ -235,9 +271,10 @@ function backward_euler_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
     copyto!(u, b)
 end
 
-# Real-time loop
+# Real-time loop (TRUE 0 bytes/call)
+t = 0.0
 while running
-    backward_euler_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, t)
+    backward_euler_step!(u, ws, G, C, A_work, ipiv, b_work, inv_dt, t)
     t += dt
 end
 ```
