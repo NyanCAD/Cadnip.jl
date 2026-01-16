@@ -427,8 +427,166 @@ eval(ce_amplifier_code)
 
 end  # testset "Audio Integration Tests"
 
-# Note: Zero-allocation tests are in test/mna/zero_alloc.jl
-# Those tests comprehensively verify TRUE zero allocation with:
-# 1. Component-based API: alloc_current!(ctx, :I, :name) not Symbol(:I_, name)
-# 2. Dense LAPACK for refactorization
-# 3. Fixed factorization for linear circuits
+#==============================================================================#
+# Zero-Allocation BJT Transient Simulation Test
+#
+# Demonstrates TRUE zero allocation for nonlinear circuit simulation with:
+# - Nonlinear Verilog-A BJT model (uses ForwardDiff AD)
+# - Component-based alloc_current! API
+# - Dense LAPACK solver (getrf!/getrs!)
+#==============================================================================#
+
+using LinearAlgebra
+using LinearAlgebra.LAPACK
+
+"""
+Helper function to measure allocations correctly.
+Uses @allocated with loop INSIDE the begin block.
+"""
+function measure_allocations(f::Function; warmup=1000, iters=10000)
+    for _ in 1:warmup
+        f()
+    end
+    GC.gc()
+
+    GC.enable(false)
+    try
+        allocs = @allocated begin
+            for _ in 1:iters
+                f()
+            end
+        end
+        return allocs ÷ iters
+    finally
+        GC.enable(true)
+    end
+end
+
+@testset "Zero-Allocation BJT Transient" begin
+
+    # BJT common-emitter amplifier with component-based API
+    function bjt_amp_builder(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        end
+
+        base = MNA.get_node!(ctx, :base)
+        collector = MNA.get_node!(ctx, :collector)
+        emitter = MNA.get_node!(ctx, :emitter)
+        vcc_node = MNA.get_node!(ctx, :vcc)
+
+        # Voltage sources using component-based API (zero allocation)
+        I_vcc = MNA.alloc_current!(ctx, :I_, :Vcc)
+        MNA.stamp_G!(ctx, vcc_node, I_vcc, 1.0)
+        MNA.stamp_G!(ctx, I_vcc, vcc_node, 1.0)
+        MNA.stamp_b!(ctx, I_vcc, params.Vcc)
+
+        I_vb = MNA.alloc_current!(ctx, :I_, :Vb)
+        MNA.stamp_G!(ctx, base, I_vb, 1.0)
+        MNA.stamp_G!(ctx, I_vb, base, 1.0)
+        MNA.stamp_b!(ctx, I_vb, params.Vb)
+
+        # Resistors (already zero-alloc)
+        MNA.stamp!(Resistor(params.Rc), ctx, vcc_node, collector)
+        MNA.stamp!(Resistor(params.Re), ctx, emitter, 0)
+
+        # Nonlinear BJT model (uses ForwardDiff - still zero-alloc!)
+        MNA.stamp!(npnbjt(), ctx, base, emitter, collector; _mna_x_=x)
+
+        return ctx
+    end
+
+    circuit = MNACircuit(bjt_amp_builder; Vcc=12.0, Vb=0.7, Rc=4700.0, Re=1000.0)
+    ws = MNA.compile(circuit)
+    cs = ws.structure
+    n = MNA.system_size(cs)
+
+    @testset "MNA fast path with nonlinear BJT" begin
+        u = zeros(n)
+        du = zeros(n)
+        resid = zeros(n)
+        J = copy(cs.G)
+        t = 0.0
+        gamma = 1.0
+
+        # Initialize with DC solution
+        MNA.fast_rebuild!(ws, u, t)
+        for _ in 1:20  # Newton iterations
+            MNA.fast_residual!(resid, du, u, ws, t)
+            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+            u .-= J \ resid
+        end
+
+        # Measure allocations
+        allocs_rebuild = measure_allocations() do
+            MNA.fast_rebuild!(ws, u, t)
+        end
+        @test allocs_rebuild == 0
+        @info "fast_rebuild! (BJT): $(allocs_rebuild) bytes/call"
+
+        allocs_residual = measure_allocations() do
+            MNA.fast_residual!(resid, du, u, ws, t)
+        end
+        @test allocs_residual == 0
+        @info "fast_residual! (BJT): $(allocs_residual) bytes/call"
+
+        allocs_jacobian = measure_allocations() do
+            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+        end
+        @test allocs_jacobian == 0
+        @info "fast_jacobian! (BJT): $(allocs_jacobian) bytes/call"
+    end
+
+    @testset "Dense LAPACK transient step with BJT" begin
+        G_dense = Matrix(cs.G)
+        C_dense = Matrix(cs.C)
+        A_work = similar(G_dense)
+        ipiv = Vector{LinearAlgebra.BlasInt}(undef, n)
+        b_work = zeros(n)
+        u = zeros(n)
+        dt = 1e-6
+        inv_dt = 1.0 / dt
+
+        # Initialize with DC
+        MNA.fast_rebuild!(ws, u, 0.0)
+        u .= G_dense \ ws.dctx.b
+
+        function transient_step!(u, ws, G, C, A_work, ipiv, b, inv_dt, t)
+            # Rebuild (handles nonlinear devices)
+            MNA.fast_rebuild!(ws, u, t)
+
+            # A = G + C/dt
+            @inbounds for i in eachindex(A_work)
+                A_work[i] = G[i] + inv_dt * C[i]
+            end
+
+            # LU factorize
+            LAPACK.getrf!(A_work, ipiv)
+
+            # b = C*u/dt + sources
+            mul!(b, C, u)
+            @inbounds for i in eachindex(b)
+                b[i] = b[i] * inv_dt + ws.dctx.b[i]
+            end
+
+            # Solve
+            LAPACK.getrs!('N', A_work, ipiv, b)
+            copyto!(u, b)
+            return nothing
+        end
+
+        allocs = measure_allocations() do
+            transient_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, 0.0)
+        end
+        @test allocs == 0
+        @info "Transient step (BJT, dense LAPACK): $(allocs) bytes/call"
+
+        # Run 100 steps and verify stability
+        for i in 1:100
+            transient_step!(u, ws, G_dense, C_dense, A_work, ipiv, b_work, inv_dt, i * dt)
+        end
+        @test all(isfinite, u)
+        @test all(x -> abs(x) < 100, u)
+    end
+
+end  # testset "Zero-Allocation BJT Transient"
