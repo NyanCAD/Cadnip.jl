@@ -20,7 +20,7 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, Rodas5P, ImplicitEuler
+using OrdinaryDiffEq: FBDF, QNDF, Rodas5P, Rodas4P, ImplicitEuler
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
@@ -28,14 +28,16 @@ const BENCHMARK_DIR = @__DIR__
 # Solver definitions - one from each family
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
 const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization()))
+const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization()))
 const SOLVER_RODAS5P = ("Rodas5P", () -> Rodas5P(linsolve=KLUFactorization()))
+const SOLVER_RODAS4P = ("Rodas4P", () -> Rodas4P(linsolve=KLUFactorization()))
 const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization()))
 
 # Per-benchmark solver configurations
 # RC Circuit (linear): ImplicitEuler is 3x faster than IDA, so substitute it
-const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_FBDF, SOLVER_RODAS5P]
+const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_QNDF, SOLVER_RODAS4P]
 # Graetz/Mul (nonlinear): ImplicitEuler fails, use IDA
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS5P]
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_QNDF, SOLVER_RODAS4P]
 
 # Results storage
 struct BenchmarkResult
