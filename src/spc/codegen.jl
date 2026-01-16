@@ -1932,7 +1932,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
                 times_vals = Float64[Float64(vals[i]) for i in 1:2:length(vals)]
                 value_vals = Float64[Float64(vals[i]) for i in 2:2:length(vals)]
-                dc_value = value_vals[1]
+                # DC value: use explicit dc= if specified, otherwise use first PWL value
+                dc_value = dc_val !== nothing ? dc_val : value_vals[1]
 
                 # Build SVector expression inside quote to avoid serialization issues
                 times_exprs = [:($(t)) for t in times_vals]
@@ -1942,28 +1943,33 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 if is_voltage
                     return quote
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...))
-                            stamp!(VoltageSource($dc_value; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
+                            dc = $dc_value
+                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
                     return quote
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...))
-                            stamp!(CurrentSource($dc_value; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
+                            dc = $dc_value
+                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                # DC value: use explicit dc= if specified, otherwise use first PWL value
+                dc_expr = dc_val !== nothing ? dc_val : :(values[1])
                 if is_voltage
                     return quote
                         let vals = [$(vals...)]
                             times = vals[1:2:end]
                             values = vals[2:2:end]
-                            stamp!(VoltageSource(values[1]; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            dc = $dc_expr
+                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -1972,7 +1978,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let vals = [$(vals...)]
                             times = vals[1:2:end]
                             values = vals[2:2:end]
-                            stamp!(CurrentSource(values[1]; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            dc = $dc_expr
+                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -1993,11 +2000,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             theta_expr = n_vals >= 5 ? vals[5] : 0.0
             phase_expr = n_vals >= 6 ? vals[6] : 0.0  # phase in degrees
 
+            # DC value: use explicit dc= if specified, otherwise use vo (the offset)
+            dc_expr = dc_val !== nothing ? dc_val : vo_expr
+
             # Create transient function with captured parameters
             if is_voltage
                 return quote
                     let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr
                         # SPICE SIN: vo + va * exp(-theta*(t-td)) * sin(2π*freq*(t-td) + phase_rad)
                         tran_fn = _t -> begin
                             if _t < td
@@ -2006,14 +2016,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                                 vo + va * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
                             end
                         end
-                        stamp!(VoltageSource(vo; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
+                        stamp!(VoltageSource(dc; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
                 return quote
                     let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr
+                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr
                         tran_fn = _t -> begin
                             if _t < td
                                 io + ia * sind(phase)
@@ -2021,7 +2031,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                                 io + ia * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
                             end
                         end
-                        stamp!(CurrentSource(io; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
+                        stamp!(CurrentSource(dc; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2053,42 +2063,49 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 t0, t1, t2, t3, t4, t5 = 0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per
                 v_1, v_2, v_3, v_4, v_5, v_6 = v1, v1, v2, v2, v1, v1
 
+                # DC value: use explicit dc= if specified, otherwise use v1 (initial pulse value)
+                dc_value = dc_val !== nothing ? dc_val : v1
+
                 if is_voltage
                     return quote
                         let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6)
-                            stamp!(VoltageSource($v1; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
+                            dc = $dc_value
+                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
                     return quote
                         let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6)
-                            stamp!(CurrentSource($v1; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
+                            dc = $dc_value
+                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays
+                # DC value: use explicit dc= if specified, otherwise use v1/i1 (initial pulse value)
+                dc_expr = dc_val !== nothing ? dc_val : v1_expr
                 if is_voltage
                     return quote
                         let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [v1, v1, v2, v2, v1, v1]
-                            stamp!(VoltageSource(v1; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
                     return quote
                         let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [i1, i1, i2, i2, i1, i1]
-                            stamp!(CurrentSource(i1; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
