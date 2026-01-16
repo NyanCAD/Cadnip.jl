@@ -20,21 +20,23 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF
+using OrdinaryDiffEq: FBDF, ImplicitEuler
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
-# Solvers to test
-# For small circuits:
-# - IDA-KLU: Best for long simulations (lower memory pressure, less GC)
-# - IDA-Dense: 1.3-2.5x faster for short simulations (< 100k timesteps)
-# - FBDF-KLU: Lowest allocation count, competitive performance
-const SOLVERS = [
-    ("IDA-KLU", () -> IDA(linear_solver=:KLU, max_error_test_failures=20)),
-    ("IDA-Dense", () -> IDA(linear_solver=:Dense, max_error_test_failures=20)),
-    ("FBDF-KLU", () -> FBDF(linsolve=KLUFactorization())),
-]
+# Solver definitions
+# Different benchmarks benefit from different solvers
+const SOLVER_IDA_KLU = ("IDA-KLU", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
+const SOLVER_IDA_DENSE = ("IDA-Dense", () -> IDA(linear_solver=:Dense, max_error_test_failures=20))
+const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization()))
+const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization()))
+
+# Per-benchmark solver configurations
+# RC Circuit (linear): ImplicitEuler is 3x faster than IDA
+const SOLVERS_RC = [SOLVER_IDA_KLU, SOLVER_IDA_DENSE, SOLVER_IMPLICIT_EULER]
+# Graetz/Mul (nonlinear): ImplicitEuler fails, use IDA variants + FBDF
+const SOLVERS_NONLINEAR = [SOLVER_IDA_KLU, SOLVER_IDA_DENSE, SOLVER_FBDF]
 
 # Results storage
 struct BenchmarkResult
@@ -188,9 +190,9 @@ function run_benchmark_with_solver(name, script_path, solver_name, solver_fn)
     end
 end
 
-function run_benchmark_all_solvers(name, script_path)
+function run_benchmark_all_solvers(name, script_path, solvers)
     results = BenchmarkResult[]
-    for (solver_name, solver_fn) in SOLVERS
+    for (solver_name, solver_fn) in solvers
         push!(results, run_benchmark_with_solver(name, script_path, solver_name, solver_fn))
     end
     return results
@@ -207,22 +209,25 @@ function main()
 
     results = BenchmarkResult[]
 
-    # RC Circuit - all solvers
+    # RC Circuit - linear circuit, ImplicitEuler is 3x faster
     append!(results, run_benchmark_all_solvers(
         "RC Circuit",
-        joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl")
+        joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl"),
+        SOLVERS_RC
     ))
 
-    # Graetz Bridge - all solvers
+    # Graetz Bridge - nonlinear (diodes), needs robust DAE solver
     append!(results, run_benchmark_all_solvers(
         "Graetz Bridge",
-        joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme.jl")
+        joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme.jl"),
+        SOLVERS_NONLINEAR
     ))
 
-    # Voltage Multiplier - all solvers
+    # Voltage Multiplier - nonlinear (diodes), needs robust DAE solver
     append!(results, run_benchmark_all_solvers(
         "Voltage Multiplier",
-        joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl")
+        joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"),
+        SOLVERS_NONLINEAR
     ))
 
     # # Ring Oscillator - all solvers
