@@ -426,3 +426,129 @@ eval(ce_amplifier_code)
     end
 
 end  # testset "Audio Integration Tests"
+
+#==============================================================================#
+# Zero-Allocation BJT Transient Simulation Test
+#
+# Demonstrates TRUE zero allocation for nonlinear circuit simulation with:
+# - SPICE-generated circuit (parse_spice_to_mna + eval)
+# - Nonlinear Verilog-A BJT model (uses ForwardDiff AD)
+# - OrdinaryDiffEq ImplicitEuler with blind_step!() wrapper
+#
+# Uses bjt_with_rc circuit defined at top of file via parse_spice_to_mna.
+#==============================================================================#
+
+"""
+Helper function to measure allocations correctly.
+Uses @allocated with loop INSIDE the begin block.
+"""
+function measure_allocations(f::Function; warmup=1000, iters=10000)
+    for _ in 1:warmup
+        f()
+    end
+    GC.gc()
+
+    GC.enable(false)
+    try
+        allocs = @allocated begin
+            for _ in 1:iters
+                f()
+            end
+        end
+        return allocs ÷ iters
+    finally
+        GC.enable(true)
+    end
+end
+
+@testset "Zero-Allocation BJT Transient" begin
+
+    # Use SPICE-generated bjt_with_rc circuit (defined at top of file)
+    # This tests the actual SPICE codegen path for zero allocation
+    circuit = MNACircuit(bjt_with_rc)
+
+    # Compile with dense matrices for zero-allocation OrdinaryDiffEq integration
+    ws = MNA.compile(circuit; dense=true)
+    cs = ws.structure
+    n = MNA.system_size(cs)
+
+    @testset "MNA fast path with SPICE-generated BJT circuit (dense)" begin
+        u = zeros(n)
+        du = zeros(n)
+        resid = zeros(n)
+        J = zeros(n, n)  # Dense Jacobian
+        t = 0.0
+        gamma = 1.0
+
+        # Initialize with DC solution
+        MNA.fast_rebuild!(ws, u, t)
+        for _ in 1:20  # Newton iterations
+            MNA.fast_residual!(resid, du, u, ws, t)
+            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+            u .-= J \ resid
+        end
+
+        # Measure allocations
+        allocs_rebuild = measure_allocations() do
+            MNA.fast_rebuild!(ws, u, t)
+        end
+        @test allocs_rebuild == 0
+        @info "fast_rebuild! (SPICE BJT, dense): $(allocs_rebuild) bytes/call"
+
+        allocs_residual = measure_allocations() do
+            MNA.fast_residual!(resid, du, u, ws, t)
+        end
+        @test allocs_residual == 0
+        @info "fast_residual! (SPICE BJT, dense): $(allocs_residual) bytes/call"
+
+        allocs_jacobian = measure_allocations() do
+            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+        end
+        @test allocs_jacobian == 0
+        @info "fast_jacobian! (SPICE BJT, dense): $(allocs_jacobian) bytes/call"
+    end
+
+    @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
+        # Use simplified ODEProblem API with dense=true for zero-allocation
+        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
+
+        # Create integrator with zero-allocation settings
+        # CedarTranOp computes DC operating point during init
+        integrator = init(prob, ImplicitEuler(autodiff=false),
+            adaptive=false,
+            dt=1e-9,
+            callback=nothing,
+            save_on=false,
+            dense=false,
+            maxiters=10_000_000,
+            initializealg=MNA.CedarTranOp()
+        )
+
+        # Warmup
+        for _ in 1:1000
+            MNA.blind_step!(integrator)
+        end
+        GC.gc()
+
+        # Measure allocations
+        reinit!(integrator, prob.u0)
+        allocs = measure_allocations(; warmup=100, iters=10000) do
+            MNA.blind_step!(integrator)
+        end
+        @test allocs == 0
+        @info "OrdinaryDiffEq step (SPICE BJT, dense): $(allocs) bytes/call"
+
+        # Verify solution remains reasonable after many steps
+        reinit!(integrator, prob.u0)
+        for _ in 1:1000
+            MNA.blind_step!(integrator)
+        end
+        @test all(isfinite, integrator.u)
+
+        # Check voltages are in reasonable range for BJT circuit
+        # bjt_with_rc has: Vcc=12V at vcc, Vb=0.65V at base, collector through 4.7k resistor
+        @test integrator.u[1] > 0.0  # Some positive voltage
+        @test integrator.u[1] < 15.0  # Below supply + margin
+    end
+
+end  # testset "Zero-Allocation BJT Transient"

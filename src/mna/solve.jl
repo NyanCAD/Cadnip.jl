@@ -1684,7 +1684,7 @@ sol = solve(prob, Rodas5P())
 # See Also
 - `DAEProblem(circuit, tspan)` - Alternative using Sundials IDA
 """
-function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, kwargs...)
+function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, dense=false, kwargs...)
     builder = circuit.builder
     params = circuit.params
     base_spec = circuit.spec
@@ -1696,19 +1696,16 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     n = system_size(ctx)
 
     # Compile circuit structure using the detection context
-    # Structure (sparsity pattern) is correct from detection passes
-    # Note: Voltage-dependent capacitors are rewritten as charge formulation,
-    # so the C matrix is constant regardless of operating point.
-    # CedarDCOp will compute the actual DC operating point during solve()
-    cs = compile_structure(builder, params, base_spec; ctx=ctx)
+    # dense=true enables zero-allocation stepping with OrdinaryDiffEq
+    cs = compile_structure(builder, params, base_spec; ctx=ctx, dense=dense)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
+    # Use zeros as initial guess - CedarTranOp/CedarDCOp will compute DC during init()
     if u0 === nothing
         u0 = zeros(n)
     end
 
-    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
+    # Initialize workspace at t=0
     fast_rebuild!(ws, u0, 0.0)
 
     # RHS function using EvalWorkspace with DirectStampContext
@@ -1723,10 +1720,14 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         return nothing
     end
 
-    # Jacobian using EvalWorkspace
+    # Jacobian using EvalWorkspace (zero-allocation for dense matrices)
     function jac!(J, u, p, t)
         fast_rebuild!(p, u, real_time(t))
-        copyto!(J, -p.structure.G)
+        G = p.structure.G
+        # Avoid -G allocation: element-wise negate into J
+        @inbounds for i in eachindex(J, G)
+            J[i] = -G[i]
+        end
         return nothing
     end
 
@@ -1738,7 +1739,7 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         jac_prototype = -cs.G
     )
 
-    # Pass workspace as p for CedarDCOp initialization
+    # Pass workspace as p parameter
     return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws; kwargs...)
 end
 
@@ -1834,10 +1835,16 @@ ws.structure.C   # Capacitance matrix
 fast_rebuild!(ws, u, t)
 fast_residual!(resid, du, u, ws, t)
 ```
+
+# Zero-allocation dense Jacobian (for OrdinaryDiffEq ImplicitEuler)
+```julia
+ws = compile(circuit; dense=true)  # Use dense matrices
+# Now fast_jacobian!(J_dense, du, u, ws, gamma, t) is zero-allocation
+```
 """
-function compile(circuit::MNACircuit)
+function compile(circuit::MNACircuit; dense::Bool=false)
     ctx = build_with_detection(circuit)
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx, dense=dense)
     return create_workspace(cs; ctx=ctx)
 end
 

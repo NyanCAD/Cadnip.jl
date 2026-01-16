@@ -420,8 +420,8 @@ Note: The -L in C comes from rewriting V = L*dI/dt as:
       Vp - Vn - L*dI/dt = 0
 """
 function stamp!(L::Inductor, ctx::AnyMNAContext, p::Int, n::Int)
-    # Allocate current variable
-    I_idx = alloc_current!(ctx, Symbol(:I_, L.name))
+    # Allocate current variable using component-based API (zero allocation for DirectStampContext)
+    I_idx = alloc_current!(ctx, :I_, L.name)
 
     # KCL: current I_L flows from p to n
     stamp_G!(ctx, p, I_idx,  1.0)
@@ -470,8 +470,8 @@ b_ac = V_ac               Source voltage value (AC small-signal)
 ```
 """
 function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int)
-    # Allocate current variable
-    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+    # Allocate current variable using component-based API (zero allocation for DirectStampContext)
+    I_idx = alloc_current!(ctx, :I_, V.name)
 
     # KCL: current I_V flows from p through source to n
     stamp_G!(ctx, p, I_idx,  1.0)
@@ -495,7 +495,8 @@ For DC/AC analysis, uses the DC value.
 """
 @inline function stamp!(V::VoltageSource, ctx::AnyMNAContext, p::Int, n::Int,
                         t::Real, mode::Symbol)
-    I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
+    # Component-based API for zero allocation in DirectStampContext
+    I_idx = alloc_current!(ctx, :I_, V.name)
 
     stamp_G!(ctx, p, I_idx,  1.0)
     stamp_G!(ctx, n, I_idx, -1.0)
@@ -600,8 +601,8 @@ G = I_E    [ +1    -1   -A   +A    . ]  Voltage: Vout - A*Vin = 0
 where A = E.gain
 """
 function stamp!(E::VCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
-    # Allocate current variable for output branch
-    I_idx = alloc_current!(ctx, Symbol(:I_, E.name))
+    # Allocate current variable for output branch (zero allocation for DirectStampContext)
+    I_idx = alloc_current!(ctx, :I_, E.name)
 
     # KCL at output nodes
     stamp_G!(ctx, out_p, I_idx,  1.0)
@@ -664,11 +665,11 @@ Returns (I_out_idx, I_in_idx) - indices of output and input current variables.
 The input branch is a zero-volt voltage source (ammeter) to sense current.
 """
 function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
-    # Input current variable (sensing branch: V = 0)
-    I_in_idx = alloc_current!(ctx, Symbol(:I_, H.name, :_in))
+    # Input current variable (sensing branch: V = 0) - zero allocation for DirectStampContext
+    I_in_idx = alloc_current!(ctx, :I_, H.name, :_in)
 
-    # Output current variable
-    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name, :_out))
+    # Output current variable - zero allocation for DirectStampContext
+    I_out_idx = alloc_current!(ctx, :I_, H.name, :_out)
 
     # Input sensing branch (zero-volt source)
     stamp_G!(ctx, in_p, I_in_idx,  1.0)
@@ -705,8 +706,8 @@ Returns I_in_idx - the index of the input current variable.
 The input branch is a zero-volt voltage source (ammeter) to sense current.
 """
 function stamp!(F::CCCS, ctx::AnyMNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
-    # Input current variable (sensing branch)
-    I_in_idx = alloc_current!(ctx, Symbol(:I_, F.name, :_in))
+    # Input current variable (sensing branch) - zero allocation for DirectStampContext
+    I_in_idx = alloc_current!(ctx, :I_, F.name, :_in)
 
     # Input sensing branch (zero-volt source)
     stamp_G!(ctx, in_p, I_in_idx,  1.0)
@@ -738,8 +739,8 @@ This is used when the SPICE netlist references a voltage source name for current
 Returns I_out_idx - the index of the output current variable.
 """
 function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
-    # Output current variable
-    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
+    # Output current variable (component-based API for zero allocation)
+    I_out_idx = alloc_current!(ctx, :I_, H.name)
 
     # Output branch
     stamp_G!(ctx, out_p, I_out_idx,  1.0)
@@ -781,8 +782,8 @@ end
 Stamp a CCVS using an existing current variable (accepts CurrentIndex from get_current_idx).
 """
 function stamp!(H::CCVS, ctx::AnyMNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
-    # Output current variable
-    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
+    # Output current variable (component-based API for zero allocation)
+    I_out_idx = alloc_current!(ctx, :I_, H.name)
 
     # Output branch
     stamp_G!(ctx, out_p, I_out_idx,  1.0)
@@ -920,8 +921,8 @@ Returns the index of the source current variable.
 """
 function stamp!(B::BehavioralVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
                 get_voltage=nothing)
-    # Allocate current variable
-    I_idx = alloc_current!(ctx, Symbol(:I_, B.name))
+    # Allocate current variable (component-based API for zero allocation)
+    I_idx = alloc_current!(ctx, :I_, B.name)
 
     # KCL: current I flows from p through source to n
     stamp_G!(ctx, p, I_idx,  1.0)
