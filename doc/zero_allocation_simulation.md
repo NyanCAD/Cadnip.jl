@@ -175,13 +175,14 @@ using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 circuit = MNACircuit(builder; params...)
 
 # Create ODE problem with dense matrices for zero-allocation
-# DC operating point is computed automatically
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
 # Create integrator with minimal overhead
+# CedarTranOp computes DC operating point during init
 integrator = init(prob, ImplicitEuler(autodiff=false),
     adaptive=false, dt=1e-5, callback=nothing,
-    save_on=false, dense=false, maxiters=10_000_000)
+    save_on=false, dense=false, maxiters=10_000_000,
+    initializealg=MNA.CedarTranOp())
 
 # Real-time loop (TRUE 0 bytes/call)
 while running

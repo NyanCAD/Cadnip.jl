@@ -510,17 +510,18 @@ end
 
     @testset "OrdinaryDiffEq zero-allocation transient with SPICE BJT" begin
         # Use simplified ODEProblem API with dense=true for zero-allocation
-        # DC operating point is computed automatically when u0 not provided
         prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
 
         # Create integrator with zero-allocation settings
+        # CedarTranOp computes DC operating point during init
         integrator = init(prob, ImplicitEuler(autodiff=false),
             adaptive=false,
             dt=1e-9,
             callback=nothing,
             save_on=false,
             dense=false,
-            maxiters=10_000_000
+            maxiters=10_000_000,
+            initializealg=MNA.CedarTranOp()
         )
 
         # Warmup
