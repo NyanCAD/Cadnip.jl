@@ -166,7 +166,7 @@ end
 Julia's compiler optimizes away the ReturnCode allocation when it sees the value is unused.
 This is much simpler than calling internal functions directly.
 
-**Alternative**: Call OrdinaryDiffEq's internal functions directly (more control, same result):
+**Using the API**: The `make_ode_functions` helper creates properly typed ODE functions:
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
@@ -174,65 +174,29 @@ using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 # Compile with dense matrices for zero-allocation Jacobian
 ws = MNA.compile(circuit; dense=true)
 n = MNA.system_size(ws)
-du_work = zeros(n)
 
-# Use a struct to pass workspace (avoids closure boxing)
-struct WorkspaceParams{W, D}
-    ws::W
-    du_work::D
-end
-params = WorkspaceParams(ws, du_work)
+# Get ODE functions - pass ws directly as p parameter
+f!, jac! = MNA.make_ode_functions(ws)
 
-# ODE functions access workspace through p parameter
-function ode_f!(du, u, p, t)
-    MNA.fast_rebuild!(p.ws, u, t)
-    MNA.fast_residual!(du, p.du_work, u, p.ws, t)
-    return nothing
-end
+# Get initial condition
+u0 = copy(dc!(circuit).x)
 
-function ode_jac!(J, u, p, t)
-    MNA.fast_rebuild!(p.ws, u, t)
-    MNA.fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
-    return nothing
-end
-
-# Create ODE problem with workspace as p
+# Create ODE problem - ws is the p parameter (no wrapper needed)
 jac_proto = zeros(n, n)
-odef = ODEFunction(ode_f!; jac=ode_jac!, jac_prototype=jac_proto)
-prob = ODEProblem(odef, u0, tspan, params)
+odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
+prob = ODEProblem(odef, u0, tspan, ws)
 
 # Create integrator with minimal overhead
 integrator = init(prob, ImplicitEuler(autodiff=false),
-    adaptive=false,
-    dt=1e-5,
-    callback=nothing,
-    save_on=false,
-    dense=false,
-    maxiters=10_000_000
-)
-
-# Access internal module
-ODECore = OrdinaryDiffEq.OrdinaryDiffEqCore
-cache = integrator.cache
-
-# Zero-allocation step function (0 bytes/call)
-function zero_alloc_step!(integrator, cache)
-    ODECore.loopheader!(integrator)
-    ODECore.perform_step!(integrator, cache)
-    ODECore.loopfooter!(integrator)
-    ODECore.handle_tstop!(integrator)
-    return nothing  # Do not return retcode - that's what allocates!
-end
+    adaptive=false, dt=1e-5, callback=nothing,
+    save_on=false, dense=false, maxiters=10_000_000)
 
 # Real-time loop (TRUE 0 bytes/call)
 while running
-    zero_alloc_step!(integrator, cache)
+    MNA.blind_step!(integrator)
     # Access state: integrator.u
 end
 ```
-
-**Key insight**: The 16-byte allocation comes from the `ReturnCode` enum escaping the function.
-Wrapping `step!()` in a function that returns `nothing` lets the compiler optimize it away.
 
 For the simplest zero-allocation approach without ODE solvers, use the manual stepper below.
 

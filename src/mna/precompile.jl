@@ -618,39 +618,16 @@ b_vector(ws::EvalWorkspace) = ws.dctx.b
 export make_ode_functions, blind_step!
 
 """
-    ODEWorkspace{W<:EvalWorkspace}
-
-Wrapper struct for passing EvalWorkspace through ODE solver's `p` parameter.
-
-This avoids closure boxing which would cause allocations. The ODE functions
-access the workspace through `p.ws` and use `p.du_work` as scratch space.
-
-# Example
-```julia
-ws = MNA.compile(circuit; dense=true)
-ode_ws = MNA.ODEWorkspace(ws)
-prob = ODEProblem(f!, u0, tspan, ode_ws)
-```
-"""
-struct ODEWorkspace{W<:EvalWorkspace}
-    ws::W
-    du_work::Vector{Float64}
-end
-
-function ODEWorkspace(ws::EvalWorkspace)
-    n = system_size(ws)
-    ODEWorkspace(ws, zeros(n))
-end
-
-"""
-    make_ode_functions(ws::EvalWorkspace) -> (f!, jac!, ODEWorkspace)
+    make_ode_functions(ws::EvalWorkspace) -> (f!, jac!)
 
 Create ODE functions for use with OrdinaryDiffEq from a compiled workspace.
 
 Returns a tuple of:
 - `f!(du, u, p, t)`: ODE right-hand side function
 - `jac!(J, u, p, t)`: Jacobian function
-- `ode_ws::ODEWorkspace`: Workspace wrapper to pass as `p` parameter
+
+Pass `ws` directly as the `p` parameter to ODEProblem. The functions use
+`ws.resid_tmp` as scratch space internally.
 
 # Example
 ```julia
@@ -658,16 +635,16 @@ using OrdinaryDiffEq
 
 circuit = MNACircuit(builder; params...)
 ws = MNA.compile(circuit; dense=true)
-f!, jac!, ode_ws = MNA.make_ode_functions(ws)
+f!, jac! = MNA.make_ode_functions(ws)
 
 # Get initial condition
 u0 = copy(dc!(circuit).x)
 
-# Create ODE problem
+# Create ODE problem - pass ws as p parameter
 n = MNA.system_size(ws)
 jac_proto = zeros(n, n)
 odef = ODEFunction(f!; jac=jac!, jac_prototype=jac_proto)
-prob = ODEProblem(odef, u0, tspan, ode_ws)
+prob = ODEProblem(odef, u0, tspan, ws)
 
 # Create zero-allocation integrator
 integrator = init(prob, ImplicitEuler(autodiff=false),
@@ -679,21 +656,19 @@ MNA.blind_step!(integrator)  # 0 bytes/call
 ```
 """
 function make_ode_functions(ws::EvalWorkspace)
-    ode_ws = ODEWorkspace(ws)
-
-    function f!(du, u, p, t)
-        fast_rebuild!(p.ws, u, t)
-        fast_residual!(du, p.du_work, u, p.ws, t)
+    function f!(du, u, p::EvalWorkspace, t)
+        fast_rebuild!(p, u, t)
+        fast_residual!(du, p.resid_tmp, u, p, t)
         return nothing
     end
 
-    function jac!(J, u, p, t)
-        fast_rebuild!(p.ws, u, t)
-        fast_jacobian!(J, p.du_work, u, p.ws, 1.0, t)
+    function jac!(J, u, p::EvalWorkspace, t)
+        fast_rebuild!(p, u, t)
+        fast_jacobian!(J, p.resid_tmp, u, p, 1.0, t)
         return nothing
     end
 
-    return (f!, jac!, ode_ws)
+    return (f!, jac!)
 end
 
 """
