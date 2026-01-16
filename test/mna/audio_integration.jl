@@ -426,3 +426,9 @@ eval(ce_amplifier_code)
     end
 
 end  # testset "Audio Integration Tests"
+
+# Note: Zero-allocation tests are in test/mna/zero_alloc.jl
+# Those tests comprehensively verify TRUE zero allocation with:
+# 1. Component-based API: alloc_current!(ctx, :I, :name) not Symbol(:I_, name)
+# 2. Dense LAPACK for refactorization
+# 3. Fixed factorization for linear circuits

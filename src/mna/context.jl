@@ -338,15 +338,35 @@ end
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
 
 """
-    alloc_current!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol) -> CurrentIndex
+    alloc_current!(ctx::MNAContext, prefix::Symbol, name::Symbol) -> CurrentIndex
 
 Component-based current allocation that builds the full name from components.
 Avoids Symbol interpolation at call site for use with DirectStampContext.
-For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+
+For MNAContext, constructs: Symbol(prefix, name) (direct concatenation, no extra separator).
+This matches the pattern Symbol(:I_, :Vs) -> :I_Vs.
+
+# Example
+```julia
+# These are equivalent for MNAContext:
+alloc_current!(ctx, :I_, :Vs)           # -> :I_Vs
+alloc_current!(ctx, Symbol(:I_, :Vs))   # -> :I_Vs (but allocates!)
+```
 """
-function alloc_current!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol)::CurrentIndex
-    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
-    return alloc_current!(ctx, name)
+function alloc_current!(ctx::MNAContext, prefix::Symbol, name::Symbol)::CurrentIndex
+    full_name = Symbol(prefix, name)
+    return alloc_current!(ctx, full_name)
+end
+
+"""
+    alloc_current!(ctx::MNAContext, prefix::Symbol, name::Symbol, suffix::Symbol) -> CurrentIndex
+
+Three-argument component-based current allocation for names like Symbol(:I_, :H1, :_in).
+For MNAContext, constructs: Symbol(prefix, name, suffix).
+"""
+function alloc_current!(ctx::MNAContext, prefix::Symbol, name::Symbol, suffix::Symbol)::CurrentIndex
+    full_name = Symbol(prefix, name, suffix)
+    return alloc_current!(ctx, full_name)
 end
 
 """

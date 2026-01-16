@@ -219,29 +219,47 @@ end
 @inline alloc_charge!(dctx::DirectStampContext, name::String, p::Int, n::Int) = alloc_charge!(dctx, Symbol(name), p, n)
 
 # Component-based APIs: avoid Symbol construction at call site
-# For DirectStampContext, base_name and instance_name are IGNORED - uses counter-based access
+# For DirectStampContext, names are IGNORED - uses counter-based access
 # These exist so generated code can pass components without allocating Symbol
 
 """
-    alloc_current!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol) -> CurrentIndex
+    alloc_current!(dctx::DirectStampContext, prefix::Symbol, name::Symbol) -> CurrentIndex
 
 Component-based current allocation that avoids Symbol interpolation at call site.
-For DirectStampContext, both names are ignored - uses counter-based access.
-For MNAContext, this builds the full name from components.
+For DirectStampContext, both arguments are ignored - uses counter-based access.
+For MNAContext, this builds: Symbol(prefix, name).
+
+# Example
+```julia
+alloc_current!(ctx, :I_, :Vs)  # Zero allocation for DirectStampContext
+```
 """
-@inline function alloc_current!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol)::CurrentIndex
+@inline function alloc_current!(dctx::DirectStampContext, prefix::Symbol, name::Symbol)::CurrentIndex
     pos = dctx.current_pos
     dctx.current_pos = pos + 1
     return CurrentIndex(pos)
 end
 
 """
-    alloc_charge!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int) -> ChargeIndex
+    alloc_current!(dctx::DirectStampContext, prefix::Symbol, name::Symbol, suffix::Symbol) -> CurrentIndex
+
+Three-argument component-based current allocation for names like Symbol(:I_, :H1, :_in).
+For DirectStampContext, all arguments are ignored - uses counter-based access.
+For MNAContext, this builds: Symbol(prefix, name, suffix).
+"""
+@inline function alloc_current!(dctx::DirectStampContext, prefix::Symbol, name::Symbol, suffix::Symbol)::CurrentIndex
+    pos = dctx.current_pos
+    dctx.current_pos = pos + 1
+    return CurrentIndex(pos)
+end
+
+"""
+    alloc_charge!(dctx::DirectStampContext, prefix::Symbol, name::Symbol, p::Int, n::Int) -> ChargeIndex
 
 Component-based charge allocation that avoids Symbol interpolation at call site.
-For DirectStampContext, both names are ignored - uses counter-based access.
+For DirectStampContext, names are ignored - uses counter-based access.
 """
-@inline function alloc_charge!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int)::ChargeIndex
+@inline function alloc_charge!(dctx::DirectStampContext, prefix::Symbol, name::Symbol, p::Int, n::Int)::ChargeIndex
     pos = dctx.charge_pos
     dctx.charge_pos = pos + 1
     return ChargeIndex(pos)
@@ -343,6 +361,69 @@ Stamp capacitance pattern for 2-terminal element.
     stamp_C!(dctx, n, p, -C)
     stamp_C!(dctx, n, n,  C)
     return nothing
+end
+
+"""
+    stamp_voltage_contribution!(dctx::DirectStampContext, p::Int, n::Int, v_fn, x::AbstractVector, current_name::Symbol)
+
+Zero-allocation voltage contribution stamping for DirectStampContext.
+"""
+@inline function stamp_voltage_contribution!(
+    dctx::DirectStampContext,
+    p::Int, n::Int,
+    v_fn,
+    x::AbstractVector,
+    current_name::Symbol
+)
+    # Allocate current variable (counter-based, zero allocation)
+    I_idx = alloc_current!(dctx, current_name)
+
+    # Get voltage value
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+    Vpn = Vp - Vn
+    v_val = v_fn(Vpn)
+
+    # Stamp voltage source pattern
+    stamp_G!(dctx, p, I_idx, 1.0)
+    stamp_G!(dctx, n, I_idx, -1.0)
+    stamp_G!(dctx, I_idx, p, 1.0)
+    stamp_G!(dctx, I_idx, n, -1.0)
+    stamp_b!(dctx, I_idx, v_val)
+
+    return I_idx
+end
+
+"""
+    stamp_voltage_contribution!(dctx::DirectStampContext, p::Int, n::Int, v_fn, x::AbstractVector, prefix::Symbol, name::Symbol)
+
+Component-based API for zero allocation. Takes prefix and name separately
+to avoid allocating a new Symbol during circuit rebuild.
+"""
+@inline function stamp_voltage_contribution!(
+    dctx::DirectStampContext,
+    p::Int, n::Int,
+    v_fn,
+    x::AbstractVector,
+    prefix::Symbol, name::Symbol
+)
+    # Allocate current variable (counter-based, zero allocation)
+    I_idx = alloc_current!(dctx, prefix, name)
+
+    # Get voltage value
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+    Vpn = Vp - Vn
+    v_val = v_fn(Vpn)
+
+    # Stamp voltage source pattern
+    stamp_G!(dctx, p, I_idx, 1.0)
+    stamp_G!(dctx, n, I_idx, -1.0)
+    stamp_G!(dctx, I_idx, p, 1.0)
+    stamp_G!(dctx, I_idx, n, -1.0)
+    stamp_b!(dctx, I_idx, v_val)
+
+    return I_idx
 end
 
 @inline reset_for_restamping!(dctx::DirectStampContext) = reset_direct_stamp!(dctx)

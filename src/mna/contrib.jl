@@ -649,6 +649,38 @@ function stamp_voltage_contribution!(
     return I_idx
 end
 
+"""
+    stamp_voltage_contribution!(ctx::MNAContext, p::Int, n::Int, v_fn, x::AbstractVector, prefix::Symbol, name::Symbol)
+
+Component-based API for zero allocation. Same as above but takes prefix and name separately
+to avoid allocating a new Symbol during circuit rebuild.
+"""
+function stamp_voltage_contribution!(
+    ctx::MNAContext,
+    p::Int, n::Int,
+    v_fn,
+    x::AbstractVector,
+    prefix::Symbol, name::Symbol
+)
+    # Allocate current variable (component-based API for zero allocation)
+    I_idx = alloc_current!(ctx, prefix, name)
+
+    # Get voltage value
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+    Vpn = Vp - Vn
+    v_val = v_fn(Vpn)
+
+    # Stamp voltage source pattern
+    stamp_G!(ctx, p, I_idx, 1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p, 1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+    stamp_b!(ctx, I_idx, v_val)
+
+    return I_idx
+end
+
 export stamp_current_contribution!, stamp_voltage_contribution!, evaluate_contribution
 export stamp_charge_contribution!, evaluate_charge_contribution
 
