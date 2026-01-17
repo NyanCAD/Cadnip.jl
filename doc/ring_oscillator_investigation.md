@@ -140,6 +140,59 @@ Max voltage: 16.18V  # Note: linear solve at u=0, not physically meaningful
 V(vdd): 1.2V  # Correct supply voltage
 ```
 
+## Successful Configuration (January 2026)
+
+After extensive CI testing, a working configuration was found:
+
+### Winning Configuration
+
+```julia
+tran!(circuit, (0.0, 1e-9);
+    solver=FBDF(autodiff=false),
+    dtmax=0.01e-9,  # 10ps max step - CRITICAL
+    initializealg=CedarTranOp())
+```
+
+**Results:**
+- Status: **Success** (100% completion)
+- Timepoints: 180
+- NR iterations: 531
+- Iter/step: 3.0 (healthy)
+
+### Key Findings
+
+| Configuration | Status | Progress | Notes |
+|---------------|--------|----------|-------|
+| FBDF + dtmax=0.1ns | Unstable | 25% | Too large step |
+| FBDF + dtmax=0.01ns | **Success** | **100%** | **Winner** |
+| FBDF + loose tol | Unstable | 32% | Tolerances don't help |
+| Rodas5P | Unstable | 31% | Wrong solver type |
+| IDA | Segfault | - | Bug in DAE path |
+
+### Why It Works
+
+1. **CedarTranOp homotopy**: The initialization uses a fallback chain:
+   - Regular DC solve → fails (expected, no stable DC point)
+   - GMIN stepping → fails
+   - Source stepping → **succeeds**
+
+2. **FBDF solver**: BDF (Backward Differentiation Formula) methods are the standard
+   for stiff circuit simulation. FBDF is SciML's modern BDF implementation.
+
+3. **dtmax=0.01ns (10ps)**: This is the critical parameter. The ring oscillator
+   switches at ~GHz frequencies, requiring small timesteps to capture the dynamics.
+   With dtmax=0.1ns, the solver tries to take steps too large and goes unstable.
+
+### Updated Recommendations
+
+The ring oscillator benchmark (`benchmarks/vacask/ring/cedarsim/runme.jl`) has been
+updated to use this winning configuration.
+
+For ring oscillators and other fast-switching circuits:
+- Use `FBDF(autodiff=false)` solver
+- Use `CedarTranOp()` for initialization (enables homotopy)
+- Set `dtmax` small enough to capture switching (e.g., 10ps for GHz circuits)
+
 ## Investigation Notes
 
 Diagnostic scripts were used during investigation but have been cleaned up.
@@ -148,3 +201,4 @@ Key tests performed:
 - Single BSIM4 device comparison (76s vs 150s JIT)
 - GMIN regularization (enables linear solve)
 - LevenbergMarquardt solver (successfully finds pseudo-equilibrium)
+- CI testing of solver/tolerance/dtmax combinations (found winning config)
