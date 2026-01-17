@@ -439,7 +439,7 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
                 mosfet_type = val == :p ? :pmos : :nmos
                 continue
             end
-            # Default handling - no rewrite
+            # Default handling - no rewrite (falls through to add as parameter)
         elseif name == :level
             # TODO
             level = parse(Float64, String(p.val))
@@ -1916,6 +1916,73 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     end
 end
 
+"""
+    cg_mna_instance!(state, instance::SNode{SP.OSDIDevice})
+
+Generate MNA builder code for OSDI device instances (N elements).
+
+OSDI devices are VA-generated devices referenced through model cards.
+The model (e.g., psp103n) is a type with a `stamp!` method.
+Instance parameters are passed as keyword arguments.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
+    nets = sema_nets(instance)
+    # Build node argument list dynamically based on number of terminals
+    node_exprs = [cg_net_name!(state, net) for net in nets]
+    name = LString(instance.name)
+
+    # Get the model reference - can be in model or model_after field
+    model_ref_name = instance.model !== nothing ? instance.model : instance.model_after
+    if model_ref_name === nothing
+        error("OSDI device $name has no model specified")
+    end
+    model_name = cg_model_name!(state, model_ref_name)
+
+    # Look up the model definition to get the GlobalRef for case-insensitive param lookup
+    model_sym = LSymbol(model_ref_name)
+    case_insensitive = Dict{Symbol,Symbol}()
+    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
+        (_, def) = last(state.sema.models[model_sym])
+        model_globalref = def.val[2]
+        if model_globalref isa GlobalRef
+            T = getglobal(model_globalref.mod, model_globalref.name)
+            case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+        end
+    end
+
+    # Build instance parameter kwargs with case-insensitive lookup
+    param_kwargs = Expr[]
+    for p in instance.parameters
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        # Use case-insensitive lookup to find correct parameter name
+        lname = Symbol(lowercase(String(param_name)))
+        rname = get(case_insensitive, lname, param_name)
+        push!(param_kwargs, Expr(:kw, rname, param_val))
+    end
+
+    # Generate code to create device instance and stamp it
+    if isempty(param_kwargs)
+        device_expr = :($model_name())
+    else
+        device_expr = Expr(:call, model_name, param_kwargs...)
+    end
+
+    # Generate stamp! call with variable number of node arguments
+    # Build the call expression manually to handle variable node count
+    node_args = Expr(:tuple, node_exprs...)
+    instance_sym = QuoteNode(Symbol(name))
+
+    return quote
+        let dev = $device_expr
+            nodes = $node_args
+            $(MNA).stamp!(dev, ctx, nodes...;
+                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_instance_ = $instance_sym)
+        end
+    end
+end
+
 # Fallback for unhandled instance types - generate nothing
 function cg_mna_instance!(state::CodegenState, instance)
     return :(nothing)  # Skip unimplemented devices
@@ -2198,7 +2265,106 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}())
+    codegen_toplevel_models!(state::CodegenState)
+
+Generate model definitions for the top level of the circuit.
+Returns an array of Expr that should be placed at module scope (before subcircuit builders).
+
+This extracts model factory definitions (like psp103n, psp103p) so they can be
+accessed by both subcircuit builders and the main circuit function.
+"""
+function codegen_toplevel_models!(state::CodegenState)
+    model_defs = Expr[]
+
+    for (model_name, defs) in state.sema.models
+        if !isempty(defs)
+            (_, def) = last(defs)  # Use most recent definition
+            model_ast = def.val[1]  # The model SNode
+            model_ref = def.val[2]  # The GlobalRef
+
+            # Check if this is a resistor model
+            typ = LSymbol(model_ast.typ)
+            if typ == :r
+                # Extract model parameters into a NamedTuple
+                model_params = Expr[]
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Skip meta-parameters
+                    if pname in (:level, :version, :type)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use uppercase for R parameter (SPICE convention)
+                    if pname == :r
+                        push!(model_params, Expr(:(=), :R, pval))
+                    elseif pname == :rsh
+                        push!(model_params, Expr(:(=), :rsh, pval))
+                    else
+                        push!(model_params, Expr(:(=), pname, pval))
+                    end
+                end
+                model_var = cg_model_name!(state, model_name)
+                push!(model_defs, :($model_var = ($(model_params...),)))
+            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                # VA model from imported HDL module or external package
+                # Get the model type to build case-insensitive parameter lookup
+                T = getglobal(model_ref.mod, model_ref.name)
+                case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+
+                model_params = Expr[]
+                level = nothing
+                version = nothing
+                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+                type_val = nothing
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    if pname == :level
+                        level = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :version
+                        version = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :type
+                        type_val = cg_expr!(state, p.val)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use case-insensitive lookup to find correct parameter name
+                    lname = Symbol(lowercase(String(pname)))
+                    rname = get(case_insensitive, lname, pname)
+                    push!(model_params, Expr(:kw, rname, pval))
+                end
+                device_type = mosfet_type !== nothing ? mosfet_type : typ
+                level_int = level === nothing ? nothing : Int(level)
+                version_str = version === nothing ? nothing : string(Int(version))
+                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                has_type_from_registry = false
+                for (param_name, param_val) in pairs(type_params)
+                    push!(model_params, Expr(:kw, param_name, param_val))
+                    if param_name == :TYPE
+                        has_type_from_registry = true
+                    end
+                end
+                if !has_type_from_registry && type_val !== nothing
+                    push!(model_params, Expr(:kw, :TYPE, type_val))
+                end
+                model_var = cg_model_name!(state, model_name)
+                push!(model_defs, quote
+                    $model_var = let base_type = $model_ref
+                        function(; kwargs...)
+                            base_type(; $(model_params...), kwargs...)
+                        end
+                    end
+                end)
+            end
+        end
+    end
+
+    return model_defs
+end
+
+"""
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), skip_models=false)
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2211,9 +2377,12 @@ When `is_subcircuit=false` (top-level), params come from the `params` argument.
 
 `subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
 to look up exposed_parameters when generating subcircuit instance calls.
+
+`skip_models=true` skips model codegen (used when models are defined at top level).
 """
 function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
-                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
+                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
+                      skip_models::Bool=false)
     block = Expr(:block)
     ret = block
 
@@ -2336,81 +2505,101 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Codegen model definitions for MNA
+    # Codegen model definitions for MNA (unless skip_models=true, meaning models are at top level)
     # For each model, extract parameters and create a NamedTuple or VA model wrapper
-    for (model_name, defs) in state.sema.models
-        if !isempty(defs)
-            (_, def) = last(defs)  # Use most recent definition
-            model_ast = def.val[1]  # The model SNode
-            model_ref = def.val[2]  # The GlobalRef
+    if !skip_models
+        for (model_name, defs) in state.sema.models
+            if !isempty(defs)
+                (_, def) = last(defs)  # Use most recent definition
+                model_ast = def.val[1]  # The model SNode
+                model_ref = def.val[2]  # The GlobalRef
 
-            # Check if this is a resistor model
-            typ = LSymbol(model_ast.typ)
-            if typ == :r
-                # Extract model parameters into a NamedTuple
-                model_params = Expr[]
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    # Skip meta-parameters
-                    if pname in (:level, :version, :type)
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    # Use uppercase for R parameter (SPICE convention)
-                    # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
-                    if pname == :r
-                        push!(model_params, Expr(:(=), :R, pval))
-                    elseif pname == :rsh
-                        push!(model_params, Expr(:(=), :rsh, pval))
-                    else
-                        push!(model_params, Expr(:(=), pname, pval))
-                    end
-                end
-                model_var = cg_model_name!(state, model_name)
-                push!(block.args, :($model_var = ($(model_params...),)))
-            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
-                # VA model from imported HDL module or external package
-                # Create a model wrapper that combines model params with instance params
-                model_params = Expr[]
-                # Extract level, version for getparams lookup
-                level = nothing
-                version = nothing
-                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    # Track meta-parameters for registry lookup
-                    if pname == :level
-                        level = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :version
-                        version = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :type
-                        # Skip - will be added from getparams
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    push!(model_params, Expr(:kw, pname, pval))
-                end
-                # Query model registry for type parameters (polarity for MOSFET/BJT)
-                device_type = mosfet_type !== nothing ? mosfet_type : typ
-                level_int = level === nothing ? nothing : Int(level)
-                version_str = version === nothing ? nothing : string(Int(version))
-                type_params = CedarSim.getparams(device_type, level_int, version_str)
-                for (param_name, param_val) in pairs(type_params)
-                    push!(model_params, Expr(:kw, param_name, param_val))
-                end
-                model_var = cg_model_name!(state, model_name)
-                # Create a callable that returns a VA device with merged parameters
-                # model_name(; instance_params...) = VAType(; model_params..., instance_params...)
-                push!(block.args, quote
-                    $model_var = let base_type = $model_ref
-                        # Create a callable that merges model params with instance params
-                        function(; kwargs...)
-                            base_type(; $(model_params...), kwargs...)
+                # Check if this is a resistor model
+                typ = LSymbol(model_ast.typ)
+                if typ == :r
+                    # Extract model parameters into a NamedTuple
+                    model_params = Expr[]
+                    for p in model_ast.parameters
+                        pname = LSymbol(p.name)
+                        # Skip meta-parameters
+                        if pname in (:level, :version, :type)
+                            continue
+                        end
+                        pval = cg_expr!(state, p.val)
+                        # Use uppercase for R parameter (SPICE convention)
+                        # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
+                        if pname == :r
+                            push!(model_params, Expr(:(=), :R, pval))
+                        elseif pname == :rsh
+                            push!(model_params, Expr(:(=), :rsh, pval))
+                        else
+                            push!(model_params, Expr(:(=), pname, pval))
                         end
                     end
-                end)
+                    model_var = cg_model_name!(state, model_name)
+                    push!(block.args, :($model_var = ($(model_params...),)))
+                elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                    # VA model from imported HDL module or external package
+                    # Get the model type to build case-insensitive parameter lookup
+                    T = getglobal(model_ref.mod, model_ref.name)
+                    case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+
+                    # Create a model wrapper that combines model params with instance params
+                    model_params = Expr[]
+                    # Extract level, version for getparams lookup
+                    level = nothing
+                    version = nothing
+                    mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+                    type_val = nothing  # Track type parameter value for later
+                    for p in model_ast.parameters
+                        pname = LSymbol(p.name)
+                        # Track meta-parameters for registry lookup
+                        if pname == :level
+                            level = parse(Float64, String(p.val))
+                            continue
+                        elseif pname == :version
+                            version = parse(Float64, String(p.val))
+                            continue
+                        elseif pname == :type
+                            # Store type value - may need to add if getparams doesn't provide it
+                            type_val = cg_expr!(state, p.val)
+                            continue
+                        end
+                        pval = cg_expr!(state, p.val)
+                        # Use case-insensitive lookup to find correct parameter name
+                        lname = Symbol(lowercase(String(pname)))
+                        rname = get(case_insensitive, lname, pname)
+                        push!(model_params, Expr(:kw, rname, pval))
+                    end
+                    # Query model registry for type parameters (polarity for MOSFET/BJT)
+                    device_type = mosfet_type !== nothing ? mosfet_type : typ
+                    level_int = level === nothing ? nothing : Int(level)
+                    version_str = version === nothing ? nothing : string(Int(version))
+                    type_params = CedarSim.getparams(device_type, level_int, version_str)
+                    has_type_from_registry = false
+                    for (param_name, param_val) in pairs(type_params)
+                        push!(model_params, Expr(:kw, param_name, param_val))
+                        if param_name == :TYPE
+                            has_type_from_registry = true
+                        end
+                    end
+                    # If getparams didn't provide TYPE but model card had type=N, add it
+                    if !has_type_from_registry && type_val !== nothing
+                        # VA models typically expect TYPE (uppercase) for device polarity
+                        push!(model_params, Expr(:kw, :TYPE, type_val))
+                    end
+                    model_var = cg_model_name!(state, model_name)
+                    # Create a callable that returns a VA device with merged parameters
+                    # model_name(; instance_params...) = VAType(; model_params..., instance_params...)
+                    push!(block.args, quote
+                        $model_var = let base_type = $model_ref
+                            # Create a callable that merges model params with instance params
+                            function(; kwargs...)
+                                base_type(; $(model_params...), kwargs...)
+                            end
+                        end
+                    end)
+                end
             end
         end
     end
@@ -2646,7 +2835,11 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
     end
 
-    # Generate subcircuit builders first
+    # Generate top-level model definitions FIRST
+    # These need to be accessible by subcircuit builders and the main circuit
+    model_defs = codegen_toplevel_models!(state)
+
+    # Generate subcircuit builders
     subckt_defs = Expr[]
     for (name, subckt_list) in sema_result.subckts
         if !isempty(subckt_list)
@@ -2657,8 +2850,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
     end
 
-    # Generate the body - pass subckt_semas in case top-level has subcircuit instances
-    body = codegen_mna!(state; subckt_semas=subckt_semas)
+    # Generate the body - skip_models=true since models are at top level
+    body = codegen_mna!(state; subckt_semas=subckt_semas, skip_models=true)
 
     # Wrap in function definition with necessary imports
     # These imports are needed when the generated code is eval'd directly in Main
@@ -2671,6 +2864,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         using CedarSim.MNA: pwl_at_time  # For PWL transient functions
         using CedarSim: ParamLens, IdentityLens, StaticArrays
         using CedarSim.SpectreEnvironment
+
+        # Top-level model factory functions (accessible by subcircuit builders and main circuit)
+        $(model_defs...)
 
         # Subcircuit builders
         $(subckt_defs...)
