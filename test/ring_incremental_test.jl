@@ -1,9 +1,10 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# Ring Oscillator Test - FBDF Focus
+# Ring Oscillator Test - Winning Configuration
 #
-# FBDF got source stepping to succeed (149 pts, 0.25ns, 4.6 iter/step)
-# Try variations to push further
+# FBDF + CedarTranOp + dtmax=0.01ns successfully simulates the PSP103 ring oscillator.
+#
+# See doc/ring_oscillator_investigation.md for full investigation details.
 #==============================================================================#
 
 using CedarSim
@@ -11,13 +12,13 @@ using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp
 using OrdinaryDiffEq: FBDF
 using Printf
-using Logging
-
-global_logger(ConsoleLogger(stderr, Logging.Debug))
+using Test
 
 println("="^60)
-println("Loading PSP103 and parsing circuit...")
+println("Ring Oscillator Test - PSP103 + CedarTranOp")
 println("="^60)
+
+println("\nLoading PSP103 model...")
 using PSPModels
 
 const spice_file = joinpath(@__DIR__, "..", "benchmarks", "vacask", "ring", "cedarsim", "runme.sp")
@@ -28,52 +29,30 @@ eval(circuit_code)
 
 circuit = MNACircuit(ring_circuit)
 data = MNA.assemble!(circuit)
-println("  Assembled. $(size(data.G, 1)) unknowns.")
+println("Assembled: $(size(data.G, 1)) unknowns")
 
-function test_tran(name; solver, tspan=(0.0, 1e-9), kwargs...)
-    println("\n" * "="^60)
-    println("$name")
-    println("="^60)
+println("\nRunning transient (FBDF + CedarTranOp + dtmax=0.01ns)...")
+sol = tran!(circuit, (0.0, 1e-9);
+    solver=FBDF(autodiff=false),
+    dtmax=0.01e-9,
+    initializealg=CedarTranOp(),
+    maxiters=100000,
+    dense=false)
 
-    circ = MNACircuit(ring_circuit)
-    MNA.assemble!(circ)
-
-    try
-        sol = tran!(circ, tspan; solver=solver, initializealg=CedarTranOp(),
-                    dense=false, kwargs...)
-        println("  Status:     $(sol.retcode)")
-        println("  Timepoints: $(length(sol.t))")
-        println("  Final time: $(@sprintf("%.3e", sol.t[end])) / $(@sprintf("%.3e", tspan[2]))")
-        pct = 100 * sol.t[end] / tspan[2]
-        println("  Progress:   $(@sprintf("%.1f", pct))%")
-        if sol.stats !== nothing && sol.stats.nnonliniter > 0
-            println("  NR iters:   $(sol.stats.nnonliniter)")
-            println("  Iter/step:  $(@sprintf("%.1f", sol.stats.nnonliniter / max(1, length(sol.t))))")
-        end
-        return sol.retcode, sol.t[end]
-    catch e
-        println("  FAILED: $e")
-        return :error, 0.0
-    end
+println("\n=== Results ===")
+println("  Status:     $(sol.retcode)")
+@printf("  Timepoints: %d\n", length(sol.t))
+@printf("  Final time: %.3e / %.3e\n", sol.t[end], 1e-9)
+pct = 100 * sol.t[end] / 1e-9
+@printf("  Progress:   %.1f%%\n", pct)
+if sol.stats !== nothing && sol.stats.nnonliniter > 0
+    @printf("  NR iters:   %d\n", sol.stats.nnonliniter)
+    @printf("  Iter/step:  %.1f\n", sol.stats.nnonliniter / length(sol.t))
 end
 
-# FBDF baseline (got 149 pts, 0.25ns before)
-test_tran("FBDF baseline";
-    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000)
+@testset "Ring oscillator transient" begin
+    @test sol.retcode == :Success
+    @test sol.t[end] >= 1e-9 * 0.99  # Allow small tolerance
+end
 
-# FBDF + force_dtmin (force through unstable points)
-test_tran("FBDF + force_dtmin";
-    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000, force_dtmin=true)
-
-# FBDF + smaller dtmax (catch fast dynamics)
-test_tran("FBDF + dtmax=0.01ns";
-    solver=FBDF(autodiff=false), dtmax=0.01e-9, maxiters=200000)
-
-# FBDF + looser tolerances (less strict convergence)
-test_tran("FBDF + loose tol";
-    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000,
-    abstol=1e-6, reltol=1e-4)
-
-println("\n" * "="^60)
-println("Done!")
-println("="^60)
+println("\nDone!")

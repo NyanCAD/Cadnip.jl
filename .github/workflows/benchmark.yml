@@ -1,11 +1,10 @@
-name: Ring Oscillator Benchmark
+name: Benchmarks
 
 on:
   push:
     branches:
       - main
       - master
-      - 'claude/*'  # Run on claude branches
   pull_request:
   workflow_dispatch:  # Allow manual triggering
 
@@ -14,45 +13,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ring-benchmark:
-    name: Ring Oscillator - CedarTranOp Homotopy Test
+  benchmark:
+    name: VACASK Benchmarks - Julia ${{ matrix.version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.11'
+          version: ${{ matrix.version }}
 
       - uses: julia-actions/cache@v2
 
       - name: Install dependencies
         run: |
-          julia --project=test -e '
+          julia --project=benchmarks -e '
             using Pkg
             Pkg.instantiate()
             Pkg.precompile()
           '
 
-      - name: Run ring oscillator benchmark
+      - name: Run VACASK benchmarks
         run: |
-          echo "Starting at $(date)"
-          time julia --project=test test/ring_incremental_test.jl 2>&1 | tee ring_results.txt
-          echo "Finished at $(date)"
+          julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl benchmark_results.md
 
-      - name: Publish results
-        run: |
-          echo "## Ring Oscillator Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat ring_results.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Publish benchmark results
+        run: cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload results
+      - name: Upload benchmark results
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: ring-benchmark-results
-          path: ring_results.txt
+          name: benchmark-results-julia-${{ matrix.version }}
+          path: benchmark_results.md
           retention-days: 30
