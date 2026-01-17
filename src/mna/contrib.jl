@@ -737,9 +737,13 @@ result = evaluate_charge_contribution(q_fn, 0.3, 0.0)
 ```
 """
 function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
+    # Extract Float64 values in case inputs are Dual numbers (from solver AD)
+    Vp_f64 = Float64(value(Vp))
+    Vn_f64 = Float64(value(Vn))
+
     # Create voltage duals for Jacobian computation
-    Vp_dual = Dual{JacobianTag}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
-    Vn_dual = Dual{JacobianTag}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
+    Vp_dual = Dual{JacobianTag}(Vp_f64, one(Vp_f64), zero(Vp_f64))  # ∂/∂Vp = 1, ∂/∂Vn = 0
+    Vn_dual = Dual{JacobianTag}(Vn_f64, zero(Vn_f64), one(Vn_f64))  # ∂/∂Vp = 0, ∂/∂Vn = 1
 
     # Compute q with branch voltage
     Vpn_dual = Vp_dual - Vn_dual  # ∂Vpn/∂Vp = 1, ∂Vpn/∂Vn = -1
@@ -1068,6 +1072,57 @@ String convenience overload.
 """
 stamp_charge_state!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String) =
     stamp_charge_state!(ctx, p, n, q_fn, x, Symbol(charge_name))
+
+"""
+    stamp_charge_state!(dctx::DirectStampContext, p, n, q_fn, x, charge_name) -> ChargeIndex
+
+DirectStampContext version of stamp_charge_state! for fast rebuilds.
+Uses counter-based charge allocation and precompiled sparse matrix stamping.
+"""
+function stamp_charge_state!(
+    dctx::DirectStampContext,
+    p::Int, n::Int,
+    q_fn,
+    x::AbstractVector,
+    charge_name::Symbol
+)
+    # Allocate charge state variable (counter-based for DirectStampContext)
+    q_idx = alloc_charge!(dctx, charge_name, p, n)
+
+    # Get operating point voltages
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+
+    # Get current charge value (for Newton companion)
+    q_resolved = resolve_index(dctx, q_idx)
+    q_current = length(x) >= q_resolved ? x[q_resolved] : 0.0
+
+    # Evaluate charge function and capacitances
+    result = evaluate_charge_contribution(q_fn, Vp, Vn)
+
+    # --- 1. Mass matrix entries (constant, already stamped during MNAContext build) ---
+    # For DirectStampContext, C matrix is not restamped (it's constant)
+    # The C matrix entries were set during the initial MNAContext build
+
+    # --- 2. Conductance matrix (scaled constraint Jacobian) ---
+    stamp_G!(dctx, q_idx, q_idx, 1.0)
+
+    if p != 0
+        stamp_G!(dctx, q_idx, p, -CHARGE_SCALE * result.dq_dVp)
+    end
+    if n != 0
+        stamp_G!(dctx, q_idx, n, -CHARGE_SCALE * result.dq_dVn)
+    end
+
+    # --- 3. RHS (Newton companion model for scaled constraint) ---
+    b_constraint = CHARGE_SCALE * (result.q - result.dq_dVp * Vp - result.dq_dVn * Vn)
+    stamp_b!(dctx, q_idx, b_constraint)
+
+    return q_idx
+end
+
+stamp_charge_state!(dctx::DirectStampContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String) =
+    stamp_charge_state!(dctx, p, n, q_fn, x, Symbol(charge_name))
 
 #==============================================================================#
 # Automatic Detection and Stamping for VA Code Generation
