@@ -1,18 +1,15 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# Ring Oscillator Test - CedarTranOp Focused
+# Ring Oscillator Test - FBDF Focus
 #
-# Most promising configurations based on prior results:
-# - Rodas5P got 34k timepoints before unstable
-# - force_dtmin may help push through
-# - IDA is standard for circuits
+# FBDF got source stepping to succeed (149 pts, 0.25ns, 4.6 iter/step)
+# Try variations to push further
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp
-using OrdinaryDiffEq: Rodas5P, FBDF
-using Sundials: IDA
+using OrdinaryDiffEq: FBDF
 using Printf
 using Logging
 
@@ -51,6 +48,7 @@ function test_tran(name; solver, tspan=(0.0, 1e-9), kwargs...)
         println("  Progress:   $(@sprintf("%.1f", pct))%")
         if sol.stats !== nothing && sol.stats.nnonliniter > 0
             println("  NR iters:   $(sol.stats.nnonliniter)")
+            println("  Iter/step:  $(@sprintf("%.1f", sol.stats.nnonliniter / max(1, length(sol.t))))")
         end
         return sol.retcode, sol.t[end]
     catch e
@@ -59,17 +57,22 @@ function test_tran(name; solver, tspan=(0.0, 1e-9), kwargs...)
     end
 end
 
-# Test 1: Rodas5P + force_dtmin (baseline was unstable, try forcing through)
-test_tran("Rodas5P + force_dtmin";
-    solver=Rodas5P(), dtmax=0.1e-9, maxiters=100000, force_dtmin=true)
+# FBDF baseline (got 149 pts, 0.25ns before)
+test_tran("FBDF baseline";
+    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000)
 
-# Test 2: FBDF + force_dtmin (BDF is standard for stiff circuits)
+# FBDF + force_dtmin (force through unstable points)
 test_tran("FBDF + force_dtmin";
     solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000, force_dtmin=true)
 
-# Test 3: IDA (native DAE solver with KLU sparse)
-test_tran("IDA";
-    solver=IDA(linear_solver=:KLU), dtmax=0.1e-9, maxiters=100000)
+# FBDF + smaller dtmax (catch fast dynamics)
+test_tran("FBDF + dtmax=0.01ns";
+    solver=FBDF(autodiff=false), dtmax=0.01e-9, maxiters=200000)
+
+# FBDF + looser tolerances (less strict convergence)
+test_tran("FBDF + loose tol";
+    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000,
+    abstol=1e-6, reltol=1e-4)
 
 println("\n" * "="^60)
 println("Done!")
