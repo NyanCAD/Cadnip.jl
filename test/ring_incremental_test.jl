@@ -1,18 +1,19 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# Incremental Ring Oscillator Test - PSP103 + CedarTranOp Homotopy
+# Ring Oscillator Test - CedarTranOp Homotopy Variations
 #
-# Step-by-step test:
-# 1. Parse and compile circuit
-# 2. DC operating point with different init algorithms
-# 3. Short transient (1ns)
+# Focus on CedarTranOp (which successfully initializes) with different:
+# - Solvers (Rodas5P, FBDF, IDA)
+# - Tolerances
+# - force_dtmin settings
+# - Linear solvers
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: CedarDCOp, CedarTranOp, CedarUICOp
-using OrdinaryDiffEq: Rodas5P, ImplicitEuler
-using LinearSolve: QRFactorization
+using CedarSim.MNA: CedarTranOp
+using OrdinaryDiffEq: Rodas5P, FBDF, ImplicitEuler
+using Sundials: IDA
 using Printf
 using Logging
 
@@ -42,133 +43,90 @@ circuit = MNACircuit(ring_circuit)
 data = MNA.assemble!(circuit)
 println("  Assembled. $(size(data.G, 1)) unknowns.")
 
-println("\n" * "="^60)
-println("Step 4: DC operating point with CedarDCOp...")
-println("="^60)
-try
-    dc_result = dc!(circuit)
-    println("  DC retcode: $(dc_result.retcode)")
-    println("  Max voltage: $(maximum(abs.(dc_result.u)))")
-catch e
-    println("  DC failed: $e")
-end
+# Test function
+function test_tran(name, circuit_factory; solver, tspan=(0.0, 1e-9), kwargs...)
+    println("\n" * "="^60)
+    println("$name")
+    println("="^60)
 
-println("\n" * "="^60)
-println("Step 5: DC operating point with CedarTranOp...")
-println("="^60)
-circuit2 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit2)
-try
-    # Use tran! with very short span to test TranOp initialization
-    sol = tran!(circuit2, (0.0, 1e-12); solver=Rodas5P(),
-                initializealg=CedarTranOp(), maxiters=10000, dense=false)
-    println("  TranOp init: $(sol.retcode)")
-    println("  Initial state max: $(maximum(abs.(sol.u[1])))")
-catch e
-    println("  TranOp failed: $e")
-    showerror(stdout, e, catch_backtrace())
-end
+    circ = circuit_factory()
+    MNA.assemble!(circ)
 
-println("\n" * "="^60)
-println("Step 6: Short transient (1ns) with CedarTranOp...")
-println("="^60)
-circuit3 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit3)
-try
-    sol = tran!(circuit3, (0.0, 1e-9); dtmax=0.1e-9, solver=Rodas5P(),
-                initializealg=CedarTranOp(), maxiters=50000, dense=false)
-    println("  Status: $(sol.retcode)")
-    println("  Timepoints: $(length(sol.t))")
-    println("  Final time: $(sol.t[end])")
-    if sol.stats !== nothing
-        println("  NR iters: $(sol.stats.nnonliniter)")
+    try
+        sol = tran!(circ, tspan; solver=solver, initializealg=CedarTranOp(),
+                    dense=false, kwargs...)
+        println("  Status:     $(sol.retcode)")
+        println("  Timepoints: $(length(sol.t))")
+        println("  Final time: $(@sprintf("%.3e", sol.t[end])) / $(@sprintf("%.3e", tspan[2]))")
+        if sol.stats !== nothing && sol.stats.nnonliniter > 0
+            println("  NR iters:   $(sol.stats.nnonliniter)")
+            println("  Iter/step:  $(@sprintf("%.1f", sol.stats.nnonliniter / max(1, length(sol.t))))")
+        end
+        return sol.retcode
+    catch e
+        println("  FAILED: $(typeof(e))")
+        println("  $e")
+        return :error
     end
-catch e
-    println("  Transient failed: $e")
-    showerror(stdout, e, catch_backtrace())
 end
 
-println("\n" * "="^60)
-println("Step 7: Short transient with CedarUICOp (for oscillators)...")
-println("="^60)
-circuit4 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit4)
-try
-    sol = tran!(circuit4, (0.0, 1e-9); dtmax=0.1e-9, solver=Rodas5P(),
-                initializealg=CedarUICOp(warmup_steps=20), maxiters=50000, dense=false)
-    println("  Status: $(sol.retcode)")
-    println("  Timepoints: $(length(sol.t))")
-    println("  Final time: $(sol.t[end])")
-    if sol.stats !== nothing
-        println("  NR iters: $(sol.stats.nnonliniter)")
-    end
-catch e
-    println("  UICOp transient failed: $e")
-    showerror(stdout, e, catch_backtrace())
-end
+circuit_factory() = MNACircuit(ring_circuit)
 
-println("\n" * "="^60)
-println("Step 8: ImplicitEuler with force_dtmin=true...")
-println("="^60)
-circuit5 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit5)
-try
-    sol = tran!(circuit5, (0.0, 1e-9); dt=0.01e-9, dtmax=0.1e-9,
-                solver=ImplicitEuler(autodiff=false),
-                initializealg=CedarTranOp(),
-                force_dtmin=true, maxiters=50000, dense=false)
-    println("  Status: $(sol.retcode)")
-    println("  Timepoints: $(length(sol.t))")
-    println("  Final time: $(sol.t[end])")
-    if sol.stats !== nothing
-        println("  NR iters: $(sol.stats.nnonliniter)")
-    end
-catch e
-    println("  ImplicitEuler failed: $e")
-    showerror(stdout, e, catch_backtrace())
-end
+# ============================================================================
+# Rodas5P variations
+# ============================================================================
 
-println("\n" * "="^60)
-println("Step 9: ImplicitEuler adaptive=false, fixed dt...")
-println("="^60)
-circuit6 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit6)
-try
-    sol = tran!(circuit6, (0.0, 1e-9); dt=0.001e-9,
-                solver=ImplicitEuler(autodiff=false),
-                initializealg=CedarTranOp(),
-                adaptive=false, force_dtmin=true, maxiters=100000, dense=false)
-    println("  Status: $(sol.retcode)")
-    println("  Timepoints: $(length(sol.t))")
-    println("  Final time: $(sol.t[end])")
-    if sol.stats !== nothing
-        println("  NR iters: $(sol.stats.nnonliniter)")
-    end
-catch e
-    println("  ImplicitEuler fixed dt failed: $e")
-    showerror(stdout, e, catch_backtrace())
-end
+test_tran("Rodas5P (baseline)", circuit_factory;
+    solver=Rodas5P(), dtmax=0.1e-9, maxiters=100000)
 
-println("\n" * "="^60)
-println("Step 10: Rodas5P with SVDFactorization (dense)...")
-println("="^60)
-circuit7 = MNACircuit(ring_circuit)
-MNA.assemble!(circuit7)
-try
-    # SVD requires dense matrices - use GenericLUFactorization for sparse instead
-    # Or use QRFactorization which handles sparse
-    sol = tran!(circuit7, (0.0, 1e-9); dtmax=0.1e-9,
-                solver=Rodas5P(linsolve=QRFactorization()),
-                initializealg=CedarTranOp(), maxiters=50000, dense=false)
-    println("  Status: $(sol.retcode)")
-    println("  Timepoints: $(length(sol.t))")
-    println("  Final time: $(sol.t[end])")
-    if sol.stats !== nothing
-        println("  NR iters: $(sol.stats.nnonliniter)")
-    end
-catch e
-    println("  Rodas5P+QR failed: $e")
-end
+test_tran("Rodas5P + tighter tol", circuit_factory;
+    solver=Rodas5P(), dtmax=0.1e-9, maxiters=100000,
+    abstol=1e-12, reltol=1e-10)
+
+test_tran("Rodas5P + smaller dtmax", circuit_factory;
+    solver=Rodas5P(), dtmax=0.01e-9, maxiters=200000)
+
+test_tran("Rodas5P + force_dtmin", circuit_factory;
+    solver=Rodas5P(), dtmax=0.1e-9, maxiters=100000,
+    force_dtmin=true)
+
+# ============================================================================
+# FBDF (BDF method - standard for circuits)
+# ============================================================================
+
+test_tran("FBDF (baseline)", circuit_factory;
+    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000)
+
+test_tran("FBDF + force_dtmin", circuit_factory;
+    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000,
+    force_dtmin=true)
+
+test_tran("FBDF + tighter tol", circuit_factory;
+    solver=FBDF(autodiff=false), dtmax=0.1e-9, maxiters=100000,
+    abstol=1e-12, reltol=1e-10)
+
+# ============================================================================
+# IDA (native DAE solver)
+# ============================================================================
+
+test_tran("IDA (baseline)", circuit_factory;
+    solver=IDA(linear_solver=:KLU), dtmax=0.1e-9, maxiters=100000)
+
+test_tran("IDA + force_dtmin", circuit_factory;
+    solver=IDA(linear_solver=:KLU), dtmax=0.1e-9, maxiters=100000,
+    force_dtmin=true)
+
+# ============================================================================
+# ImplicitEuler with force_dtmin (simple but robust)
+# ============================================================================
+
+test_tran("ImplicitEuler + force_dtmin", circuit_factory;
+    solver=ImplicitEuler(autodiff=false), dt=0.01e-9, dtmax=0.1e-9,
+    maxiters=100000, force_dtmin=true)
+
+test_tran("ImplicitEuler + force_dtmin + tight tol", circuit_factory;
+    solver=ImplicitEuler(autodiff=false), dt=0.01e-9, dtmax=0.1e-9,
+    maxiters=100000, force_dtmin=true, abstol=1e-12, reltol=1e-10)
 
 println("\n" * "="^60)
 println("Done!")
