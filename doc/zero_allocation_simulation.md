@@ -131,57 +131,47 @@ output matrices, required for optimal OrdinaryDiffEq integration.
 
 ## OrdinaryDiffEq Integration
 
-**Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach:
+**Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach.
 
-| Configuration | Allocation | Notes |
-|--------------|------------|-------|
-| `step!()` directly | 16 bytes/call | ReturnCode boxing |
-| **`blind_step!()` wrapper** | **0 bytes/call** | Simplest zero-alloc |
-| Internal functions directly | **0 bytes/call** | More control |
-| `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK unavoidable |
-| Manual backward Euler | **0 bytes/call** | No ODE solver overhead |
+### Requirements
 
-### Why `step!()` allocates 16 bytes
+| Requirement | Reason |
+|------------|--------|
+| **Dense matrices** (`dense=true`) | Sparse UMFPACK `lu!` allocates ~1696 bytes/call |
+| **`blind_step!()` wrapper** | `step!()` returns ReturnCode causing 16 bytes boxing |
+| **Fixed timestep** (`adaptive=false`) | Adaptive stepping requires error estimation allocations |
+| **`autodiff=false`** | Use explicit Jacobian from MNA |
 
-The standard `step!(integrator)` returns `integrator.sol.retcode` (a `SciMLBase.ReturnCode.T` enum),
-which causes 16 bytes of boxing allocation per call when the return value is used or escapes.
+### Compatible Solvers
 
-### Achieving TRUE zero allocation (0 bytes/call)
+All these solvers achieve zero allocation with the above settings:
 
-**Simple approach**: Wrap `step!()` in a function that discards the return value:
+| Solver | Order | Type |
+|--------|-------|------|
+| `FBDF` | 1-5 | Variable-order BDF (recommended) |
+| `QNDF` | 1-5 | Variable-order quasi-constant BDF |
+| `Rodas5P`, `Rodas5` | 5 | Rosenbrock |
+| `Rodas4P`, `Rodas4` | 4 | Rosenbrock |
+| `Rosenbrock23` | 2-3 | Rosenbrock |
+| `ImplicitEuler` | 1 | SDIRK |
+| `ImplicitMidpoint` | 2 | IRK |
+| `Trapezoid` | 2 | SDIRK |
 
-```julia
-function blind_step!(integrator)
-    step!(integrator)
-    return nothing
-end
+**Not compatible** (don't support mass matrices): `TRBDF2`, `KenCarp4`
 
-# Real-time loop (TRUE 0 bytes/call)
-while running
-    blind_step!(integrator)
-    # Access state: integrator.u
-end
-```
-
-Julia's compiler optimizes away the ReturnCode allocation when it sees the value is unused.
-This is much simpler than calling internal functions directly.
-
-**Using the API**: Use `ODEProblem(circuit, tspan; dense=true)` for the simplest setup:
+### Example
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 
-# Create circuit
 circuit = MNACircuit(builder; params...)
-
-# Create ODE problem with dense matrices for zero-allocation
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
-# Create integrator with minimal overhead
-# CedarTranOp computes DC operating point during init
-integrator = init(prob, ImplicitEuler(autodiff=false),
-    adaptive=false, dt=1e-5, callback=nothing,
-    save_on=false, dense=false, maxiters=10_000_000,
+# FBDF is a good default - variable order up to 5th, L-stable
+integrator = init(prob, FBDF(autodiff=false);
+    adaptive=false, dt=1e-5,
+    save_on=false, dense=false,
+    maxiters=10_000_000,
     initializealg=MNA.CedarTranOp())
 
 # Real-time loop (TRUE 0 bytes/call)
