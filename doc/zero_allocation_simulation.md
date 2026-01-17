@@ -131,15 +131,39 @@ output matrices, required for optimal OrdinaryDiffEq integration.
 
 ## OrdinaryDiffEq Integration
 
-**Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach:
+**Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach.
 
-| Configuration | Allocation | Notes |
-|--------------|------------|-------|
-| `step!()` directly | 16 bytes/call | ReturnCode boxing |
-| **`blind_step!()` wrapper** | **0 bytes/call** | Simplest zero-alloc |
-| Internal functions directly | **0 bytes/call** | More control |
-| `ImplicitEuler + KLUFactorization` (sparse) | ~1700 bytes/call | UMFPACK unavoidable |
-| Manual backward Euler | **0 bytes/call** | No ODE solver overhead |
+### Fundamental Requirements
+
+These constraints are required for zero allocation:
+
+| Requirement | Reason |
+|------------|--------|
+| **Dense matrices** (`dense=true`) | Sparse UMFPACK `lu!` allocates ~1696 bytes/call |
+| **`blind_step!()` wrapper** | `step!()` returns ReturnCode causing 16 bytes boxing |
+| **Fixed timestep** (`adaptive=false`) | Adaptive stepping requires error estimation allocations |
+
+### Solver Compatibility
+
+Multiple fixed-step implicit solvers work for zero allocation:
+
+| Solver | Order | Properties | Zero-Alloc |
+|--------|-------|------------|------------|
+| `ImplicitEuler` | 1st | L-stable, simplest | ✓ |
+| `ImplicitMidpoint` | 2nd | Symplectic, A-stable | ✓ |
+| `Trapezoid` | 2nd | A-stable | ✓ |
+
+All require `autodiff=false` to use the explicit Jacobian.
+
+### Relaxable Settings
+
+These settings don't affect stepping allocations:
+
+| Setting | Purpose | Can Relax? |
+|---------|---------|------------|
+| `save_on=false` | Solution history storage | Yes - saving allocates, stepping doesn't |
+| `dense=false` (integrator) | Interpolation coefficients | Yes - only affects output |
+| `callback=nothing` | Event handling | Depends on callback implementation |
 
 ### Why `step!()` allocates 16 bytes
 
@@ -177,11 +201,12 @@ circuit = MNACircuit(builder; params...)
 # Create ODE problem with dense matrices for zero-allocation
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
-# Create integrator with minimal overhead
+# Create integrator - can use ImplicitEuler, ImplicitMidpoint, or Trapezoid
 # CedarTranOp computes DC operating point during init
-integrator = init(prob, ImplicitEuler(autodiff=false),
-    adaptive=false, dt=1e-5, callback=nothing,
-    save_on=false, dense=false, maxiters=10_000_000,
+integrator = init(prob, ImplicitMidpoint(autodiff=false),  # or ImplicitEuler, Trapezoid
+    adaptive=false, dt=1e-5,
+    save_on=false, dense=false,     # These can be relaxed if needed
+    maxiters=10_000_000,
     initializealg=MNA.CedarTranOp())
 
 # Real-time loop (TRUE 0 bytes/call)
