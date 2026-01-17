@@ -1,0 +1,45 @@
+* Astable Multivibrator (Free-Running Oscillator)
+* Classic cross-coupled BJT oscillator
+* Frequency approx = 1 / (1.4 * R * C) = 1 / (1.4 * 10k * 1u) ~ 71 Hz
+
+* Simulation options for convergence
+.options ABSTOL=1e-10 RELTOL=1e-3 VNTOL=1e-6 ITL1=500 ITL2=200
+.options METHOD=gear
+
+* Power supply with soft start (avoids hard transients)
+Vcc vcc 0 PWL(0 0 1m 5)
+
+* Collector resistors
+Rc1 vcc q1_coll 1k
+Rc2 vcc q2_coll 1k
+
+* Base resistors
+R1 vcc q1_base 10k
+R2 vcc q2_base 10k
+
+* Cross-coupling capacitors (timing)
+C1 q1_coll q2_base 1u
+C2 q2_coll q1_base 1u
+
+* BJT transistors - using simple Ebers-Moll model
+Q1 q1_coll q1_base 0 NPN_SIMPLE
+Q2 q2_coll q2_base 0 NPN_SIMPLE
+
+* Simplified NPN model for convergence
+.model NPN_SIMPLE NPN(IS=1e-15 BF=100)
+
+* Transient analysis: 100ms with max step 100us
+.tran 100u 100m
+
+* Control commands
+.control
+run
+* Plot collector voltages
+wrdata astable_output.txt V(q1_coll) V(q2_coll)
+* Measure oscillation frequency after startup
+meas tran period1 TRIG V(q1_coll) VAL=2.5 RISE=2 TARG V(q1_coll) VAL=2.5 RISE=3
+let freq = 1/period1
+print freq
+.endc
+
+.end
