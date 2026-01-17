@@ -2372,14 +2372,33 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 # VA model from imported HDL module or external package
                 # Create a model wrapper that combines model params with instance params
                 model_params = Expr[]
+                # Extract level, version for getparams lookup
+                level = nothing
+                version = nothing
+                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
                 for p in model_ast.parameters
                     pname = LSymbol(p.name)
-                    # Skip meta-parameters
-                    if pname in (:level, :version, :type)
+                    # Track meta-parameters for registry lookup
+                    if pname == :level
+                        level = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :version
+                        version = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :type
+                        # Skip - will be added from getparams
                         continue
                     end
                     pval = cg_expr!(state, p.val)
                     push!(model_params, Expr(:kw, pname, pval))
+                end
+                # Query model registry for type parameters (polarity for MOSFET/BJT)
+                device_type = mosfet_type !== nothing ? mosfet_type : typ
+                level_int = level === nothing ? nothing : Int(level)
+                version_str = version === nothing ? nothing : string(Int(version))
+                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                for (param_name, param_val) in pairs(type_params)
+                    push!(model_params, Expr(:kw, param_name, param_val))
                 end
                 model_var = cg_model_name!(state, model_name)
                 # Create a callable that returns a VA device with merged parameters
