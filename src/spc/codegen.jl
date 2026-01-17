@@ -458,9 +458,14 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
         push!(params, Expr(:kw, :version, Expr(:call, CedarSim.mknondefault, version)))
     end
 
-    if mosfet_type !== nothing
-        param = devtype_param(modelref, mosfet_type)
-        param !== nothing && push!(params, Expr(:kw, param[1], Expr(:call, CedarSim.mknondefault, param[2])))
+    # Query the model registry for type parameters (polarity, etc.)
+    # Use the device type (mosfet_type for MOSFETs, or typ for other devices)
+    device_type = mosfet_type !== nothing ? mosfet_type : typ
+    level_int = level === nothing ? nothing : Int(level)
+    version_str = version === nothing ? nothing : string(Int(version))
+    type_params = CedarSim.getparams(device_type, level_int, version_str)
+    for (param_name, param_val) in pairs(type_params)
+        push!(params, Expr(:kw, param_name, Expr(:call, CedarSim.mknondefault, param_val)))
     end
 
     m = match(binning_rx, LString(model.name))
@@ -1839,7 +1844,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
 
     # Build instance parameter kwargs
     param_kwargs = Expr[]
-    for p in instance.params
+    for p in instance.parameters
         param_name = LSymbol(p.name)
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
@@ -1858,6 +1863,53 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     return quote
         let dev = $device_expr
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
+                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_instance_ = $(QuoteNode(Symbol(name))))
+        end
+    end
+end
+
+"""
+    cg_mna_instance!(state, instance::SNode{SP.BipolarTransistor})
+
+Generate MNA builder code for BJT instances (Q elements).
+
+For MNA, BJTs are VA-generated devices. The model (e.g., npn1 from sp_bjt)
+is a type with a `stamp!` method. Instance parameters are passed
+as keyword arguments to construct the device.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransistor})
+    nets = sema_nets(instance)
+    # BJT ports: collector, base, emitter (substrate optional)
+    c = cg_net_name!(state, nets[1])
+    b = cg_net_name!(state, nets[2])
+    e = cg_net_name!(state, nets[3])
+    # Substrate is optional - use 0 (ground) if not specified
+    s = length(nets) >= 4 ? cg_net_name!(state, nets[4]) : 0
+    name = LString(instance.name)
+
+    # Get the model reference
+    model_name = cg_model_name!(state, instance.model)
+
+    # Build instance parameter kwargs
+    param_kwargs = Expr[]
+    for p in instance.params
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        push!(param_kwargs, Expr(:kw, param_name, param_val))
+    end
+
+    # Generate code to create device instance and stamp it
+    if isempty(param_kwargs)
+        device_expr = :($model_name())
+    else
+        device_expr = Expr(:call, model_name, param_kwargs...)
+    end
+
+    # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    return quote
+        let dev = $device_expr
+            $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                 _mna_instance_ = $(QuoteNode(Symbol(name))))
         end
@@ -2320,14 +2372,33 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 # VA model from imported HDL module or external package
                 # Create a model wrapper that combines model params with instance params
                 model_params = Expr[]
+                # Extract level, version for getparams lookup
+                level = nothing
+                version = nothing
+                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
                 for p in model_ast.parameters
                     pname = LSymbol(p.name)
-                    # Skip meta-parameters
-                    if pname in (:level, :version, :type)
+                    # Track meta-parameters for registry lookup
+                    if pname == :level
+                        level = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :version
+                        version = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :type
+                        # Skip - will be added from getparams
                         continue
                     end
                     pval = cg_expr!(state, p.val)
                     push!(model_params, Expr(:kw, pname, pval))
+                end
+                # Query model registry for type parameters (polarity for MOSFET/BJT)
+                device_type = mosfet_type !== nothing ? mosfet_type : typ
+                level_int = level === nothing ? nothing : Int(level)
+                version_str = version === nothing ? nothing : string(Int(version))
+                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                for (param_name, param_val) in pairs(type_params)
+                    push!(model_params, Expr(:kw, param_name, param_val))
                 end
                 model_var = cg_model_name!(state, model_name)
                 # Create a callable that returns a VA device with merged parameters

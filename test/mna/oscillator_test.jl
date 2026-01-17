@@ -1,7 +1,8 @@
 #==============================================================================#
 # Standalone Oscillator Test Script
 #
-# Tests CMOS ring oscillator using vadistiller sp_mos1 model.
+# Tests CMOS ring oscillator using VADistillerModels sp_mos1 model via
+# ModelRegistry (NMOS/PMOS level=1).
 # Run with: julia --project=test test/mna/oscillator_test.jl
 #==============================================================================#
 
@@ -13,25 +14,16 @@ using CedarSim.MNA: voltage, current
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor
 using CedarSim.MNA: MNACircuit, MNASolutionAccessor
 using CedarSim.MNA: reset_for_restamping!, CedarUICOp
-using VerilogAParser
 using SciMLBase
-using CedarSim: tran!, parse_spice_to_mna
+using CedarSim: tran!
 using OrdinaryDiffEq: Rodas5P
 using LinearSolve: KLUFactorization
 
-#==============================================================================#
-# Load sp_mos1 model from vadistiller
-#==============================================================================#
-
-const mos1_path = joinpath(@__DIR__, "..", "vadistiller", "models", "mos1.va")
-const mos1_va = VerilogAParser.parsefile(mos1_path)
-if mos1_va.ps.errored
-    error("Failed to parse mos1.va")
-end
-Core.eval(@__MODULE__, CedarSim.make_mna_module(mos1_va))
+# Load VADistillerModels to register sp_mos1 with ModelRegistry
+using VADistillerModels
 
 #==============================================================================#
-# Ring Oscillator SPICE Netlist
+# Ring Oscillator SPICE Netlist (using model cards)
 #
 # 3-stage CMOS ring oscillator:
 # - Each stage is an inverter (NMOS + PMOS)
@@ -42,25 +34,28 @@ Core.eval(@__MODULE__, CedarSim.make_mna_module(mos1_va))
 # where n = number of stages, t_delay = inverter delay
 #==============================================================================#
 
-const ring_osc_code = parse_spice_to_mna("""
+const ring_oscillator = sp"""
 * 3-stage CMOS Ring Oscillator
-* Uses sp_mos1 with minimal parameters
+* Uses sp_mos1 via ModelRegistry (level=1)
+
+* Model cards for NMOS and PMOS
+.model pmos1 pmos level=1 vto=-0.7 kp=50e-6
+.model nmos1 nmos level=1 vto=0.7 kp=100e-6
 
 * Power supply
 Vdd vdd 0 DC 3.3
 
 * Stage 1: Inverter (in1 -> out1)
-* PMOS: type=-1, NMOS: type=1
-XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+MP1 out1 in1 vdd vdd pmos1 w=2e-6 l=1e-6
+MN1 out1 in1 0 0 nmos1 w=1e-6 l=1e-6
 
 * Stage 2: Inverter (out1 -> out2)
-XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+MP2 out2 out1 vdd vdd pmos1 w=2e-6 l=1e-6
+MN2 out2 out1 0 0 nmos1 w=1e-6 l=1e-6
 
 * Stage 3: Inverter (out2 -> in1) - feedback
-XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+MP3 in1 out2 vdd vdd pmos1 w=2e-6 l=1e-6
+MN3 in1 out2 0 0 nmos1 w=1e-6 l=1e-6
 
 * Load capacitors (represent gate capacitance and wiring)
 C1 out1 0 10f
@@ -68,8 +63,7 @@ C2 out2 0 10f
 C3 in1 0 10f
 
 .END
-"""; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
-eval(ring_osc_code)
+"""i
 
 #==============================================================================#
 # Tests

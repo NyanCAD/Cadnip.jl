@@ -37,27 +37,30 @@ function mem_mb()
     return round(Sys.total_memory() - Sys.free_memory(); digits=0) / 1024 / 1024
 end
 
-# Ring oscillator circuit defined via SPICE (parsed at module level)
-const ring_oscillator_code = parse_spice_to_mna("""
+# Ring oscillator circuit defined via SPICE with model cards
+# Uses VADistillerModels.sp_mos1 via ModelRegistry (level=1)
+const ring_oscillator = sp"""
 * 3-stage CMOS Ring Oscillator
+.model pmos1 pmos level=1 vto=-0.7 kp=50e-6
+.model nmos1 nmos level=1 vto=0.7 kp=100e-6
 Vdd vdd 0 DC 3.3
-XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
-XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
-XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
-XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+MP1 out1 in1 vdd vdd pmos1 w=2e-6 l=1e-6
+MN1 out1 in1 0 0 nmos1 w=1e-6 l=1e-6
+MP2 out2 out1 vdd vdd pmos1 w=2e-6 l=1e-6
+MN2 out2 out1 0 0 nmos1 w=1e-6 l=1e-6
+MP3 in1 out2 vdd vdd pmos1 w=2e-6 l=1e-6
+MN3 in1 out2 0 0 nmos1 w=1e-6 l=1e-6
 C1 out1 0 10f
 C2 out2 0 10f
 C3 in1 0 10f
 .END
-"""; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
-eval(ring_oscillator_code)
+"""i
 
-# Monostable multivibrator circuit using sp_bjt
-# Tests CedarDCOp with high maxiters for sp_bjt internal nodes
-const monostable_spice_code = """
+# Monostable multivibrator circuit using model cards for BJT
+# Uses VADistillerModels.sp_bjt via ModelRegistry (npn device type)
+const monostable_multivibrator = sp"""
 * Monostable Multivibrator (One-Shot) using sp_bjt
+.model npn1 npn bf=100 is=1e-15
 Vcc vcc 0 DC 5.0
 Vtrig trig 0 DC 0 PULSE 0 5 1m 1u 1u 10u 1
 R1 vcc q1_base 10k
@@ -66,13 +69,10 @@ Rc1 vcc q1_coll 1k
 Rc2 vcc q2_coll 1k
 C1 q1_coll q2_base 10u
 Ctrig trig q1_base 100n
-XQ1 q1_coll q1_base 0 0 sp_bjt bf=100 is=1e-15
-XQ2 q2_coll q2_base 0 0 sp_bjt bf=100 is=1e-15
+Q1 q1_coll q1_base 0 npn1
+Q2 q2_coll q2_base 0 npn1
 .END
-"""
-const monostable_code = parse_spice_to_mna(monostable_spice_code;
-    circuit_name=:monostable_multivibrator, imported_hdl_modules=[sp_bjt_module])
-eval(monostable_code)
+"""i
 
 @testset "VADistiller Integration Tests" begin
 

@@ -103,7 +103,12 @@ end
 
 sema_nets(instance::TwoTerminal) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.MOSFET}) = (instance.d, instance.g, instance.s, instance.b)
-sema_nets(instance::SNode{SP.BipolarTransistor}) = (instance.c, instance.b, instance.e, instance.s)
+# BJT: substrate (s) and thermal (t) nodes are optional - filter out nothing
+function sema_nets(instance::SNode{SP.BipolarTransistor})
+    nets = [instance.c, instance.b, instance.e]
+    instance.s !== nothing && push!(nets, instance.s)
+    return Tuple(nets)
+end
 sema_nets(instance::SNode{SP.SubcktCall}) = instance.nodes
 # Spectre instance: nodes are in nodelist.nodes
 sema_nets(instance::SNode{SC.Instance}) = Tuple(n.node for n in instance.nodelist.nodes)
@@ -270,69 +275,46 @@ function sema_resolve_import(scope::SemaResult, imp::Symbol)
     return imp_mod
 end
 
+"""
+    spice_select_device(sema, devkind, level, version, stmt; dialect=:ngspice)
+
+Select the appropriate model type for a SPICE device declaration.
+
+Uses the ModelRegistry dispatch system to find registered models. Falls back to
+searching imported HDL modules (Verilog-A `.hdl` includes) if no registered model
+is found.
+
+Returns a GlobalRef to the model type, or GlobalRef(CedarSim, :UnimplementedDevice)
+if no suitable model is found.
+
+Note: For VA models to be resolved, they must either:
+1. Be registered with CedarSim.ModelRegistry (preferred for standard device types)
+2. Be included via `.hdl` directive in the SPICE netlist
+"""
 function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, stmt; dialect=:ngspice)
-    if devkind == :d
-        return GlobalRef(CedarSim.SpectreEnvironment, :diode)
-    elseif devkind == :r
-        return GlobalRef(CedarSim.SpectreEnvironment, :resistor)
-    elseif devkind == :c
-        return GlobalRef(CedarSim.SpectreEnvironment, :capacitor)
-    end
-    if dialect == :ngspice
-        if devkind in (:pmos, :nmos)
-            if level == 5
-                file = stmt.ps.srcfile.path
-                line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-                @warn "BSIM2 ($devkind at level $level) not implemented" _file=file _line=line
-                return GlobalRef(CedarSim, :UnimplementedDevice)
-            elseif level == 8 || level == 49
-                file = stmt.ps.srcfile.path
-                line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-                @warn "BSIM3 ($devkind at level $level) not implemented" _file=file _line=line
-                return GlobalRef(CedarSim, :UnimplementedDevice)
-            elseif level == 14 || level == 54
-                return GlobalRef(sema_resolve_import(sema, :BSIM4), :bsim4)
-            elseif level == 17 || level == 72
-                if version == 107 || version === nothing
-                    return :bsimcmg107
-                else
-                    file = stmt.ps.srcfile.path
-                    line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-                    @warn "Version $version of mosfet $devkind at level $level not implemented" _file=file _line=line
-                    return GlobalRef(CedarSim, :UnimplementedDevice)
-                end
-            else
-                file = stmt.ps.srcfile.path
-                line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-                @warn "Mosfet $devkind at level $level not implemented" _file=file _line=line
-                return GlobalRef(CedarSim, :UnimplementedDevice)
-            end
-        elseif devkind in (:pnp, :npn)
-            file = stmt.ps.srcfile.path
-            line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-            @warn "Bipolar $devkind at level $level not implemented" _file=file _line=line
-            return GlobalRef(CedarSim, :UnimplementedDevice)
-        elseif devkind == :sw
-            return GlobalRef(CedarSim.SpectreEnvironment, :Switch)
-        end
+    # Convert version to string for registry lookup
+    version_str = version === nothing ? nothing : string(Int(version))
+    level_int = level === nothing ? nothing : Int(level)
+
+    # Try the model registry first (preferred path)
+    model_type = CedarSim.getmodel(devkind, level_int, version_str)
+
+    if model_type !== nothing
+        # Found in registry - convert type to GlobalRef
+        return GlobalRef(parentmodule(model_type), nameof(model_type))
     end
 
-    # Search for this model in the imported HDL modules (Verilog-A)
-    # This allows VA modules to be used as device types via .hdl includes
+    # Search for this model in HDL modules included via .hdl directive
     for hdl_mod in sema.imported_hdl_modules
         if isdefined(hdl_mod, devkind)
             return GlobalRef(hdl_mod, devkind)
         end
     end
 
-    # Search for this model in the HDL Imports
-    if sema.parse_cache !== nothing
-        # Might be an import instead, which we will resolve later
-        return GlobalRef(sema.parse_cache.thismod, devkind)
-    end
+    # No model found - warn and return UnimplementedDevice
     file = stmt.ps.srcfile.path
     line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
-    @warn "Device $devkind at level $level not implemented" _file=file _line=line
+    @warn "Device $devkind at level $level not implemented. Register with ModelRegistry or include via .hdl" _file=file _line=line
     return GlobalRef(CedarSim, :UnimplementedDevice)
 end
 
