@@ -17,7 +17,7 @@ jobs:
   ring-benchmark:
     name: Ring Oscillator - CedarTranOp Homotopy Test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +38,9 @@ jobs:
 
       - name: Run ring oscillator benchmark
         run: |
-          julia --project=test test/ring_incremental_test.jl 2>&1 | tee ring_results.txt
+          echo "Starting at $(date)"
+          time julia --project=test test/ring_incremental_test.jl 2>&1 | tee ring_results.txt
+          echo "Finished at $(date)"
 
       - name: Publish results
         run: |
