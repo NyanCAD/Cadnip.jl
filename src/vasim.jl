@@ -1663,40 +1663,39 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
+                    # NOTE: Charge state is stored as q_scaled = q * CHARGE_SCALE for conditioning
                     _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
 
-                    # --- Mass matrix (constant entries!) ---
-                    # KCL coupling: I = dq/dt flows from p to n
+                    # --- Mass matrix (constant entries with CHARGE_SCALE!) ---
+                    # KCL coupling: I = dq/dt = (1/CHARGE_SCALE) * d(q_scaled)/dt
+                    # The (1/CHARGE_SCALE) factor converts scaled charge derivative to current
                     if $p_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $p_node, _q_idx, 1.0)
+                        CedarSim.MNA.stamp_C!(ctx, $p_node, _q_idx, 1.0 / CedarSim.MNA.CHARGE_SCALE)
                     end
                     if $n_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $n_node, _q_idx, -1.0)
+                        CedarSim.MNA.stamp_C!(ctx, $n_node, _q_idx, -1.0 / CedarSim.MNA.CHARGE_SCALE)
                     end
 
-                    # --- Constraint Jacobian (in G matrix) ---
-                    # Constraint: F = q - Q(V) = 0
-                    # ∂F/∂q = 1
+                    # --- Constraint Jacobian (in G matrix, scaled) ---
+                    # Scaled constraint: F_scaled = q_scaled - CHARGE_SCALE*Q(V) = 0
+                    # ∂F_scaled/∂q_scaled = 1 (keeps diagonal well-conditioned)
                     CedarSim.MNA.stamp_G!(ctx, _q_idx, _q_idx, 1.0)
 
-                    # ∂F/∂V_k = -∂Q/∂V_k for each node k
+                    # ∂F_scaled/∂V_k = -CHARGE_SCALE * ∂Q/∂V_k for each node k
                     $([quote
                         if $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -$(Symbol("dq_dV", k)))
+                            CedarSim.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -CedarSim.MNA.CHARGE_SCALE * $(Symbol("dq_dV", k)))
                         end
                     end for k in 1:n_all_nodes]...)
 
-                    # --- Constraint RHS (Newton companion) ---
-                    # Newton: G*x = b where b = G*x₀ - F(x₀)
-                    # Constraint F = q - Q(V), so F(x₀) = q₀ - Q(V₀)
-                    # G*x₀ = 1*q₀ + Σ(-∂Q/∂V_k)*V_k = q₀ - Σ(∂Q/∂V_k * V_k)
-                    # b = G*x₀ - F(x₀) = q₀ - Σ(dQ/dV_k * V_k) - (q₀ - Q(V₀))
-                    #   = Q(V₀) - Σ(dQ/dV_k * V_k)
+                    # --- Constraint RHS (Newton companion, scaled) ---
+                    # For scaled constraint F_scaled = q_scaled - CHARGE_SCALE*Q(V):
+                    # b = CHARGE_SCALE * (Q(V₀) - Σ(dQ/dV_k * V_k))
                     _b_constraint = q_val  # Q(V₀)
                     $([quote
                         _b_constraint -= $(Symbol("dq_dV", k)) * $(Symbol("V_", k))  # - dQ/dV_k * V_k
                     end for k in 1:n_all_nodes]...)
-                    CedarSim.MNA.stamp_b!(ctx, _q_idx, _b_constraint)
+                    CedarSim.MNA.stamp_b!(ctx, _q_idx, CedarSim.MNA.CHARGE_SCALE * _b_constraint)
                 else
                     # Linear capacitor: use standard C matrix stamping
                     $([quote

@@ -108,11 +108,103 @@ q_actual = x[q_idx] / CHARGE_SCALE
 3. **Lower stiffness**: Reduced condition number of Jacobian
 4. **Compatible with SciML**: No solver internals need changing
 
-## Testing
+## Testing Plan
 
-1. Compare condition number before/after scaling
-2. Benchmark convergence iterations on circuits with capacitors
-3. Verify numerical accuracy (should be identical within roundoff)
+### Test 1: Condition Number Comparison
+
+Create a test circuit with voltage-dependent capacitor and measure condition number:
+
+```julia
+# test/mna/charge_scaling.jl
+using LinearAlgebra
+using Test
+
+@testset "Charge scaling reduces condition number" begin
+    # Build a simple circuit with voltage-dependent capacitor
+    # (e.g., varactor diode model)
+
+    function build_test_circuit(; charge_scale=1.0)
+        # ... circuit with C(V) = C0 * (1 + V/V0)
+    end
+
+    # Build with and without scaling
+    sys_unscaled = build_test_circuit(charge_scale=1.0)
+    sys_scaled = build_test_circuit(charge_scale=CHARGE_SCALE)
+
+    # Assemble Jacobian at operating point
+    G_unscaled, C_unscaled = assemble(sys_unscaled)
+    G_scaled, C_scaled = assemble(sys_scaled)
+
+    # Compute condition numbers
+    κ_unscaled = cond(Matrix(G_unscaled))
+    κ_scaled = cond(Matrix(G_scaled))
+
+    @test κ_scaled < κ_unscaled
+    @test κ_scaled / κ_unscaled < 1e-6  # Expect ~1e12 improvement
+
+    println("Condition number improvement: $(κ_unscaled / κ_scaled)x")
+end
+```
+
+### Test 2: Solution Accuracy
+
+Verify scaling doesn't change the physics:
+
+```julia
+@testset "Charge scaling preserves solution accuracy" begin
+    # Same circuit, same operating point
+    sol_unscaled = dc!(circuit_unscaled)
+    sol_scaled = dc!(circuit_scaled)
+
+    # Voltages should match exactly
+    @test sol_unscaled.V ≈ sol_scaled.V rtol=1e-12
+
+    # Charges should match after unscaling
+    q_unscaled = sol_unscaled.q
+    q_scaled = sol_scaled.q_scaled / CHARGE_SCALE
+    @test q_unscaled ≈ q_scaled rtol=1e-12
+end
+```
+
+### Test 3: Transient Accuracy
+
+Run transient and compare waveforms:
+
+```julia
+@testset "Charge scaling preserves transient accuracy" begin
+    tspan = (0.0, 1e-6)
+
+    sol_unscaled = tran!(circuit_unscaled, tspan)
+    sol_scaled = tran!(circuit_scaled, tspan)
+
+    # Compare voltage at all timepoints
+    for t in range(tspan..., 100)
+        V_unscaled = sol_unscaled(t)
+        V_scaled = sol_scaled(t)
+        @test V_unscaled ≈ V_scaled rtol=1e-9
+    end
+end
+```
+
+### Test 4: Convergence Speed (Optional)
+
+Measure Newton iterations if using custom solver:
+
+```julia
+@testset "Charge scaling improves convergence" begin
+    # Count iterations to converge
+    iters_unscaled = dc_with_stats!(circuit_unscaled).iterations
+    iters_scaled = dc_with_stats!(circuit_scaled).iterations
+
+    @test iters_scaled <= iters_unscaled
+end
+```
+
+### Running the Tests
+
+```bash
+~/.juliaup/bin/julia --project=test test/mna/charge_scaling.jl
+```
 
 ## Notes
 

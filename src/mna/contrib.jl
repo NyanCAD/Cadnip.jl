@@ -16,7 +16,27 @@
 import ForwardDiff
 using ForwardDiff: Dual, value, partials, Tag
 
-export va_ddt, stamp_contribution!, ContributionTag, JacobianTag
+export va_ddt, stamp_contribution!, ContributionTag, JacobianTag, CHARGE_SCALE
+
+#==============================================================================#
+# Charge State Scaling
+#
+# Charge variables are typically O(1e-12) while voltages are O(1). This causes
+# poor Jacobian conditioning. We scale charge states by CHARGE_SCALE so they
+# have similar magnitude to voltages, improving numerical stability.
+#
+# See doc/state_scaling_plan.md for details.
+#==============================================================================#
+
+"""
+    CHARGE_SCALE
+
+Scaling factor for charge state variables. Charge is stored internally as
+`q_scaled = q * CHARGE_SCALE` so that charge states are O(1) like voltages.
+
+Default: 1e12 (converts Coulombs to pico-Coulombs scale)
+"""
+const CHARGE_SCALE = 1e12
 
 #==============================================================================#
 # S-Dual for ddt() (time derivative in Laplace domain)
@@ -967,7 +987,7 @@ function stamp_charge_state!(
     x::AbstractVector,
     charge_name::Symbol
 )
-    # Allocate charge state variable
+    # Allocate charge state variable (stores q_scaled = q * CHARGE_SCALE)
     q_idx = alloc_charge!(ctx, charge_name, p, n)
 
     # Get operating point voltages
@@ -976,60 +996,66 @@ function stamp_charge_state!(
 
     # Get current charge value (for Newton companion)
     # If x doesn't have the charge variable yet, use the equilibrium value
-    q_current = length(x) >= q_idx ? x[q_idx] : 0.0
+    q_resolved = resolve_index(ctx, q_idx)
+    q_current = length(x) >= q_resolved ? x[q_resolved] : 0.0
 
     # Evaluate charge function and capacitances
     result = evaluate_charge_contribution(q_fn, Vp, Vn)
 
+    # ==========================================================================
+    # CHARGE SCALING for better Jacobian conditioning
+    #
+    # We store q_scaled = q * CHARGE_SCALE internally, so charge states are O(1)
+    # like voltages (instead of O(1e-12)).
+    #
+    # Scaled constraint: F_scaled = q_scaled - CHARGE_SCALE*Q(V) = 0
+    # This keeps the diagonal entry = 1.0 (well-conditioned).
+    #
+    # The physical current I = dq/dt = d(q_scaled/CHARGE_SCALE)/dt
+    #                        = (1/CHARGE_SCALE) * d(q_scaled)/dt
+    #
+    # See doc/state_scaling_plan.md for derivation.
+    # ==========================================================================
+
     # --- 1. Mass matrix entries (constant coefficients!) ---
     #
-    # NOTE: The constraint row (q_idx) is ALGEBRAIC - no C entry on diagonal.
-    # The dq/dt terms only appear in the KCL equations (rows p and n).
-    # This correctly models: q = Q(V) as an algebraic constraint, with
-    # the current I = dq/dt appearing in KCL.
-
-    # KCL coupling: current I = dq/dt flows from p to n
-    # At node p: current leaves → +dq/dt contribution
-    # At node n: current enters → -dq/dt contribution
+    # KCL coupling: I = dq/dt = (1/CHARGE_SCALE) * d(q_scaled)/dt
+    # At node p: current leaves → +(1/SCALE)*d(q_scaled)/dt
+    # At node n: current enters → -(1/SCALE)*d(q_scaled)/dt
     if p != 0
-        stamp_C!(ctx, p, q_idx, 1.0)
+        stamp_C!(ctx, p, q_idx, 1.0 / CHARGE_SCALE)
     end
     if n != 0
-        stamp_C!(ctx, n, q_idx, -1.0)
+        stamp_C!(ctx, n, q_idx, -1.0 / CHARGE_SCALE)
     end
 
-    # --- 2. Conductance matrix (constraint Jacobian) ---
-
-    # Constraint equation: F = q - Q(V) = 0
-    # Jacobian: ∂F/∂q = 1, ∂F/∂Vp = -∂Q/∂Vp, ∂F/∂Vn = -∂Q/∂Vn
+    # --- 2. Conductance matrix (scaled constraint Jacobian) ---
+    #
+    # Scaled constraint: F_scaled = q_scaled - CHARGE_SCALE*Q(V) = 0
+    # Jacobian: ∂F_scaled/∂q_scaled = 1
+    #           ∂F_scaled/∂Vp = -CHARGE_SCALE * ∂Q/∂Vp
+    #           ∂F_scaled/∂Vn = -CHARGE_SCALE * ∂Q/∂Vn
 
     stamp_G!(ctx, q_idx, q_idx, 1.0)
 
     if p != 0
-        stamp_G!(ctx, q_idx, p, -result.dq_dVp)
+        stamp_G!(ctx, q_idx, p, -CHARGE_SCALE * result.dq_dVp)
     end
     if n != 0
-        stamp_G!(ctx, q_idx, n, -result.dq_dVn)
+        stamp_G!(ctx, q_idx, n, -CHARGE_SCALE * result.dq_dVn)
     end
 
-    # --- 3. RHS (Newton companion model for constraint) ---
+    # --- 3. RHS (Newton companion model for scaled constraint) ---
+    #
+    # For scaled constraint F_scaled = q_scaled - CHARGE_SCALE*Q(V):
+    # b = -F_scaled(x₀) + J*x₀
+    #   = -(q_scaled₀ - CHARGE_SCALE*Q(V₀)) + (1*q_scaled₀ - CHARGE_SCALE*∂Q/∂Vp*Vp - CHARGE_SCALE*∂Q/∂Vn*Vn)
+    #   = CHARGE_SCALE*Q(V₀) - CHARGE_SCALE*(∂Q/∂Vp*Vp + ∂Q/∂Vn*Vn)
+    #   = CHARGE_SCALE * (Q(V₀) - ∂Q/∂Vp*Vp - ∂Q/∂Vn*Vn)
+    #
+    # Note: At equilibrium q_scaled = CHARGE_SCALE*Q(V), the constraint is satisfied.
 
-    # Newton companion: b = F(x₀) - J(x₀)*x₀ + J(x₀)*x
-    # Rearranging: J*x = b where b = F(x₀) - J*x₀
-    #
-    # For constraint F = q - Q(V):
-    # F(x₀) = q₀ - Q(Vp₀, Vn₀) = q₀ - result.q
-    #
-    # J*x₀ = 1*q₀ + (-∂Q/∂Vp)*Vp₀ + (-∂Q/∂Vn)*Vn₀
-    #      = q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀
-    #
-    # b = F(x₀) - J*x₀
-    #   = (q₀ - result.q) - (q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀)
-    #   = -result.q + result.dq_dVp*Vp₀ + result.dq_dVn*Vn₀
-    #
-    # Note: This ensures that at equilibrium (q = Q(V)), the constraint is satisfied.
-
-    b_constraint = -result.q + result.dq_dVp * Vp + result.dq_dVn * Vn
+    b_constraint = CHARGE_SCALE * (result.q - result.dq_dVp * Vp - result.dq_dVn * Vn)
     stamp_b!(ctx, q_idx, b_constraint)
 
     return q_idx

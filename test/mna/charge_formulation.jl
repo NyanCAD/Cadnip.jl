@@ -7,9 +7,10 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: va_ddt, is_voltage_dependent_charge
+using CedarSim.MNA: va_ddt, is_voltage_dependent_charge, CHARGE_SCALE
 using CedarSim.MNA: ContributionTag, JacobianTag
 using ForwardDiff: Dual, value, partials
+using LinearAlgebra: cond
 
 @testset "Voltage-Dependent Capacitor Detection" begin
 
@@ -119,7 +120,7 @@ end
 
 @testset "Charge State Variable Allocation" begin
     using CedarSim.MNA: MNAContext, get_node!, alloc_charge!, has_charge, get_charge_idx
-    using CedarSim.MNA: system_size, n_charges
+    using CedarSim.MNA: system_size, n_charges, resolve_index, ChargeIndex
 
     ctx = MNAContext()
     a = get_node!(ctx, :a)
@@ -135,7 +136,8 @@ end
     @test system_size(ctx) == 3  # nodes + charge
     @test has_charge(ctx, :Q_test)
     @test get_charge_idx(ctx, :Q_test) == q_idx
-    @test q_idx == 3  # After 2 nodes
+    @test q_idx isa ChargeIndex
+    @test resolve_index(ctx, q_idx) == 3  # After 2 nodes
 
     # Allocate another
     b = get_node!(ctx, :b)
@@ -143,12 +145,12 @@ end
 
     @test n_charges(ctx) == 2
     @test system_size(ctx) == 5  # 3 nodes + 2 charges
-    @test q_idx2 == 5
+    @test resolve_index(ctx, q_idx2) == 5
 end
 
 @testset "stamp_charge_state! basic" begin
     using CedarSim.MNA: MNAContext, MNASystem, get_node!, stamp!, assemble!
-    using CedarSim.MNA: stamp_charge_state!, VoltageSource
+    using CedarSim.MNA: stamp_charge_state!, VoltageSource, resolve_index
 
     # Test: voltage source + nonlinear capacitor to ground
     ctx = MNAContext()
@@ -166,29 +168,31 @@ end
 
     q_idx = stamp_charge_state!(ctx, vcc, 0, q_fn, x, :Q_cap)
 
-    @test q_idx == 3  # After node + current
+    q_row = resolve_index(ctx, q_idx)
+    @test q_row == 3  # After node + current
 
     sys = assemble!(ctx)
 
-    # Check C matrix has charge formulation entries
+    # Check C matrix has charge formulation entries WITH SCALING
     # The charge constraint row is ALGEBRAIC (no C[q_idx, q_idx])
     # The dq/dt terms appear in KCL rows via C[vcc, q_idx]
-    @test sys.C[q_idx, q_idx] ≈ 0.0  # Algebraic constraint - no mass
+    # Due to charge scaling, C entries are 1/CHARGE_SCALE
+    @test sys.C[q_row, q_row] ≈ 0.0  # Algebraic constraint - no mass
 
-    # C[vcc, q_idx] = 1 (current flows out of vcc)
-    @test sys.C[vcc, q_idx] ≈ 1.0
+    # C[vcc, q_row] = 1/CHARGE_SCALE (current = (1/SCALE)*d(q_scaled)/dt)
+    @test sys.C[vcc, q_row] ≈ 1.0 / CHARGE_SCALE
 
     # G matrix has constraint entries
-    # G[q_idx, q_idx] = 1
-    @test sys.G[q_idx, q_idx] ≈ 1.0
+    # G[q_row, q_row] = 1 (well-conditioned diagonal)
+    @test sys.G[q_row, q_row] ≈ 1.0
 
-    # G[q_idx, vcc] = -dQ/dVp = -2*C0*V = -2e-12 at V=1
-    @test sys.G[q_idx, vcc] ≈ -2e-12
+    # G[q_row, vcc] = -CHARGE_SCALE * dQ/dVp = -CHARGE_SCALE * 2*C0*V at V=1
+    @test sys.G[q_row, vcc] ≈ -CHARGE_SCALE * 2e-12
 end
 
 @testset "stamp_charge_state! with both nodes" begin
     using CedarSim.MNA: MNAContext, get_node!, assemble!
-    using CedarSim.MNA: stamp_charge_state!
+    using CedarSim.MNA: stamp_charge_state!, resolve_index
 
     ctx = MNAContext()
     p = get_node!(ctx, :p)
@@ -201,17 +205,18 @@ end
     x = [2.0, 1.0]  # Vp=2, Vn=1, so Vpn=1
 
     q_idx = stamp_charge_state!(ctx, p, n, q_fn, x, :Q_C)
+    q_row = resolve_index(ctx, q_idx)
 
     sys = assemble!(ctx)
 
-    # KCL coupling
-    @test sys.C[p, q_idx] ≈ 1.0   # Current leaves p
-    @test sys.C[n, q_idx] ≈ -1.0  # Current enters n
+    # KCL coupling WITH SCALING
+    @test sys.C[p, q_row] ≈ 1.0 / CHARGE_SCALE   # Current leaves p (scaled)
+    @test sys.C[n, q_row] ≈ -1.0 / CHARGE_SCALE  # Current enters n (scaled)
 
-    # Constraint Jacobian
-    @test sys.G[q_idx, q_idx] ≈ 1.0
-    @test sys.G[q_idx, p] ≈ -C     # -dQ/dVp
-    @test sys.G[q_idx, n] ≈ C      # -dQ/dVn = -(-C) = C
+    # Constraint Jacobian WITH SCALING
+    @test sys.G[q_row, q_row] ≈ 1.0                   # Well-conditioned diagonal
+    @test sys.G[q_row, p] ≈ -CHARGE_SCALE * C         # -CHARGE_SCALE * dQ/dVp
+    @test sys.G[q_row, n] ≈ CHARGE_SCALE * C          # -CHARGE_SCALE * dQ/dVn = CHARGE_SCALE * C
 end
 
 @testset "stamp_reactive_with_detection!" begin
@@ -242,6 +247,8 @@ end
     end
 
     @testset "Nonlinear capacitor -> charge formulation" begin
+        using CedarSim.MNA: resolve_index, get_charge_idx
+
         ctx = MNAContext()
         p = get_node!(ctx, :p)
         n = get_node!(ctx, :n)
@@ -258,16 +265,17 @@ end
         sys = assemble!(ctx)
 
         # Should have charge variable
-        q_idx = 3  # After 2 nodes
+        q_row = resolve_index(ctx, get_charge_idx(ctx, :Q_test))  # After 2 nodes
+        @test q_row == 3
 
-        # Charge formulation entries
-        # The constraint row is ALGEBRAIC (no C[q_idx, q_idx])
-        @test sys.C[q_idx, q_idx] ≈ 0.0  # Algebraic constraint
-        @test sys.C[p, q_idx] ≈ 1.0      # KCL coupling
-        @test sys.C[n, q_idx] ≈ -1.0
+        # Charge formulation entries WITH SCALING
+        # The constraint row is ALGEBRAIC (no C[q_row, q_row])
+        @test sys.C[q_row, q_row] ≈ 0.0                    # Algebraic constraint
+        @test sys.C[p, q_row] ≈ 1.0 / CHARGE_SCALE        # KCL coupling (scaled)
+        @test sys.C[n, q_row] ≈ -1.0 / CHARGE_SCALE
 
         # Constraint entries in G
-        @test sys.G[q_idx, q_idx] ≈ 1.0  # ∂/∂q = 1
+        @test sys.G[q_row, q_row] ≈ 1.0  # Well-conditioned diagonal
     end
 
     @testset "Mixed resistive + linear capacitive" begin
@@ -289,7 +297,7 @@ end
 
 @testset "Charge formulation solver integration" begin
     using CedarSim.MNA: MNAContext, get_node!, stamp!, VoltageSource, assemble!
-    using CedarSim.MNA: stamp_charge_state!, detect_differential_vars
+    using CedarSim.MNA: stamp_charge_state!, detect_differential_vars, resolve_index
 
     @testset "Charge constraint is algebraic" begin
         # Create a simple circuit with a nonlinear capacitor
@@ -305,6 +313,7 @@ end
 
         x = [1.0, 0.0]  # [Vcc, I_V1]
         q_idx = stamp_charge_state!(ctx, vcc, 0, q_fn, x, :Q_cap)
+        q_row = resolve_index(ctx, q_idx)
 
         sys = assemble!(ctx)
 
@@ -315,14 +324,14 @@ end
         @test diff_vars[vcc] == true
 
         # Charge variable should be ALGEBRAIC (constraint q = Q(V))
-        @test diff_vars[q_idx] == false
+        @test diff_vars[q_row] == false
 
         # Current variable (voltage source) should be algebraic
         I_idx = 2  # After vcc node
         @test diff_vars[I_idx] == false
     end
 
-    @testset "KCL has dq/dt terms" begin
+    @testset "KCL has dq/dt terms with scaling" begin
         # Create circuit with nonlinear cap between two nodes
         ctx = MNAContext()
         p = get_node!(ctx, :p)
@@ -333,18 +342,104 @@ end
 
         x = [1.0, 0.5]  # [Vp, Vn]
         q_idx = stamp_charge_state!(ctx, p, n, q_fn, x, :Q_cap)
+        q_row = resolve_index(ctx, q_idx)
 
         sys = assemble!(ctx)
 
-        # KCL at p includes +dq/dt (current leaves)
-        @test sys.C[p, q_idx] ≈ 1.0
+        # KCL at p includes +(1/CHARGE_SCALE)*d(q_scaled)/dt (current leaves)
+        @test sys.C[p, q_row] ≈ 1.0 / CHARGE_SCALE
 
-        # KCL at n includes -dq/dt (current enters)
-        @test sys.C[n, q_idx] ≈ -1.0
+        # KCL at n includes -(1/CHARGE_SCALE)*d(q_scaled)/dt (current enters)
+        @test sys.C[n, q_row] ≈ -1.0 / CHARGE_SCALE
 
         # Constraint row has no C entries (algebraic)
-        @test sys.C[q_idx, q_idx] ≈ 0.0
-        @test sys.C[q_idx, p] ≈ 0.0
-        @test sys.C[q_idx, n] ≈ 0.0
+        @test sys.C[q_row, q_row] ≈ 0.0
+        @test sys.C[q_row, p] ≈ 0.0
+        @test sys.C[q_row, n] ≈ 0.0
+    end
+end
+
+@testset "Charge scaling improves conditioning" begin
+    using CedarSim.MNA: MNAContext, get_node!, stamp!, assemble!
+    using CedarSim.MNA: stamp_charge_state!, VoltageSource, Resistor, resolve_index
+
+    # ==========================================================================
+    # Test: Verify that charge scaling keeps G matrix well-conditioned
+    #
+    # Without scaling, the G matrix would have entries like:
+    #   - Diagonal for charge constraint: 1.0
+    #   - Off-diagonal: -dQ/dV ≈ -1e-12 (capacitance)
+    # This creates a condition number ~1e12 due to magnitude mismatch.
+    #
+    # With scaling:
+    #   - Diagonal for charge constraint: 1.0 (unchanged)
+    #   - Off-diagonal: -CHARGE_SCALE * dQ/dV ≈ -1.0 (similar magnitude)
+    # This keeps the condition number much smaller.
+    # ==========================================================================
+
+    @testset "G matrix diagonal dominance" begin
+        ctx = MNAContext()
+        vcc = get_node!(ctx, :vcc)
+
+        # Voltage source + resistor load + nonlinear capacitor
+        stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
+        stamp!(Resistor(1000.0; name=:R1), ctx, vcc, 0)
+
+        # Nonlinear capacitor: Q(V) = C0 * V^2
+        C0 = 1e-12
+        q_fn(V) = C0 * V^2
+
+        x = [1.0, 0.0, 0.0]  # [Vcc, I_V1, q_scaled]
+        q_idx = stamp_charge_state!(ctx, vcc, 0, q_fn, x, :Q_cap)
+        q_row = resolve_index(ctx, q_idx)
+
+        sys = assemble!(ctx)
+        G = Matrix(sys.G)
+
+        # Check that the charge constraint row has reasonable magnitude entries
+        # The diagonal should be 1.0
+        @test G[q_row, q_row] ≈ 1.0
+
+        # The off-diagonal entry should be -CHARGE_SCALE * dQ/dV = -CHARGE_SCALE * 2*C0*V
+        # At V=1: -CHARGE_SCALE * 2e-12 = -2.0 (with CHARGE_SCALE=1e12)
+        # This is O(1), not O(1e-12)!
+        expected_offdiag = -CHARGE_SCALE * 2 * C0 * 1.0  # at V=1
+        @test G[q_row, vcc] ≈ expected_offdiag
+
+        # The magnitude of the off-diagonal is now comparable to the diagonal
+        @test abs(G[q_row, vcc]) >= 0.1  # Should be O(1), not O(1e-12)
+    end
+
+    @testset "Condition number comparison" begin
+        # Build circuit with nonlinear capacitor
+        ctx = MNAContext()
+        p = get_node!(ctx, :p)
+        n = get_node!(ctx, :n)
+
+        # Add resistors so the matrix is well-defined
+        stamp!(Resistor(1000.0; name=:R1), ctx, p, 0)
+        stamp!(Resistor(1000.0; name=:R2), ctx, n, 0)
+        stamp!(Resistor(500.0; name=:R3), ctx, p, n)
+
+        # Nonlinear capacitor between p and n
+        C0 = 1e-12
+        q_fn(V) = C0 * V^2
+
+        x = [1.0, 0.5, 0.0]  # [Vp, Vn, q_scaled]
+        q_idx = stamp_charge_state!(ctx, p, n, q_fn, x, :Q_cap)
+
+        sys = assemble!(ctx)
+        G = Matrix(sys.G)
+
+        # Compute condition number
+        κ = cond(G)
+
+        # With scaling, condition number should be reasonable (not astronomical)
+        # Without scaling, it would be ~1e12 due to 1e-12 capacitance values
+        # With scaling, it should be O(1e3) or better
+        @test κ < 1e6  # Much better than 1e12
+
+        # Print for debugging
+        println("G matrix condition number with charge scaling: $κ")
     end
 end
