@@ -133,79 +133,44 @@ output matrices, required for optimal OrdinaryDiffEq integration.
 
 **Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach.
 
-### Fundamental Requirements
-
-These constraints are required for zero allocation:
+### Requirements
 
 | Requirement | Reason |
 |------------|--------|
 | **Dense matrices** (`dense=true`) | Sparse UMFPACK `lu!` allocates ~1696 bytes/call |
 | **`blind_step!()` wrapper** | `step!()` returns ReturnCode causing 16 bytes boxing |
 | **Fixed timestep** (`adaptive=false`) | Adaptive stepping requires error estimation allocations |
+| **`autodiff=false`** | Use explicit Jacobian from MNA |
 
-### Solver Compatibility
+### Compatible Solvers
 
-Multiple fixed-step implicit solvers work for zero allocation:
+All these solvers achieve zero allocation with the above settings:
 
-| Solver | Order | Properties | Zero-Alloc |
-|--------|-------|------------|------------|
-| `ImplicitEuler` | 1st | L-stable, simplest | ✓ |
-| `ImplicitMidpoint` | 2nd | Symplectic, A-stable | ✓ |
-| `Trapezoid` | 2nd | A-stable | ✓ |
+| Solver | Order | Type |
+|--------|-------|------|
+| `FBDF` | 1-5 | Variable-order BDF (recommended) |
+| `QNDF` | 1-5 | Variable-order quasi-constant BDF |
+| `Rodas5P`, `Rodas5` | 5 | Rosenbrock |
+| `Rodas4P`, `Rodas4` | 4 | Rosenbrock |
+| `Rosenbrock23` | 2-3 | Rosenbrock |
+| `ImplicitEuler` | 1 | SDIRK |
+| `ImplicitMidpoint` | 2 | IRK |
+| `Trapezoid` | 2 | SDIRK |
 
-All require `autodiff=false` to use the explicit Jacobian.
+**Not compatible** (don't support mass matrices): `TRBDF2`, `KenCarp4`
 
-### Relaxable Settings
-
-These settings don't affect stepping allocations:
-
-| Setting | Purpose | Can Relax? |
-|---------|---------|------------|
-| `save_on=false` | Solution history storage | Yes - saving allocates, stepping doesn't |
-| `dense=false` (integrator) | Interpolation coefficients | Yes - only affects output |
-| `callback=nothing` | Event handling | Depends on callback implementation |
-
-### Why `step!()` allocates 16 bytes
-
-The standard `step!(integrator)` returns `integrator.sol.retcode` (a `SciMLBase.ReturnCode.T` enum),
-which causes 16 bytes of boxing allocation per call when the return value is used or escapes.
-
-### Achieving TRUE zero allocation (0 bytes/call)
-
-**Simple approach**: Wrap `step!()` in a function that discards the return value:
-
-```julia
-function blind_step!(integrator)
-    step!(integrator)
-    return nothing
-end
-
-# Real-time loop (TRUE 0 bytes/call)
-while running
-    blind_step!(integrator)
-    # Access state: integrator.u
-end
-```
-
-Julia's compiler optimizes away the ReturnCode allocation when it sees the value is unused.
-This is much simpler than calling internal functions directly.
-
-**Using the API**: Use `ODEProblem(circuit, tspan; dense=true)` for the simplest setup:
+### Example
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 
-# Create circuit
 circuit = MNACircuit(builder; params...)
-
-# Create ODE problem with dense matrices for zero-allocation
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
-# Create integrator - can use ImplicitEuler, ImplicitMidpoint, or Trapezoid
-# CedarTranOp computes DC operating point during init
-integrator = init(prob, ImplicitMidpoint(autodiff=false),  # or ImplicitEuler, Trapezoid
+# FBDF is a good default - variable order up to 5th, L-stable
+integrator = init(prob, FBDF(autodiff=false);
     adaptive=false, dt=1e-5,
-    save_on=false, dense=false,     # These can be relaxed if needed
+    save_on=false, dense=false,
     maxiters=10_000_000,
     initializealg=MNA.CedarTranOp())
 

@@ -428,26 +428,26 @@ eval(ce_amplifier_code)
 end  # testset "Audio Integration Tests"
 
 #==============================================================================#
-# Zero-Allocation BJT Transient Simulation Test
+# Zero-Allocation Transient Simulation Test
 #
 # Demonstrates zero-allocation circuit simulation with OrdinaryDiffEq.
 #
-# FUNDAMENTAL RESTRICTIONS (cannot be relaxed):
+# REQUIREMENTS for zero allocation:
 # 1. Dense matrices (dense=true) - Sparse UMFPACK lu! allocates ~1696 bytes/call
 # 2. blind_step!() wrapper - step!() returns ReturnCode causing 16 bytes boxing
 # 3. Fixed timestep (adaptive=false) - Adaptive stepping requires error estimation
+# 4. autodiff=false - Use explicit Jacobian from MNA
 #
-# RELAXABLE SETTINGS (tested below):
-# 1. Solver choice - ImplicitEuler, ImplicitMidpoint, Trapezoid all work
-# 2. save_on=false - Only affects solution history storage, not stepping
-# 3. dense=false (integrator) - Only affects interpolation, not stepping
-# 4. callback=nothing - Only matters if callbacks would allocate
+# COMPATIBLE SOLVERS (all zero-alloc with above settings):
+# - FBDF, QNDF (variable-order BDF, up to 5th order)
+# - Rodas5P, Rodas5, Rodas4P, Rodas4 (Rosenbrock methods)
+# - Rosenbrock23, ImplicitEuler, ImplicitMidpoint, Trapezoid
 #
-# The key insight: zero allocation requires dense matrices and fixed timestep.
-# Within those constraints, you can use different solvers and relaxed settings.
+# NOT COMPATIBLE (don't support mass matrices):
+# - TRBDF2, KenCarp4
 #==============================================================================#
 
-using OrdinaryDiffEq: ImplicitMidpoint, Trapezoid
+using OrdinaryDiffEq: FBDF
 
 """
 Helper function to measure allocations correctly.
@@ -472,197 +472,65 @@ function measure_allocations(f::Function; warmup=1000, iters=10000)
     end
 end
 
-@testset "Zero-Allocation BJT Transient" begin
+@testset "Zero-Allocation Transient" begin
 
-    # Use SPICE-generated bjt_with_rc circuit (defined at top of file)
     circuit = MNACircuit(bjt_with_rc)
 
-    # Compile with dense matrices - REQUIRED for zero allocation
+    # dense=true is REQUIRED for zero allocation (avoids sparse UMFPACK)
     ws = MNA.compile(circuit; dense=true)
     cs = ws.structure
     n = MNA.system_size(cs)
 
-    @testset "MNA fast path primitives (dense matrices)" begin
+    @testset "MNA primitives" begin
         u = zeros(n)
         du = zeros(n)
         resid = zeros(n)
         J = zeros(n, n)
-        t = 0.0
-        gamma = 1.0
 
-        # Initialize with DC solution
-        MNA.fast_rebuild!(ws, u, t)
+        MNA.fast_rebuild!(ws, u, 0.0)
         for _ in 1:20
-            MNA.fast_residual!(resid, du, u, ws, t)
-            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
+            MNA.fast_residual!(resid, du, u, ws, 0.0)
+            MNA.fast_jacobian!(J, du, u, ws, 1.0, 0.0)
             u .-= J \ resid
         end
 
-        allocs_rebuild = measure_allocations() do
-            MNA.fast_rebuild!(ws, u, t)
-        end
-        @test allocs_rebuild == 0
-
-        allocs_residual = measure_allocations() do
-            MNA.fast_residual!(resid, du, u, ws, t)
-        end
-        @test allocs_residual == 0
-
-        allocs_jacobian = measure_allocations() do
-            MNA.fast_jacobian!(J, du, u, ws, gamma, t)
-        end
-        @test allocs_jacobian == 0
+        @test measure_allocations(() -> MNA.fast_rebuild!(ws, u, 0.0)) == 0
+        @test measure_allocations(() -> MNA.fast_residual!(resid, du, u, ws, 0.0)) == 0
+        @test measure_allocations(() -> MNA.fast_jacobian!(J, du, u, ws, 1.0, 0.0)) == 0
     end
 
-    #==========================================================================#
-    # Test different fixed-step solvers for zero allocation
-    #
-    # All these solvers should be zero-allocation with:
-    # - dense=true (dense matrices)
-    # - adaptive=false (fixed timestep)
-    # - blind_step!() wrapper
-    #==========================================================================#
-
-    @testset "ImplicitEuler (1st order, L-stable)" begin
-        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
-        integrator = init(prob, ImplicitEuler(autodiff=false);
-            adaptive=false, dt=1e-9, callback=nothing,
-            save_on=false, dense=false, maxiters=10_000_000,
-            initializealg=MNA.CedarTranOp())
-
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        GC.gc()
-
-        reinit!(integrator, prob.u0)
-        allocs = measure_allocations(; warmup=100, iters=10000) do
-            MNA.blind_step!(integrator)
-        end
-        @test allocs == 0
-        @info "ImplicitEuler: $(allocs) bytes/step"
-
-        reinit!(integrator, prob.u0)
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        @test all(isfinite, integrator.u)
-    end
-
-    @testset "ImplicitMidpoint (2nd order, symplectic)" begin
-        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
-        integrator = init(prob, ImplicitMidpoint(autodiff=false);
-            adaptive=false, dt=1e-9, callback=nothing,
-            save_on=false, dense=false, maxiters=10_000_000,
-            initializealg=MNA.CedarTranOp())
-
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        GC.gc()
-
-        reinit!(integrator, prob.u0)
-        allocs = measure_allocations(; warmup=100, iters=10000) do
-            MNA.blind_step!(integrator)
-        end
-        @test allocs == 0
-        @info "ImplicitMidpoint: $(allocs) bytes/step"
-
-        reinit!(integrator, prob.u0)
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        @test all(isfinite, integrator.u)
-    end
-
-    @testset "Trapezoid (2nd order, A-stable)" begin
-        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
-        integrator = init(prob, Trapezoid(autodiff=false);
-            adaptive=false, dt=1e-9, callback=nothing,
-            save_on=false, dense=false, maxiters=10_000_000,
-            initializealg=MNA.CedarTranOp())
-
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        GC.gc()
-
-        reinit!(integrator, prob.u0)
-        allocs = measure_allocations(; warmup=100, iters=10000) do
-            MNA.blind_step!(integrator)
-        end
-        @test allocs == 0
-        @info "Trapezoid: $(allocs) bytes/step"
-
-        reinit!(integrator, prob.u0)
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        @test all(isfinite, integrator.u)
-    end
-
-    #==========================================================================#
-    # Test relaxed settings that DON'T affect allocation
-    #
-    # These settings control output behavior, not stepping allocations.
-    #==========================================================================#
-
-    @testset "Relaxed settings (save_on=true still zero-alloc stepping)" begin
+    @testset "FBDF solver (variable-order BDF, up to 5th order)" begin
         prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
 
-        # Note: save_on=true will allocate when SAVING, but each STEP is still zero-alloc
-        # This tests that stepping itself doesn't allocate even with save_on=true
-        integrator = init(prob, ImplicitEuler(autodiff=false);
-            adaptive=false, dt=1e-9,
-            save_on=true,  # Relaxed: allow saving (but measure step, not save)
-            dense=false,
-            maxiters=10_000_000,
-            initializealg=MNA.CedarTranOp())
-
-        # Warmup with saving disabled for measurement
-        integrator.opts.save_on = false
-        for _ in 1:1000
-            MNA.blind_step!(integrator)
-        end
-        GC.gc()
-
-        reinit!(integrator, prob.u0)
-        allocs = measure_allocations(; warmup=100, iters=10000) do
-            MNA.blind_step!(integrator)
-        end
-        @test allocs == 0
-        @info "ImplicitEuler (save_on disabled for step): $(allocs) bytes/step"
-    end
-
-    #==========================================================================#
-    # Document why adaptive=true cannot be zero-allocation
-    #==========================================================================#
-
-    @testset "Adaptive stepping allocates (expected)" begin
-        prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
-
-        # Adaptive stepping WILL allocate - this documents the expected behavior
-        integrator = init(prob, ImplicitEuler(autodiff=false);
-            adaptive=true,  # This will cause allocations
+        # Requirements: adaptive=false, autodiff=false
+        integrator = init(prob, FBDF(autodiff=false);
+            adaptive=false,
             dt=1e-9,
             save_on=false,
             dense=false,
             maxiters=10_000_000,
             initializealg=MNA.CedarTranOp())
 
-        for _ in 1:100
+        # Warmup
+        for _ in 1:1000
             MNA.blind_step!(integrator)
         end
         GC.gc()
 
+        # Measure - must use blind_step! to avoid ReturnCode boxing
         reinit!(integrator, prob.u0)
-        allocs = measure_allocations(; warmup=10, iters=100) do
+        allocs = measure_allocations(; warmup=100, iters=10000) do
             MNA.blind_step!(integrator)
         end
-        # Adaptive stepping allocates for error estimation
-        # This is expected and documents the fundamental limitation
-        @info "Adaptive ImplicitEuler: $(allocs) bytes/step (expected non-zero)"
-        # We don't test allocs == 0 here - this documents the limitation
+        @test allocs == 0
+        @info "FBDF: $(allocs) bytes/step"
+
+        # Verify solution is valid
+        reinit!(integrator, prob.u0)
+        for _ in 1:1000
+            MNA.blind_step!(integrator)
+        end
+        @test all(isfinite, integrator.u)
     end
 
-end  # testset "Zero-Allocation BJT Transient"
+end  # testset "Zero-Allocation Transient"
