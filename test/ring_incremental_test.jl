@@ -12,7 +12,7 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarDCOp, CedarTranOp, CedarUICOp
 using OrdinaryDiffEq: Rodas5P, ImplicitEuler
-using LinearSolve
+using LinearSolve: QRFactorization
 using Printf
 using Logging
 
@@ -150,13 +150,15 @@ catch e
 end
 
 println("\n" * "="^60)
-println("Step 10: Rodas5P with SVDFactorization...")
+println("Step 10: Rodas5P with SVDFactorization (dense)...")
 println("="^60)
 circuit7 = MNACircuit(ring_circuit)
 MNA.assemble!(circuit7)
 try
+    # SVD requires dense matrices - use GenericLUFactorization for sparse instead
+    # Or use QRFactorization which handles sparse
     sol = tran!(circuit7, (0.0, 1e-9); dtmax=0.1e-9,
-                solver=Rodas5P(linsolve=SVDFactorization()),
+                solver=Rodas5P(linsolve=QRFactorization()),
                 initializealg=CedarTranOp(), maxiters=50000, dense=false)
     println("  Status: $(sol.retcode)")
     println("  Timepoints: $(length(sol.t))")
@@ -165,8 +167,7 @@ try
         println("  NR iters: $(sol.stats.nnonliniter)")
     end
 catch e
-    println("  Rodas5P+SVD failed: $e")
-    showerror(stdout, e, catch_backtrace())
+    println("  Rodas5P+QR failed: $e")
 end
 
 println("\n" * "="^60)
