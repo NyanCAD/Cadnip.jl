@@ -435,19 +435,21 @@ end  # testset "Audio Integration Tests"
 # REQUIREMENTS for zero allocation:
 # 1. Dense matrices (dense=true) - Sparse UMFPACK lu! allocates ~1696 bytes/call
 # 2. blind_step!() wrapper - step!() returns ReturnCode causing 16 bytes boxing
-# 3. Fixed timestep (adaptive=false) - Adaptive stepping requires error estimation
-# 4. autodiff=false - Use explicit Jacobian from MNA
+# 3. autodiff=false - Use explicit Jacobian from MNA
 #
-# COMPATIBLE SOLVERS (all zero-alloc with above settings):
-# - FBDF, QNDF (variable-order BDF, up to 5th order)
+# ZERO-ALLOCATION SOLVERS (with adaptive=true):
+# - QNDF (variable-order quasi-constant BDF, recommended)
 # - Rodas5P, Rodas5, Rodas4P, Rodas4 (Rosenbrock methods)
 # - Rosenbrock23, ImplicitEuler, ImplicitMidpoint, Trapezoid
+#
+# ALLOCATES WITH ADAPTIVE (use fixed timestep or switch solver):
+# - FBDF (~56 bytes/step due to Lagrange interpolation in order control)
 #
 # NOT COMPATIBLE (don't support mass matrices):
 # - TRBDF2, KenCarp4
 #==============================================================================#
 
-using OrdinaryDiffEq: FBDF
+using OrdinaryDiffEq: QNDF
 
 """
 Helper function to measure allocations correctly.
@@ -499,12 +501,12 @@ end
         @test measure_allocations(() -> MNA.fast_jacobian!(J, du, u, ws, 1.0, 0.0)) == 0
     end
 
-    @testset "FBDF solver (variable-order BDF, up to 5th order)" begin
+    @testset "QNDF solver (variable-order BDF, adaptive timestep)" begin
         prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
 
-        # Requirements: adaptive=false, autodiff=false
-        integrator = init(prob, FBDF(autodiff=false);
-            adaptive=false,
+        # QNDF achieves zero allocation even with adaptive=true
+        integrator = init(prob, QNDF(autodiff=false);
+            adaptive=true,
             dt=1e-9,
             save_on=false,
             dense=false,
@@ -523,7 +525,7 @@ end
             MNA.blind_step!(integrator)
         end
         @test allocs == 0
-        @info "FBDF: $(allocs) bytes/step"
+        @info "QNDF (adaptive): $(allocs) bytes/step"
 
         # Verify solution is valid
         reinit!(integrator, prob.u0)
