@@ -1,14 +1,7 @@
 9 stage ring oscillator with PSP103 MOSFETs
 
-* NMOS wrapper - uses PSP103VA directly (uppercase params to match VA model)
-.subckt nmos d g s b w=1u l=0.2u ld=0.5u ls=0.5u
-  xm d g s b PSP103VA TYPE=1 W={w} L={l}
-.ends
-
-* PMOS wrapper - uses PSP103VA directly with TYPE=-1
-.subckt pmos d g s b w=1u l=0.2u ld=0.5u ls=0.5u
-  xm d g s b PSP103VA TYPE=-1 W={w} L={l}
-.ends
+* Include full PSP103VA model cards (200+ params each, matching ngspice)
+.include "models.inc"
 
 * Inverter subcircuit
 .subckt inverter in out vdd vss w=1u l=0.2u pfact=2

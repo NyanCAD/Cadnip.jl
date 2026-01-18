@@ -1991,8 +1991,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     # NOTE: ctx accepts AnyMNAContext (MNAContext or DirectStampContext) for zero-allocation mode
+    # NOTE: @noinline prevents LLVM SROA from blowing up when this gets compiled
+    # into a circuit function. Without it, large VA models (782-field PSP103VA) cause OOM.
     quote
-        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+        Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
                                      $([:($np::Int) for np in node_params]...);
                                      _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),

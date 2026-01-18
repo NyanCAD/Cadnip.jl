@@ -1389,12 +1389,17 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
         # Generate stamp! call for VA module
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
-        # Include instance name for unique internal node naming
+        # Include hierarchical instance name for unique internal node naming
+        # NOTE: Use invokelatest to force runtime dispatch and use precompiled stamp! methods.
+        # Without this, Julia may try to inline-specialize the call, triggering LLVM compilation
+        # that crashes on very large functions (>90K statements, e.g., PSP103VA with 96K).
+        local_name = QuoteNode(Symbol(name))
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = $(QuoteNode(Symbol(name))))
+                    _mna_instance_ = full_instance_name)
             end
         end
     end
@@ -1497,7 +1502,8 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 # Build hierarchical instance name from _mna_prefix_ + local instance name
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                     _mna_instance_ = full_instance_name)
             end
@@ -1772,12 +1778,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             end
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-            # Include instance name for unique internal node naming
+            # Include hierarchical instance name for unique internal node naming
+            # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+            local_name = QuoteNode(Symbol(name))
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
-                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = $(QuoteNode(Symbol(name))))
+                        _mna_instance_ = full_instance_name)
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
@@ -1850,21 +1859,28 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
-    # Generate code to create device instance and stamp it
-    # The model_name is a callable that returns a VA device struct
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
+    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
+    # of dev at compile time. This prevents LLVM SROA from trying to decompose
+    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :($model_name())
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
     else
-        device_expr = Expr(:call, model_name, param_kwargs...)
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-    # Include instance name for unique internal node naming
+    # Include hierarchical instance name for unique internal node naming
+    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+    local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
-            $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+            Base.invokelatest($(MNA).stamp!, dev, ctx, $d, $g, $s, $b;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = $(QuoteNode(Symbol(name))))
+                _mna_instance_ = full_instance_name)
         end
     end
 end
@@ -1899,19 +1915,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
-    # Generate code to create device instance and stamp it
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
+    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
+    # of dev at compile time. This prevents LLVM SROA from trying to decompose
+    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :($model_name())
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
     else
-        device_expr = Expr(:call, model_name, param_kwargs...)
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+    local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
-            $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+            Base.invokelatest($(MNA).stamp!, dev, ctx, $c, $b, $e, $s;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = $(QuoteNode(Symbol(name))))
+                _mna_instance_ = full_instance_name)
         end
     end
 end
@@ -1961,24 +1985,33 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
         push!(param_kwargs, Expr(:kw, rname, param_val))
     end
 
-    # Generate code to create device instance and stamp it
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
+    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
+    # of dev at compile time. This prevents LLVM SROA from trying to decompose
+    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :($model_name())
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
     else
-        device_expr = Expr(:call, model_name, param_kwargs...)
+        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
     end
 
     # Generate stamp! call with variable number of node arguments
     # Build the call expression manually to handle variable node count
+    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
     node_args = Expr(:tuple, node_exprs...)
-    instance_sym = QuoteNode(Symbol(name))
+    local_name = QuoteNode(Symbol(name))
 
+    # Build hierarchical instance name from _mna_prefix_ + local instance name
+    # This ensures unique internal node names across subcircuit instances
     return quote
         let dev = $device_expr
             nodes = $node_args
-            $(MNA).stamp!(dev, ctx, nodes...;
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+            Base.invokelatest($(MNA).stamp!, dev, ctx, nodes...;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = $instance_sym)
+                _mna_instance_ = full_instance_name)
         end
     end
 end
@@ -2332,7 +2365,8 @@ function codegen_toplevel_models!(state::CodegenState)
                     # Use case-insensitive lookup to find correct parameter name
                     lname = Symbol(lowercase(String(pname)))
                     rname = get(case_insensitive, lname, pname)
-                    push!(model_params, Expr(:kw, rname, pval))
+                    # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
+                    push!(model_params, Expr(:(=), rname, pval))
                 end
                 device_type = mosfet_type !== nothing ? mosfet_type : typ
                 level_int = level === nothing ? nothing : Int(level)
@@ -2340,22 +2374,18 @@ function codegen_toplevel_models!(state::CodegenState)
                 type_params = CedarSim.getparams(device_type, level_int, version_str)
                 has_type_from_registry = false
                 for (param_name, param_val) in pairs(type_params)
-                    push!(model_params, Expr(:kw, param_name, param_val))
+                    push!(model_params, Expr(:(=), param_name, param_val))
                     if param_name == :TYPE
                         has_type_from_registry = true
                     end
                 end
                 if !has_type_from_registry && type_val !== nothing
-                    push!(model_params, Expr(:kw, :TYPE, type_val))
+                    push!(model_params, Expr(:(=), :TYPE, type_val))
                 end
                 model_var = cg_model_name!(state, model_name)
-                push!(model_defs, quote
-                    $model_var = let base_type = $model_ref
-                        function(; kwargs...)
-                            base_type(; $(model_params...), kwargs...)
-                        end
-                    end
-                end)
+                # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                # This avoids embedding 200 kwargs in the generated code
+                push!(model_defs, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
             end
         end
     end
@@ -2569,7 +2599,8 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                         # Use case-insensitive lookup to find correct parameter name
                         lname = Symbol(lowercase(String(pname)))
                         rname = get(case_insensitive, lname, pname)
-                        push!(model_params, Expr(:kw, rname, pval))
+                        # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
+                        push!(model_params, Expr(:(=), rname, pval))
                     end
                     # Query model registry for type parameters (polarity for MOSFET/BJT)
                     device_type = mosfet_type !== nothing ? mosfet_type : typ
@@ -2578,7 +2609,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                     type_params = CedarSim.getparams(device_type, level_int, version_str)
                     has_type_from_registry = false
                     for (param_name, param_val) in pairs(type_params)
-                        push!(model_params, Expr(:kw, param_name, param_val))
+                        push!(model_params, Expr(:(=), param_name, param_val))
                         if param_name == :TYPE
                             has_type_from_registry = true
                         end
@@ -2586,19 +2617,12 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                     # If getparams didn't provide TYPE but model card had type=N, add it
                     if !has_type_from_registry && type_val !== nothing
                         # VA models typically expect TYPE (uppercase) for device polarity
-                        push!(model_params, Expr(:kw, :TYPE, type_val))
+                        push!(model_params, Expr(:(=), :TYPE, type_val))
                     end
                     model_var = cg_model_name!(state, model_name)
-                    # Create a callable that returns a VA device with merged parameters
-                    # model_name(; instance_params...) = VAType(; model_params..., instance_params...)
-                    push!(block.args, quote
-                        $model_var = let base_type = $model_ref
-                            # Create a callable that merges model params with instance params
-                            function(; kwargs...)
-                                base_type(; $(model_params...), kwargs...)
-                            end
-                        end
-                    end)
+                    # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                    # This avoids embedding 200 kwargs in the generated code
+                    push!(block.args, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
                 end
             end
         end
@@ -2879,6 +2903,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                  x::AbstractVector=ZERO_VECTOR,
                                  ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing)
+            # Default prefix for top-level instances (empty = no prefix)
+            _mna_prefix_ = Symbol("")
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
@@ -2890,8 +2916,13 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
 
         # Zero-allocation positional version for DirectStampContext (fast path)
-        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
+        # NOTE: Do NOT use @inline here - VA models with large stamp! functions
+        # (90K+ IR statements) will cause LLVM to crash during compilation.
+        # The invokelatest barrier only helps if the circuit function isn't inlined.
+        function $(circuit_name)(params, spec::$(MNASpec), t::Real,
                                         x::AbstractVector, ctx::$(DirectStampContext))
+            # Default prefix for top-level instances (empty = no prefix)
+            _mna_prefix_ = Symbol("")
             $(reset_for_restamping!)(ctx)
             $body
             return ctx

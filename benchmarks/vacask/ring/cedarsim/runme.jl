@@ -26,9 +26,9 @@ const spice_file = joinpath(@__DIR__, "runme.sp")
 const spice_code = read(spice_file, String)
 
 # Parse SPICE to code, then evaluate to get the builder function
-# Pass PSP103VA_module so the SPICE parser knows about our VA device
+# Pass PSPModels so the SPICE parser recognizes the psp103va model type
 const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_circuit,
-                                         imported_hdl_modules=[PSP103VA_module])
+                                         imported_hdl_modules=[PSPModels])
 eval(circuit_code)
 
 """
