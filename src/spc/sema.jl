@@ -91,7 +91,7 @@ const TwoTerminal = Union{SNode{SP.Resistor}, SNode{SP.Inductor}, SNode{SP.Capac
 
 # Controlled sources use parameterized ControlledSource{in, out} type
 # VCVS = ControlledSource{:V,:V}, VCCS = ControlledSource{:V,:C}, etc.
-const AnySPInstance = Union{SNode{SP.MOSFET}, SNode{SP.SubcktCall},
+const AnySPInstance = Union{SNode{SP.MOSFET}, SNode{SP.SubcktCall}, SNode{SP.OSDIDevice},
     SNode{SP.BipolarTransistor}, SNode{SP.Behavioral},
     SNode{SP.ControlledSource{:C,:V}}, SNode{SP.ControlledSource{:C,:C}},
     SNode{SP.ControlledSource{:V,:V}}, SNode{SP.ControlledSource{:V,:C}},
@@ -110,6 +110,7 @@ function sema_nets(instance::SNode{SP.BipolarTransistor})
     return Tuple(nets)
 end
 sema_nets(instance::SNode{SP.SubcktCall}) = instance.nodes
+sema_nets(instance::SNode{SP.OSDIDevice}) = instance.nodes
 # Spectre instance: nodes are in nodelist.nodes
 sema_nets(instance::SNode{SC.Instance}) = Tuple(n.node for n in instance.nodelist.nodes)
 # Controlled sources: output nodes + control nodes
@@ -305,9 +306,13 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
     end
 
     # Search for this model in HDL modules included via .hdl directive
+    # SPICE is case-insensitive, so try both exact match and uppercase
+    devkind_upper = Symbol(uppercase(String(devkind)))
     for hdl_mod in sema.imported_hdl_modules
         if isdefined(hdl_mod, devkind)
             return GlobalRef(hdl_mod, devkind)
+        elseif isdefined(hdl_mod, devkind_upper)
+            return GlobalRef(hdl_mod, devkind_upper)
         end
     end
 
@@ -402,6 +407,14 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
             # Phase 0: VAModelCall doesn't exist in the parser
             if isa(stmt, SNode{SP.MOSFET})
                 push!(scope.exposed_models, LSymbol(stmt.model))
+            end
+            if isa(stmt, SNode{SP.OSDIDevice})
+                # OSDI devices use model cards like MOSFETs
+                if stmt.model !== nothing
+                    push!(scope.exposed_models, LSymbol(stmt.model))
+                elseif stmt.model_after !== nothing
+                    push!(scope.exposed_models, LSymbol(stmt.model_after))
+                end
             end
             if isa(stmt, SNode{SP.Resistor})
                 if stmt.val !== nothing && (hasparam(stmt.params, "l") || hasparam(stmt.params, "r"))
