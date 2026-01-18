@@ -133,33 +133,52 @@ output matrices, required for optimal OrdinaryDiffEq integration.
 
 **Finding**: OrdinaryDiffEq can achieve **true zero allocation (0 bytes/call)** with the right approach.
 
-### Requirements
+### Requirements for Fixed Timestep (adaptive=false)
 
 | Requirement | Reason |
 |------------|--------|
 | **Dense matrices** (`dense=true`) | Sparse UMFPACK `lu!` allocates ~1696 bytes/call |
 | **`blind_step!()` wrapper** | `step!()` returns ReturnCode causing 16 bytes boxing |
-| **Fixed timestep** (`adaptive=false`) | Adaptive stepping requires error estimation allocations |
 | **`autodiff=false`** | Use explicit Jacobian from MNA |
+
+All solvers below achieve zero allocation with fixed timestep (`adaptive=false`).
+
+### Adaptive Timestep (adaptive=true)
+
+**Key finding**: Some solvers achieve **zero allocation even with adaptive stepping**!
+
+| Solver | Fixed Timestep | Adaptive Timestep | Notes |
+|--------|----------------|-------------------|-------|
+| `QNDF` | 0 bytes | **0 bytes** | Recommended for stiff circuits |
+| `Rodas5P` | 0 bytes | **0 bytes** | Recommended for moderate stiffness |
+| `Rosenbrock23` | 0 bytes | **0 bytes** | Robust fallback |
+| `ImplicitEuler` | 0 bytes | **0 bytes** | Simple, very stable |
+| `FBDF` | 0 bytes | **~56 bytes** | Allocates in order control |
+
+**Why FBDF allocates with adaptive stepping:**
+FBDF uses Lagrange interpolation for variable order control, which allocates in:
+- `calc_Lagrange_interp!` (bdf_utils.jl:157) - ~45 bytes for view/slice operations
+- `choose_order!` (controllers.jl:178) - ~11 bytes for intermediate arrays
+
+**Recommendation:** Use `QNDF` instead of `FBDF` for zero-allocation adaptive BDF stepping.
+QNDF uses backward differences with κ-correction which avoids these allocations.
 
 ### Compatible Solvers
 
-All these solvers achieve zero allocation with the above settings:
-
-| Solver | Order | Type |
-|--------|-------|------|
-| `FBDF` | 1-5 | Variable-order BDF (recommended) |
-| `QNDF` | 1-5 | Variable-order quasi-constant BDF |
-| `Rodas5P`, `Rodas5` | 5 | Rosenbrock |
-| `Rodas4P`, `Rodas4` | 4 | Rosenbrock |
-| `Rosenbrock23` | 2-3 | Rosenbrock |
-| `ImplicitEuler` | 1 | SDIRK |
-| `ImplicitMidpoint` | 2 | IRK |
-| `Trapezoid` | 2 | SDIRK |
+| Solver | Order | Type | Adaptive Alloc |
+|--------|-------|------|----------------|
+| `QNDF` | 1-5 | Variable-order quasi-constant BDF | **0 bytes** |
+| `Rodas5P`, `Rodas5` | 5 | Rosenbrock | **0 bytes** |
+| `Rodas4P`, `Rodas4` | 4 | Rosenbrock | **0 bytes** |
+| `Rosenbrock23` | 2-3 | Rosenbrock | **0 bytes** |
+| `ImplicitEuler` | 1 | SDIRK | **0 bytes** |
+| `ImplicitMidpoint` | 2 | IRK | **0 bytes** |
+| `Trapezoid` | 2 | SDIRK | **0 bytes** |
+| `FBDF` | 1-5 | Variable-order BDF | ~56 bytes |
 
 **Not compatible** (don't support mass matrices): `TRBDF2`, `KenCarp4`
 
-### Example
+### Example: Fixed Timestep
 
 ```julia
 using CedarSim, CedarSim.MNA, OrdinaryDiffEq
@@ -167,8 +186,8 @@ using CedarSim, CedarSim.MNA, OrdinaryDiffEq
 circuit = MNACircuit(builder; params...)
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
 
-# FBDF is a good default - variable order up to 5th, L-stable
-integrator = init(prob, FBDF(autodiff=false);
+# QNDF with fixed timestep (0 bytes/step)
+integrator = init(prob, QNDF(autodiff=false);
     adaptive=false, dt=1e-5,
     save_on=false, dense=false,
     maxiters=10_000_000,
@@ -177,6 +196,30 @@ integrator = init(prob, FBDF(autodiff=false);
 # Real-time loop (TRUE 0 bytes/call)
 while running
     MNA.blind_step!(integrator)
+    # Access state: integrator.u
+end
+```
+
+### Example: Adaptive Timestep (Zero Allocation)
+
+```julia
+using CedarSim, CedarSim.MNA, OrdinaryDiffEq
+
+circuit = MNACircuit(builder; params...)
+prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
+
+# QNDF with adaptive timestep (still 0 bytes/step!)
+integrator = init(prob, QNDF(autodiff=false);
+    adaptive=true,  # Adaptive stepping enabled
+    dt=1e-9,        # Initial timestep
+    save_on=false, dense=false,
+    maxiters=10_000_000,
+    initializealg=MNA.CedarTranOp())
+
+# Real-time loop with automatic step size control (0 bytes/call)
+while running
+    MNA.blind_step!(integrator)
+    # integrator.dt contains current adaptive timestep
     # Access state: integrator.u
 end
 ```
@@ -248,4 +291,5 @@ end
 - `src/mna/context.jl`: Component-based `alloc_current!` APIs
 - `src/mna/value_only.jl`: `DirectStampContext` and `stamp_voltage_contribution!`
 - `src/mna/contrib.jl`: Zero-allocation ForwardDiff contribution stamping
-- `test/mna/audio_integration.jl`: Zero-allocation OrdinaryDiffEq integration tests
+- `test/mna/audio_integration.jl`: Zero-allocation OrdinaryDiffEq integration tests (fixed timestep)
+- `test/mna/adaptive_allocation_test.jl`: Adaptive timestep allocation tests
