@@ -178,28 +178,6 @@ QNDF uses backward differences with κ-correction which avoids these allocations
 
 **Not compatible** (don't support mass matrices): `TRBDF2`, `KenCarp4`
 
-### Example: Fixed Timestep
-
-```julia
-using CedarSim, CedarSim.MNA, OrdinaryDiffEq
-
-circuit = MNACircuit(builder; params...)
-prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)
-
-# QNDF with fixed timestep (0 bytes/step)
-integrator = init(prob, QNDF(autodiff=false);
-    adaptive=false, dt=1e-5,
-    save_on=false, dense=false,
-    maxiters=10_000_000,
-    initializealg=MNA.CedarTranOp())
-
-# Real-time loop (TRUE 0 bytes/call)
-while running
-    MNA.blind_step!(integrator)
-    # Access state: integrator.u
-end
-```
-
 ### Example: Adaptive Timestep (Zero Allocation)
 
 ```julia
@@ -291,5 +269,4 @@ end
 - `src/mna/context.jl`: Component-based `alloc_current!` APIs
 - `src/mna/value_only.jl`: `DirectStampContext` and `stamp_voltage_contribution!`
 - `src/mna/contrib.jl`: Zero-allocation ForwardDiff contribution stamping
-- `test/mna/audio_integration.jl`: Zero-allocation OrdinaryDiffEq integration tests (fixed timestep)
-- `test/mna/adaptive_allocation_test.jl`: Adaptive timestep allocation tests
+- `test/mna/audio_integration.jl`: Zero-allocation OrdinaryDiffEq integration tests (QNDF with adaptive timestep)
