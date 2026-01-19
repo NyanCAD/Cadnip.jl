@@ -106,11 +106,15 @@ end
 #==============================================================================#
 
 """
-    make_mna_device(vm::VANode{VerilogModule})
+    make_mna_device(vm::VANode{VerilogModule}; noinline=nothing)
 
 Generate MNA-compatible Julia code for a Verilog-A module.
 
 Generates `stamp!` methods that work with MNAContext directly.
+
+# Keyword Arguments
+- `noinline`: Set to `true` for very large models (e.g., PSP103VA) to prevent
+  LLVM SROA blow-up during compilation. By default, stamp! is inlineable.
 
 # Generated Code Structure
 ```julia
@@ -136,7 +140,7 @@ function MNA.stamp!(dev::DeviceName, ctx::MNAContext, p::Int, n::Int;
 end
 ```
 """
-function make_mna_device(vm::VANode{VerilogModule})
+function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing}=nothing)
     ps = pins(vm)
     modname = String(vm.id)
     symname = Symbol(modname)
@@ -327,7 +331,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
-        function_defs, contributions, to_julia_mna, short_circuits)
+        function_defs, contributions, to_julia_mna, short_circuits; noinline)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -1375,10 +1379,12 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `contributions`: Branch contribution tuples
 - `to_julia`: MNAScope for code translation
 - `short_circuits`: Dict mapping internal_node => (external, condition) for node aliasing
+- `noinline`: Set to `true` for very large models to prevent LLVM SROA blow-up (default: inlineable)
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
-                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}())
+                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}();
+                                          noinline::Union{Bool,Nothing}=nothing)
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
     n_all_nodes = n_ports + n_internal
@@ -1991,11 +1997,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     # NOTE: ctx accepts AnyMNAContext (MNAContext or DirectStampContext) for zero-allocation mode
-    # NOTE: @noinline prevents LLVM SROA from blowing up when this gets compiled
-    # into a circuit function. Only applied for large models (>= 50 parameters) where
-    # SROA can cause compile time explosion. Small models benefit from inlining.
-    n_params = length(params_to_locals)
-    use_noinline = n_params >= 50
+    # NOTE: @noinline can be set explicitly for very large models (e.g., PSP103VA with 782 params)
+    # to prevent LLVM SROA from blowing up. By default, stamp! is inlineable for performance.
+    use_noinline = noinline === true
 
     # Build the function body
     stamp_body = quote

@@ -1860,18 +1860,16 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
     # spicecall returns ParallelInstances, extract .device for stamping
-    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
-    # of dev at compile time. This prevents LLVM SROA from trying to decompose
-    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
+        device_expr = :($(spicecall)($model_name).device)
     else
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # Include hierarchical instance name for unique internal node naming
-    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
+    # to prevent LLVM SROA blow-up. Type is preserved for efficient dispatch.
     local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
@@ -1916,17 +1914,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
     # spicecall returns ParallelInstances, extract .device for stamping
-    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
-    # of dev at compile time. This prevents LLVM SROA from trying to decompose
-    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
+        device_expr = :($(spicecall)($model_name).device)
     else
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
     local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
@@ -1986,18 +1981,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
     # spicecall returns ParallelInstances, extract .device for stamping
-    # NOTE: Wrap in inferencebarrier to prevent Julia from knowing the exact type
-    # of dev at compile time. This prevents LLVM SROA from trying to decompose
-    # large VA model structs (782-field PSP103VA) into individual scalars.
     if isempty(param_kwargs)
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name).device))
+        device_expr = :($(spicecall)($model_name).device)
     else
-        device_expr = :(Base.inferencebarrier($(spicecall)($model_name; $(param_kwargs...)).device))
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
     end
 
     # Generate stamp! call with variable number of node arguments
     # Build the call expression manually to handle variable node count
-    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
     node_args = Expr(:tuple, node_exprs...)
     local_name = QuoteNode(Symbol(name))
 
