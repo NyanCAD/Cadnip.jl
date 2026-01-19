@@ -1992,66 +1992,85 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     # NOTE: ctx accepts AnyMNAContext (MNAContext or DirectStampContext) for zero-allocation mode
     # NOTE: @noinline prevents LLVM SROA from blowing up when this gets compiled
-    # into a circuit function. Without it, large VA models (782-field PSP103VA) cause OOM.
-    quote
-        Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                     $([:($np::Int) for np in node_params]...);
-                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                     _mna_instance_::Symbol=Symbol(""))
-            # Convert empty vectors to ZERO_VECTOR for safe indexing
-            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
-            $(params_to_locals...)
-            $(function_defs...)
+    # into a circuit function. Only applied for large models (>= 50 parameters) where
+    # SROA can cause compile time explosion. Small models benefit from inlining.
+    n_params = length(params_to_locals)
+    use_noinline = n_params >= 50
 
-            # Initialize local variables FIRST (before internal node allocation)
-            # This is needed because short-circuit conditions may reference these variables
-            $local_var_init
+    # Build the function body
+    stamp_body = quote
+        # Convert empty vectors to ZERO_VECTOR for safe indexing
+        _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+        $(params_to_locals...)
+        $(function_defs...)
 
-            # Allocate internal nodes (idempotent - returns existing index if already allocated)
-            $internal_node_alloc
+        # Initialize local variables FIRST (before internal node allocation)
+        # This is needed because short-circuit conditions may reference these variables
+        $local_var_init
 
-            # Add GMIN to ground for internal nodes (prevents floating nodes)
-            $gmin_stamp
+        # Allocate internal nodes (idempotent - returns existing index if already allocated)
+        $internal_node_alloc
 
-            # Allocate current variables for named branches with voltage contributions
-            $branch_current_alloc
+        # Add GMIN to ground for internal nodes (prevents floating nodes)
+        $gmin_stamp
 
-            # Get operating point voltages (Float64) - used for RHS linearization
-            $voltage_extraction
+        # Allocate current variables for named branches with voltage contributions
+        $branch_current_alloc
 
-            # Get operating point currents for named branches
-            $branch_current_extraction
+        # Get operating point voltages (Float64) - used for RHS linearization
+        $voltage_extraction
 
-            # Assign Float64 voltages to node symbols (for detection phase)
-            # This runs BEFORE dual_creation so detection lambdas capture plain floats
-            $float_node_assignment
+        # Get operating point currents for named branches
+        $branch_current_extraction
 
-            # Run voltage-dependent charge detection (with plain Float64 values)
-            # Results are cached in ctx.charge_is_vdep for later use in stamp_code
-            $detection_block
+        # Assign Float64 voltages to node symbols (for detection phase)
+        # This runs BEFORE dual_creation so detection lambdas capture plain floats
+        $float_node_assignment
 
-            # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
-            CedarSim.MNA.reset_detection_counter!(ctx)
+        # Run voltage-dependent charge detection (with plain Float64 values)
+        # Results are cached in ctx.charge_is_vdep for later use in stamp_code
+        $detection_block
 
-            # Create duals with partials for each node voltage (terminals + internal)
-            # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
-            # This overwrites node symbols (p, n, etc.) with JacobianTag duals
-            $dual_creation
+        # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
+        CedarSim.MNA.reset_detection_counter!(ctx)
 
-            # Evaluate contribution expressions with duals
-            $contrib_eval
+        # Create duals with partials for each node voltage (terminals + internal)
+        # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
+        # This overwrites node symbols (p, n, etc.) with JacobianTag duals
+        $dual_creation
 
-            # Stamp current contributions
-            $stamp_code
+        # Evaluate contribution expressions with duals
+        $contrib_eval
 
-            # Stamp voltage contributions for named branches (e.g., inductor V = L*dI/dt)
-            $voltage_stamp_code
+        # Stamp current contributions
+        $stamp_code
 
-            # Stamp two-node voltage contributions (e.g., V(a,b) <+ 0 for short circuit)
-            $twonode_voltage_stamp_code
+        # Stamp voltage contributions for named branches (e.g., inductor V = L*dI/dt)
+        $voltage_stamp_code
 
-            return nothing
+        # Stamp two-node voltage contributions (e.g., V(a,b) <+ 0 for short circuit)
+        $twonode_voltage_stamp_code
+
+        return nothing
+    end
+
+    # Build function signature
+    func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                 $([:($np::Int) for np in node_params]...);
+                                 _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                 _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                 _mna_instance_::Symbol=Symbol(""))
+        $stamp_body
+    end)
+
+    # Conditionally add @noinline for large models
+    if use_noinline
+        quote
+            Base.@noinline $func_sig
+        end
+    else
+        quote
+            $func_sig
         end
     end
 end
