@@ -62,6 +62,9 @@ include("precompile.jl")
 # Analysis solvers (uses precompile.jl types)
 include("solve.jl")
 
+# Device cache interface (uses MNASpec from solve.jl)
+include("cache.jl")
+
 # Cedar DC operating point initialization (uses EvalWorkspace from precompile.jl)
 include("dcop.jl")
 

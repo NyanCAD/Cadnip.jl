@@ -26,6 +26,366 @@ const VAT = VerilogAParser.VerilogATokenize
 
 const VANode = VerilogAParser.VerilogACSTParser.Node
 
+#==============================================================================#
+# Taint Tracking for Code Splitting
+#
+# Classifies expressions and statements as "static" (parameter/temperature
+# dependent only) or "dynamic" (voltage/current dependent).
+#
+# Static code can be moved to init_device!() and computed once.
+# Dynamic code must stay in stamp!() and run every Newton iteration.
+#==============================================================================#
+
+"""
+    CodegenTaint
+
+Tracks which variables and statements are static vs dynamic during codegen.
+
+Static = depends only on parameters, temperature, constants
+Dynamic = depends on voltages (V()), currents (I()), or solution vector (x)
+
+Conservative rule: if uncertain, classify as dynamic (safe but less optimal).
+"""
+mutable struct CodegenTaint
+    # Variables that are known static (param-only)
+    static_vars::Set{Symbol}
+    # Variables that are known dynamic (voltage-dependent)
+    dynamic_vars::Set{Symbol}
+    # Statements classified as static (can go in init_device!)
+    static_stmts::Vector{Any}
+    # Statements classified as dynamic (must stay in stamp!)
+    dynamic_stmts::Vector{Any}
+    # Track which static vars are actually used (for cache struct)
+    used_static_vars::Set{Symbol}
+end
+
+function CodegenTaint()
+    CodegenTaint(Set{Symbol}(), Set{Symbol}(), Any[], Any[], Set{Symbol}())
+end
+
+"""
+    is_static_expr(taint::CodegenTaint, expr) -> Bool
+
+Check if an expression is static (doesn't depend on voltages/currents).
+Conservative: returns false if uncertain.
+"""
+function is_static_expr(taint::CodegenTaint, expr)
+    if expr isa Number || expr isa String
+        return true
+    end
+    if expr isa QuoteNode
+        return true
+    end
+    # Type values (like Float64, Int) are static - used for type conversion
+    if expr isa DataType
+        return true
+    end
+    if expr isa Symbol
+        # Known dynamic symbols
+        if expr in taint.dynamic_vars
+            return false
+        end
+        # Known static symbols (params, temp)
+        if expr in taint.static_vars
+            return true
+        end
+        # Special MNA symbols that are dynamic
+        if expr in (:_mna_x_, :_mna_t_, :_mna_mode_, :ctx)
+            return false
+        end
+        # Special MNA symbols that are static
+        if expr in (:_mna_spec_, :dev)
+            return true
+        end
+        # Type names are static (used in type conversions)
+        if expr in (:Float64, :Int, :Int64, :Int32, :Bool, :String, :Real, :Integer)
+            return true
+        end
+        # Unknown - assume dynamic to be safe
+        return false
+    end
+    if expr isa Expr
+        if expr.head == :call
+            fname = expr.args[1]
+            # V() and I() are always dynamic - they access voltages/currents
+            if fname == :V || fname == :I
+                return false
+            end
+            # va_ddt is dynamic (involves time derivative of state)
+            if fname == :va_ddt
+                return false
+            end
+            # Dual creation is dynamic
+            if fname == :Dual || (fname isa Expr && fname.head == :curly && fname.args[1] == :Dual)
+                return false
+            end
+            # MNA stamping functions are dynamic
+            if fname in (:stamp_G!, :stamp_C!, :stamp_b!, :stamp_current_contribution!)
+                return false
+            end
+            # Allocation functions are dynamic (need ctx)
+            if fname in (:alloc_internal_node!, :alloc_current!, :alloc_charge!)
+                return false
+            end
+            # Type constructors and conversion functions are static
+            if fname == :zero || fname == :one || fname == :Float64 || fname == :Int
+                return true
+            end
+            # Check if it's a module-qualified function
+            debug = get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
+            if debug
+                @info "is_static_expr call check" fname fname_type=typeof(fname) is_expr=(fname isa Expr) head=(fname isa Expr ? fname.head : nothing)
+            end
+            # Handle resolved function objects (when macro has already resolved the function)
+            if fname isa Function
+                fname_mod = parentmodule(fname)
+                fname_str = string(fname_mod) * "." * string(nameof(fname))
+                debug && @info "Resolved function" fname_str
+                # CedarSim.MNA functions are dynamic
+                if occursin("MNA", fname_str)
+                    return false
+                end
+                # VerilogAEnvironment functions are static (type conversion, math functions)
+                if occursin("VerilogAEnvironment", fname_str)
+                    if debug
+                        @info "VerilogAEnvironment resolved function call" fname_str args=expr.args[2:end]
+                        for (i, arg) in enumerate(expr.args[2:end])
+                            @info "  checking arg $i" arg result=is_static_expr(taint, arg)
+                        end
+                    end
+                    return all(is_static_expr(taint, arg) for arg in expr.args[2:end])
+                end
+                # Base math functions are static (*, +, -, /, ^, etc.)
+                if fname_mod == Base || fname_mod == Core
+                    if debug
+                        @info "Base/Core resolved function call" fname_str args=expr.args[2:end]
+                        for (i, arg) in enumerate(expr.args[2:end])
+                            @info "  checking arg $i" arg result=is_static_expr(taint, arg)
+                        end
+                    end
+                    return all(is_static_expr(taint, arg) for arg in expr.args[2:end])
+                end
+            end
+            if fname isa Expr && fname.head == :.
+                # Extract the full path as a string for easier matching
+                fname_str = string(fname)
+                debug && @info "Qualified function name" fname_str
+                # CedarSim.MNA functions are dynamic
+                if startswith(fname_str, "CedarSim.MNA")
+                    return false
+                end
+                # VerilogAEnvironment functions are static (type conversion, math functions)
+                if occursin("VerilogAEnvironment", fname_str)
+                    # These are static: vaconvert, etc. - check arguments
+                    args_to_check = expr.args[2:end]
+                    if get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
+                        @info "VerilogAEnvironment call" fname_str args=args_to_check
+                        for (i, arg) in enumerate(args_to_check)
+                            @info "  checking arg $i" arg result=is_static_expr(taint, arg)
+                        end
+                    end
+                    return all(is_static_expr(taint, arg) for arg in args_to_check)
+                end
+            end
+            # Other calls: static if all args are static
+            return all(is_static_expr(taint, arg) for arg in expr.args[2:end])
+        elseif expr.head == :.
+            # Field access (e.g., dev.R, _mna_spec_.temp)
+            obj = expr.args[1]
+            if obj == :dev || obj == :_mna_spec_
+                return true  # Parameter/spec access is static
+            end
+            return is_static_expr(taint, obj)
+        elseif expr.head == :if || expr.head == :elseif
+            # Conditional: static only if condition AND all branches are static
+            return all(is_static_expr(taint, arg) for arg in expr.args)
+        elseif expr.head == :block
+            # Block: static if all statements are static
+            return all(is_static_expr(taint, arg) for arg in expr.args if !(arg isa LineNumberNode))
+        elseif expr.head == :(=) || expr.head == :(+=) || expr.head == :(-=) || expr.head == :(*=) || expr.head == :(/=)
+            # Assignment: static if RHS is static (LHS is just a symbol)
+            return is_static_expr(taint, expr.args[2])
+        elseif expr.head == :let
+            # Let binding: check the body
+            return is_static_expr(taint, expr.args[end])
+        elseif expr.head == :tuple || expr.head == :vect
+            return all(is_static_expr(taint, arg) for arg in expr.args)
+        elseif expr.head == :ref
+            # Array indexing: check index and array
+            return all(is_static_expr(taint, arg) for arg in expr.args)
+        elseif expr.head == :comparison
+            return all(is_static_expr(taint, arg) for arg in expr.args[1:2:end])
+        elseif expr.head == :&&  || expr.head == :||
+            return all(is_static_expr(taint, arg) for arg in expr.args)
+        elseif expr.head == :curly
+            # Type parameters - static
+            return true
+        elseif expr.head == :(::)
+            # Type annotation - check value if present
+            if length(expr.args) == 2
+                return is_static_expr(taint, expr.args[1])
+            end
+            return true
+        end
+        # Default: check all subexpressions
+        return all(is_static_expr(taint, arg) for arg in expr.args if !(arg isa LineNumberNode))
+    end
+    # Unknown type - assume dynamic to be safe
+    return false
+end
+
+"""
+    classify_assignment!(taint::CodegenTaint, lhs::Symbol, rhs, stmt)
+
+Classify an assignment statement as static or dynamic, updating taint tracking.
+"""
+function classify_assignment!(taint::CodegenTaint, lhs::Symbol, rhs, stmt)
+    is_static = is_static_expr(taint, rhs)
+    if get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
+        @info "classify_assignment!" lhs rhs is_static
+    end
+    if is_static
+        push!(taint.static_vars, lhs)
+        push!(taint.static_stmts, stmt)
+    else
+        push!(taint.dynamic_vars, lhs)
+        push!(taint.dynamic_stmts, stmt)
+    end
+end
+
+"""
+    extract_symbols(expr) -> Set{Symbol}
+
+Extract all symbols referenced in an expression.
+"""
+function extract_symbols(expr, symbols=Set{Symbol}())
+    if expr isa Symbol
+        push!(symbols, expr)
+    elseif expr isa Expr
+        for arg in expr.args
+            extract_symbols(arg, symbols)
+        end
+    end
+    return symbols
+end
+
+"""
+    generate_cache_struct(device_name::Symbol, static_vars::Dict{Symbol, Type})
+
+Generate a mutable cache struct to store static computation results.
+
+# Example output:
+```julia
+mutable struct MyDeviceCache
+    var1::Float64
+    var2::Float64
+    _initialized::Bool
+    MyDeviceCache() = new(0.0, 0.0, false)
+end
+```
+"""
+function generate_cache_struct(device_name::Symbol, static_var_types::Dict{Symbol, Type})
+    cache_name = Symbol(device_name, "Cache")
+
+    # Build field declarations
+    fields = Any[]
+    init_values = Any[]
+
+    for (name, T) in sort(collect(static_var_types), by=first)  # Sort for deterministic order
+        push!(fields, Expr(:(::), name, T))
+        # Default initialization value based on type
+        default_val = T === String ? "" : T === Int ? 0 : 0.0
+        push!(init_values, default_val)
+    end
+
+    # Add _initialized flag
+    push!(fields, Expr(:(::), :_initialized, :Bool))
+    push!(init_values, false)
+
+    # Build struct with inner constructor
+    struct_body = Expr(:block, fields...)
+    push!(struct_body.args, :($(cache_name)() = new($(init_values...))))
+
+    return Expr(:struct, true,  # mutable
+                cache_name,
+                struct_body)
+end
+
+"""
+    generate_init_device_method(device_name, cache_name, params_to_locals, static_stmts, static_var_names)
+
+Generate the init_device! method that computes static values.
+
+# Example output:
+```julia
+function CedarSim.MNA.init_device!(cache::MyDeviceCache, dev::MyDevice, spec::MNASpec)
+    if cache._initialized
+        return cache
+    end
+    # Extract parameters
+    R = undefault(dev.R)
+    # Compute static values
+    R_scaled = R * 1000.0
+    # Store in cache
+    cache.R_scaled = R_scaled
+    cache._initialized = true
+    return cache
+end
+```
+"""
+function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
+                                      params_to_locals::Vector, static_stmts::Vector,
+                                      static_var_names::Set{Symbol})
+    # Build the function body
+    body = Expr(:block)
+
+    # Early return if already initialized
+    push!(body.args, quote
+        if cache._initialized
+            return cache
+        end
+    end)
+
+    # Extract parameters from device
+    for stmt in params_to_locals
+        push!(body.args, stmt)
+    end
+
+    # Execute static statements
+    for stmt in static_stmts
+        push!(body.args, stmt)
+    end
+
+    # Store results in cache
+    for var in sort(collect(static_var_names))  # Sort for deterministic order
+        push!(body.args, :(cache.$var = $var))
+    end
+
+    # Mark as initialized and return
+    push!(body.args, :(cache._initialized = true))
+    push!(body.args, :(return cache))
+
+    # Build the function
+    return quote
+        function CedarSim.MNA.init_device!(cache::$cache_name, dev::$device_name,
+                                           _mna_spec_::CedarSim.MNA.MNASpec)
+            $body
+        end
+    end
+end
+
+"""
+    generate_make_cache_method(device_name, cache_name)
+
+Generate a method to create a new cache instance for a device.
+"""
+function generate_make_cache_method(device_name::Symbol, cache_name::Symbol)
+    quote
+        CedarSim.MNA.make_cache(::Type{$device_name}) = $cache_name()
+        CedarSim.MNA.make_cache(::$device_name) = $cache_name()
+    end
+end
+
 function eisa(e::VANode{S}, T::Type) where {S}
     S <: T
 end
@@ -326,12 +686,125 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         end
     end
 
+    #===========================================================================#
+    # Code Splitting: Classify statements as static vs dynamic
+    #
+    # Static code (parameter/temperature dependent) goes in init_device!()
+    # Dynamic code (voltage dependent) stays in stamp!()
+    #===========================================================================#
+
+    taint = CodegenTaint()
+
+    # Mark parameters as static
+    for p in parameter_names
+        push!(taint.static_vars, p)
+    end
+    # Mark spec-related as static
+    push!(taint.static_vars, :_mna_spec_)
+    push!(taint.static_vars, :dev)
+
+    # Classify local variable initializations
+    for decl in local_var_decls
+        if decl.head == :local
+            inner = decl.args[1]
+            if inner isa Expr && inner.head == :(=)
+                lhs = inner.args[1]
+                rhs = inner.args[2]
+                if lhs isa Expr && lhs.head == :(::)
+                    name = lhs.args[1]
+                    var_type = lhs.args[2]
+                    # Create a simple assignment for classification
+                    simple_stmt = :($name = $rhs)
+                    classify_assignment!(taint, name, rhs, simple_stmt)
+                elseif lhs isa Symbol
+                    classify_assignment!(taint, lhs, rhs, inner)
+                end
+            end
+        end
+    end
+
+    # Classify contributions - assignments and conditionals
+    for c in contributions
+        if c.kind == :assignment
+            expr = c.expr
+            if expr isa Expr && expr.head in (:(=), :(+=), :(-=), :(*=), :(/=))
+                lhs = expr.args[1]
+                rhs = expr.args[2]
+                if lhs isa Symbol
+                    classify_assignment!(taint, lhs, rhs, expr)
+                else
+                    # Complex LHS (e.g., array indexing) - assume dynamic
+                    push!(taint.dynamic_stmts, expr)
+                end
+            else
+                # Not a simple assignment - check if static
+                if is_static_expr(taint, expr)
+                    push!(taint.static_stmts, expr)
+                else
+                    push!(taint.dynamic_stmts, expr)
+                end
+            end
+        elseif c.kind == :conditional
+            # Conditionals: if any branch has V/I access, entire block is dynamic
+            if is_static_expr(taint, c.expr)
+                push!(taint.static_stmts, c.expr)
+            else
+                push!(taint.dynamic_stmts, c.expr)
+            end
+        end
+        # Current/voltage contributions are always dynamic (handled in stamp_code)
+    end
+
+    # Identify which static vars are actually used in dynamic code
+    # (these need to be in the cache and loaded at stamp! start)
+    for stmt in taint.dynamic_stmts
+        syms = extract_symbols(stmt)
+        for sym in syms
+            if sym in taint.static_vars
+                push!(taint.used_static_vars, sym)
+            end
+        end
+    end
+
+    # Also check current contribution expressions for static var usage
+    for c in contributions
+        if c.kind == :current || c.kind == :voltage
+            syms = extract_symbols(c.expr)
+            for sym in syms
+                if sym in taint.static_vars
+                    push!(taint.used_static_vars, sym)
+                end
+            end
+        end
+    end
+
+    # Build static variable types dict (for cache struct generation)
+    static_var_types = Dict{Symbol, Type}()
+    for var in taint.used_static_vars
+        if var in parameter_names
+            # Skip raw parameters - they're already in the device struct
+            continue
+        end
+        T = get(var_types, var, Float64)
+        static_var_types[var] = T
+    end
+
+    # Debug output
+    if get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
+        @info "Code splitting taint analysis for $symname" static_vars=taint.static_vars dynamic_vars=taint.dynamic_vars used_static_vars=taint.used_static_vars static_stmts=length(taint.static_stmts) dynamic_stmts=length(taint.dynamic_stmts) static_var_types=static_var_types
+    end
+
+    # Generate cache struct (only if there are static vars to cache)
+    cache_name = Symbol(symname, "Cache")
+    has_cache = !isempty(static_var_types)
+
     # Generate stamp method using unified n-terminal approach
     # (works for any number of terminals, including 2)
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
-        function_defs, contributions, to_julia_mna, short_circuits; noinline)
+        function_defs, contributions, to_julia_mna, short_circuits,
+        taint, cache_name, has_cache; noinline)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -431,6 +904,24 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     if getproperty_override !== nothing
         push!(result_args, getproperty_override)
     end
+
+    # Add cache-related methods if there are static vars to cache
+    if has_cache
+        # Generate cache struct
+        cache_struct = generate_cache_struct(symname, static_var_types)
+        push!(result_args, cache_struct)
+
+        # Generate init_device! method
+        init_method = generate_init_device_method(
+            symname, cache_name, params_to_locals,
+            taint.static_stmts, taint.used_static_vars)
+        push!(result_args, init_method)
+
+        # Generate make_cache method
+        make_cache_method = generate_make_cache_method(symname, cache_name)
+        push!(result_args, make_cache_method)
+    end
+
     push!(result_args, stamp_method)
 
     Expr(:toplevel, result_args...)
@@ -1379,11 +1870,15 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `contributions`: Branch contribution tuples
 - `to_julia`: MNAScope for code translation
 - `short_circuits`: Dict mapping internal_node => (external, condition) for node aliasing
+- `taint`: CodegenTaint for static/dynamic classification (optional)
+- `cache_name`: Name of the cache struct (optional)
+- `has_cache`: Whether to generate cache-aware stamp! (optional)
 - `noinline`: Set to `true` for very large models to prevent LLVM SROA blow-up (default: inlineable)
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
-                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}();
+                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}(),
+                                          taint=nothing, cache_name=nothing, has_cache=false;
                                           noinline::Union{Bool,Nothing}=nothing)
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
@@ -1398,20 +1893,34 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     all_node_syms = [port_args; internal_nodes]
     all_node_params = [node_params; internal_node_params]
 
-    # Split into two blocks:
+    # Split into three blocks:
     # 1. local_var_init: Variable initialization (before internal_node_alloc)
     #    - Uses Float64 for scalar initialization to avoid Dual issues with short-circuit conditions
-    # 2. contrib_eval: Contribution computation expressions (after dual_creation)
+    # 2. static_assign: Static assignments (only when cache is not available)
+    #    - Computes parameter/temperature dependent values inline as fallback
+    # 3. contrib_eval: Dynamic contribution computation expressions (after dual_creation)
     #    - May update variables with Dual-compatible values
     local_var_init = Expr(:block)
+    static_assign = Expr(:block)  # Fallback when cache is not available
     contrib_eval = Expr(:block)
+
+    # Cache loading block (only used when has_cache is true)
+    cache_load = Expr(:block)
 
     # For n-terminal devices:
     # 1. Don't use `local` - variables need to be visible in outer scope for stamp_code
     # 2. Initialize with Float64 first (for short-circuit condition evaluation)
     # 3. Integer variables stay as Int (for control flow - booleans, counters)
     # 4. String variables stay as String (for parameter comparisons)
+    #
+    # When has_cache is true:
+    # - Static variables are loaded from cache (computed in init_device!)
+    # - Only dynamic variables are initialized here
     first_port = port_args[1]
+
+    # Build set of cached static var names for quick lookup
+    cached_static_vars = has_cache && taint !== nothing ? taint.used_static_vars : Set{Symbol}()
+
     for decl in local_var_decls
         # Convert `local name::T = init_expr` appropriately
         if decl.head == :local
@@ -1427,6 +1936,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     is_integer_type = var_type == :Int || var_type == Int
                     is_string_type = var_type == :String || var_type == String
 
+                    # Always initialize the variable (for fallback when cache is Nothing)
                     if is_integer_type
                         # Integer variables: keep as scalar, don't promote
                         push!(local_var_init.args, :($name = $rhs))
@@ -1440,16 +1950,27 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                         # Float64: use the init value directly
                         push!(local_var_init.args, :($name = Float64($rhs)))
                     end
+
+                    # Also add cache load if this is a cached static variable
+                    if has_cache && name in cached_static_vars
+                        push!(cache_load.args, :($name = _cache_.$name))
+                    end
                 else
                     # If no type annotation, still strip `local`
                     push!(local_var_init.args, inner)
+                    if lhs isa Symbol && has_cache && lhs in cached_static_vars
+                        push!(cache_load.args, :($lhs = _cache_.$lhs))
+                    end
                 end
             elseif inner isa Expr && inner.head == :(::)
                 # Just type annotation, no initialization
                 name = inner.args[1]
                 var_type = inner.args[2]
+
                 is_integer_type = var_type == :Int || var_type == Int
                 is_string_type = var_type == :String || var_type == String
+
+                # Always initialize with default value (for fallback when cache is Nothing)
                 if is_integer_type
                     push!(local_var_init.args, :($name = 0))
                 elseif is_string_type
@@ -1457,9 +1978,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 else
                     push!(local_var_init.args, :($name = 0.0))
                 end
+
+                # Also add cache load if this is a cached static variable
+                if has_cache && name in cached_static_vars
+                    push!(cache_load.args, :($name = _cache_.$name))
+                end
             else
                 # Plain assignment inside local - just use the assignment
                 push!(local_var_init.args, inner)
+                if inner isa Symbol && has_cache && inner in cached_static_vars
+                    push!(cache_load.args, :($inner = _cache_.$inner))
+                end
             end
         else
             push!(local_var_init.args, decl)
@@ -1496,10 +2025,20 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             end
             push!(twonode_voltage_contribs[branch], c.expr)
         elseif c.kind == :conditional
-            push!(contrib_eval.args, c.expr)
+            # Static conditionals go to static_assign (for fallback when cache is not available)
+            if has_cache && taint !== nothing && c.expr in taint.static_stmts
+                push!(static_assign.args, c.expr)
+            else
+                push!(contrib_eval.args, c.expr)
+            end
         elseif c.kind == :assignment
-            # Regular assignment (e.g., cdrain = R*V(g,s)**2)
-            push!(contrib_eval.args, c.expr)
+            # Static assignments go to static_assign (for fallback when cache is not available)
+            if has_cache && taint !== nothing && c.expr in taint.static_stmts
+                push!(static_assign.args, c.expr)
+            else
+                # Regular dynamic assignment (e.g., cdrain = R*V(g,s)**2)
+                push!(contrib_eval.args, c.expr)
+            end
         end
     end
 
@@ -1999,19 +2538,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # NOTE: ctx accepts AnyMNAContext (MNAContext or DirectStampContext) for zero-allocation mode
     # NOTE: @noinline can be set explicitly for very large models (e.g., PSP103VA with 782 params)
     # to prevent LLVM SROA from blowing up. By default, stamp! is inlineable for performance.
+    #
+    # When has_cache is true, stamp! accepts an optional _cache_ parameter.
+    # When _cache_ is provided and initialized, static computations are loaded from it.
+    # When _cache_ is nothing, static computations are done inline (backward compat).
     use_noinline = noinline === true
 
-    # Build the function body
-    stamp_body = quote
-        # Convert empty vectors to ZERO_VECTOR for safe indexing
-        _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
-        $(params_to_locals...)
-        $(function_defs...)
-
-        # Initialize local variables FIRST (before internal node allocation)
-        # This is needed because short-circuit conditions may reference these variables
-        $local_var_init
-
+    # Common function body (after variable initialization)
+    common_body = quote
         # Allocate internal nodes (idempotent - returns existing index if already allocated)
         $internal_node_alloc
 
@@ -2058,23 +2592,68 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         return nothing
     end
 
-    # Build function signature
-    func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                 $([:($np::Int) for np in node_params]...);
-                                 _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                 _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                 _mna_instance_::Symbol=Symbol(""))
-        $stamp_body
-    end)
-
+    # Generate cache-aware stamp! if has_cache, otherwise generate original version
     # Conditionally add @noinline for large models
-    if use_noinline
-        quote
-            Base.@noinline $func_sig
+    if has_cache
+        func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                     $([:($np::Int) for np in node_params]...);
+                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                     _mna_instance_::Symbol=Symbol(""),
+                                     _cache_::Union{$cache_name, Nothing}=nothing)
+            # Convert empty vectors to ZERO_VECTOR for safe indexing
+            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+            $(params_to_locals...)
+            $(function_defs...)
+
+            # Initialize local variables FIRST (before internal node allocation)
+            # This is needed because short-circuit conditions may reference these variables
+            $local_var_init
+
+            # Load cached static values if cache is provided and initialized
+            # Otherwise, compute static values inline (fallback)
+            if _cache_ !== nothing && _cache_._initialized
+                $cache_load
+            else
+                $static_assign
+            end
+
+            $common_body
+        end)
+        if use_noinline
+            quote
+                Base.@noinline $func_sig
+            end
+        else
+            quote
+                $func_sig
+            end
         end
     else
-        quote
-            $func_sig
+        func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                     $([:($np::Int) for np in node_params]...);
+                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                     _mna_instance_::Symbol=Symbol(""))
+            # Convert empty vectors to ZERO_VECTOR for safe indexing
+            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+            $(params_to_locals...)
+            $(function_defs...)
+
+            # Initialize local variables FIRST (before internal node allocation)
+            # This is needed because short-circuit conditions may reference these variables
+            $local_var_init
+
+            $common_body
+        end)
+        if use_noinline
+            quote
+                Base.@noinline $func_sig
+            end
+        else
+            quote
+                $func_sig
+            end
         end
     end
 end

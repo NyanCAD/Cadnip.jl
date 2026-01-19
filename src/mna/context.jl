@@ -923,3 +923,4 @@ function Base.show(io::IO, ::MIME"text/plain", ctx::MNAContext)
     println(io, "  C matrix: $(length(ctx.C_V)) entries")
     println(io, "  System size: $(system_size(ctx))")
 end
+
