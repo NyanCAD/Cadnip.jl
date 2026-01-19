@@ -101,6 +101,29 @@ function is_static_expr(taint::CodegenTaint, expr)
         if expr in (:Float64, :Int, :Int64, :Int32, :Bool, :String, :Real, :Integer)
             return true
         end
+        # VA system variables that are static (temperature-dependent, not voltage-dependent)
+        # Note: VA parser may produce symbols like \$temperature (with backslash) or $temperature
+        expr_str = string(expr)
+        debug = get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
+        is_va_sysvar = startswith(expr_str, "\$") || startswith(expr_str, "\\\$") || startswith(expr_str, "var\"")
+        if debug && occursin("temp", expr_str)
+            @info "Checking temperature symbol" expr expr_str is_va_sysvar
+        end
+        if is_va_sysvar
+            # $temperature, $vt, $simparam, etc. are static (temperature-dependent)
+            # $realtime, $abstime are dynamic (time-dependent)
+            if occursin("temperature", expr_str) || occursin("vt", expr_str)
+                debug && @info "Recognized as static VA system var" expr_str
+                return true
+            end
+            if occursin("simparam", expr_str) || occursin("param_given", expr_str)
+                return true
+            end
+            # Time-related functions are dynamic
+            if occursin("realtime", expr_str) || occursin("abstime", expr_str)
+                return false
+            end
+        end
         # Unknown - assume dynamic to be safe
         return false
     end
@@ -466,15 +489,11 @@ end
 #==============================================================================#
 
 """
-    make_mna_device(vm::VANode{VerilogModule}; noinline=nothing)
+    make_mna_device(vm::VANode{VerilogModule})
 
 Generate MNA-compatible Julia code for a Verilog-A module.
 
 Generates `stamp!` methods that work with MNAContext directly.
-
-# Keyword Arguments
-- `noinline`: Set to `true` for very large models (e.g., PSP103VA) to prevent
-  LLVM SROA blow-up during compilation. By default, stamp! is inlineable.
 
 # Generated Code Structure
 ```julia
@@ -500,7 +519,7 @@ function MNA.stamp!(dev::DeviceName, ctx::MNAContext, p::Int, n::Int;
 end
 ```
 """
-function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing}=nothing)
+function make_mna_device(vm::VANode{VerilogModule})
     ps = pins(vm)
     modname = String(vm.id)
     symname = Symbol(modname)
@@ -785,6 +804,10 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             # Skip raw parameters - they're already in the device struct
             continue
         end
+        # Skip function arguments (dev, _mna_spec_) - they're already available
+        if var in (:dev, :_mna_spec_)
+            continue
+        end
         T = get(var_types, var, Float64)
         static_var_types[var] = T
     end
@@ -804,7 +827,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
         function_defs, contributions, to_julia_mna, short_circuits,
-        taint, cache_name, has_cache; noinline)
+        taint, cache_name, has_cache)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -911,10 +934,24 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         cache_struct = generate_cache_struct(symname, static_var_types)
         push!(result_args, cache_struct)
 
+        # Filter out parameters and function arguments from used_static_vars
+        # Only local variables go in cache
+        cached_local_vars = Set{Symbol}()
+        for var in taint.used_static_vars
+            if var in parameter_names
+                continue
+            end
+            # Skip function arguments - they're already available
+            if var in (:dev, :_mna_spec_)
+                continue
+            end
+            push!(cached_local_vars, var)
+        end
+
         # Generate init_device! method
         init_method = generate_init_device_method(
             symname, cache_name, params_to_locals,
-            taint.static_stmts, taint.used_static_vars)
+            taint.static_stmts, cached_local_vars)
         push!(result_args, init_method)
 
         # Generate make_cache method
@@ -963,6 +1000,11 @@ function (::MNAScope)(cs::VANode{FloatLiteral})
 end
 
 function (scope::MNAScope)(ip::VANode{IdentifierPrimary})
+    # Check if this is a system identifier that needs special translation
+    # (e.g., $temperature, $vt, $simparam)
+    if isa(ip.id, VANode{SystemIdentifier})
+        return scope(ip.id)  # Delegate to SystemIdentifier handler
+    end
     id = Symbol(assemble_id_string(ip.id))
     if scope.undefault_ids
         id = Expr(:call, undefault, id)
@@ -1873,13 +1915,11 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `taint`: CodegenTaint for static/dynamic classification (optional)
 - `cache_name`: Name of the cache struct (optional)
 - `has_cache`: Whether to generate cache-aware stamp! (optional)
-- `noinline`: Set to `true` for very large models to prevent LLVM SROA blow-up (default: inlineable)
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia, short_circuits=Dict{Symbol, NamedTuple}(),
-                                          taint=nothing, cache_name=nothing, has_cache=false;
-                                          noinline::Union{Bool,Nothing}=nothing)
+                                          taint=nothing, cache_name=nothing, has_cache=false)
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
     n_all_nodes = n_ports + n_internal
@@ -1893,15 +1933,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     all_node_syms = [port_args; internal_nodes]
     all_node_params = [node_params; internal_node_params]
 
-    # Split into three blocks:
+    # Split into two blocks:
     # 1. local_var_init: Variable initialization (before internal_node_alloc)
     #    - Uses Float64 for scalar initialization to avoid Dual issues with short-circuit conditions
-    # 2. static_assign: Static assignments (only when cache is not available)
-    #    - Computes parameter/temperature dependent values inline as fallback
-    # 3. contrib_eval: Dynamic contribution computation expressions (after dual_creation)
+    #    - Cached variables are excluded (loaded from cache instead)
+    # 2. contrib_eval: Dynamic contribution computation expressions (after dual_creation)
     #    - May update variables with Dual-compatible values
+    #    - Static assignments are excluded when has_cache (computed in init_device!)
     local_var_init = Expr(:block)
-    static_assign = Expr(:block)  # Fallback when cache is not available
     contrib_eval = Expr(:block)
 
     # Cache loading block (only used when has_cache is true)
@@ -1932,34 +1971,31 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     name = lhs.args[1]
                     var_type = lhs.args[2]  # Type annotation (Int, Float64, or String)
 
-                    # Check type and handle appropriately
+                    # Cached variables: load from cache, skip initialization
+                    if has_cache && name in cached_static_vars
+                        push!(cache_load.args, :($name = _cache_.$name))
+                        continue
+                    end
+
+                    # Non-cached variables: initialize normally
                     is_integer_type = var_type == :Int || var_type == Int
                     is_string_type = var_type == :String || var_type == String
 
-                    # Always initialize the variable (for fallback when cache is Nothing)
                     if is_integer_type
-                        # Integer variables: keep as scalar, don't promote
                         push!(local_var_init.args, :($name = $rhs))
                     elseif is_string_type
-                        # String variables: keep as String, use the init value directly
                         push!(local_var_init.args, :($name = $rhs))
                     elseif rhs isa Expr && rhs.head == :call && rhs.args[1] == :zero
-                        # zero() call - use 0.0 for initial value
                         push!(local_var_init.args, :($name = 0.0))
                     else
-                        # Float64: use the init value directly
                         push!(local_var_init.args, :($name = Float64($rhs)))
-                    end
-
-                    # Also add cache load if this is a cached static variable
-                    if has_cache && name in cached_static_vars
-                        push!(cache_load.args, :($name = _cache_.$name))
                     end
                 else
                     # If no type annotation, still strip `local`
-                    push!(local_var_init.args, inner)
                     if lhs isa Symbol && has_cache && lhs in cached_static_vars
                         push!(cache_load.args, :($lhs = _cache_.$lhs))
+                    else
+                        push!(local_var_init.args, inner)
                     end
                 end
             elseif inner isa Expr && inner.head == :(::)
@@ -1967,10 +2003,15 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 name = inner.args[1]
                 var_type = inner.args[2]
 
+                # Cached variables: load from cache, skip initialization
+                if has_cache && name in cached_static_vars
+                    push!(cache_load.args, :($name = _cache_.$name))
+                    continue
+                end
+
+                # Non-cached variables: initialize with default
                 is_integer_type = var_type == :Int || var_type == Int
                 is_string_type = var_type == :String || var_type == String
-
-                # Always initialize with default value (for fallback when cache is Nothing)
                 if is_integer_type
                     push!(local_var_init.args, :($name = 0))
                 elseif is_string_type
@@ -1978,16 +2019,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 else
                     push!(local_var_init.args, :($name = 0.0))
                 end
-
-                # Also add cache load if this is a cached static variable
-                if has_cache && name in cached_static_vars
-                    push!(cache_load.args, :($name = _cache_.$name))
-                end
             else
-                # Plain assignment inside local - just use the assignment
-                push!(local_var_init.args, inner)
+                # Plain assignment inside local
                 if inner isa Symbol && has_cache && inner in cached_static_vars
                     push!(cache_load.args, :($inner = _cache_.$inner))
+                else
+                    push!(local_var_init.args, inner)
                 end
             end
         else
@@ -2025,20 +2062,18 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             end
             push!(twonode_voltage_contribs[branch], c.expr)
         elseif c.kind == :conditional
-            # Static conditionals go to static_assign (for fallback when cache is not available)
+            # Skip static conditionals when has_cache (computed in init_device!)
             if has_cache && taint !== nothing && c.expr in taint.static_stmts
-                push!(static_assign.args, c.expr)
-            else
-                push!(contrib_eval.args, c.expr)
+                continue
             end
+            push!(contrib_eval.args, c.expr)
         elseif c.kind == :assignment
-            # Static assignments go to static_assign (for fallback when cache is not available)
+            # Skip static assignments when has_cache (computed in init_device!)
             if has_cache && taint !== nothing && c.expr in taint.static_stmts
-                push!(static_assign.args, c.expr)
-            else
-                # Regular dynamic assignment (e.g., cdrain = R*V(g,s)**2)
-                push!(contrib_eval.args, c.expr)
+                continue
             end
+            # Regular dynamic assignment (e.g., cdrain = R*V(g,s)**2)
+            push!(contrib_eval.args, c.expr)
         end
     end
 
@@ -2536,13 +2571,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     # NOTE: ctx accepts AnyMNAContext (MNAContext or DirectStampContext) for zero-allocation mode
-    # NOTE: @noinline can be set explicitly for very large models (e.g., PSP103VA with 782 params)
-    # to prevent LLVM SROA from blowing up. By default, stamp! is inlineable for performance.
+    # NOTE: @noinline prevents LLVM SROA from blowing up when this gets compiled
+    # into a circuit function. Without it, large VA models (782-field PSP103VA) cause OOM.
     #
     # When has_cache is true, stamp! accepts an optional _cache_ parameter.
     # When _cache_ is provided and initialized, static computations are loaded from it.
     # When _cache_ is nothing, static computations are done inline (backward compat).
-    use_noinline = noinline === true
 
     # Common function body (after variable initialization)
     common_body = quote
@@ -2593,66 +2627,62 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end
 
     # Generate cache-aware stamp! if has_cache, otherwise generate original version
-    # Conditionally add @noinline for large models
     if has_cache
-        func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                     $([:($np::Int) for np in node_params]...);
-                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                     _mna_instance_::Symbol=Symbol(""),
-                                     _cache_::Union{$cache_name, Nothing}=nothing)
-            # Convert empty vectors to ZERO_VECTOR for safe indexing
-            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
-            $(params_to_locals...)
-            $(function_defs...)
+        quote
+            # Main stamp! with mandatory cache - this is the small, optimized version
+            # Static code has been moved to init_device!(), only cache loading remains
+            Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                         $([:($np::Int) for np in node_params]...),
+                                         _cache_::$cache_name;
+                                         _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                         _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                         _mna_instance_::Symbol=Symbol(""))
+                # Convert empty vectors to ZERO_VECTOR for safe indexing
+                _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+                $(params_to_locals...)
+                $(function_defs...)
 
-            # Initialize local variables FIRST (before internal node allocation)
-            # This is needed because short-circuit conditions may reference these variables
-            $local_var_init
+                # Initialize local variables (non-cached ones only)
+                $local_var_init
 
-            # Load cached static values if cache is provided and initialized
-            # Otherwise, compute static values inline (fallback)
-            if _cache_ !== nothing && _cache_._initialized
+                # Load cached static values (cache is required and must be initialized)
                 $cache_load
-            else
-                $static_assign
+
+                $common_body
             end
 
-            $common_body
-        end)
-        if use_noinline
-            quote
-                Base.@noinline $func_sig
-            end
-        else
-            quote
-                $func_sig
+            # Convenience wrapper: creates and initializes cache automatically
+            # This maintains API compatibility but creates a new cache each call
+            # For performance, use the cache-requiring version with a pre-initialized cache
+            function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                         $([:($np::Int) for np in node_params]...);
+                                         _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                         _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                         _mna_instance_::Symbol=Symbol(""))
+                _cache_ = CedarSim.MNA.make_cache($symname)
+                CedarSim.MNA.init_device!(_cache_, dev, _mna_spec_)
+                CedarSim.MNA.stamp!(dev, ctx, $(node_params...), _cache_;
+                    _mna_t_=_mna_t_, _mna_mode_=_mna_mode_, _mna_x_=_mna_x_,
+                    _mna_spec_=_mna_spec_, _mna_instance_=_mna_instance_)
             end
         end
     else
-        func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                     $([:($np::Int) for np in node_params]...);
-                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                     _mna_instance_::Symbol=Symbol(""))
-            # Convert empty vectors to ZERO_VECTOR for safe indexing
-            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
-            $(params_to_locals...)
-            $(function_defs...)
+        quote
+            Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+                                         $([:($np::Int) for np in node_params]...);
+                                         _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
+                                         _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                         _mna_instance_::Symbol=Symbol(""))
+                # Convert empty vectors to ZERO_VECTOR for safe indexing
+                _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+                $(params_to_locals...)
+                $(function_defs...)
 
-            # Initialize local variables FIRST (before internal node allocation)
-            # This is needed because short-circuit conditions may reference these variables
-            $local_var_init
+                # Initialize local variables FIRST (before internal node allocation)
+                # This is needed because short-circuit conditions may reference these variables
+                $local_var_init
 
-            $common_body
-        end)
-        if use_noinline
-            quote
-                Base.@noinline $func_sig
-            end
-        else
-            quote
-                $func_sig
+                $common_body
             end
         end
     end
