@@ -1390,14 +1390,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         # Generate stamp! call for VA module
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
         # Include hierarchical instance name for unique internal node naming
-        # NOTE: Use invokelatest to force runtime dispatch and use precompiled stamp! methods.
-        # Without this, Julia may try to inline-specialize the call, triggering LLVM compilation
-        # that crashes on very large functions (>90K statements, e.g., PSP103VA with 96K).
+        # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
         local_name = QuoteNode(Symbol(name))
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-                Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                $(MNA).stamp!(dev, ctx, $(port_exprs...);
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                     _mna_instance_ = full_instance_name)
             end
@@ -1498,12 +1496,12 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
         # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
         # Use hierarchical prefix for unique internal node naming (e.g., xu1_xmp_xm)
+        # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 # Build hierarchical instance name from _mna_prefix_ + local instance name
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-                # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
-                Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                $(MNA).stamp!(dev, ctx, $(port_exprs...);
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                     _mna_instance_ = full_instance_name)
             end
@@ -1779,12 +1777,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
             # Include hierarchical instance name for unique internal node naming
-            # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+            # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
             local_name = QuoteNode(Symbol(name))
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                         _mna_instance_ = full_instance_name)
                 end
@@ -1873,12 +1871,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # Include hierarchical instance name for unique internal node naming
-    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
     local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
             local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            Base.invokelatest($(MNA).stamp!, dev, ctx, $d, $g, $s, $b;
+            $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                 _mna_instance_ = full_instance_name)
         end
@@ -1928,12 +1926,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
     local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
             local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            Base.invokelatest($(MNA).stamp!, dev, ctx, $c, $b, $e, $s;
+            $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                 _mna_instance_ = full_instance_name)
         end
@@ -1999,7 +1997,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
 
     # Generate stamp! call with variable number of node arguments
     # Build the call expression manually to handle variable node count
-    # NOTE: invokelatest prevents LLVM crash on large VA models (>90K statements)
+    # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
     node_args = Expr(:tuple, node_exprs...)
     local_name = QuoteNode(Symbol(name))
 
@@ -2009,7 +2007,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
         let dev = $device_expr
             nodes = $node_args
             local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            Base.invokelatest($(MNA).stamp!, dev, ctx, nodes...;
+            $(MNA).stamp!(dev, ctx, nodes...;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
                 _mna_instance_ = full_instance_name)
         end
@@ -2916,9 +2914,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
 
         # Zero-allocation positional version for DirectStampContext (fast path)
-        # NOTE: Do NOT use @inline here - VA models with large stamp! functions
-        # (90K+ IR statements) will cause LLVM to crash during compilation.
-        # The invokelatest barrier only helps if the circuit function isn't inlined.
+        # NOTE: Do NOT use @inline here - keeps circuit function from being inlined.
+        # The stamp! methods are @noinline which prevents SROA blow-up.
         function $(circuit_name)(params, spec::$(MNASpec), t::Real,
                                         x::AbstractVector, ctx::$(DirectStampContext))
             # Default prefix for top-level instances (empty = no prefix)
