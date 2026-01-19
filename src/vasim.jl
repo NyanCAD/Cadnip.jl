@@ -358,7 +358,8 @@ end
 """
 function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
                                       params_to_locals::Vector, static_stmts::Vector,
-                                      static_var_names::Set{Symbol})
+                                      static_var_names::Set{Symbol},
+                                      function_defs::Vector=Any[])
     # Build the function body
     body = Expr(:block)
 
@@ -372,6 +373,11 @@ function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
     # Extract parameters from device
     for stmt in params_to_locals
         push!(body.args, stmt)
+    end
+
+    # Include analog function definitions (needed for static code that calls them)
+    for fdef in function_defs
+        push!(body.args, fdef)
     end
 
     # Execute static statements
@@ -951,7 +957,7 @@ function make_mna_device(vm::VANode{VerilogModule})
         # Generate init_device! method
         init_method = generate_init_device_method(
             symname, cache_name, params_to_locals,
-            taint.static_stmts, cached_local_vars)
+            taint.static_stmts, cached_local_vars, function_defs)
         push!(result_args, init_method)
 
         # Generate make_cache method

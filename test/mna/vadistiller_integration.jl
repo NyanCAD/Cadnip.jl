@@ -19,6 +19,7 @@ using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, MNASolutionAccessor
 using CedarSim.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
+using CedarSim.MNA: make_cache, init_device!
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
@@ -100,8 +101,14 @@ Q2 q2_coll q2_base 0 npn1
                     mid = get_node!(ctx, :mid)
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    stamp!(sp_resistor(resistance=1000.0), ctx, vcc, mid; _mna_spec_=spec, _mna_x_=Float64[])
-                    stamp!(sp_resistor(resistance=1000.0), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
+                    dev1 = sp_resistor(resistance=1000.0)
+                    cache1 = make_cache(typeof(dev1))
+                    init_device!(cache1, dev1, spec)
+                    stamp!(dev1, ctx, vcc, mid, cache1; _mna_spec_=spec, _mna_x_=Float64[])
+                    dev2 = sp_resistor(resistance=1000.0)
+                    cache2 = make_cache(typeof(dev2))
+                    init_device!(cache2, dev2, spec)
+                    stamp!(dev2, ctx, mid, 0, cache2; _mna_spec_=spec, _mna_x_=Float64[])
 
                     return ctx
                 end
@@ -125,7 +132,10 @@ Q2 q2_coll q2_base 0 npn1
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-                    stamp!(sp_capacitor(capacitance=1e-6), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
+                    dev = sp_capacitor(capacitance=1e-6)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, mid, 0, cache; _mna_spec_=spec, _mna_x_=Float64[])
 
                     return ctx
                 end
@@ -149,7 +159,10 @@ Q2 q2_coll q2_base 0 npn1
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-                    stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
+                    dev = sp_inductor(inductance=1e-3)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, mid, 0, cache; _mna_spec_=spec, _mna_x_=Float64[])
 
                     return ctx
                 end
@@ -171,7 +184,10 @@ Q2 q2_coll q2_base 0 npn1
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
-                    stamp!(sp_diode(), ctx, diode_a, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_diode()
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, diode_a, 0, cache; _mna_spec_=spec, _mna_x_=x)
                     return ctx
                 end
 
@@ -187,7 +203,10 @@ Q2 q2_coll q2_base 0 npn1
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
-                    stamp!(sp_diode(; rs=10.0), ctx, diode_a, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_diode(; rs=10.0)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, diode_a, 0, cache; _mna_spec_=spec, _mna_x_=x)
                     return ctx
                 end
 
@@ -222,7 +241,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
                     stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
                     stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_bjt(; bf=100.0, is=1e-15)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, collector, base, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -279,7 +301,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(10.0; name=:V1), ctx, vdd, 0)
                     stamp!(VoltageSource(0.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_jfet1(; vt0=-2.0, beta=1e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_jfet1(; vt0=-2.0, beta=1e-3)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -303,7 +328,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vdd, 0)
                     stamp!(VoltageSource(0.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(500.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mes1(; vt0=-1.0, beta=2.5e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mes1(; vt0=-1.0, beta=2.5e-3)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -327,7 +355,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(10.0; name=:V1), ctx, vdd, 0)
                     stamp!(VoltageSource(0.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_jfet2(; vto=-2.0, beta=1e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_jfet2(; vto=-2.0, beta=1e-3)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -358,7 +389,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -382,7 +416,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos2(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mos2(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -406,7 +443,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos3(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mos3(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -430,7 +470,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos6(; l=1e-6, w=10e-6, vto=0.7, u0=600.0, tox=10e-9), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mos6(; l=1e-6, w=10e-6, vto=0.7, u0=600.0, tox=10e-9)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -454,7 +497,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos9(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_mos9(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -524,7 +570,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(10.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(5.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(100.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_vdmos(; vto=2.0, kp=0.5), ctx, drain, gate, 0, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_vdmos(; vto=2.0, kp=0.5)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -548,7 +597,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(1.8; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(1.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_bsim3v3(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_bsim3v3(; l=100e-9, w=1e-6)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -587,7 +639,10 @@ Q2 q2_coll q2_base 0 npn1
                     stamp!(VoltageSource(1.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(0.5; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_bsim4v8(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
+                    dev = sp_bsim4v8(; l=100e-9, w=1e-6)
+                    cache = make_cache(typeof(dev))
+                    init_device!(cache, dev, spec)
+                    stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -622,8 +677,14 @@ Q2 q2_coll q2_base 0 npn1
                 out = get_node!(ctx, :out)
 
                 stamp!(VoltageSource(params.V), ctx, v, 0)
-                stamp!(sp_resistor(; r=params.R), ctx, v, out; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_capacitor(; c=params.C), ctx, out, 0; _mna_spec_=spec, _mna_x_=x)
+                dev_r = sp_resistor(; r=params.R)
+                cache_r = make_cache(typeof(dev_r))
+                init_device!(cache_r, dev_r, spec)
+                stamp!(dev_r, ctx, v, out, cache_r; _mna_spec_=spec, _mna_x_=x)
+                dev_c = sp_capacitor(; c=params.C)
+                cache_c = make_cache(typeof(dev_c))
+                init_device!(cache_c, dev_c, spec)
+                stamp!(dev_c, ctx, out, 0, cache_c; _mna_spec_=spec, _mna_x_=x)
 
                 return ctx
             end
@@ -649,8 +710,14 @@ Q2 q2_coll q2_base 0 npn1
                 vout = get_node!(ctx, :vout)
 
                 stamp!(VoltageSource(params.V), ctx, vin, 0)
-                stamp!(sp_diode(; is=1e-14), ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
-                stamp!(sp_resistor(; r=params.R), ctx, vout, 0; _mna_spec_=spec, _mna_x_=x)
+                dev_d = sp_diode(; is=1e-14)
+                cache_d = make_cache(typeof(dev_d))
+                init_device!(cache_d, dev_d, spec)
+                stamp!(dev_d, ctx, vin, vout, cache_d; _mna_x_=x, _mna_spec_=spec)
+                dev_r = sp_resistor(; r=params.R)
+                cache_r = make_cache(typeof(dev_r))
+                init_device!(cache_r, dev_r, spec)
+                stamp!(dev_r, ctx, vout, 0, cache_r; _mna_spec_=spec, _mna_x_=x)
 
                 return ctx
             end
@@ -682,9 +749,14 @@ Q2 q2_coll q2_base 0 npn1
                 stamp!(VoltageSource(params.Vbias;
                        tran=_t -> params.Vbias + params.Vac * sin(2π * params.freq * _t), name=:Vg),
                        ctx, vgate, 0, t, spec.mode)
-                stamp!(sp_resistor(; r=params.Rd), ctx, vdd, vdrain; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_mos1(; vto=1.0, kp=1e-4),
-                       ctx, vdrain, vgate, 0, 0; _mna_x_=x, _mna_spec_=spec)
+                dev_r = sp_resistor(; r=params.Rd)
+                cache_r = make_cache(typeof(dev_r))
+                init_device!(cache_r, dev_r, spec)
+                stamp!(dev_r, ctx, vdd, vdrain, cache_r; _mna_spec_=spec, _mna_x_=x)
+                dev_m = sp_mos1(; vto=1.0, kp=1e-4)
+                cache_m = make_cache(typeof(dev_m))
+                init_device!(cache_m, dev_m, spec)
+                stamp!(dev_m, ctx, vdrain, vgate, 0, 0, cache_m; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -717,9 +789,14 @@ Q2 q2_coll q2_base 0 npn1
                 stamp!(VoltageSource(params.Vbias;
                        tran=_t -> params.Vbias + params.Vac * sin(2π * params.freq * _t), name=:Vb),
                        ctx, vbase, 0, t, spec.mode)
-                stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_bjt(; bf=100.0),
-                       ctx, vcollector, vbase, 0, 0; _mna_x_=x, _mna_spec_=spec)
+                dev_r = sp_resistor(; r=params.Rc)
+                cache_r = make_cache(typeof(dev_r))
+                init_device!(cache_r, dev_r, spec)
+                stamp!(dev_r, ctx, vcc, vcollector, cache_r; _mna_spec_=spec, _mna_x_=x)
+                dev_b = sp_bjt(; bf=100.0)
+                cache_b = make_cache(typeof(dev_b))
+                init_device!(cache_b, dev_b, spec)
+                stamp!(dev_b, ctx, vcollector, vbase, 0, 0, cache_b; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -763,8 +840,10 @@ Q2 q2_coll q2_base 0 npn1
                 stamp!(VoltageSource(0.0;
                        tran=_t -> params.Vamp * sin(2π * params.freq * _t), name=:Vin),
                        ctx, vin, 0, t, spec.mode)
-                stamp!(sp_diode(; is=1e-14, cjo=10e-12, m=0.5, vj=0.7),
-                       ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
+                dev = sp_diode(; is=1e-14, cjo=10e-12, m=0.5, vj=0.7)
+                cache = make_cache(typeof(dev))
+                init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vin, vout, cache; _mna_x_=x, _mna_spec_=spec)
                 stamp!(Resistor(params.R), ctx, vout, 0)
 
                 return ctx
@@ -815,9 +894,11 @@ Q2 q2_coll q2_base 0 npn1
                        tran=_t -> params.Vbias + params.Vac * sin(2π * params.freq * _t), name=:Vg),
                        ctx, vgate, 0, t, spec.mode)
                 stamp!(Resistor(params.Rd), ctx, vdd, vdrain)
-                stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4,
-                               cgso=1e-12, cgdo=0.5e-12),
-                       ctx, vdrain, vgate, 0, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4,
+                              cgso=1e-12, cgdo=0.5e-12)
+                cache = make_cache(typeof(dev))
+                init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vdrain, vgate, 0, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -861,8 +942,10 @@ Q2 q2_coll q2_base 0 npn1
                 stamp!(VoltageSource(0.0;
                        tran=_t -> params.Vamp * sin(2π * params.freq * _t), name=:Vin),
                        ctx, vin, 0, t, spec.mode)
-                stamp!(sp_diode(; is=1e-14, cjo=5e-12, m=0.5),
-                       ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
+                dev = sp_diode(; is=1e-14, cjo=5e-12, m=0.5)
+                cache = make_cache(typeof(dev))
+                init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vin, vout, cache; _mna_x_=x, _mna_spec_=spec)
                 stamp!(Capacitor(params.C), ctx, vout, 0)
                 stamp!(Resistor(params.R), ctx, vout, 0)
 
