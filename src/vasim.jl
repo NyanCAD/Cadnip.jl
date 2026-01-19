@@ -70,6 +70,10 @@ Check if an expression is static (doesn't depend on voltages/currents).
 Conservative: returns false if uncertain.
 """
 function is_static_expr(taint::CodegenTaint, expr)
+    # Nothing is static (e.g., suppressed $warning calls)
+    if expr === nothing
+        return true
+    end
     if expr isa Number || expr isa String
         return true
     end
@@ -293,6 +297,30 @@ function extract_symbols(expr, symbols=Set{Symbol}())
 end
 
 """
+    extract_assigned_symbols(expr) -> Set{Symbol}
+
+Extract all symbols that are ASSIGNED TO in an expression.
+This walks the expression tree looking for assignment statements.
+"""
+function extract_assigned_symbols(expr, symbols=Set{Symbol}())
+    if expr isa Expr
+        if expr.head in (:(=), :(+=), :(-=), :(*=), :(/=))
+            lhs = expr.args[1]
+            if lhs isa Symbol
+                push!(symbols, lhs)
+            elseif lhs isa Expr && lhs.head == :(::) && lhs.args[1] isa Symbol
+                push!(symbols, lhs.args[1])
+            end
+        end
+        # Recursively check all subexpressions
+        for arg in expr.args
+            extract_assigned_symbols(arg, symbols)
+        end
+    end
+    return symbols
+end
+
+"""
     generate_cache_struct(device_name::Symbol, static_vars::Dict{Symbol, Type})
 
 Generate a mutable cache struct to store static computation results.
@@ -393,6 +421,11 @@ function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
     # Mark as initialized and return
     push!(body.args, :(cache._initialized = true))
     push!(body.args, :(return cache))
+
+    # Debug: print generated init_device code
+    if get(ENV, "CEDARSIM_DEBUG_INIT_DEVICE", "") == "1"
+        @info "Generated init_device! for $device_name" body=body
+    end
 
     # Build the function
     return quote
@@ -773,8 +806,17 @@ function make_mna_device(vm::VANode{VerilogModule})
             # Conditionals: if any branch has V/I access, entire block is dynamic
             if is_static_expr(taint, c.expr)
                 push!(taint.static_stmts, c.expr)
+                # Also mark variables assigned inside static conditionals as static
+                for sym in extract_assigned_symbols(c.expr)
+                    push!(taint.static_vars, sym)
+                end
             else
                 push!(taint.dynamic_stmts, c.expr)
+                # IMPORTANT: Mark variables assigned inside dynamic conditionals as dynamic
+                # This ensures they get proper initialization and aren't loaded from cache
+                for sym in extract_assigned_symbols(c.expr)
+                    push!(taint.dynamic_vars, sym)
+                end
             end
         end
         # Current/voltage contributions are always dynamic (handled in stamp_code)
@@ -782,10 +824,12 @@ function make_mna_device(vm::VANode{VerilogModule})
 
     # Identify which static vars are actually used in dynamic code
     # (these need to be in the cache and loaded at stamp! start)
+    # IMPORTANT: Exclude variables that are also assigned dynamically (in dynamic_vars)
+    # because they will be computed in stamp! and shouldn't be loaded from cache
     for stmt in taint.dynamic_stmts
         syms = extract_symbols(stmt)
         for sym in syms
-            if sym in taint.static_vars
+            if sym in taint.static_vars && !(sym in taint.dynamic_vars)
                 push!(taint.used_static_vars, sym)
             end
         end
@@ -796,11 +840,40 @@ function make_mna_device(vm::VANode{VerilogModule})
         if c.kind == :current || c.kind == :voltage
             syms = extract_symbols(c.expr)
             for sym in syms
-                if sym in taint.static_vars
+                if sym in taint.static_vars && !(sym in taint.dynamic_vars)
                     push!(taint.used_static_vars, sym)
                 end
             end
         end
+    end
+
+    # CRITICAL: Statements that assign to dynamic vars must be in dynamic_stmts,
+    # even if the RHS is static. This ensures the assignment runs in stamp!().
+    # Also track the static vars used in such assignments for caching.
+    stmts_to_move = Expr[]
+    for stmt in taint.static_stmts
+        if stmt isa Expr && stmt.head in (:(=), :(+=), :(-=), :(*=), :(/=))
+            lhs = stmt.args[1]
+            rhs = stmt.args[2]
+            # If this statement assigns to a variable that's now in dynamic_vars,
+            # move it to dynamic_stmts and track static vars from RHS
+            lhs_sym = lhs isa Symbol ? lhs : (lhs isa Expr && lhs.head == :(::) ? lhs.args[1] : nothing)
+            if lhs_sym !== nothing && lhs_sym in taint.dynamic_vars
+                push!(stmts_to_move, stmt)
+                # Extract static vars from the RHS - they're needed for dynamic computation
+                syms = extract_symbols(rhs)
+                for sym in syms
+                    if sym in taint.static_vars && !(sym in taint.dynamic_vars)
+                        push!(taint.used_static_vars, sym)
+                    end
+                end
+            end
+        end
+    end
+    # Move statements from static to dynamic
+    for stmt in stmts_to_move
+        filter!(s -> s !== stmt, taint.static_stmts)
+        push!(taint.dynamic_stmts, stmt)
     end
 
     # Build static variable types dict (for cache struct generation)
@@ -821,6 +894,15 @@ function make_mna_device(vm::VANode{VerilogModule})
     # Debug output
     if get(ENV, "CEDARSIM_DEBUG_TAINT", "") == "1"
         @info "Code splitting taint analysis for $symname" static_vars=taint.static_vars dynamic_vars=taint.dynamic_vars used_static_vars=taint.used_static_vars static_stmts=length(taint.static_stmts) dynamic_stmts=length(taint.dynamic_stmts) static_var_types=static_var_types
+
+        # Debug specific variables of interest
+        for var in [:DIOtSatCur, :DIOtSatSWCur, :csat, :csatsw, :cdb, :gdb, :load_cd, :cdeq]
+            in_static = var in taint.static_vars
+            in_dynamic = var in taint.dynamic_vars
+            in_used = var in taint.used_static_vars
+            in_types = haskey(static_var_types, var)
+            @info "Variable $var: static=$in_static dynamic=$in_dynamic used=$in_used in_cache=$in_types"
+        end
     end
 
     # Generate cache struct (only if there are static vars to cache)
@@ -2081,6 +2163,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Regular dynamic assignment (e.g., cdrain = R*V(g,s)**2)
             push!(contrib_eval.args, c.expr)
         end
+    end
+
+    if get(ENV, "CEDARSIM_DEBUG_STAMP", "") == "1"
+        println("DEBUG contrib_eval for $symname: $(length(contrib_eval.args)) statements")
     end
 
     # Allocate current variables for named branches with voltage contributions
