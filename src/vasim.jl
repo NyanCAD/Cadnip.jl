@@ -385,7 +385,8 @@ end
 ```
 """
 function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
-                                      params_to_locals::Vector, static_stmts::Vector,
+                                      params_to_locals::Vector, local_var_decls::Vector,
+                                      static_stmts::Vector,
                                       static_var_names::Set{Symbol},
                                       function_defs::Vector=Any[])
     # Build the function body
@@ -406,6 +407,24 @@ function generate_init_device_method(device_name::Symbol, cache_name::Symbol,
     # Include analog function definitions (needed for static code that calls them)
     for fdef in function_defs
         push!(body.args, fdef)
+    end
+
+    # Declare local variables (needed before static statements can assign to them)
+    # Convert `local name::T = init_expr` to simple `name = init_expr` for init_device scope
+    for decl in local_var_decls
+        if decl.head == :local
+            inner = decl.args[1]
+            if inner isa Expr && inner.head == :(=)
+                lhs = inner.args[1]
+                rhs = inner.args[2]
+                if lhs isa Expr && lhs.head == :(::)
+                    name = lhs.args[1]
+                    # Only include if the variable is used in static statements
+                    # This avoids declaring variables that are only used dynamically
+                    push!(body.args, :($name = $rhs))
+                end
+            end
+        end
     end
 
     # Execute static statements
@@ -1038,7 +1057,7 @@ function make_mna_device(vm::VANode{VerilogModule})
 
         # Generate init_device! method
         init_method = generate_init_device_method(
-            symname, cache_name, params_to_locals,
+            symname, cache_name, params_to_locals, local_var_decls,
             taint.static_stmts, cached_local_vars, function_defs)
         push!(result_args, init_method)
 
