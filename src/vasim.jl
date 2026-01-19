@@ -869,22 +869,24 @@ function make_mna_device(vm::VANode{VerilogModule})
     # CRITICAL: Statements that assign to dynamic vars must be in dynamic_stmts,
     # even if the RHS is static. This ensures the assignment runs in stamp!().
     # Also track the static vars used in such assignments for caching.
+    # This applies to both direct assignments AND conditionals containing assignments.
     stmts_to_move = Expr[]
     for stmt in taint.static_stmts
-        if stmt isa Expr && stmt.head in (:(=), :(+=), :(-=), :(*=), :(/=))
-            lhs = stmt.args[1]
-            rhs = stmt.args[2]
-            # If this statement assigns to a variable that's now in dynamic_vars,
-            # move it to dynamic_stmts and track static vars from RHS
-            lhs_sym = lhs isa Symbol ? lhs : (lhs isa Expr && lhs.head == :(::) ? lhs.args[1] : nothing)
-            if lhs_sym !== nothing && lhs_sym in taint.dynamic_vars
-                push!(stmts_to_move, stmt)
-                # Extract static vars from the RHS - they're needed for dynamic computation
-                syms = extract_symbols(rhs)
-                for sym in syms
-                    if sym in taint.static_vars && !(sym in taint.dynamic_vars)
-                        push!(taint.used_static_vars, sym)
-                    end
+        if !(stmt isa Expr)
+            continue
+        end
+
+        # Check if this statement (or any nested part) assigns to a dynamic var
+        assigned_syms = extract_assigned_symbols(stmt)
+        assigns_to_dynamic = any(sym -> sym in taint.dynamic_vars, assigned_syms)
+
+        if assigns_to_dynamic
+            push!(stmts_to_move, stmt)
+            # Extract ALL static vars from the statement - they're needed for dynamic computation
+            all_syms = extract_symbols(stmt)
+            for sym in all_syms
+                if sym in taint.static_vars && !(sym in taint.dynamic_vars)
+                    push!(taint.used_static_vars, sym)
                 end
             end
         end
