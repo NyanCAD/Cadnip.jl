@@ -33,7 +33,10 @@ endmodule
         out = get_node!(ctx, :out)
 
         stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-        stamp!(VAR(R=1000.0), ctx, vcc, out)
+        dev = VAR(R=1000.0)
+        cache = MNA.make_cache(typeof(dev))
+        MNA.init_device!(cache, dev, spec)
+        stamp!(dev, ctx, vcc, out, cache)
         stamp!(Capacitor(1e-9; name=:C), ctx, out, 0)
 
         return ctx
@@ -105,7 +108,10 @@ endmodule
         out = get_node!(ctx, :out)
 
         stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
-        stamp!(VAR_rev(R=1000.0), ctx, vcc, out)
+        dev = VAR_rev(R=1000.0)
+        cache = MNA.make_cache(typeof(dev))
+        MNA.init_device!(cache, dev, spec)
+        stamp!(dev, ctx, vcc, out, cache)
         stamp!(Capacitor(1e-9; name=:C), ctx, out, 0)
 
         return ctx

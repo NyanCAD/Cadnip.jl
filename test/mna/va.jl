@@ -243,7 +243,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             vcc = get_node!(ctx, :vcc)
 
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAResistor(R=2000.0), ctx, vcc, 0)
+            dev = VAResistor(R=2000.0)
+            cache = MNA.make_cache(typeof(dev))
+            MNA.init_device!(cache, dev, spec)
+            stamp!(dev, ctx, vcc, 0, cache)
 
             return ctx
         end
@@ -284,7 +287,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(V_val; name=:V1), ctx, vcc, 0)
             stamp!(Resistor(R_val; name=:R1), ctx, vcc, cap)
-            stamp!(VACapacitor(C=C_val), ctx, cap, 0)
+            dev = VACapacitor(C=C_val)
+            cache = MNA.make_cache(typeof(dev))
+            MNA.init_device!(cache, dev, spec)
+            stamp!(dev, ctx, cap, 0, cache)
 
             return ctx
         end
@@ -336,7 +342,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             vcc = get_node!(ctx, :vcc)
 
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAParallelRC(R=1000.0, C=1e-6), ctx, vcc, 0)
+            dev = VAParallelRC(R=1000.0, C=1e-6)
+            cache = MNA.make_cache(typeof(dev))
+            MNA.init_device!(cache, dev, spec)
+            stamp!(dev, ctx, vcc, 0, cache)
 
             return ctx
         end

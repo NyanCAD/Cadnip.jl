@@ -2626,14 +2626,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         return nothing
     end
 
-    # Generate cache-aware stamp! if has_cache, otherwise generate original version
+    # Generate stamp! with mandatory cache parameter
+    # Cache type is the generated cache struct, or Nothing for models without cache
+    cache_type = has_cache ? cache_name : :Nothing
+
     if has_cache
         quote
             # Main stamp! with mandatory cache - this is the small, optimized version
             # Static code has been moved to init_device!(), only cache loading remains
             Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
                                          $([:($np::Int) for np in node_params]...),
-                                         _cache_::$cache_name;
+                                         _cache_::$cache_type;
                                          _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                          _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
                                          _mna_instance_::Symbol=Symbol(""))
@@ -2650,26 +2653,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
                 $common_body
             end
-
-            # Convenience wrapper: creates and initializes cache automatically
-            # This maintains API compatibility but creates a new cache each call
-            # For performance, use the cache-requiring version with a pre-initialized cache
-            function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                         $([:($np::Int) for np in node_params]...);
-                                         _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                         _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                         _mna_instance_::Symbol=Symbol(""))
-                _cache_ = CedarSim.MNA.make_cache($symname)
-                CedarSim.MNA.init_device!(_cache_, dev, _mna_spec_)
-                CedarSim.MNA.stamp!(dev, ctx, $(node_params...), _cache_;
-                    _mna_t_=_mna_t_, _mna_mode_=_mna_mode_, _mna_x_=_mna_x_,
-                    _mna_spec_=_mna_spec_, _mna_instance_=_mna_instance_)
-            end
         end
     else
         quote
+            # stamp! with nothing cache for models without static vars
             Base.@noinline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
-                                         $([:($np::Int) for np in node_params]...);
+                                         $([:($np::Int) for np in node_params]...),
+                                         _cache_::$cache_type;
                                          _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                          _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
                                          _mna_instance_::Symbol=Symbol(""))
@@ -2678,8 +2668,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 $(params_to_locals...)
                 $(function_defs...)
 
-                # Initialize local variables FIRST (before internal node allocation)
-                # This is needed because short-circuit conditions may reference these variables
+                # Initialize local variables
                 $local_var_init
 
                 $common_body

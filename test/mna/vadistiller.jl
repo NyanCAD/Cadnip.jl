@@ -57,8 +57,14 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 mid = get_node!(ctx, :mid)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VADResistor(resistance=1000.0), ctx, vcc, mid)
-                stamp!(VADResistor(resistance=1000.0), ctx, mid, 0)
+                dev1 = VADResistor(resistance=1000.0)
+                cache1 = MNA.make_cache(typeof(dev1))
+                MNA.init_device!(cache1, dev1, spec)
+                stamp!(dev1, ctx, vcc, mid, cache1)
+                dev2 = VADResistor(resistance=1000.0)
+                cache2 = MNA.make_cache(typeof(dev2))
+                MNA.init_device!(cache2, dev2, spec)
+                stamp!(dev2, ctx, mid, 0, cache2)
 
                 return ctx
             end
@@ -98,7 +104,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 stamp!(VoltageSource(V_val; name=:V1), ctx, vcc, 0)
                 stamp!(Resistor(R_val; name=:R1), ctx, vcc, cap)
-                stamp!(VADCapacitor(capacitance=C_val), ctx, cap, 0)
+                dev = VADCapacitor(capacitance=C_val)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, cap, 0, cache)
 
                 return ctx
             end
@@ -159,7 +168,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.6; name=:V1), ctx, anode, 0)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, anode, 0; _mna_x_=x)
+                dev = VADDiode(Is=1e-14, N=1.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, anode, 0, cache; _mna_x_=x)
 
                 return ctx
             end
@@ -201,7 +213,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.7; name=:V1), ctx, anode, 0)
-                stamp!(VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0), ctx, anode, 0; _mna_x_=x)
+                dev = VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, anode, 0, cache; _mna_x_=x)
 
                 return ctx
             end
@@ -257,7 +272,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 # Load resistor
                 stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                 # VCCS: Ids = gm * Vgs
-                stamp!(VADVCCS(gm=1e-3), ctx, drain, gate, 0)
+                dev = VADVCCS(gm=1e-3)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache)
 
                 return ctx
             end
@@ -298,7 +316,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(1.5; name=:Vg), ctx, gate, 0)  # Vgs = 1.5V
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)  # 10kΩ load
-                stamp!(VADMOS(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0; _mna_x_=x)
+                dev = VADMOS(Kp=1e-4, Vth=0.5)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x)
 
                 return ctx
             end
@@ -347,7 +368,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(1.5; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
                 # 4-terminal stamp: d=drain, g=gate, s=0, b=0 (bulk tied to source)
-                stamp!(VADNMOS4(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0, 0; _mna_x_=x)
+                dev = VADNMOS4(Kp=1e-4, Vth=0.5)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, 0, cache; _mna_x_=x)
 
                 return ctx
             end
@@ -401,7 +425,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -431,7 +458,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -500,7 +530,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
-                stamp!(VAMOSRsd(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSRsd(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -554,8 +587,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
-                stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
-                       ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -577,8 +612,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
-                stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
-                       ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, drain, gate, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -624,7 +661,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.5; name=:Vin), ctx, vin, 0)  # Mid-rail input
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, vout)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, vout, vin, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vout, vin, 0, cache; _mna_x_=x, _mna_spec_=spec)
                 # Load capacitance
                 stamp!(Capacitor(1e-12; name=:Cload), ctx, vout, 0)
 
@@ -683,7 +723,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VATempResistor(R0=1000.0, TC=0.004), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VATempResistor(R0=1000.0, TC=0.004)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -727,7 +770,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAGminResistor(R=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAGminResistor(R=1000.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -771,7 +817,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
+                dev = VAOptionalParam(R=2000.0, Ralt=500.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, s)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is true, so uses R=2000
@@ -787,7 +836,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
+                dev = VAOptionalParam(Ralt=500.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, s)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is false, so uses Ralt=500
@@ -826,7 +878,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
+            dev = VAAliasTest(tnom=100.0)
+            cache = MNA.make_cache(typeof(dev))
+            MNA.init_device!(cache, dev, s)
+            stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
@@ -842,7 +897,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
+            dev = VAAliasTest(tref=100.0)
+            cache = MNA.make_cache(typeof(dev))
+            MNA.init_device!(cache, dev, s)
+            stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # Same result - alias forwards to tnom
@@ -885,8 +943,14 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 mid = get_node!(ctx, :mid)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VarInitResistor(R=1000.0), ctx, vcc, mid)
-                stamp!(VarInitResistor(R=1000.0), ctx, mid, 0)
+                dev1 = VarInitResistor(R=1000.0)
+                cache1 = MNA.make_cache(typeof(dev1))
+                MNA.init_device!(cache1, dev1, spec)
+                stamp!(dev1, ctx, vcc, mid, cache1)
+                dev2 = VarInitResistor(R=1000.0)
+                cache2 = MNA.make_cache(typeof(dev2))
+                MNA.init_device!(cache2, dev2, spec)
+                stamp!(dev2, ctx, mid, 0, cache2)
 
                 return ctx
             end
@@ -922,7 +986,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(4.5; name=:V1), ctx, vcc, 0)
-                stamp!(VarInitNonZero(R=1000.0), ctx, vcc, 0)
+                dev = VarInitNonZero(R=1000.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vcc, 0, cache)
 
                 return ctx
             end
@@ -963,7 +1030,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAInternalResistor(R1=1000.0, R2=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAInternalResistor(R1=1000.0, R2=1000.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -998,7 +1068,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(9.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAMultiInternal(R=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
+                dev = VAMultiInternal(R=1000.0)
+                cache = MNA.make_cache(typeof(dev))
+                MNA.init_device!(cache, dev, spec)
+                stamp!(dev, ctx, vcc, 0, cache; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
