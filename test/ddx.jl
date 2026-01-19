@@ -3,7 +3,7 @@ module ddx_tests
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current
+using CedarSim.MNA: voltage, current, make_cache, init_device!
 using CedarSim.MNA: VoltageSource
 using Test
 
@@ -37,6 +37,11 @@ endmodule
     # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from vcc to gnd
     # V1 sources this current (pushes out of positive terminal), so I_V1 = -60A
 
+    # Create device and cache once outside the builder
+    nlvcr_dev = NLVCR(R=2.0)
+    nlvcr_cache = make_cache(typeof(nlvcr_dev))
+    # nlvcr_cache may be nothing for simple models with no static code
+
     # Builder accepts time and x keyword for Newton iteration
     function VRcircuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
@@ -44,13 +49,19 @@ endmodule
         else
             CedarSim.MNA.reset_for_restamping!(ctx)
         end
+
+        # Initialize cache on first call (only if cache exists)
+        if nlvcr_cache !== nothing && !nlvcr_cache._initialized
+            init_device!(nlvcr_cache, nlvcr_dev, spec)
+        end
+
         vcc = get_node!(ctx, :vcc)
         vg = get_node!(ctx, :vg)
 
         stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
         stamp!(VoltageSource(3.0; name=:V2), ctx, vg, 0)
-        # Pass x to the nonlinear device stamp
-        stamp!(NLVCR(R=2.0), ctx, vcc, vg, 0; _mna_x_=x)
+        # Pass cache and x to the nonlinear device stamp
+        stamp!(nlvcr_dev, ctx, vcc, vg, 0, nlvcr_cache; _mna_x_=x)
 
         return ctx
     end
