@@ -9,12 +9,16 @@ including standard, self-heating, and non-quasi-static (NQS) variants.
 # Usage
 ```julia
 using PSPModels
-using CedarSim.MNA: MNAContext, stamp!, get_node!
+using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!, make_cache, init_device!
 
 ctx = MNAContext()
+spec = MNASpec()
 d = get_node!(ctx, :d)
 g = get_node!(ctx, :g)
-stamp!(PSP103VA(), ctx, d, g, 0, 0; _mna_spec_=spec, _mna_x_=Float64[])
+dev = PSP103VA()
+cache = make_cache(typeof(dev))
+init_device!(cache, dev, spec)
+stamp!(dev, ctx, d, g, 0, 0, cache; _mna_spec_=spec, _mna_x_=Float64[])
 ```
 
 # Exported Models
@@ -28,7 +32,8 @@ module PSPModels
 using CedarSim
 using CedarSim: VAFile
 using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
-                    compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
+                    compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!,
+                    make_cache, init_device!
 using VerilogAParser
 using PrecompileTools: @compile_workload
 
@@ -100,10 +105,13 @@ export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
             reset_for_restamping!(ctx)
         end
         a = get_node!(ctx, :a)
+        dev = JUNCAP200_module.JUNCAP200()
+        cache = make_cache(typeof(dev))
+        init_device!(cache, dev, spec)
         if use_zero_vector
-            stamp!(JUNCAP200_module.JUNCAP200(), ctx, a, 0; _mna_spec_=spec)
+            stamp!(dev, ctx, a, 0, cache; _mna_spec_=spec)
         else
-            stamp!(JUNCAP200_module.JUNCAP200(), ctx, a, 0; _mna_spec_=spec, _mna_x_=x)
+            stamp!(dev, ctx, a, 0, cache; _mna_spec_=spec, _mna_x_=x)
         end
         return ctx
     end
@@ -119,10 +127,13 @@ export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
         d = get_node!(ctx, :d)
         g = get_node!(ctx, :g)
         s = get_node!(ctx, :s)
+        dev = PSP103VA_module.PSP103VA()
+        cache = make_cache(typeof(dev))
+        init_device!(cache, dev, spec)
         if use_zero_vector
-            stamp!(PSP103VA_module.PSP103VA(), ctx, d, g, s, 0; _mna_spec_=spec)
+            stamp!(dev, ctx, d, g, s, 0, cache; _mna_spec_=spec)
         else
-            stamp!(PSP103VA_module.PSP103VA(), ctx, d, g, s, 0; _mna_spec_=spec, _mna_x_=x)
+            stamp!(dev, ctx, d, g, s, 0, cache; _mna_spec_=spec, _mna_x_=x)
         end
         return ctx
     end

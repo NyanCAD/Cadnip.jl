@@ -9,11 +9,15 @@ BJT, JFETs, MOSFETs) as well as advanced models (BSIM3v3, BSIM4v8, VDMOS).
 # Usage
 ```julia
 using VADistillerModels
-using CedarSim.MNA: MNAContext, stamp!, get_node!
+using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!, make_cache, init_device!
 
 ctx = MNAContext()
+spec = MNASpec()
 vcc = get_node!(ctx, :vcc)
-stamp!(sp_resistor(resistance=1000.0), ctx, vcc, 0; _mna_spec_=spec, _mna_x_=Float64[])
+dev = sp_resistor(resistance=1000.0)
+cache = make_cache(typeof(dev))
+init_device!(cache, dev, spec)
+stamp!(dev, ctx, vcc, 0, cache; _mna_spec_=spec, _mna_x_=Float64[])
 ```
 
 # Model Registration
@@ -43,7 +47,8 @@ module VADistillerModels
 using CedarSim
 using CedarSim: VAFile
 using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
-                    compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
+                    compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!,
+                    make_cache, init_device!
 using CedarSim.ModelRegistry: getmodel, getparams, AbstractSimulator
 using VerilogAParser
 using PrecompileTools: @compile_workload
@@ -205,11 +210,11 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
     end
 
     # Helper to build stamp call with optional _mna_x_
-    function stamp_with_x!(dev, ctx, nodes...; spec, x, use_zero_vector)
+    function stamp_with_x!(dev, cache, ctx, nodes...; spec, x, use_zero_vector)
         if use_zero_vector
-            stamp!(dev, ctx, nodes...; _mna_spec_=spec)
+            stamp!(dev, ctx, nodes..., cache; _mna_spec_=spec)
         else
-            stamp!(dev, ctx, nodes...; _mna_spec_=spec, _mna_x_=x)
+            stamp!(dev, ctx, nodes..., cache; _mna_spec_=spec, _mna_x_=x)
         end
     end
 
@@ -222,7 +227,10 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
                 reset_for_restamping!(ctx)
             end
             n1 = get_node!(ctx, :n1)
-            stamp_with_x!(device_fn(), ctx, n1, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            dev = device_fn()
+            cache = make_cache(typeof(dev))
+            init_device!(cache, dev, spec)
+            stamp_with_x!(dev, cache, ctx, n1, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
             return ctx
         end
     end
@@ -237,7 +245,10 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
-            stamp_with_x!(device_fn(), ctx, d, g, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            dev = device_fn()
+            cache = make_cache(typeof(dev))
+            init_device!(cache, dev, spec)
+            stamp_with_x!(dev, cache, ctx, d, g, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
             return ctx
         end
     end
@@ -253,7 +264,10 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
             s = get_node!(ctx, :s)
-            stamp_with_x!(device_fn(), ctx, d, g, s, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            dev = device_fn()
+            cache = make_cache(typeof(dev))
+            init_device!(cache, dev, spec)
+            stamp_with_x!(dev, cache, ctx, d, g, s, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
             return ctx
         end
     end
@@ -270,7 +284,10 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
             g = get_node!(ctx, :g)
             s = get_node!(ctx, :s)
             tj = get_node!(ctx, :tj)
-            stamp_with_x!(device_fn(), ctx, d, g, s, 0, tj; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            dev = device_fn()
+            cache = make_cache(typeof(dev))
+            init_device!(cache, dev, spec)
+            stamp_with_x!(dev, cache, ctx, d, g, s, 0, tj; spec=spec, x=x, use_zero_vector=use_zero_vector)
             return ctx
         end
     end
