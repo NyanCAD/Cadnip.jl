@@ -812,3 +812,105 @@ end
 - No change in simulation results (bit-exact)
 - Workspace overhead < 5% of runtime
 - Code remains readable and debuggable
+
+## Part 10: Implementation Status and Findings
+
+### What Was Implemented
+
+The following changes were made to `src/vasim.jl`:
+
+1. **MNAScope Extended** (lines 459-479):
+   - Added `use_state_struct::Bool` field
+   - Added `named_blocks::Vector{NamedTuple{...}}` field
+   - Added `is_local_variable()` helper function
+
+2. **Variable Access Transformation** (when enabled):
+   - `IdentifierPrimary` handler: `varname` → `s.varname` for local variables
+   - `AnalogVariableAssignment` handler: `varname = expr` → `s.varname = expr`
+
+3. **Named Block Detection**:
+   - `AnalogSeqBlock` handler: detects `begin : blockname` and registers for separate generation
+   - Returns function call to `_block_name!(s, dev, ctx, ...)` instead of inlining
+
+4. **Block Function Generation** (lines 2111-2140):
+   - Generates @noinline functions for each named block
+   - Destructures node voltages from NamedTuple for V() access
+
+5. **State Struct Generation** (lines 2078-2109):
+   - Generates `mutable struct DeviceName_State` with all local variables
+   - Inner constructor initializes all fields to type-appropriate defaults
+
+### Critical Issue Discovered: Dual Type Mismatch
+
+**The Problem**: Variables that receive voltage-dependent values (from V(), I() calls) get
+ForwardDiff.Dual values, but the state struct has typed fields (Float64, Int, String).
+
+```julia
+# Generated state struct
+mutable struct sp_resistor_State
+    v_rhs::Float64  # Typed as Float64
+end
+
+# In stamp! body
+s.v_rhs = V(p,n)  # V() returns Dual{JacobianTag, Float64, 2}
+# ERROR: no method matching Float64(::ForwardDiff.Dual{...})
+```
+
+**OpenVAF's Solution**: They only put parameter-derived values in the cache, never voltage-
+dependent values. The eval function computes voltage-dependent values locally.
+
+### Current Status: State Struct Mode Disabled
+
+To avoid breaking existing functionality, state struct mode is **disabled by default**:
+- `use_state_struct = false` in MNAScope constructor
+- All tests pass with this setting
+- Named blocks are inlined as before
+
+### Options to Enable State Struct Mode
+
+1. **Option A: Any-typed fields** (simple but loses type stability)
+   ```julia
+   mutable struct DeviceName_State
+       v_rhs::Any  # Can hold Float64 or Dual
+   end
+   ```
+
+2. **Option B: Parameterized struct** (preserves type stability)
+   ```julia
+   mutable struct DeviceName_State{T}
+       v_rhs::T
+   end
+   ```
+   The struct type would be specialized based on whether duals are used.
+
+3. **Option C: Separate storage for op-dependent variables** (like OpenVAF)
+   - State struct only holds parameter-derived values
+   - Voltage-dependent variables stay as local variables
+   - Requires classifying variables by op-dependence
+
+4. **Option D: Don't store voltage-dependent variables in struct**
+   - Let block functions return computed values
+   - Or use different mechanism for variable passing
+   - More complex code generation
+
+### Recommended Next Steps
+
+1. **For immediate use**: Keep state struct disabled. Current code works correctly.
+
+2. **For PSP103 specifically**: Try Option B (parameterized struct) since PSP103's named
+   blocks have natural semantics:
+   - `initial_model`, `initial_instance`: No voltage access, can use Float64 struct
+   - `evaluateblock`: Has voltage access, struct needs to handle duals
+
+3. **For general solution**: Implement Option C (OpenVAF-style classification)
+   - Classify variables by op-dependence during AST analysis
+   - Only static variables go in struct
+   - More work but correct semantic separation
+
+### Test Results
+
+With state struct mode disabled:
+- `test/mna/core.jl`: ✓ 356/356 tests pass
+- `test/mna/va.jl`: ✓ 49/49 tests pass
+- `test/mna/vadistiller.jl`: ✓ 42/42 tests pass
+- `test/mna/vadistiller_integration.jl`: Times out (expected, PSP103 still monolithic)
