@@ -148,6 +148,15 @@ export var"$port_connected", port_connected
 var"$port_connected"(port) = 1
 port_connected(port) = 1
 
+# Safe struct field assignment for model splitting
+# Stores Float64/Int/String values but is a no-op for ForwardDiff.Dual
+# This allows using a typed state struct while working with dual-valued locals
+export _safe_set!
+@inline _safe_set!(s, f::Base.Symbol, v::Float64) = Base.setproperty!(s, f, v)
+@inline _safe_set!(s, f::Base.Symbol, v::Int) = Base.setproperty!(s, f, v)
+@inline _safe_set!(s, f::Base.Symbol, v::Base.String) = Base.setproperty!(s, f, v)
+@inline _safe_set!(s, f::Base.Symbol, v::ForwardDiff.Dual) = Base.nothing  # No-op for duals
+
 # Base type for VA-generated models
 abstract type VAModel <: CedarSim.CircuitElement; end
 
