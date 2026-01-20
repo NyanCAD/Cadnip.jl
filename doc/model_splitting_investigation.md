@@ -474,44 +474,85 @@ Full OpenVAF-style separation requires:
 
 **Effort**: 2-3 weeks for robust implementation
 
-### Option B: Mechanical Chunking (Simple but Effective)
+### Option B: Mechanical Chunking with Mutable State Struct
 
-Split the generated code by **statement count**, not semantics:
+Split the generated code at **top-level statement boundaries**, using a mutable struct for all local variables:
 
 ```julia
-# Split every ~25K statements at safe boundaries
-@noinline function _chunk1!(ws, dev, ctx, nodes, x, t, spec)
-    # Parameter extraction + statements 1-25000
-    ws[1] = undefault(dev.param1)
-    # ... first quarter of code
+# Generated per-device workspace struct
+mutable struct PSP103VA_State
+    # All local variables as fields
+    Vt::Float64
+    Is_eff::Float64
+    V_gs::Float64
+    I_ds::Float64
+    # ... hundreds of fields for large models
+
+    function PSP103VA_State()
+        s = new()
+        # Initialize all fields to zero
+        s.Vt = 0.0
+        s.Is_eff = 0.0
+        # ...
+        return s
+    end
 end
 
-@noinline function _chunk2!(ws, ctx, nodes, x, t)
-    # Statements 25001-50000
-    # Read from ws, write to ws
+# Chunk functions - @noinline prevents SROA
+@noinline function _chunk1!(s::PSP103VA_State, dev, ctx, nodes, x, t, spec)
+    # Parameter extraction
+    s.param1 = undefault(dev.param1)
+    s.Vt = k * spec.temp / q
+    s.Is_eff = s.param1 * scaling_factor
+    # ... first chunk of code, all variable access via s.varname
 end
 
-@noinline function _chunk3!(ws, ctx, nodes, x, t)
-    # Statements 50001-75000
+@noinline function _chunk2!(s::PSP103VA_State, ctx, nodes, x, t)
+    # Voltage extraction + more computation
+    s.V_gs = x[nodes[1]] - x[nodes[2]]
+    s.I_ds = s.Is_eff * (exp(s.V_gs / s.Vt) - 1)
+    # ... uses s.Vt, s.Is_eff from chunk1
 end
 
-@noinline function _chunk4!(ws, ctx, nodes, x, t)
-    # Statements 75001+ and stamping
+@noinline function _chunk3!(s::PSP103VA_State, ctx, nodes)
+    # Stamping
+    stamp_G!(ctx, nodes[1], nodes[2], s.dI_dV)
+    stamp_b!(ctx, nodes[1], -s.Ieq)
+    # ...
 end
 
-function stamp!(dev::DeviceName, ctx, nodes...; x, t, spec)
-    ws = Vector{Float64}(undef, WS_SIZE)
-    _chunk1!(ws, dev, ctx, nodes, x, t, spec)
-    _chunk2!(ws, ctx, nodes, x, t)
-    _chunk3!(ws, ctx, nodes, x, t)
-    _chunk4!(ws, ctx, nodes, x, t)
+function stamp!(dev::PSP103VA, ctx, nodes...; x, t, spec)
+    s = PSP103VA_State()
+    _chunk1!(s, dev, ctx, nodes, x, t, spec)
+    _chunk2!(s, ctx, nodes, x, t)
+    _chunk3!(s, ctx, nodes)
 end
 ```
+
+**Why mutable struct instead of Vector{Float64}?**
+- Named access (`s.Vt`) vs indexed (`ws[42]`) - more readable/debuggable
+- Type-stable - Julia knows all field types at compile time
+- No bounds checking overhead
+- Same IR generation as local variables (field load/store)
+
+**Why @noinline prevents SROA issues:**
+- SROA only happens when functions are inlined
+- With @noinline, struct is passed as opaque pointer
+- Each chunk compiles independently, no 90K statement explosion
+- Struct field access is simple load/store, not scalar replacement
 
 **Key rules for safe split points**:
 - Never split inside a conditional (`if`/`else`) block
 - Never split inside a loop (`for`/`while`)
 - Only split between top-level statements in the analog block
+
+**Codegen changes in vasim.jl**:
+1. Collect all local variable names and types
+2. Generate `mutable struct DeviceName_State` with all fields
+3. Transform `varname = expr` → `s.varname = expr` throughout
+4. Transform `varname` references → `s.varname`
+5. Split at top-level statement boundaries
+6. Generate @noinline chunk functions
 
 **Effort**: 1 week for basic implementation
 
