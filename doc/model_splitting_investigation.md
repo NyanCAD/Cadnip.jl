@@ -556,24 +556,85 @@ end
 
 **Effort**: 1 week for basic implementation
 
-### Option C: Hybrid (Recommended)
+### Option C: Named Block Detection (Best for PSP-style models)
 
-Combine both approaches:
+PSP103 already has semantically meaningful named blocks:
 
-1. **Phase 1**: Mechanical chunking (quick win)
-   - Split at statement boundaries
-   - All variables go through workspace
-   - Immediate compilation improvement
+```
+analog begin
+    begin : initial_model      // Pure parameter processing (no V())
+    end
+    begin : initial_instance   // Instance param processing (no V())
+    end
+    begin : evaluateblock      // Main evaluation
+        begin : evaluateStatic     // DC calculations with V()
+        begin : evaluateDynamic    // AC/transient calculations
+        begin : loadStatic         // Static stamping
+        begin : loadDynamic        // Dynamic stamping
+        begin : noise              // Noise model
+        begin : OPinfo             // Operating point info
+    end
+end
+```
 
-2. **Phase 2**: Parameter extraction optimization
-   - Identify `undefault(dev.X)` calls
-   - Extract to first chunk only
-   - Avoid redundant extraction in later chunks
+**VerilogAParser already exposes this:**
+```julia
+# AnalogSeqBlock structure
+struct AnalogSeqBlock
+    kwbegin::EXPR{Keyword}
+    decl::Maybe{EXPR{AnalogBlockDecl}}  # Contains the block name!
+    stmts::EXPRList{Any}
+    kwend::EXPRErr{Keyword}
+end
 
-3. **Phase 3** (future): Semantic analysis
-   - Implement simple OP-dependence tracking
-   - Cache truly static values
-   - Skip recomputation on rebuild
+struct AnalogBlockDecl
+    colon::EXPR{Notation}
+    id::EXPR{Identifier}      # Block name like "initial_model"
+    decls::EXPRList{...}
+end
+
+# Access block name:
+if asb.decl !== nothing
+    block_name = String(asb.decl.id)  # "initial_model", "evaluateblock", etc.
+end
+```
+
+**Implementation approach:**
+1. Walk the AST looking for named `AnalogSeqBlock` nodes
+2. Map known block names to function roles:
+   - `initial_model` → `_setup_model!(s, dev, spec)`
+   - `initial_instance` → `_setup_instance!(s, dev, ctx, nodes, spec)`
+   - `evaluateStatic`, `evaluateDynamic` → `_evaluate!(s, ctx, x, t)`
+   - `loadStatic`, `loadDynamic` → `_stamp!(s, ctx, nodes)`
+3. Generate separate @noinline functions for each named block
+4. For unnamed/unknown blocks, use mechanical chunking as fallback
+
+**Benefits:**
+- Respects model author's semantic intent
+- Natural boundaries (no risk of mid-computation splits)
+- Works great for well-structured models like PSP
+- Falls back to mechanical chunking for VADistiller models without named blocks
+
+**Effort**: 1-2 weeks (depends on naming conventions to support)
+
+### Option D: Hybrid (Recommended)
+
+Combine named block detection + mechanical chunking:
+
+1. **Phase 1**: Named block detection
+   - Detect `begin : blockname` patterns in AST
+   - Generate separate functions for recognized blocks
+   - PSP-style models get optimal split automatically
+
+2. **Phase 2**: Mechanical chunking fallback
+   - For models without named blocks (VADistiller output)
+   - Split at top-level statement boundaries
+   - Use mutable state struct for variable passing
+
+3. **Phase 3**: "First V()" heuristic
+   - Additional split at first V() reference
+   - Separates parameter processing from voltage-dependent code
+   - Works for all models regardless of structure
 
 ## Part 9: Implementation Details for Mechanical Chunking
 
