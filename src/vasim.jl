@@ -161,7 +161,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
         Dict{Symbol, VAFunction}(), true, ddx_order,
         Dict{Symbol, Pair{Symbol,Symbol}}(),
-        false, NamedTuple{(:name, :body), Tuple{Symbol, Expr}}[])
+        false, NamedTuple{(:name, :body), Tuple{Symbol, Expr}}[],
+        Ref(0))
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -273,7 +274,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         ddx_order,
         named_branches,
         true,  # use_state_struct - enabled to detect named blocks
-        named_blocks)
+        named_blocks,
+        Ref(0))  # block_counter for unique function names
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -469,6 +471,8 @@ struct MNAScope
     use_state_struct::Bool
     # Collected named blocks for separate function generation
     named_blocks::Vector{NamedTuple{(:name, :body), Tuple{Symbol, Expr}}}
+    # Counter for unique block function names (PSP103 has duplicate block names)
+    block_counter::Ref{Int}
 end
 
 # Helper to check if a symbol is a local variable (not a parameter or node)
@@ -773,9 +777,10 @@ end
 function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
     # Check if this is a named block (begin : blockname)
     if to_julia.use_state_struct && asb.decl !== nothing
-        # Extract block name
+        # Extract block name with unique counter (PSP103 has duplicate block names like evaluateDynamic)
         block_name = Symbol(assemble_id_string(asb.decl.id))
-        func_name = Symbol("_block_", block_name, "!")
+        to_julia.block_counter[] += 1
+        func_name = Symbol("_block_", to_julia.block_counter[], "_", block_name, "!")
 
         # Translate the block's statements
         body = Expr(:block)
@@ -1115,7 +1120,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
         to_julia.named_branches,
-        to_julia.use_state_struct, to_julia.named_blocks)
+        to_julia.use_state_struct, to_julia.named_blocks,
+        to_julia.block_counter)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2112,13 +2118,16 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     block_functions = Expr[]
 
     # Build destructuring expression for node voltages
-    # This extracts (; p, n, g, s, ...) = _mna_node_indices_
+    # V() generates code with _node_ prefix (e.g., _node_SI), so we need:
+    # _node_D = _mna_node_indices_.D, _node_G = _mna_node_indices_.G, ...
     all_node_syms_for_blocks = [port_args; internal_nodes]
     node_destructure = if !isempty(all_node_syms_for_blocks)
-        # Create (; sym1, sym2, ...) = _mna_node_indices_ pattern
-        Expr(:(=),
-            Expr(:tuple, Expr(:parameters, all_node_syms_for_blocks...)),
-            :_mna_node_indices_)
+        expr = Expr(:block)
+        for sym in all_node_syms_for_blocks
+            node_var = Symbol("_node_", sym)
+            push!(expr.args, :($node_var = _mna_node_indices_.$sym))
+        end
+        expr
     else
         :()
     end
