@@ -617,24 +617,93 @@ end
 
 **Effort**: 1-2 weeks (depends on naming conventions to support)
 
-### Option D: Hybrid (Recommended)
+### Option D: Simple Named Block Compilation (Recommended)
 
-Combine named block detection + mechanical chunking:
+**Key insight**: PSP103 is the main model that blows up, and it already has named blocks.
+Rather than complex analysis, just compile each named `begin : blockname` as a separate function.
 
-1. **Phase 1**: Named block detection
-   - Detect `begin : blockname` patterns in AST
-   - Generate separate functions for recognized blocks
-   - PSP-style models get optimal split automatically
+**Implementation in vasim.jl:**
 
-2. **Phase 2**: Mechanical chunking fallback
-   - For models without named blocks (VADistiller output)
-   - Split at top-level statement boundaries
-   - Use mutable state struct for variable passing
+```julia
+# When translating AnalogSeqBlock with a name:
+function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
+    if asb.decl !== nothing
+        # Named block - generate as separate @noinline function
+        block_name = Symbol(String(asb.decl.id))
+        func_name = Symbol("_block_", block_name, "!")
 
-3. **Phase 3**: "First V()" heuristic
-   - Additional split at first V() reference
-   - Separates parameter processing from voltage-dependent code
-   - Works for all models regardless of structure
+        # Collect the block's statements
+        body = Expr(:block)
+        for stmt in asb.stmts
+            push!(body.args, to_julia(stmt))
+        end
+
+        # Register this block for later function generation
+        push!(to_julia.named_blocks, (name=func_name, body=body))
+
+        # Return a call to the generated function
+        return :($func_name(s, ctx, nodes, x, t, spec))
+    else
+        # Unnamed block - inline as before
+        ret = Expr(:block)
+        for stmt in asb.stmts
+            push!(ret.args, to_julia(stmt))
+        end
+        return ret
+    end
+end
+
+# Generated code structure:
+mutable struct PSP103VA_State
+    # All local variables
+    EPSSI::Float64
+    SWGEO_i::Float64
+    # ... etc
+end
+
+@noinline function _block_initial_model!(s, dev, ctx, nodes, x, t, spec)
+    s.EPSSI = 8.854e-12 * 11.7
+    s.SWGEO_i = floor(...)
+    # ... all initial_model code
+end
+
+@noinline function _block_initial_instance!(s, dev, ctx, nodes, x, t, spec)
+    # ... all initial_instance code, uses s.EPSSI etc from previous block
+end
+
+@noinline function _block_evaluateblock!(s, dev, ctx, nodes, x, t, spec)
+    # Contains nested blocks - could further split or inline
+    _block_evaluateStatic!(s, ctx, nodes, x, t, spec)
+    _block_evaluateDynamic!(s, ctx, nodes, x, t, spec)
+    _block_loadStatic!(s, ctx, nodes)
+    # ...
+end
+
+function stamp!(dev::PSP103VA, ctx, nodes...; x, t, spec)
+    s = PSP103VA_State()
+    _block_initial_model!(s, dev, ctx, nodes, x, t, spec)
+    _block_initial_instance!(s, dev, ctx, nodes, x, t, spec)
+    _block_evaluateblock!(s, dev, ctx, nodes, x, t, spec)
+end
+```
+
+**Variable access transformation:**
+- All local variable assignments: `varname = expr` → `s.varname = expr`
+- All local variable reads: `varname` → `s.varname`
+- Parameters stay as-is (read from `dev.param`)
+- Node voltages stay as-is (read from `x[node_idx]`)
+
+**Why this works:**
+1. Each named block becomes a separate compilation unit
+2. @noinline prevents inlining back into a giant function
+3. State struct passed by reference - no copying overhead
+4. Smaller models (VADistiller output) don't have named blocks → unchanged behavior
+
+**Effort**: ~3-5 days
+- Modify `MNAScope` to track named blocks
+- Generate state struct with all local variables
+- Transform variable access to struct field access
+- Generate @noinline wrapper functions
 
 ## Part 9: Implementation Details for Mechanical Chunking
 
