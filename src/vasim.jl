@@ -2120,16 +2120,20 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Build destructuring expression for node voltages
     # V() generates code with _node_ prefix (e.g., _node_SI), so we need:
     # _node_D = _mna_node_indices_.D, _node_G = _mna_node_indices_.G, ...
-    # Also create unprefixed aliases (D = _node_D) for direct node references in VA code
+    # Also create unprefixed aliases (D = _node_D) for direct node references,
+    # but only for nodes that don't conflict with local variable names
     all_node_syms_for_blocks = [port_args; internal_nodes]
     node_destructure = if !isempty(all_node_syms_for_blocks)
         expr = Expr(:block)
         for sym in all_node_syms_for_blocks
             node_var = Symbol("_node_", sym)
-            # Create _node_X = _mna_node_indices_.X
+            # Create _node_X = _mna_node_indices_.X (always needed for V() calls)
             push!(expr.args, :($node_var = _mna_node_indices_.$sym))
-            # Also create unprefixed alias X = _node_X for direct node references
-            push!(expr.args, :($sym = $node_var))
+            # Also create unprefixed alias X = _node_X, but only if X is not a local variable
+            # This avoids shadowing actual variables while supporting direct node references
+            if !haskey(var_types, sym)
+                push!(expr.args, :($sym = $node_var))
+            end
         end
         expr
     else
