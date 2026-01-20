@@ -349,17 +349,266 @@ end
 
 The key difference: OpenVAF can analyze at IR level because it controls the whole pipeline. Cadnip.jl operates at Julia AST level, so the split must happen during code generation.
 
+## Part 7: Addressing Practical Concerns
+
+### Problem 1: Mixed Statements
+
+Consider `I_ds = Is * (exp(V_gs / Vt) - 1)` where `Is` and `Vt` are parameters, `V_gs` is voltage.
+
+**OpenVAF's solution**:
+- Setup: `cache[slot_Is] = Is; cache[slot_Vt] = Vt`
+- Eval: `Is = cache[slot_Is]; Vt = cache[slot_Vt]; I_ds = Is * (exp(V_gs / Vt) - 1)`
+
+The computation happens in eval, but pre-computed values are loaded from cache.
+
+### Problem 2: isdefault() Handling
+
+`isdefault(param)` is purely parameter-dependent:
+- Setup: `cache[slot_is_default] = Float64(isdefault(dev.param))`
+- Eval: `if cache[slot_is_default] != 0.0 then ...`
+
+Booleans are stored as Float64 (0.0/1.0) in the cache.
+
+### Problem 3: Local Variable Classification
+
+This is the hard problem. Variables can be:
+
+| Category | Example | Handling |
+|----------|---------|----------|
+| Param-only | `Vt = k*T/q` | Store in cache during setup |
+| Voltage-only | `V_gs = V_g - V_s` | Local to eval only |
+| Mixed assignment | `x = param; if cond then x = V*2` | Needs full analysis |
+| Loop variables | `for i = 1:N` | Local to containing function |
+
+**OpenVAF's solution**: Full dataflow taint propagation. Any value that transitively depends on an OP-dependent value is marked OP-dependent.
+
+**For Cadnip.jl**, implementing full taint propagation is complex. Simpler alternatives:
+
+1. **Conservative: Assume most things are voltage-dependent**
+   - Only extract raw parameters to cache
+   - All intermediate computations stay in eval
+   - Simple but misses optimization opportunities
+
+2. **Heuristic: Classify by AST position**
+   - Code before first `V(...)` reference → potentially static
+   - Code after first `V(...)` reference → definitely dynamic
+   - Imperfect but catches common patterns
+
+### Problem 4: The NamedTuple Size Issue
+
+A 1000+ field NamedTuple creates its own compilation problems. **OpenVAF's solution**:
+
+```rust
+// Cache is flat memory indexed by integer slot
+cache_slots: TiMap<CacheSlot, (ClassId, u32), Type>
+
+// In setup:
+store_cache_slot(instance, slot_idx, value)
+
+// In eval:
+value = load_cache_slot(instance, slot_idx)
+```
+
+**For Cadnip.jl**, use a `Vector{Float64}` workspace:
+
+```julia
+# Constants generated at codegen time
+const WS_Vt = 1
+const WS_Is_eff = 2
+const WS_SIZE = 500
+
+@noinline function _stamp_setup!(ws::Vector{Float64}, dev, ctx, ...)
+    ws[WS_Vt] = k * spec.temp / q
+    ws[WS_Is_eff] = undefault(dev.Is) * scaling_factor
+end
+
+@noinline function _stamp_eval!(ws::Vector{Float64}, ctx, nodes, x, t)
+    Vt = ws[WS_Vt]
+    Is_eff = ws[WS_Is_eff]
+    # ... use Vt, Is_eff with voltages
+end
+```
+
+This avoids NamedTuple overhead entirely.
+
+## Part 8: Revised Recommendation - Pragmatic Chunking
+
+Given the complexity of semantic analysis, a more practical approach:
+
+### Option A: Semantic Split (Complex but Optimal)
+
+Full OpenVAF-style separation requires:
+1. AST analysis to identify V(...) and I(...) references
+2. Dependency tracking to propagate "OP-dependent" flag
+3. Separate generation of setup vs eval code
+4. Cache slot allocation for shared values
+
+**Effort**: 2-3 weeks for robust implementation
+
+### Option B: Mechanical Chunking (Simple but Effective)
+
+Split the generated code by **statement count**, not semantics:
+
+```julia
+# Split every ~25K statements at safe boundaries
+@noinline function _chunk1!(ws, dev, ctx, nodes, x, t, spec)
+    # Parameter extraction + statements 1-25000
+    ws[1] = undefault(dev.param1)
+    # ... first quarter of code
+end
+
+@noinline function _chunk2!(ws, ctx, nodes, x, t)
+    # Statements 25001-50000
+    # Read from ws, write to ws
+end
+
+@noinline function _chunk3!(ws, ctx, nodes, x, t)
+    # Statements 50001-75000
+end
+
+@noinline function _chunk4!(ws, ctx, nodes, x, t)
+    # Statements 75001+ and stamping
+end
+
+function stamp!(dev::DeviceName, ctx, nodes...; x, t, spec)
+    ws = Vector{Float64}(undef, WS_SIZE)
+    _chunk1!(ws, dev, ctx, nodes, x, t, spec)
+    _chunk2!(ws, ctx, nodes, x, t)
+    _chunk3!(ws, ctx, nodes, x, t)
+    _chunk4!(ws, ctx, nodes, x, t)
+end
+```
+
+**Key rules for safe split points**:
+- Never split inside a conditional (`if`/`else`) block
+- Never split inside a loop (`for`/`while`)
+- Only split between top-level statements in the analog block
+
+**Effort**: 1 week for basic implementation
+
+### Option C: Hybrid (Recommended)
+
+Combine both approaches:
+
+1. **Phase 1**: Mechanical chunking (quick win)
+   - Split at statement boundaries
+   - All variables go through workspace
+   - Immediate compilation improvement
+
+2. **Phase 2**: Parameter extraction optimization
+   - Identify `undefault(dev.X)` calls
+   - Extract to first chunk only
+   - Avoid redundant extraction in later chunks
+
+3. **Phase 3** (future): Semantic analysis
+   - Implement simple OP-dependence tracking
+   - Cache truly static values
+   - Skip recomputation on rebuild
+
+## Part 9: Implementation Details for Mechanical Chunking
+
+### Workspace Variable Assignment
+
+At codegen time in `vasim.jl`:
+
+```julia
+# Build mapping: variable_name -> workspace_index
+workspace_mapping = Dict{Symbol, Int}()
+ws_index = 1
+
+# Assign indices to all variables that need persistence
+for var in all_local_variables
+    workspace_mapping[var] = ws_index
+    ws_index += 1
+end
+
+# Also assign indices for any expression results that cross chunk boundaries
+```
+
+### Identifying Safe Split Points
+
+```julia
+function find_safe_split_points(statements::Vector{Expr}, target_chunks::Int)
+    total = length(statements)
+    chunk_size = div(total, target_chunks)
+
+    split_points = Int[]
+    current_pos = chunk_size
+
+    while current_pos < total
+        # Find nearest safe point (not inside control structure)
+        safe_pos = find_nearest_safe_point(statements, current_pos)
+        push!(split_points, safe_pos)
+        current_pos = safe_pos + chunk_size
+    end
+
+    return split_points
+end
+
+function find_nearest_safe_point(statements, target_pos)
+    # Walk backward from target to find top-level statement
+    # (not inside if/for/while)
+    for pos in target_pos:-1:1
+        if is_top_level_statement(statements, pos)
+            return pos
+        end
+    end
+    return 1
+end
+```
+
+### Variable Liveness Across Chunks
+
+To minimize workspace size, track which variables are live at each split point:
+
+```julia
+function compute_live_variables(statements, split_points)
+    # For each chunk, compute:
+    # - Variables defined in this chunk
+    # - Variables used in later chunks (must persist)
+
+    live_at_split = [Set{Symbol}() for _ in split_points]
+
+    for (i, split_pos) in enumerate(split_points)
+        # Variables defined before split_pos and used after
+        for stmt in statements[1:split_pos]
+            defined = extract_defined_vars(stmt)
+            for var in defined
+                if is_used_after(var, statements, split_pos)
+                    push!(live_at_split[i], var)
+                end
+            end
+        end
+    end
+
+    return live_at_split
+end
+```
+
 ## Conclusion
 
-The recommended approach is **function decomposition at codegen time**, splitting stamp! into:
-1. `_extract_params()` - parameter extraction only
-2. `_stamp_model_setup!()` - parameter-derived computation
-3. `_stamp_eval!()` - voltage-dependent evaluation
+### Revised Recommendation
 
-This provides:
-- **Immediate benefit**: Smaller individual functions
-- **Conservative change**: Same external API
-- **Reliable**: No complex dataflow analysis needed
-- **Testable**: Can verify equivalence with unsplit version
+**Start with mechanical chunking** (Option B/C) because:
+1. Immediate benefit with minimal analysis
+2. No risk of incorrect semantic classification
+3. Easy to verify correctness (same results as unsplit)
+4. Foundation for future semantic optimization
 
-The approach mirrors OpenVAF's setup/eval split conceptually while fitting Julia's compilation model.
+### Implementation Path
+
+| Week | Task | Deliverable |
+|------|------|-------------|
+| 1 | Chunk detection | Find safe split points in generated AST |
+| 1 | Workspace setup | Generate workspace allocation + variable mapping |
+| 2 | Chunk generation | Generate @noinline chunk functions |
+| 2 | Integration | Wire chunks together in stamp! |
+| 3 | Testing | Verify PSP103VA, BSIM4 compile and run correctly |
+| 3 | Measurement | Compare compilation time before/after |
+
+### Success Criteria
+
+- PSP103VA compilation time reduced by 50%+
+- No change in simulation results (bit-exact)
+- Workspace overhead < 5% of runtime
+- Code remains readable and debuggable
