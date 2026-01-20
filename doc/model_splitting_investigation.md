@@ -394,6 +394,35 @@ This is the hard problem. Variables can be:
    - Code after first `V(...)` reference → definitely dynamic
    - Imperfect but catches common patterns
 
+### Empirical Analysis: Code Before First V()
+
+Analyzed all VADistillerModels to check if the "code before first V()" heuristic is viable:
+
+| Model | Static Lines | Notes |
+|-------|-------------|-------|
+| bsim4v8.va | 1364 | 20% of analog block |
+| bsim3v3.va | 369 | |
+| vdmos.va | 142 | |
+| capacitor.va | 119 | |
+| resistor.va | 117 | |
+| bjt.va | 100 | |
+| mos1-6.va | 78-83 | |
+| jfet1-2.va | 41-45 | |
+| mes1.va | 21 | Smallest |
+
+**PSP103** (not VADistiller): ~1000 lines before first V() (48% of analog block).
+PSP103 has explicitly named blocks: `initial_model`, `initial_instance`, `evaluateblock`.
+
+**Key finding**: All models compute parameter-derived values BEFORE accessing voltages.
+This pattern is universal because:
+1. More efficient (compute once, use many times)
+2. Matches conceptual flow (setup → evaluate → stamp)
+3. VADistiller and manual writers follow this convention
+
+**Risk case**: If someone wrote `vbe = V(b,e);` on line 1, followed by thousands of
+parameter-only lines, the heuristic would fail. But this pattern doesn't exist in
+practice - all real models do parameter processing first.
+
 ### Problem 4: The NamedTuple Size Issue
 
 A 1000+ field NamedTuple creates its own compilation problems. **OpenVAF's solution**:
