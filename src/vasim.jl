@@ -480,6 +480,54 @@ function is_local_variable(scope::MNAScope, sym::Symbol)
     return haskey(scope.var_types, sym) && !(sym in scope.parameters) && !(sym in scope.node_order)
 end
 
+"""
+    analyze_var_usage(expr, local_vars::Set{Symbol}) -> (reads::Set{Symbol}, writes::Set{Symbol})
+
+Walk a Julia expression and find which local variables are read and written.
+Only considers symbols that are in `local_vars` set (excludes parameters, nodes, etc.)
+"""
+function analyze_var_usage(expr, local_vars::Set{Symbol})
+    reads = Set{Symbol}()
+    writes = Set{Symbol}()
+    _analyze_var_usage!(expr, local_vars, reads, writes)
+    return reads, writes
+end
+
+function _analyze_var_usage!(expr::Symbol, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    if expr in local_vars
+        push!(reads, expr)
+    end
+end
+
+function _analyze_var_usage!(expr::Expr, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    if expr.head == :(=)
+        # Assignment: lhs is written, rhs is read
+        lhs = expr.args[1]
+        if lhs isa Symbol && lhs in local_vars
+            push!(writes, lhs)
+        elseif lhs isa Expr
+            # Could be destructuring or indexed assignment - analyze lhs for reads
+            _analyze_var_usage!(lhs, local_vars, reads, writes)
+        end
+        # Analyze RHS for reads
+        for arg in expr.args[2:end]
+            _analyze_var_usage!(arg, local_vars, reads, writes)
+        end
+    elseif expr.head == :call && length(expr.args) >= 3 && expr.args[1] == :_safe_set!
+        # _safe_set!(s, :varname, value) - the varname is written, value is read
+        # Skip - these are our own generated pack statements
+    else
+        # Recursively analyze all subexpressions
+        for arg in expr.args
+            _analyze_var_usage!(arg, local_vars, reads, writes)
+        end
+    end
+end
+
+function _analyze_var_usage!(expr, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    # Non-Symbol, non-Expr (literals, etc.) - nothing to do
+end
+
 # Literal parsing methods
 function (::MNAScope)(cs::VANode{Literal})
     Meta.parse(String(cs))
@@ -501,11 +549,14 @@ end
 
 function (scope::MNAScope)(ip::VANode{IdentifierPrimary})
     id = Symbol(assemble_id_string(ip.id))
+    # In state struct mode, parameters are accessed directly from dev
+    # to avoid extracting 782 params in every block function
+    if scope.use_state_struct && id in scope.parameters
+        return :(CedarSim.undefault(dev.$id))
+    end
     if scope.undefault_ids
         id = Expr(:call, undefault, id)
     end
-    # In state struct mode, we use locals (unpacked at block start)
-    # so no s.varname prefix needed here
     id
 end
 
@@ -2146,37 +2197,32 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         :()
     end
 
-    # Build parameter extraction expression for block functions
-    # This extracts parameters from dev into local variables
-    extract_params = Expr(:block)
-    for name in parameter_names
-        push!(extract_params.args, :($name = CedarSim.undefault(dev.$name)))
-    end
+    # Build set of local variable names for dependency analysis
+    local_var_names = Set{Symbol}(name for (name, _) in var_types if !(name in parameter_names))
 
-    # Build unpack expression: varname = s.varname for all local variables
-    # This runs at start of each block function
-    unpack_vars = Expr(:block)
-    for (name, _) in var_types
-        if !(name in parameter_names)
+    # Generate per-block functions with optimized unpack/pack
+    # Only unpack variables the block reads, only pack variables it writes
+    for block in named_blocks
+        # Analyze which variables this block reads and writes
+        reads, writes = analyze_var_usage(block.body, local_var_names)
+
+        # Build per-block unpack: only variables this block reads
+        unpack_vars = Expr(:block)
+        for name in reads
             push!(unpack_vars.args, :($name = s.$name))
         end
-    end
 
-    # Build pack expression: _safe_set!(s, :varname, varname) for all local variables
-    # This runs at end of each block function - no-op for duals!
-    pack_vars = Expr(:block)
-    for (name, _) in var_types
-        if !(name in parameter_names)
+        # Build per-block pack: only variables this block writes
+        pack_vars = Expr(:block)
+        for name in writes
             push!(pack_vars.args, :(_safe_set!(s, $(QuoteNode(name)), $name)))
         end
-    end
 
-    for block in named_blocks
         func_def = quote
             Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_, _mna_instance_)
-                # Extract parameters from device
-                $extract_params
-                # Unpack struct fields into locals
+                # Parameters are accessed directly via dev.X in generated code
+                # (no extract_params needed - saves ~782 statements per block!)
+                # Unpack struct fields into locals (only vars this block reads)
                 $unpack_vars
                 # Destructure node indices and voltages
                 # _node_X = node index (for I() stamping)
@@ -2186,7 +2232,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 $branch_current_extraction
                 # Execute block body
                 $(block.body)
-                # Pack locals back to struct (no-op for duals)
+                # Pack locals back to struct (only vars this block writes)
                 $pack_vars
                 return nothing
             end
