@@ -2182,6 +2182,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # _node_X = node index (for I() stamping)
                 # _V_X = voltage dual (for V() access)
                 $node_destructure
+                # Extract branch currents (for I(branch) probes in block body)
+                $branch_current_extraction
                 # Execute block body
                 $(block.body)
                 # Pack locals back to struct (no-op for duals)
