@@ -569,6 +569,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
         push!(to_julia.used_branches, id1 => id2)
 
+        # V(A, K) returns the port symbols directly
+        # In main stamp! body, after dual_creation, these are voltage duals
+        # In block functions, these are unpacked from _mna_node_voltages_
         if id2 == Symbol("0")
             return id1
         else
@@ -793,8 +796,8 @@ function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
 
         # Return a call to the generated function
         # The function will be generated later with signature:
-        # @noinline function _block_name!(s, dev, ctx, nodes, x, t, spec)
-        return :($func_name(s, dev, ctx, _mna_node_indices_, _mna_x_, _mna_t_, _mna_spec_))
+        # @noinline function _block_name!(s, dev, ctx, node_idx, node_voltages, x, t, spec)
+        return :($func_name(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_))
     else
         # Unnamed block - inline as before
         ret = Expr(:block)
@@ -2117,15 +2120,26 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # 5. Be @noinline to prevent LLVM from re-inlining into stamp!
     block_functions = Expr[]
 
-    # Build destructuring expression for node voltages
-    # V() generates code with _node_ prefix (e.g., _node_SI), so we need:
-    # _node_D = _mna_node_indices_.D, _node_G = _mna_node_indices_.G, ...
+    # Build destructuring expressions for block functions:
+    # 1. A, K, etc. = voltage duals (from _mna_node_voltages_) - for V() access
+    # 2. _node_A, _node_K, etc. = node indices (from _mna_node_idx_) - for I() stamping
+    # 3. V_1, V_2, etc. = Float64 voltage values (from _mna_x_) - for RHS calculations
+    # This matches the convention in the main stamp! body where:
+    # - Port symbols (A, K) contain voltage duals after dual_creation
+    # - _node_ prefixed symbols (_node_A, _node_K) contain integer indices
+    # - V_k symbols contain Float64 voltage values for Newton companion model
     all_node_syms_for_blocks = [port_args; internal_nodes]
     node_destructure = if !isempty(all_node_syms_for_blocks)
         expr = Expr(:block)
-        for sym in all_node_syms_for_blocks
+        for (k, sym) in enumerate(all_node_syms_for_blocks)
+            # Voltage dual for V() access - uses port symbol directly (A, K, etc.)
+            push!(expr.args, :($sym = _mna_node_voltages_.$sym))
+            # Node index for I() stamping - uses _node_ prefix (_node_A, _node_K, etc.)
             node_var = Symbol("_node_", sym)
-            push!(expr.args, :($node_var = _mna_node_indices_.$sym))
+            push!(expr.args, :($node_var = _mna_node_idx_.$sym))
+            # Float64 voltage value for RHS calculations - V_1, V_2, etc.
+            V_k = Symbol("V_", k)
+            push!(expr.args, :($V_k = $node_var == 0 ? 0.0 : _mna_x_[$node_var]))
         end
         expr
     else
@@ -2159,12 +2173,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     for block in named_blocks
         func_def = quote
-            Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_indices_, _mna_x_, _mna_t_, _mna_spec_)
+            Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_)
                 # Extract parameters from device
                 $extract_params
                 # Unpack struct fields into locals
                 $unpack_vars
-                # Destructure node voltages (duals) from NamedTuple
+                # Destructure node indices and voltages
+                # _node_X = node index (for I() stamping)
+                # _V_X = voltage dual (for V() access)
                 $node_destructure
                 # Execute block body
                 $(block.body)
@@ -2192,13 +2208,25 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         :()
     end
 
-    # Create node indices tuple for passing to block functions
-    # After dual_creation, all node symbols (terminals + internal) contain dual values
-    # This NamedTuple captures all of them for passing to block functions
+    # Create two tuples for block functions:
+    # 1. node_idx_tuple - actual node indices (integers) for I() stamping - BEFORE dual_creation
+    # 2. node_voltages_tuple - voltage duals for V() access - AFTER dual_creation
     all_node_syms_for_tuple = [port_args; internal_nodes]
-    node_indices_tuple = if use_state_struct && !isempty(all_node_syms_for_tuple)
-        # Build a NamedTuple with all node symbols (terminal + internal)
-        # The values will be the dual-valued node voltages at runtime
+
+    # Node indices tuple: captures _node_X values (integers) before dual_creation
+    node_idx_tuple = if use_state_struct && !isempty(all_node_syms_for_tuple)
+        nt_pairs = []
+        for sym in all_node_syms_for_tuple
+            node_var = Symbol("_node_", sym)
+            push!(nt_pairs, :($sym = $node_var))
+        end
+        Expr(:tuple, Expr(:parameters, nt_pairs...))
+    else
+        :()
+    end
+
+    # Node voltages tuple: captures node symbols (duals) after dual_creation
+    node_voltages_tuple = if use_state_struct && !isempty(all_node_syms_for_tuple)
         nt_pairs = []
         for sym in all_node_syms_for_tuple
             push!(nt_pairs, :($sym = $sym))
@@ -2263,14 +2291,16 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
         CedarSim.MNA.reset_detection_counter!(ctx)
 
+        # Capture node indices BEFORE dual_creation (for I() stamping in block functions)
+        _mna_node_idx_ = $node_idx_tuple
+
         # Create duals with partials for each node voltage (terminals + internal)
         # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
         # This overwrites node symbols (p, n, etc.) with JacobianTag duals
         $dual_creation
 
-        # Create node indices NamedTuple for block functions
-        # This must be AFTER dual_creation so it contains dual values (not indices)
-        _mna_node_indices_ = $node_indices_tuple
+        # Capture node voltages AFTER dual_creation (for V() access in block functions)
+        _mna_node_voltages_ = $node_voltages_tuple
 
         # Evaluate contribution expressions with duals
         # (includes block function calls that compute local variables)
