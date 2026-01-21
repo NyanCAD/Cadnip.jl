@@ -796,8 +796,8 @@ function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
 
         # Return a call to the generated function
         # The function will be generated later with signature:
-        # @noinline function _block_name!(s, dev, ctx, node_idx, node_voltages, x, t, spec)
-        return :($func_name(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_))
+        # @noinline function _block_name!(s, dev, ctx, node_idx, node_voltages, x, t, spec, instance)
+        return :($func_name(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_, _mna_instance_))
     else
         # Unnamed block - inline as before
         ret = Expr(:block)
@@ -2173,7 +2173,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     for block in named_blocks
         func_def = quote
-            Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_)
+            Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_, _mna_instance_)
                 # Extract parameters from device
                 $extract_params
                 # Unpack struct fields into locals
