@@ -1391,13 +1391,32 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
         # Include hierarchical instance name for unique internal node naming
         # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+        #
+        # For very large models (200+ parameters), use invokelatest to prevent the compiler
+        # from attempting to compile the massive stamp! function inline. This adds ~3-4%
+        # runtime overhead but prevents LLVM from blowing up with 90k+ IR statements.
         local_name = QuoteNode(Symbol(name))
-        return quote
-            let dev = $va_module_ref(; $(explicit_kwargs...))
-                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+        is_large_model = fieldcount(va_type) >= 200
+
+        if is_large_model
+            # Large model: use invokelatest to prevent compiler explosion
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
+            end
+        else
+            # Normal model: direct call with @noinline stamp!
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
             end
         end
     end
@@ -1466,15 +1485,21 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     # Check if this is a VA module from imported_hdl_modules
     # Try both lowercase and original case since VA modules may use different casing
     va_module_ref = nothing
+    va_hdl_mod = nothing
+    va_type_name = subckt_name
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            va_hdl_mod = hdl_mod
+            va_type_name = subckt_name
             break
         end
         # Try original case (SPICE is case-insensitive but VA modules may be case-sensitive)
         orig_name = Symbol(String(instance.model))
         if isdefined(hdl_mod, orig_name)
             va_module_ref = GlobalRef(hdl_mod, orig_name)
+            va_hdl_mod = hdl_mod
+            va_type_name = orig_name
             break
         end
     end
@@ -1497,13 +1522,34 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
         # Use hierarchical prefix for unique internal node naming (e.g., xu1_xmp_xm)
         # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
-        return quote
-            let dev = $va_module_ref(; $(explicit_kwargs...))
-                # Build hierarchical instance name from _mna_prefix_ + local instance name
-                local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+        #
+        # For very large models (200+ parameters), use invokelatest to prevent the compiler
+        # from attempting to compile the massive stamp! function inline. This adds ~3-4%
+        # runtime overhead but prevents LLVM from blowing up with 90k+ IR statements.
+        va_type = getfield(va_hdl_mod, va_type_name)
+        is_large_model = fieldcount(va_type) >= 200
+
+        if is_large_model
+            # Large model: use invokelatest to prevent compiler explosion
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    # Build hierarchical instance name from _mna_prefix_ + local instance name
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
+            end
+        else
+            # Normal model: direct call with @noinline stamp!
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    # Build hierarchical instance name from _mna_prefix_ + local instance name
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
             end
         end
     end
@@ -1750,15 +1796,21 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
         # First, check if this is a VA module from imported_hdl_modules
         va_module_ref = nothing
+        va_hdl_mod = nothing
+        va_type_name = master_sym
         for hdl_mod in state.sema.imported_hdl_modules
             # Try both lowercase and original case
             if isdefined(hdl_mod, master_sym)
                 va_module_ref = GlobalRef(hdl_mod, master_sym)
+                va_hdl_mod = hdl_mod
+                va_type_name = master_sym
                 break
             end
             master_orig = Symbol(String(instance.master))
             if isdefined(hdl_mod, master_orig)
                 va_module_ref = GlobalRef(hdl_mod, master_orig)
+                va_hdl_mod = hdl_mod
+                va_type_name = master_orig
                 break
             end
         end
@@ -1778,13 +1830,32 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
             # Include hierarchical instance name for unique internal node naming
             # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+            #
+            # For very large models (200+ parameters), use invokelatest to prevent the compiler
+            # from attempting to compile the massive stamp! function inline.
             local_name = QuoteNode(Symbol(name))
-            return quote
-                let dev = $va_module_ref(; $(explicit_kwargs...))
-                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name)
+            va_type = getfield(va_hdl_mod, va_type_name)
+            is_large_model = fieldcount(va_type) >= 200
+
+            if is_large_model
+                # Large model: use invokelatest to prevent compiler explosion
+                return quote
+                    let dev = $va_module_ref(; $(explicit_kwargs...))
+                        local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                        Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                            _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                            _mna_instance_ = full_instance_name)
+                    end
+                end
+            else
+                # Normal model: direct call with @noinline stamp!
+                return quote
+                    let dev = $va_module_ref(; $(explicit_kwargs...))
+                        local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                        $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                            _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                            _mna_instance_ = full_instance_name)
+                    end
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
