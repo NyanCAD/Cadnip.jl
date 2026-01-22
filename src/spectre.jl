@@ -465,7 +465,10 @@ end
     end
 end
 
-function spicecall(pm::ParsedModel{T}; m=1, kwargs...) where T
+# @noinline prevents aggressive inlining/SROA that causes OOM with large VA models
+# (e.g., 782-field PSP103VA struct). The setproperties call can generate huge IR
+# if inlined into the circuit builder function.
+@noinline function spicecall(pm::ParsedModel{T}; m=1, kwargs...) where T
     instkwargs = case_adjust_kwargs(T, mknondefault_nt(values(kwargs)))::ParsedNT
     inst = setproperties(pm.model, instkwargs)
     ParallelInstances(inst, m)

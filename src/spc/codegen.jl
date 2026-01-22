@@ -439,7 +439,7 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
                 mosfet_type = val == :p ? :pmos : :nmos
                 continue
             end
-            # Default handling - no rewrite
+            # Default handling - no rewrite (falls through to add as parameter)
         elseif name == :level
             # TODO
             level = parse(Float64, String(p.val))
@@ -1389,12 +1389,34 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
         # Generate stamp! call for VA module
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
-        # Include instance name for unique internal node naming
-        return quote
-            let dev = $va_module_ref(; $(explicit_kwargs...))
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = $(QuoteNode(Symbol(name))))
+        # Include hierarchical instance name for unique internal node naming
+        # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+        #
+        # For very large models (200+ parameters), use invokelatest to prevent the compiler
+        # from attempting to compile the massive stamp! function inline. This adds ~3-4%
+        # runtime overhead but prevents LLVM from blowing up with 90k+ IR statements.
+        local_name = QuoteNode(Symbol(name))
+        is_large_model = fieldcount(va_type) >= 200
+
+        if is_large_model
+            # Large model: use invokelatest to prevent compiler explosion
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
+            end
+        else
+            # Normal model: direct call with @noinline stamp!
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
             end
         end
     end
@@ -1463,15 +1485,21 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     # Check if this is a VA module from imported_hdl_modules
     # Try both lowercase and original case since VA modules may use different casing
     va_module_ref = nothing
+    va_hdl_mod = nothing
+    va_type_name = subckt_name
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            va_hdl_mod = hdl_mod
+            va_type_name = subckt_name
             break
         end
         # Try original case (SPICE is case-insensitive but VA modules may be case-sensitive)
         orig_name = Symbol(String(instance.model))
         if isdefined(hdl_mod, orig_name)
             va_module_ref = GlobalRef(hdl_mod, orig_name)
+            va_hdl_mod = hdl_mod
+            va_type_name = orig_name
             break
         end
     end
@@ -1493,13 +1521,35 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
         # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
         # Use hierarchical prefix for unique internal node naming (e.g., xu1_xmp_xm)
-        return quote
-            let dev = $va_module_ref(; $(explicit_kwargs...))
-                # Build hierarchical instance name from _mna_prefix_ + local instance name
-                local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-                $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+        # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+        #
+        # For very large models (200+ parameters), use invokelatest to prevent the compiler
+        # from attempting to compile the massive stamp! function inline. This adds ~3-4%
+        # runtime overhead but prevents LLVM from blowing up with 90k+ IR statements.
+        va_type = getfield(va_hdl_mod, va_type_name)
+        is_large_model = fieldcount(va_type) >= 200
+
+        if is_large_model
+            # Large model: use invokelatest to prevent compiler explosion
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    # Build hierarchical instance name from _mna_prefix_ + local instance name
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                    Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
+            end
+        else
+            # Normal model: direct call with @noinline stamp!
+            return quote
+                let dev = $va_module_ref(; $(explicit_kwargs...))
+                    # Build hierarchical instance name from _mna_prefix_ + local instance name
+                    local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                        _mna_instance_ = full_instance_name)
+                end
             end
         end
     end
@@ -1746,15 +1796,21 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
         # First, check if this is a VA module from imported_hdl_modules
         va_module_ref = nothing
+        va_hdl_mod = nothing
+        va_type_name = master_sym
         for hdl_mod in state.sema.imported_hdl_modules
             # Try both lowercase and original case
             if isdefined(hdl_mod, master_sym)
                 va_module_ref = GlobalRef(hdl_mod, master_sym)
+                va_hdl_mod = hdl_mod
+                va_type_name = master_sym
                 break
             end
             master_orig = Symbol(String(instance.master))
             if isdefined(hdl_mod, master_orig)
                 va_module_ref = GlobalRef(hdl_mod, master_orig)
+                va_hdl_mod = hdl_mod
+                va_type_name = master_orig
                 break
             end
         end
@@ -1772,12 +1828,34 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             end
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-            # Include instance name for unique internal node naming
-            return quote
-                let dev = $va_module_ref(; $(explicit_kwargs...))
-                    $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = $(QuoteNode(Symbol(name))))
+            # Include hierarchical instance name for unique internal node naming
+            # NOTE: stamp! methods are @noinline which prevents SROA blow-up in the circuit builder
+            #
+            # For very large models (200+ parameters), use invokelatest to prevent the compiler
+            # from attempting to compile the massive stamp! function inline.
+            local_name = QuoteNode(Symbol(name))
+            va_type = getfield(va_hdl_mod, va_type_name)
+            is_large_model = fieldcount(va_type) >= 200
+
+            if is_large_model
+                # Large model: use invokelatest to prevent compiler explosion
+                return quote
+                    let dev = $va_module_ref(; $(explicit_kwargs...))
+                        local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                        Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
+                            _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                            _mna_instance_ = full_instance_name)
+                    end
+                end
+            else
+                # Normal model: direct call with @noinline stamp!
+                return quote
+                    let dev = $va_module_ref(; $(explicit_kwargs...))
+                        local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                        $(MNA).stamp!(dev, ctx, $(port_exprs...);
+                            _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                            _mna_instance_ = full_instance_name)
+                    end
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
@@ -1850,21 +1928,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
-    # Generate code to create device instance and stamp it
-    # The model_name is a callable that returns a VA device struct
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($model_name())
+        device_expr = :($(spicecall)($model_name).device)
     else
-        device_expr = Expr(:call, model_name, param_kwargs...)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-    # Include instance name for unique internal node naming
+    # Include hierarchical instance name for unique internal node naming
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
+    # to prevent LLVM SROA blow-up. Type is preserved for efficient dispatch.
+    local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = $(QuoteNode(Symbol(name))))
+                _mna_instance_ = full_instance_name)
         end
     end
 end
@@ -1899,19 +1982,97 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
-    # Generate code to create device instance and stamp it
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($model_name())
+        device_expr = :($(spicecall)($model_name).device)
     else
-        device_expr = Expr(:call, model_name, param_kwargs...)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
+    local_name = QuoteNode(Symbol(name))
     return quote
         let dev = $device_expr
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
             $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                 _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = $(QuoteNode(Symbol(name))))
+                _mna_instance_ = full_instance_name)
+        end
+    end
+end
+
+"""
+    cg_mna_instance!(state, instance::SNode{SP.OSDIDevice})
+
+Generate MNA builder code for OSDI device instances (N elements).
+
+OSDI devices are VA-generated devices referenced through model cards.
+The model (e.g., psp103n) is a type with a `stamp!` method.
+Instance parameters are passed as keyword arguments.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
+    nets = sema_nets(instance)
+    # Build node argument list dynamically based on number of terminals
+    node_exprs = [cg_net_name!(state, net) for net in nets]
+    name = LString(instance.name)
+
+    # Get the model reference - can be in model or model_after field
+    model_ref_name = instance.model !== nothing ? instance.model : instance.model_after
+    if model_ref_name === nothing
+        error("OSDI device $name has no model specified")
+    end
+    model_name = cg_model_name!(state, model_ref_name)
+
+    # Look up the model definition to get the GlobalRef for case-insensitive param lookup
+    model_sym = LSymbol(model_ref_name)
+    case_insensitive = Dict{Symbol,Symbol}()
+    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
+        (_, def) = last(state.sema.models[model_sym])
+        model_globalref = def.val[2]
+        if model_globalref isa GlobalRef
+            T = getglobal(model_globalref.mod, model_globalref.name)
+            case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+        end
+    end
+
+    # Build instance parameter kwargs with case-insensitive lookup
+    param_kwargs = Expr[]
+    for p in instance.parameters
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        # Use case-insensitive lookup to find correct parameter name
+        lname = Symbol(lowercase(String(param_name)))
+        rname = get(case_insensitive, lname, param_name)
+        push!(param_kwargs, Expr(:kw, rname, param_val))
+    end
+
+    # Generate code to create device instance using spicecall + setproperties pattern
+    # This avoids recompiling the 200-kwarg constructor for each netlist parse
+    # spicecall returns ParallelInstances, extract .device for stamping
+    if isempty(param_kwargs)
+        device_expr = :($(spicecall)($model_name).device)
+    else
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+    end
+
+    # Generate stamp! call with variable number of node arguments
+    # Build the call expression manually to handle variable node count
+    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
+    node_args = Expr(:tuple, node_exprs...)
+    local_name = QuoteNode(Symbol(name))
+
+    # Build hierarchical instance name from _mna_prefix_ + local instance name
+    # This ensures unique internal node names across subcircuit instances
+    return quote
+        let dev = $device_expr
+            nodes = $node_args
+            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+            $(MNA).stamp!(dev, ctx, nodes...;
+                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                _mna_instance_ = full_instance_name)
         end
     end
 end
@@ -2198,7 +2359,103 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}())
+    codegen_toplevel_models!(state::CodegenState)
+
+Generate model definitions for the top level of the circuit.
+Returns an array of Expr that should be placed at module scope (before subcircuit builders).
+
+This extracts model factory definitions (like psp103n, psp103p) so they can be
+accessed by both subcircuit builders and the main circuit function.
+"""
+function codegen_toplevel_models!(state::CodegenState)
+    model_defs = Expr[]
+
+    for (model_name, defs) in state.sema.models
+        if !isempty(defs)
+            (_, def) = last(defs)  # Use most recent definition
+            model_ast = def.val[1]  # The model SNode
+            model_ref = def.val[2]  # The GlobalRef
+
+            # Check if this is a resistor model
+            typ = LSymbol(model_ast.typ)
+            if typ == :r
+                # Extract model parameters into a NamedTuple
+                model_params = Expr[]
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Skip meta-parameters
+                    if pname in (:level, :version, :type)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use uppercase for R parameter (SPICE convention)
+                    if pname == :r
+                        push!(model_params, Expr(:(=), :R, pval))
+                    elseif pname == :rsh
+                        push!(model_params, Expr(:(=), :rsh, pval))
+                    else
+                        push!(model_params, Expr(:(=), pname, pval))
+                    end
+                end
+                model_var = cg_model_name!(state, model_name)
+                push!(model_defs, :($model_var = ($(model_params...),)))
+            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                # VA model from imported HDL module or external package
+                # Get the model type to build case-insensitive parameter lookup
+                T = getglobal(model_ref.mod, model_ref.name)
+                case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+
+                model_params = Expr[]
+                level = nothing
+                version = nothing
+                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+                type_val = nothing
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    if pname == :level
+                        level = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :version
+                        version = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :type
+                        type_val = cg_expr!(state, p.val)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use case-insensitive lookup to find correct parameter name
+                    lname = Symbol(lowercase(String(pname)))
+                    rname = get(case_insensitive, lname, pname)
+                    # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
+                    push!(model_params, Expr(:(=), rname, pval))
+                end
+                device_type = mosfet_type !== nothing ? mosfet_type : typ
+                level_int = level === nothing ? nothing : Int(level)
+                version_str = version === nothing ? nothing : string(Int(version))
+                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                has_type_from_registry = false
+                for (param_name, param_val) in pairs(type_params)
+                    push!(model_params, Expr(:(=), param_name, param_val))
+                    if param_name == :TYPE
+                        has_type_from_registry = true
+                    end
+                end
+                if !has_type_from_registry && type_val !== nothing
+                    push!(model_params, Expr(:(=), :TYPE, type_val))
+                end
+                model_var = cg_model_name!(state, model_name)
+                # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                # This avoids embedding 200 kwargs in the generated code
+                push!(model_defs, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+            end
+        end
+    end
+
+    return model_defs
+end
+
+"""
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), skip_models=false)
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2211,9 +2468,12 @@ When `is_subcircuit=false` (top-level), params come from the `params` argument.
 
 `subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
 to look up exposed_parameters when generating subcircuit instance calls.
+
+`skip_models=true` skips model codegen (used when models are defined at top level).
 """
 function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
-                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
+                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
+                      skip_models::Bool=false)
     block = Expr(:block)
     ret = block
 
@@ -2336,81 +2596,95 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Codegen model definitions for MNA
+    # Codegen model definitions for MNA (unless skip_models=true, meaning models are at top level)
     # For each model, extract parameters and create a NamedTuple or VA model wrapper
-    for (model_name, defs) in state.sema.models
-        if !isempty(defs)
-            (_, def) = last(defs)  # Use most recent definition
-            model_ast = def.val[1]  # The model SNode
-            model_ref = def.val[2]  # The GlobalRef
+    if !skip_models
+        for (model_name, defs) in state.sema.models
+            if !isempty(defs)
+                (_, def) = last(defs)  # Use most recent definition
+                model_ast = def.val[1]  # The model SNode
+                model_ref = def.val[2]  # The GlobalRef
 
-            # Check if this is a resistor model
-            typ = LSymbol(model_ast.typ)
-            if typ == :r
-                # Extract model parameters into a NamedTuple
-                model_params = Expr[]
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    # Skip meta-parameters
-                    if pname in (:level, :version, :type)
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    # Use uppercase for R parameter (SPICE convention)
-                    # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
-                    if pname == :r
-                        push!(model_params, Expr(:(=), :R, pval))
-                    elseif pname == :rsh
-                        push!(model_params, Expr(:(=), :rsh, pval))
-                    else
-                        push!(model_params, Expr(:(=), pname, pval))
-                    end
-                end
-                model_var = cg_model_name!(state, model_name)
-                push!(block.args, :($model_var = ($(model_params...),)))
-            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
-                # VA model from imported HDL module or external package
-                # Create a model wrapper that combines model params with instance params
-                model_params = Expr[]
-                # Extract level, version for getparams lookup
-                level = nothing
-                version = nothing
-                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    # Track meta-parameters for registry lookup
-                    if pname == :level
-                        level = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :version
-                        version = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :type
-                        # Skip - will be added from getparams
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    push!(model_params, Expr(:kw, pname, pval))
-                end
-                # Query model registry for type parameters (polarity for MOSFET/BJT)
-                device_type = mosfet_type !== nothing ? mosfet_type : typ
-                level_int = level === nothing ? nothing : Int(level)
-                version_str = version === nothing ? nothing : string(Int(version))
-                type_params = CedarSim.getparams(device_type, level_int, version_str)
-                for (param_name, param_val) in pairs(type_params)
-                    push!(model_params, Expr(:kw, param_name, param_val))
-                end
-                model_var = cg_model_name!(state, model_name)
-                # Create a callable that returns a VA device with merged parameters
-                # model_name(; instance_params...) = VAType(; model_params..., instance_params...)
-                push!(block.args, quote
-                    $model_var = let base_type = $model_ref
-                        # Create a callable that merges model params with instance params
-                        function(; kwargs...)
-                            base_type(; $(model_params...), kwargs...)
+                # Check if this is a resistor model
+                typ = LSymbol(model_ast.typ)
+                if typ == :r
+                    # Extract model parameters into a NamedTuple
+                    model_params = Expr[]
+                    for p in model_ast.parameters
+                        pname = LSymbol(p.name)
+                        # Skip meta-parameters
+                        if pname in (:level, :version, :type)
+                            continue
+                        end
+                        pval = cg_expr!(state, p.val)
+                        # Use uppercase for R parameter (SPICE convention)
+                        # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
+                        if pname == :r
+                            push!(model_params, Expr(:(=), :R, pval))
+                        elseif pname == :rsh
+                            push!(model_params, Expr(:(=), :rsh, pval))
+                        else
+                            push!(model_params, Expr(:(=), pname, pval))
                         end
                     end
-                end)
+                    model_var = cg_model_name!(state, model_name)
+                    push!(block.args, :($model_var = ($(model_params...),)))
+                elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                    # VA model from imported HDL module or external package
+                    # Get the model type to build case-insensitive parameter lookup
+                    T = getglobal(model_ref.mod, model_ref.name)
+                    case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+
+                    # Create a model wrapper that combines model params with instance params
+                    model_params = Expr[]
+                    # Extract level, version for getparams lookup
+                    level = nothing
+                    version = nothing
+                    mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+                    type_val = nothing  # Track type parameter value for later
+                    for p in model_ast.parameters
+                        pname = LSymbol(p.name)
+                        # Track meta-parameters for registry lookup
+                        if pname == :level
+                            level = parse(Float64, String(p.val))
+                            continue
+                        elseif pname == :version
+                            version = parse(Float64, String(p.val))
+                            continue
+                        elseif pname == :type
+                            # Store type value - may need to add if getparams doesn't provide it
+                            type_val = cg_expr!(state, p.val)
+                            continue
+                        end
+                        pval = cg_expr!(state, p.val)
+                        # Use case-insensitive lookup to find correct parameter name
+                        lname = Symbol(lowercase(String(pname)))
+                        rname = get(case_insensitive, lname, pname)
+                        # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
+                        push!(model_params, Expr(:(=), rname, pval))
+                    end
+                    # Query model registry for type parameters (polarity for MOSFET/BJT)
+                    device_type = mosfet_type !== nothing ? mosfet_type : typ
+                    level_int = level === nothing ? nothing : Int(level)
+                    version_str = version === nothing ? nothing : string(Int(version))
+                    type_params = CedarSim.getparams(device_type, level_int, version_str)
+                    has_type_from_registry = false
+                    for (param_name, param_val) in pairs(type_params)
+                        push!(model_params, Expr(:(=), param_name, param_val))
+                        if param_name == :TYPE
+                            has_type_from_registry = true
+                        end
+                    end
+                    # If getparams didn't provide TYPE but model card had type=N, add it
+                    if !has_type_from_registry && type_val !== nothing
+                        # VA models typically expect TYPE (uppercase) for device polarity
+                        push!(model_params, Expr(:(=), :TYPE, type_val))
+                    end
+                    model_var = cg_model_name!(state, model_name)
+                    # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                    # This avoids embedding 200 kwargs in the generated code
+                    push!(block.args, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+                end
             end
         end
     end
@@ -2646,7 +2920,11 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
     end
 
-    # Generate subcircuit builders first
+    # Generate top-level model definitions FIRST
+    # These need to be accessible by subcircuit builders and the main circuit
+    model_defs = codegen_toplevel_models!(state)
+
+    # Generate subcircuit builders
     subckt_defs = Expr[]
     for (name, subckt_list) in sema_result.subckts
         if !isempty(subckt_list)
@@ -2657,8 +2935,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
     end
 
-    # Generate the body - pass subckt_semas in case top-level has subcircuit instances
-    body = codegen_mna!(state; subckt_semas=subckt_semas)
+    # Generate the body - skip_models=true since models are at top level
+    body = codegen_mna!(state; subckt_semas=subckt_semas, skip_models=true)
 
     # Wrap in function definition with necessary imports
     # These imports are needed when the generated code is eval'd directly in Main
@@ -2672,6 +2950,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         using CedarSim: ParamLens, IdentityLens, StaticArrays
         using CedarSim.SpectreEnvironment
 
+        # Top-level model factory functions (accessible by subcircuit builders and main circuit)
+        $(model_defs...)
+
         # Subcircuit builders
         $(subckt_defs...)
 
@@ -2683,6 +2964,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                  x::AbstractVector=ZERO_VECTOR,
                                  ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing)
+            # Default prefix for top-level instances (empty = no prefix)
+            _mna_prefix_ = Symbol("")
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
@@ -2694,8 +2977,12 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         end
 
         # Zero-allocation positional version for DirectStampContext (fast path)
-        @inline function $(circuit_name)(params, spec::$(MNASpec), t::Real,
+        # NOTE: Do NOT use @inline here - keeps circuit function from being inlined.
+        # The stamp! methods are @noinline which prevents SROA blow-up.
+        function $(circuit_name)(params, spec::$(MNASpec), t::Real,
                                         x::AbstractVector, ctx::$(DirectStampContext))
+            # Default prefix for top-level instances (empty = no prefix)
+            _mna_prefix_ = Symbol("")
             $(reset_for_restamping!)(ctx)
             $body
             return ctx

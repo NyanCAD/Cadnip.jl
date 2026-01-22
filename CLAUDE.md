@@ -2,23 +2,31 @@
 
 ## Environment
 
+### Local Development (Native)
+
+When running on a local machine with full system access:
+
+- **Use Julia 1.12** - better compilation performance for long functions (like VA models)
+- Julia is typically pre-installed via juliaup, just use `julia` command
+- Full system resources available - no memory limits
+- For fresh setup: `juliaup add 1.12 && juliaup default 1.12`
+
+### Web/Sandbox Environment (Claude Code Web)
+
+When running in gVisor-sandboxed environment (check with `uname -r` showing `runsc` or kernel 4.4.0):
+
 - **Julia is NOT pre-installed** - install juliaup first:
   - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
   - Then source the profile: `. ~/.bashrc`
   - Add Julia 1.11: `~/.juliaup/bin/juliaup add 1.11`
   - Set as default: `~/.juliaup/bin/juliaup default 1.11`
-  - Use `~/.juliaup/bin/julia` to run Julia
-- **Use Julia 1.11** - this is what CI uses and what the Manifest.toml is locked to
-  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
-  - Don't add compatibility hacks for older Julia versions
+  - Use `~/.juliaup/bin/julia` to run Julia (full path required)
+- **Use Julia 1.11** - more stable in sandbox environment
+  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads in gVisor
+- **Memory limited** - large VA model compilations (PSP103VA with 200+ params) may OOM
+- **Precompilation issues** - may need to disable compile workloads
 
-### gVisor Runtime Workaround
-
-If running in a gVisor-sandboxed environment (check with `uname -r` showing `runsc` or kernel 4.4.0),
-Julia's precompilation may segfault during `@compile_workload` execution due to gVisor's syscall
-emulation limitations.
-
-**Fix:** Create `test/LocalPreferences.toml` to disable precompile workloads:
+**Fix for precompilation segfaults:** Create `test/LocalPreferences.toml`:
 
 ```toml
 [PSPModels]
@@ -30,6 +38,11 @@ precompile_workload = false
 
 This file is gitignored. The packages will still work but with slower first-call latency.
 See [PrecompileTools docs](https://julialang.github.io/PrecompileTools.jl/stable/) for details.
+
+### CI Environment
+
+- CI uses Julia 1.11 (what Manifest.toml is locked to)
+- Don't add compatibility hacks for older Julia versions
 
 ## Development Guidelines
 
