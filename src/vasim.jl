@@ -1211,6 +1211,11 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
         if to_julia.use_state_struct && stmt.decl !== nothing
             # Add the translated function call as a contribution (to_julia will handle the split)
             push!(contributions, (kind=:block_call, expr=to_julia(stmt)))
+            # ALSO recurse into the block to collect contribution statements
+            # These will be stamped in the main body using variables computed by the block functions
+            for s in stmt.stmts
+                mna_collect_contributions!(contributions, to_julia, s)
+            end
         else
             # Unnamed block - recurse into statements
             for s in stmt.stmts
