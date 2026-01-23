@@ -31,6 +31,7 @@ using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
 using VerilogAParser
 using PrecompileTools: @compile_workload
+using Preferences: @load_preference
 
 # Model directory
 const VA_DIR = joinpath(@__DIR__, "..", "va")
@@ -71,6 +72,13 @@ export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
 # 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
 # Note: PSPNQS103VA skipped - requires idt() function not yet supported
 # Note: PSP103TVA skipped - requires ln_1p_d() function not yet supported
+#
+# This workload can be disabled by setting precompile_workload=false in LocalPreferences.toml:
+#   [PSPModels]
+#   precompile_workload = false
+const _precompile_workload = @load_preference("precompile_workload", true)
+
+if _precompile_workload
 @compile_workload begin
     using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
@@ -128,5 +136,6 @@ export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
     end
     precompile_device(psp_builder, NamedTuple())
 end
+end # if _precompile_workload
 
 end # module

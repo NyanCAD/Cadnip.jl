@@ -47,6 +47,7 @@ using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
 using CedarSim.ModelRegistry: getmodel, getparams, AbstractSimulator
 using VerilogAParser
 using PrecompileTools: @compile_workload
+using Preferences: @load_preference
 # Model directory
 const VA_DIR = joinpath(@__DIR__, "..", "va")
 
@@ -183,6 +184,13 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
 # 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
 # 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
+#
+# This workload can be disabled by setting precompile_workload=false in LocalPreferences.toml:
+#   [VADistillerModels]
+#   precompile_workload = false
+const _precompile_workload = @load_preference("precompile_workload", true)
+
+if _precompile_workload
 @compile_workload begin
     using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
@@ -299,5 +307,6 @@ CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abst
     # 5-terminal devices (VDMOS with thermal node)
     precompile_device(make_5term_builder(() -> sp_vdmos_module.sp_vdmos()), NamedTuple())
 end
+end # if _precompile_workload
 
 end # module
