@@ -123,12 +123,38 @@ function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
 - `x`: Solution vector for nonlinear devices
 - `ctx`: MNAContext or DirectStampContext (reused across rebuilds)
 
-### ParamLens Pattern
-SPICE-generated circuits use `ParamLens` for hierarchical parameter access:
+### Top-Level Eval for SPICE Circuits
+Parse and eval SPICE circuits at top level to avoid world age issues:
 ```julia
-lens = ParamLens(params)
-p = lens.inner(; R1=1000.0, R2=1000.0)  # merges defaults with overrides
+# Top-level - no invokelatest needed
+const circuit_code = CedarSim.make_mna_circuit(ast; circuit_name=:my_circuit)
+eval(circuit_code)
+
+# Now use directly in functions
+function run_sim()
+    circuit = MNACircuit(my_circuit)
+    sol = dc!(circuit)
+end
 ```
+See `test/mna/audio_integration.jl` for the canonical pattern.
+
+### ParamLens Pattern
+`ParamLens` navigates hierarchical params and merges overrides at `.params` fields:
+```julia
+# Flat circuit params
+circuit = MNACircuit(my_circuit; params = (R1=100.0, R2=200.0))
+altered = alter(circuit; var"params.R1"=150.0)
+
+# Hierarchical subcircuit params
+circuit = MNACircuit(my_circuit; inner = (params = (R1=100.0,),))
+altered = alter(circuit; var"inner.params.R1"=200.0)
+```
+The `lens(; defaults...)` call merges with `lens.nt.params` if present.
+
+### SPICE Name Collisions
+PDK modules use `baremodule` so SPICE names like `inv`, `log`, `exp` don't
+conflict with Julia builtins. Generated code uses explicit `Base.hasfield`,
+`Base.getproperty` for any Base functions needed.
 
 ### Verilog-A Gotcha
 Disciplines (electrical, V(), I()) are IMPLICIT in VerilogAParser.
