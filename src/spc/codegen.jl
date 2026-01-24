@@ -555,7 +555,7 @@ function codegen!(state::CodegenState)
                 cd = def[2]
                 def = cg_expr!(state, cd.val.val)
                 if name in state.sema.formal_parameters
-                    expr = :($name = hasfield(typeof(var"*params#"), $(QuoteNode(name))) ? getfield(var"*params#", $(QuoteNode(name))) : $def)
+                    expr = :($name = Base.hasfield(typeof(var"*params#"), $(QuoteNode(name))) ? getfield(var"*params#", $(QuoteNode(name))) : $def)
                 else
                     expr = :($name = $def)
                 end
@@ -714,7 +714,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
             model_name = cg_model_name!(state, instance.val)
             l_expr = cg_expr!(state, getparam(instance.params, "l"))
             w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
-            :(getproperty($model_name, :rsh, 0.0) * $l_expr / $w_expr)
+            :(Base.getproperty($model_name, :rsh, 0.0) * $l_expr / $w_expr)
         else
             1000.0  # Default
         end
@@ -1468,7 +1468,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # 3. Passes instance_name as _mna_prefix_ for hierarchical naming
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
-        let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
+        let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
             $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
         end
     end
@@ -1601,7 +1601,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
     # Pass hierarchical prefix: combine current prefix with instance name
     return quote
-        let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
+        let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
             # Build hierarchical prefix from current _mna_prefix_ + local instance name
             local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
             $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
@@ -1890,7 +1890,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # Generate subcircuit call similar to SPICE SubcktCall
             # Pass instance_name as _mna_prefix_ for hierarchical naming
             return quote
-                let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
+                let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
                     $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
                 end
             end
@@ -2864,7 +2864,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
                 else
                     # Try lens override, falling back to default expression
                     lens_params = lens(; $name = $def_expr)
-                    hasfield(typeof(lens_params), $(QuoteNode(name))) ? getfield(lens_params, $(QuoteNode(name))) : $def_expr
+                    Base.hasfield(typeof(lens_params), $(QuoteNode(name))) ? getfield(lens_params, $(QuoteNode(name))) : $def_expr
                 end
             end)
         end
@@ -3044,9 +3044,10 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
     # Also export any explicitly requested symbols
     all_exports = vcat(builder_exports, exports)
 
-    # Return the module expression directly (not wrapped in quote block)
+    # Return a baremodule expression to avoid name collisions with Base
+    # (e.g., a subcircuit named `inv` won't conflict with Base.inv)
     # This allows eval(expr) to work at any level
-    return Expr(:module, true, name,
+    return Expr(:module, false, name,
         Expr(:block,
             # Import MNA context and stamping functions
             :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
