@@ -65,6 +65,14 @@ export JUNCAP200, PSP103VA, PSP103TVA, PSPNQS103VA
 # Export module references for SPICE integration
 export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
 
+# Register models with ModelRegistry for automatic resolution in SPICE
+# This allows .model statements to use these types without imported_hdl_modules
+import CedarSim.ModelRegistry: getmodel
+getmodel(::Val{:juncap200}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = JUNCAP200
+getmodel(::Val{:psp103va}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSP103VA
+getmodel(::Val{:psp103tva}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSP103TVA
+getmodel(::Val{:pspnqs103va}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSPNQS103VA
+
 # Precompile stamp! methods for all three method variants:
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
 # 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])

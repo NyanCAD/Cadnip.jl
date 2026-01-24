@@ -1,0 +1,21 @@
+name = "VACASKModels"
+uuid = "a2b3c4d5-6789-4abc-def0-123456789abc"
+version = "0.1.0"
+
+[deps]
+CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+PSPModels = "abf2981e-f194-4833-b9e6-388029af7f41"
+
+[sources]
+CedarSim = {path = "../.."}
+PSPModels = {path = "../PSPModels.jl"}
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

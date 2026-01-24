@@ -2859,12 +2859,14 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
             def_expr = local_params_with_defaults[name]
             # Check kwarg first, then lens, then default
             push!(param_resolution_exprs, quote
-                $name = if $name !== nothing
+                $name = if !($name === nothing)
                     $name  # Explicit kwarg override
                 else
                     # Try lens override, falling back to default expression
                     lens_params = lens(; $name = $def_expr)
-                    Base.hasfield(typeof(lens_params), $(QuoteNode(name))) ? getfield(lens_params, $(QuoteNode(name))) : $def_expr
+                    ifelse(hasfield(typeof(lens_params), $(QuoteNode(name))),
+                           getfield(lens_params, $(QuoteNode(name))),
+                           $def_expr)
                 end
             end)
         end
@@ -3025,6 +3027,75 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
         end
     end
 
+    # Generate model definitions (e.g., psp103n = spicecall(ParsedModel, PSP103VA, (params...)))
+    # This mirrors the model definition generation in codegen_mna! for VA models
+    model_bindings = Expr[]
+    for (model_name, defs) in sema_result.models
+        if !isempty(defs)
+            # Get the model reference from semantic analysis
+            (_, def) = last(defs)  # Use most recent definition
+            model_ast = def.val[1]  # The model SNode
+            model_ref = def.val[2]  # The GlobalRef
+            if model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                # VA model from imported HDL module or external package
+                # Build case-insensitive parameter lookup
+                T = Base.getglobal(model_ref.mod, model_ref.name)
+                case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+
+                # Extract parameters from .model statement with case adjustment
+                model_params = Expr[]
+                typ = LSymbol(model_ast.typ)
+                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+                level = nothing
+                version = nothing
+                type_val = nothing
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Track meta-parameters
+                    if pname == :level
+                        level = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :version
+                        version = parse(Float64, String(p.val))
+                        continue
+                    elseif pname == :type
+                        type_val = parse(Float64, String(p.val))
+                        continue
+                    end
+                    # Parse parameter value (simple literals only for model cards)
+                    pval_str = String(p.val)
+                    pval = tryparse(Float64, pval_str)
+                    if pval === nothing
+                        pval = tryparse(Int, pval_str)
+                    end
+                    pval === nothing && continue  # Skip unparseable params
+                    # Case-insensitive lookup
+                    lname = Symbol(lowercase(String(pname)))
+                    rname = get(case_insensitive, lname, pname)
+                    push!(model_params, Expr(:(=), rname, pval))
+                end
+                # Query model registry for type parameters (polarity for MOSFET/BJT)
+                device_type = mosfet_type !== nothing ? mosfet_type : typ
+                level_int = level === nothing ? nothing : Int(level)
+                version_str = version === nothing ? nothing : string(Int(version))
+                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                has_type_from_registry = false
+                for (param_name, param_val) in pairs(type_params)
+                    push!(model_params, Expr(:(=), param_name, param_val))
+                    if param_name == :TYPE
+                        has_type_from_registry = true
+                    end
+                end
+                # If model card had type=N but registry didn't provide TYPE, add it
+                if !has_type_from_registry && type_val !== nothing
+                    push!(model_params, Expr(:(=), :TYPE, type_val))
+                end
+                # Generate: model_name = spicecall(ParsedModel, model_ref, (params...))
+                push!(model_bindings, :($model_name = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+            end
+        end
+    end
+
     # Generate MNA builders for each subcircuit
     builders = Expr[]
     builder_exports = Symbol[]
@@ -3049,12 +3120,17 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
     # This allows eval(expr) to work at any level
     return Expr(:module, false, name,
         Expr(:block,
+            # Import Base essentials for generated code (operators, types, etc.)
+            # Note: baremodule requires explicit imports for functions used in generated code
+            :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
             # Import MNA context and stamping functions
             :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
             # Import device types needed for stamping
             :(using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
-            :(using CedarSim: ParamLens, IdentityLens),
+            :(using CedarSim: ParamLens, IdentityLens, spicecall, ParsedModel),
             :(using CedarSim.SpectreEnvironment),
+            # Model definitions (e.g., psp103n = spicecall(ParsedModel, PSP103VA, params))
+            model_bindings...,
             builders...,
             Expr(:export, all_exports...)
         )
@@ -3128,7 +3204,7 @@ function collect_lib_statements(node)
 end
 
 # Internal helper to generate module expressions from parsed PDK
-function _generate_mna_module_exprs(sa, names, preload)
+function _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
     modules = Pair{Symbol, Expr}[]
 
     # Collect all LibStatements from the parsed tree
@@ -3143,7 +3219,7 @@ function _generate_mna_module_exprs(sa, names, preload)
 
         # Generate MNA module for this library section
         mod_name = Symbol(lib_name)
-        mod_expr = make_mna_pdk_module(node; name=mod_name)
+        mod_expr = make_mna_pdk_module(node; name=mod_name, imported_hdl_modules=imported_hdl_modules)
 
         # Add preload usings if needed
         if !isempty(preload)
@@ -3170,14 +3246,15 @@ end
 # Version that evals into a target module (preferred for precompilation)
 function load_mna_modules(into::Module, file::String; names=nothing,
                           pdk_include_paths::Vector{String}=String[],
-                          preload::Vector{Module}=Module[])
+                          preload::Vector{Module}=Module[],
+                          imported_hdl_modules::Vector{Module}=Module[])
     # Parse the file
     sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
     if sa.ps.errored
         throw(LoadError(file, 0, SpectreParseError(sa)))
     end
 
-    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+    module_exprs = _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
 
     # Eval each module into the target module and collect results
     result_modules = Dict{Symbol, Module}()
@@ -3194,14 +3271,15 @@ end
 
 # Version that returns expression for manual eval (backward compatible)
 function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
-                          preload::Vector{Module}=Module[])
+                          preload::Vector{Module}=Module[],
+                          imported_hdl_modules::Vector{Module}=Module[])
     # Parse the file
     sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
     if sa.ps.errored
         throw(LoadError(file, 0, SpectreParseError(sa)))
     end
 
-    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+    module_exprs = _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
 
     res = Expr(:toplevel)
     for (_, mod_expr) in module_exprs
@@ -3239,8 +3317,9 @@ using .typical: nfet_mna_builder
 """
 function load_mna_pdk(into::Module, file::String; section::String,
                       pdk_include_paths::Vector{String}=String[],
-                      preload::Vector{Module}=Module[])
-    result = load_mna_modules(into, file; names=[section], pdk_include_paths, preload)
+                      preload::Vector{Module}=Module[],
+                      imported_hdl_modules::Vector{Module}=Module[])
+    result = load_mna_modules(into, file; names=[section], pdk_include_paths, preload, imported_hdl_modules)
     if isempty(result)
         error("Section '$section' not found in $file")
     end
@@ -3248,8 +3327,9 @@ function load_mna_pdk(into::Module, file::String; section::String,
 end
 
 function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{String}=String[],
-                      preload::Vector{Module}=Module[])
-    expr = load_mna_modules(file; names=[section], pdk_include_paths, preload)
+                      preload::Vector{Module}=Module[],
+                      imported_hdl_modules::Vector{Module}=Module[])
+    expr = load_mna_modules(file; names=[section], pdk_include_paths, preload, imported_hdl_modules)
     if isempty(expr.args)
         error("Section '$section' not found in $file")
     end
