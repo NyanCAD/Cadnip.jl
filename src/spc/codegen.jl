@@ -651,6 +651,50 @@ function getparam(params, name, default=nothing)
 end
 
 """
+    is_large_va_model(state, model_sym) -> Bool
+
+Check if a model has 200+ fields (parameters), indicating it's a large VA model
+that needs invokelatest to prevent LLVM SROA blow-up during compilation.
+
+Handles both direct model definitions in sema.models and models imported via
+imported_hdl_modules (which are ParsedModel{T} wrappers).
+"""
+function is_large_va_model(state::CodegenState, model_sym::Symbol)
+    # First check sema.models (for .model card definitions)
+    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
+        (_, def) = last(state.sema.models[model_sym])
+        model_globalref = def.val[2]
+        if model_globalref isa GlobalRef
+            T = getglobal(model_globalref.mod, model_globalref.name)
+            # Handle ParsedModel{InnerT} - extract the inner type
+            if T isa DataType && T <: CedarSim.ParsedModel
+                InnerT = T.parameters[1]
+                return fieldcount(InnerT) >= 200
+            end
+            return fieldcount(T) >= 200
+        end
+    end
+
+    # Check imported_hdl_modules (for precompiled models like psp103n)
+    if model_sym in state.sema.exposed_models
+        for hdl_mod in state.sema.imported_hdl_modules
+            if isdefined(hdl_mod, model_sym)
+                val = getfield(hdl_mod, model_sym)
+                T = typeof(val)
+                # Handle ParsedModel{InnerT} - extract the inner type
+                if T <: CedarSim.ParsedModel
+                    InnerT = T.parameters[1]
+                    return fieldcount(InnerT) >= 200
+                end
+                return fieldcount(T) >= 200
+            end
+        end
+    end
+
+    return false
+end
+
+"""
     cg_mna_instance!(state, instance)
 
 Generate MNA stamp! call for a device instance.
@@ -1920,6 +1964,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     # Get the model reference
     model_name = cg_model_name!(state, instance.model)
 
+    # Check if this is a large model (200+ fields) that needs invokelatest
+    # to prevent LLVM SROA blow-up during compilation
+    model_sym = LSymbol(instance.model)
+    is_large_model = is_large_va_model(state, model_sym)
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.parameters
@@ -1939,15 +1988,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # Include hierarchical instance name for unique internal node naming
-    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
-    # to prevent LLVM SROA blow-up. Type is preserved for efficient dispatch.
     local_name = QuoteNode(Symbol(name))
-    return quote
-        let dev = $device_expr
-            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
-                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = full_instance_name)
+
+    if is_large_model
+        # Large model: use invokelatest to prevent LLVM SROA blow-up
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, $d, $g, $s, $b;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
+        end
+    else
+        # Normal model: direct call for performance
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
         end
     end
 end
@@ -1974,6 +2035,10 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     # Get the model reference
     model_name = cg_model_name!(state, instance.model)
 
+    # Check if this is a large model (200+ fields) that needs invokelatest
+    model_sym = LSymbol(instance.model)
+    is_large_model = is_large_va_model(state, model_sym)
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.params
@@ -1992,14 +2057,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
-    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
     local_name = QuoteNode(Symbol(name))
-    return quote
-        let dev = $device_expr
-            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
-                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = full_instance_name)
+
+    if is_large_model
+        # Large model: use invokelatest to prevent LLVM SROA blow-up
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, $c, $b, $e, $s;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
+        end
+    else
+        # Normal model: direct call for performance
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
         end
     end
 end
@@ -2036,7 +2114,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
             T = getglobal(model_globalref.mod, model_globalref.name)
             case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
         end
+    elseif model_sym in state.sema.exposed_models
+        # Also try imported_hdl_modules for exposed models
+        for hdl_mod in state.sema.imported_hdl_modules
+            if isdefined(hdl_mod, model_sym)
+                val = getfield(hdl_mod, model_sym)
+                T = typeof(val)
+                # Handle ParsedModel{InnerT}
+                if T <: CedarSim.ParsedModel
+                    InnerT = T.parameters[1]
+                    case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(InnerT))
+                else
+                    case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+                end
+                break
+            end
+        end
     end
+
+    # Check if this is a large model that needs invokelatest
+    is_large_model = is_large_va_model(state, model_sym)
 
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
@@ -2060,19 +2157,32 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
 
     # Generate stamp! call with variable number of node arguments
     # Build the call expression manually to handle variable node count
-    # NOTE: For large models, stamp! should be @noinline (set via make_mna_device noinline flag)
     node_args = Expr(:tuple, node_exprs...)
     local_name = QuoteNode(Symbol(name))
 
     # Build hierarchical instance name from _mna_prefix_ + local instance name
     # This ensures unique internal node names across subcircuit instances
-    return quote
-        let dev = $device_expr
-            nodes = $node_args
-            local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
-            $(MNA).stamp!(dev, ctx, nodes...;
-                _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                _mna_instance_ = full_instance_name)
+    if is_large_model
+        # Large model: use invokelatest to prevent LLVM SROA blow-up
+        return quote
+            let dev = $device_expr
+                nodes = $node_args
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, nodes...;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
+        end
+    else
+        # Normal model: direct call for performance
+        return quote
+            let dev = $device_expr
+                nodes = $node_args
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                $(MNA).stamp!(dev, ctx, nodes...;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name)
+            end
         end
     end
 end
