@@ -3233,6 +3233,7 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
             # Import Base essentials for generated code (operators, types, etc.)
             # Note: baremodule requires explicit imports for functions used in generated code
             :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
+            :(import Base),  # Needed for explicit Base.X references in generated code
             # Import MNA context and stamping functions
             :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
             # Import device types needed for stamping
