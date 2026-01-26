@@ -752,6 +752,150 @@ end
 
 (to_julia::MNAScope)(stmt::VANode{AnalogStatement}) = to_julia(stmt.stmt)
 
+#==============================================================================#
+# Hoisted Stamping for Voltage-Dependent Conditionals
+#
+# When VA code has conditionals like `if (sigVds > 0)` that contain contributions,
+# different branches may stamp to different matrix positions. DirectStampContext
+# uses positional counters, so if branch selection changes between detection
+# (at x=0) and runtime (at actual x), stamps go to wrong positions.
+#
+# Solution: Hoist all index allocations OUTSIDE the conditional so they execute
+# in the same order regardless of which branch is taken.
+#
+# These helpers:
+# 1. Walk generated Expr to find stamp_G!/stamp_C!/stamp_b! calls
+# 2. Replace them with hoisted get_G_idx!/stamp_G_at_idx! patterns
+#==============================================================================#
+
+"""
+    StampInfo
+
+Holds information about a stamp call found in the expression tree.
+"""
+struct StampInfo
+    matrix::Symbol      # :G, :C, or :b
+    row_expr::Any       # First index expression (row for matrix, index for vector)
+    col_expr::Any       # Second index expression (column, nothing for vector)
+    val_expr::Any       # Value expression
+    original_expr::Expr # Original stamp call expression
+end
+
+"""
+    collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
+
+Walk an Expr tree and collect all stamp_G!, stamp_C!, stamp_b! calls.
+"""
+function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check if this is a stamp call
+    if expr.head == :call && length(expr.args) >= 1
+        fn = expr.args[1]
+        if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+            # Handle CedarSim.MNA.stamp_G!(ctx, i, j, val)
+            mod_chain = fn.args
+            if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                fn_name = mod_chain[end].value
+                if fn_name == :stamp_G! && length(expr.args) == 5
+                    push!(stamps, StampInfo(:G, expr.args[3], expr.args[4], expr.args[5], expr))
+                    return
+                elseif fn_name == :stamp_C! && length(expr.args) == 5
+                    push!(stamps, StampInfo(:C, expr.args[3], expr.args[4], expr.args[5], expr))
+                    return
+                elseif fn_name == :stamp_b! && length(expr.args) == 4
+                    push!(stamps, StampInfo(:b, expr.args[3], nothing, expr.args[4], expr))
+                    return
+                end
+            end
+        end
+    end
+
+    # Recurse into subexpressions
+    for arg in expr.args
+        collect_stamp_calls!(stamps, arg)
+    end
+end
+
+"""
+    replace_stamp_with_hoisted!(expr, stamp_replacements::Dict{UInt64, Symbol})
+
+Walk an Expr tree and replace stamp calls with stamp_at_idx! calls.
+The stamp_replacements dict maps objectid(original_expr) -> (idx_symbol, matrix_type).
+Returns the modified expression.
+"""
+function replace_stamp_with_hoisted(expr, stamp_replacements::Dict{UInt64, Tuple{Symbol, Symbol}})
+    if !isa(expr, Expr)
+        return expr
+    end
+
+    # Check if this expression should be replaced
+    oid = objectid(expr)
+    if haskey(stamp_replacements, oid)
+        idx_sym, matrix = stamp_replacements[oid]
+        # Find the value argument in the original stamp call
+        if matrix == :G || matrix == :C
+            val_expr = expr.args[5]  # stamp_G!(ctx, i, j, val) -> val is arg 5
+            stamp_fn = matrix == :G ? :(CedarSim.MNA.stamp_G_at_idx!) : :(CedarSim.MNA.stamp_C_at_idx!)
+        else  # :b
+            val_expr = expr.args[4]  # stamp_b!(ctx, i, val) -> val is arg 4
+            stamp_fn = :(CedarSim.MNA.stamp_b_at_idx!)
+        end
+        return :($stamp_fn(ctx, $idx_sym, $val_expr))
+    end
+
+    # Recurse and rebuild expression with replaced children
+    new_args = Any[]
+    for arg in expr.args
+        push!(new_args, replace_stamp_with_hoisted(arg, stamp_replacements))
+    end
+    return Expr(expr.head, new_args...)
+end
+
+"""
+    hoist_conditional_stamps(ifex::Expr) -> (hoisted_exprs, transformed_ifex)
+
+Transform a conditional expression to use hoisted index allocations.
+Returns a tuple of (hoisted allocation expressions, transformed conditional).
+"""
+function hoist_conditional_stamps(ifex::Expr)
+    # Collect all stamp calls from all branches
+    stamps = StampInfo[]
+    collect_stamp_calls!(stamps, ifex)
+
+    # If no stamps found, return unchanged
+    if isempty(stamps)
+        return Expr[], ifex
+    end
+
+    # Generate hoisted allocations and build replacement map
+    hoisted_exprs = Expr[]
+    stamp_replacements = Dict{UInt64, Tuple{Symbol, Symbol}}()
+
+    for (i, stamp) in enumerate(stamps)
+        if stamp.matrix == :G
+            idx_sym = Symbol("_hoist_G_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $(stamp.row_expr), $(stamp.col_expr))))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :G)
+        elseif stamp.matrix == :C
+            idx_sym = Symbol("_hoist_C_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $(stamp.row_expr), $(stamp.col_expr))))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :C)
+        elseif stamp.matrix == :b
+            idx_sym = Symbol("_hoist_b_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $(stamp.row_expr))))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :b)
+        end
+    end
+
+    # Transform the conditional to use hoisted indices
+    transformed_ifex = replace_stamp_with_hoisted(ifex, stamp_replacements)
+
+    return hoisted_exprs, transformed_ifex
+end
+
 function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
     aif = stmt.aif
     function if_body_to_julia(ifstmt)
@@ -779,7 +923,16 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
             push!(ex.args, if_body_to_julia(case.stmt))
         end
     end
-    ifex
+
+    # Apply hoisting transformation for voltage-dependent conditionals
+    # This ensures stamp allocations happen in fixed order regardless of which branch executes
+    hoisted_exprs, transformed_ifex = hoist_conditional_stamps(ifex)
+
+    if isempty(hoisted_exprs)
+        return ifex
+    else
+        return Expr(:block, hoisted_exprs..., transformed_ifex)
+    end
 end
 
 # Handle system identifiers like $mfactor
