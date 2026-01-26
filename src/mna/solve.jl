@@ -405,6 +405,9 @@ function _gshunt_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstract
                           max_steps::Int=20)
     target_gshunt = cs.spec.gshunt  # Usually 0
     gshunt_current = gshunt_start
+    # Minimum gshunt threshold - prevents infinite stepping when target is 0
+    # After reaching this, we do a final solve at exact target_gshunt
+    gshunt_min = max(target_gshunt, 1e-12)
 
     u = copy(u0)
     u_saved = copy(u0)
@@ -423,16 +426,28 @@ function _gshunt_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstract
             u .= u_new
             u_saved .= u
 
-            # Check if we've reached target
-            if gshunt_current <= target_gshunt
-                converged = true
+            # Check if we've reached target (or close enough to attempt final solve)
+            if gshunt_current <= gshunt_min
+                # Do final solve at exact target_gshunt
+                if gshunt_current != target_gshunt
+                    cs_final = @set cs.spec = with_gshunt(cs.spec, target_gshunt)
+                    u_final, final_ok = _dc_newton_compiled(cs_final, ws, u;
+                                                             abstol=abstol, maxiters=maxiters,
+                                                             nlsolve=nlsolve)
+                    if final_ok
+                        u .= u_final
+                        converged = true
+                    end
+                else
+                    converged = true
+                end
                 break
             end
 
             # Reduce gshunt for next step
             gshunt_current /= gshunt_factor
-            if gshunt_current < target_gshunt
-                gshunt_current = target_gshunt
+            if gshunt_current < gshunt_min
+                gshunt_current = gshunt_min
             end
         else
             # Failed - try smaller step
@@ -443,14 +458,6 @@ function _gshunt_stepping(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstract
             gshunt_factor = sqrt(gshunt_factor)  # Smaller steps
             u .= u_saved  # Restore last good solution
         end
-    end
-
-    # Final validation at target gshunt
-    if converged && gshunt_current != target_gshunt
-        cs_final = @set cs.spec = with_gshunt(cs.spec, target_gshunt)
-        u, converged = _dc_newton_compiled(cs_final, ws, u;
-                                           abstol=abstol, maxiters=maxiters,
-                                           nlsolve=nlsolve)
     end
 
     return u, converged
