@@ -55,6 +55,19 @@ jobs:
             Pkg.test()
           '
 
+      - name: Disable heavy precompile workloads
+        run: |
+          cat > test/LocalPreferences.toml << 'EOF'
+          [PSPModels]
+          precompile_workload = false
+
+          [VADistillerModels]
+          precompile_workload = false
+
+          [VACASKModels]
+          precompile_workload = false
+          EOF
+
       - name: Install and precompile test dependencies
         run: |
           julia --project=test -e '
