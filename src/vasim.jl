@@ -752,6 +752,444 @@ end
 
 (to_julia::MNAScope)(stmt::VANode{AnalogStatement}) = to_julia(stmt.stmt)
 
+#==============================================================================#
+# Hoisted Stamping for Voltage-Dependent Conditionals
+#
+# When VA code has conditionals like `if (sigVds > 0)` that contain contributions,
+# different branches may stamp to different matrix positions. DirectStampContext
+# uses positional counters, so if branch selection changes between detection
+# (at x=0) and runtime (at actual x), stamps go to wrong positions.
+#
+# Solution: Hoist ALL allocations (alloc_current! AND stamps) OUTSIDE the
+# conditional so they execute in the same order regardless of which branch
+# is taken at runtime.
+#
+# These helpers:
+# 1. Walk generated Expr to find alloc_current! and stamp calls
+# 2. Hoist all allocations unconditionally
+# 3. Replace original calls with references to hoisted values
+#==============================================================================#
+
+"""
+    AllocInfo
+
+Holds information about an alloc_current! call found in the expression tree.
+"""
+struct AllocInfo
+    let_var::Symbol     # The variable name in the let binding (e.g., I_var)
+    base_name::Any      # The base name argument (e.g., QuoteNode(:I_V_p_n))
+    instance_arg::Any   # The instance argument (e.g., _mna_instance_)
+    original_expr::Expr # Original let expression
+    hoisted_sym::Symbol # Symbol for hoisted allocation
+end
+
+"""
+    StampInfo
+
+Holds information about a stamp call found in the expression tree.
+"""
+struct StampInfo
+    matrix::Symbol      # :G, :C, or :b
+    row_expr::Any       # First index expression (row for matrix, index for vector)
+    col_expr::Any       # Second index expression (column, nothing for vector)
+    val_expr::Any       # Value expression
+    original_expr::Expr # Original stamp call expression
+end
+
+"""
+    collect_alloc_current_calls!(allocs::Vector{AllocInfo}, expr, counter::Ref{Int})
+
+Walk an Expr tree and collect all let bindings with alloc_current! calls.
+"""
+function collect_alloc_current_calls!(allocs::Vector{AllocInfo}, expr, counter::Ref{Int})
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check if this is a let expression with alloc_current!
+    # Pattern: let I_var = CedarSim.MNA.alloc_current!(ctx, name, instance) ... end
+    if expr.head == :let && length(expr.args) >= 2
+        bindings = expr.args[1]
+        if bindings isa Expr && bindings.head == :(=) && length(bindings.args) == 2
+            let_var = bindings.args[1]
+            rhs = bindings.args[2]
+            if let_var isa Symbol && rhs isa Expr && rhs.head == :call
+                fn = rhs.args[1]
+                if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+                    mod_chain = fn.args
+                    if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                        fn_name = mod_chain[end].value
+                        if fn_name == :alloc_current! && length(rhs.args) >= 3
+                            counter[] += 1
+                            hoisted_sym = Symbol("_hoist_alloc_", counter[])
+                            push!(allocs, AllocInfo(let_var, rhs.args[3],
+                                length(rhs.args) >= 4 ? rhs.args[4] : :_,
+                                expr, hoisted_sym))
+                            # Still recurse into the let body
+                            for i in 2:length(expr.args)
+                                collect_alloc_current_calls!(allocs, expr.args[i], counter)
+                            end
+                            return
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # Recurse into subexpressions
+    for arg in expr.args
+        collect_alloc_current_calls!(allocs, arg, counter)
+    end
+end
+
+"""
+    collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
+
+Walk an Expr tree and collect all stamp_G!, stamp_C!, stamp_b! calls.
+"""
+function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check if this is a stamp call
+    if expr.head == :call && length(expr.args) >= 1
+        fn = expr.args[1]
+        if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+            # Handle CedarSim.MNA.stamp_G!(ctx, i, j, val)
+            mod_chain = fn.args
+            if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                fn_name = mod_chain[end].value
+                if fn_name == :stamp_G! && length(expr.args) == 5
+                    push!(stamps, StampInfo(:G, expr.args[3], expr.args[4], expr.args[5], expr))
+                    return
+                elseif fn_name == :stamp_C! && length(expr.args) == 5
+                    push!(stamps, StampInfo(:C, expr.args[3], expr.args[4], expr.args[5], expr))
+                    return
+                elseif fn_name == :stamp_b! && length(expr.args) == 4
+                    push!(stamps, StampInfo(:b, expr.args[3], nothing, expr.args[4], expr))
+                    return
+                end
+            end
+        end
+    end
+
+    # Recurse into subexpressions
+    for arg in expr.args
+        collect_stamp_calls!(stamps, arg)
+    end
+end
+
+"""
+    resolve_index_expr(expr, let_var_map::Dict{Symbol, Symbol}) -> (resolved_expr, is_hoistable)
+
+Resolve an index expression by substituting let-bound variables with their hoisted symbols.
+Returns (resolved_expr, is_hoistable) where is_hoistable indicates if the resolved
+expression can be evaluated at the hoist location.
+"""
+function resolve_index_expr(expr, let_var_map::Dict{Symbol, Symbol})
+    if expr isa Integer
+        return (expr, true)
+    elseif expr isa Symbol
+        s = String(expr)
+        if startswith(s, "_node_")
+            # Node variables are function parameters - safe to hoist
+            return (expr, true)
+        elseif haskey(let_var_map, expr)
+            # This is a let-bound variable - substitute with hoisted symbol
+            return (let_var_map[expr], true)
+        else
+            # Unknown variable - not safe to hoist
+            return (expr, false)
+        end
+    else
+        return (expr, false)
+    end
+end
+
+"""
+    replace_let_and_stamps!(expr, alloc_replacements, stamp_replacements)
+
+Walk an Expr tree and:
+1. Replace let bindings with alloc_current! to use hoisted values
+2. Replace stamp calls with stamp_at_idx! calls
+Returns the modified expression.
+"""
+function replace_let_and_stamps(expr, alloc_replacements::Dict{UInt64, Symbol},
+                                 stamp_replacements::Dict{UInt64, Tuple{Symbol, Symbol}})
+    if !isa(expr, Expr)
+        return expr
+    end
+
+    oid = objectid(expr)
+
+    # Check if this is a let expression to replace
+    if haskey(alloc_replacements, oid)
+        hoisted_sym = alloc_replacements[oid]
+        # Replace: let I_var = alloc_current!(...) body end
+        # With:    let I_var = hoisted_sym body end
+        bindings = expr.args[1]
+        let_var = bindings.args[1]
+        new_bindings = :($let_var = $hoisted_sym)
+        new_body = replace_let_and_stamps(expr.args[2], alloc_replacements, stamp_replacements)
+        return Expr(:let, new_bindings, new_body)
+    end
+
+    # Check if this is a stamp call to replace
+    if haskey(stamp_replacements, oid)
+        idx_sym, matrix = stamp_replacements[oid]
+        if matrix == :G || matrix == :C
+            val_expr = expr.args[5]
+            stamp_fn = matrix == :G ? :(CedarSim.MNA.stamp_G_at_idx!) : :(CedarSim.MNA.stamp_C_at_idx!)
+        else  # :b
+            val_expr = expr.args[4]
+            stamp_fn = :(CedarSim.MNA.stamp_b_at_idx!)
+        end
+        return :($stamp_fn(ctx, $idx_sym, $val_expr))
+    end
+
+    # Recurse and rebuild expression with replaced children
+    new_args = Any[]
+    for arg in expr.args
+        push!(new_args, replace_let_and_stamps(arg, alloc_replacements, stamp_replacements))
+    end
+    return Expr(expr.head, new_args...)
+end
+
+"""
+    count_branch_allocs(branch_expr) -> Int
+
+Count the number of alloc_current! calls in a branch expression.
+Note: stamp_G!/stamp_C!/stamp_b! calls are NOT counted because they don't
+change topology - they just fill in matrix values. Branches can have different
+numbers of stamps as long as they reference the same nodes.
+"""
+function count_branch_allocs(expr)
+    count = Ref(0)
+    _count_branch_allocs!(count, expr)
+    return count[]
+end
+
+function _count_branch_allocs!(count::Ref{Int}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check for let expr with alloc_current!
+    if expr.head == :let && length(expr.args) >= 2
+        bindings = expr.args[1]
+        if bindings isa Expr && bindings.head == :(=) && length(bindings.args) == 2
+            rhs = bindings.args[2]
+            if rhs isa Expr && rhs.head == :call
+                fn = rhs.args[1]
+                if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+                    if fn.args[end] isa QuoteNode && fn.args[end].value == :alloc_current!
+                        count[] += 1
+                    end
+                end
+            end
+        end
+    end
+
+    # Recurse
+    for arg in expr.args
+        _count_branch_allocs!(count, arg)
+    end
+end
+
+"""
+    collect_alloc_names(expr) -> Set{Symbol}
+
+Collect the names of all alloc_current! calls in an expression.
+Names are extracted from the second argument (base_name QuoteNode).
+"""
+function collect_alloc_names(expr)
+    names = Set{Symbol}()
+    _collect_alloc_names!(names, expr)
+    return names
+end
+
+function _collect_alloc_names!(names::Set{Symbol}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check for let expr with alloc_current!
+    if expr.head == :let && length(expr.args) >= 2
+        bindings = expr.args[1]
+        if bindings isa Expr && bindings.head == :(=) && length(bindings.args) == 2
+            rhs = bindings.args[2]
+            if rhs isa Expr && rhs.head == :call && length(rhs.args) >= 3
+                fn = rhs.args[1]
+                if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+                    if fn.args[end] isa QuoteNode && fn.args[end].value == :alloc_current!
+                        # Extract name from second argument (QuoteNode)
+                        name_arg = rhs.args[3]
+                        if name_arg isa QuoteNode && name_arg.value isa Symbol
+                            push!(names, name_arg.value)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # Recurse
+    for arg in expr.args
+        _collect_alloc_names!(names, arg)
+    end
+end
+
+"""
+    branches_have_same_allocs(ifex::Expr) -> Bool
+
+Check if all branches of a conditional have the same allocations.
+This checks both COUNT and NAMES of alloc_current! calls.
+
+- Same count AND same names → safe to hoist (PSP103: same nodes, different order)
+- Same count but different names → topology change, don't hoist (BJT: different nodes)
+- Different count → topology change, don't hoist (diode rs==0: aliased nodes)
+"""
+function branches_have_same_allocs(ifex::Expr)
+    if ifex.head != :if || length(ifex.args) < 2
+        return true
+    end
+
+    # Collect allocations in IF branch (args[2])
+    if_names = collect_alloc_names(ifex.args[2])
+
+    # If there's an ELSE/ELSEIF branch (args[3]), check it too
+    if length(ifex.args) >= 3
+        else_branch = ifex.args[3]
+        if else_branch isa Expr && else_branch.head == :elseif
+            # Check elseif branch
+            elseif_names = collect_alloc_names(else_branch.args[2])
+            if if_names != elseif_names
+                return false
+            end
+            # Recursively check rest of chain
+            if length(else_branch.args) >= 3
+                rest = Expr(:if, else_branch.args[1], else_branch.args[2], else_branch.args[3:end]...)
+                return branches_have_same_allocs(rest)
+            end
+        else
+            # Regular else branch
+            else_names = collect_alloc_names(else_branch)
+            if if_names != else_names
+                return false
+            end
+        end
+    else
+        # No else branch - if there are any allocations, it's topology-affecting
+        if !isempty(if_names)
+            return false
+        end
+    end
+
+    return true
+end
+
+# Keep old function name as alias for backward compatibility
+branches_have_same_alloc_count(ifex::Expr) = branches_have_same_allocs(ifex)
+
+"""
+    hoist_conditional_stamps(ifex::Expr) -> (hoisted_exprs, transformed_ifex)
+
+Transform a conditional expression to use hoisted allocations.
+Returns a tuple of (hoisted allocation expressions, transformed conditional).
+
+Only hoists when all branches have the SAME allocations (same names, not just count).
+This distinguishes:
+- Value-affecting conditionals: branches stamp to same nodes, different order → HOIST
+  Example: PSP103's sigVds check swaps DI/SI positions but same node set
+- Topology-affecting conditionals: branches stamp to different nodes → DON'T HOIST
+  Example: BJT's subs check connects sub_con to b_int OR c_int (different nodes)
+  Example: Diode's rs==0 check aliases nodes (different allocation count)
+
+Hoists both:
+1. alloc_current! calls (from let bindings)
+2. stamp_G!/stamp_C!/stamp_b! calls
+
+This ensures all counter-based allocations happen in a fixed order regardless
+of which conditional branch executes at runtime.
+"""
+function hoist_conditional_stamps(ifex::Expr)
+    # Check if branches have the same allocations (same names, not just same count)
+    # Different allocations means topology-affecting conditional - don't hoist
+    # Examples:
+    # - PSP103: both branches stamp to same nodes (DI,SI,BP) → HOIST
+    # - BJT subs: branches stamp to different nodes (b_int vs c_int) → DON'T HOIST
+    if !branches_have_same_allocs(ifex)
+        return Expr[], ifex
+    end
+
+    # Step 1: Collect all alloc_current! calls
+    allocs = AllocInfo[]
+    counter = Ref(0)
+    collect_alloc_current_calls!(allocs, ifex, counter)
+
+    # Build mapping from let-bound variables to hoisted symbols
+    let_var_map = Dict{Symbol, Symbol}()
+    for alloc in allocs
+        let_var_map[alloc.let_var] = alloc.hoisted_sym
+    end
+
+    # Step 2: Collect all stamp calls
+    stamps = StampInfo[]
+    collect_stamp_calls!(stamps, ifex)
+
+    # If nothing to hoist, return unchanged
+    if isempty(allocs) && isempty(stamps)
+        return Expr[], ifex
+    end
+
+    # Step 3: Generate hoisted allocations
+    hoisted_exprs = Expr[]
+    alloc_replacements = Dict{UInt64, Symbol}()
+    stamp_replacements = Dict{UInt64, Tuple{Symbol, Symbol}}()
+
+    # Hoist alloc_current! calls
+    for alloc in allocs
+        push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+        alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
+    end
+
+    # Hoist stamp calls (with resolved index expressions)
+    for (i, stamp) in enumerate(stamps)
+        row_resolved, row_ok = resolve_index_expr(stamp.row_expr, let_var_map)
+        if stamp.matrix == :b
+            col_resolved, col_ok = nothing, true
+        else
+            col_resolved, col_ok = resolve_index_expr(stamp.col_expr, let_var_map)
+        end
+
+        if !row_ok || !col_ok
+            # Can't hoist this stamp - skip it
+            continue
+        end
+
+        if stamp.matrix == :G
+            idx_sym = Symbol("_hoist_G_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :G)
+        elseif stamp.matrix == :C
+            idx_sym = Symbol("_hoist_C_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :C)
+        elseif stamp.matrix == :b
+            idx_sym = Symbol("_hoist_b_idx_", i)
+            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
+            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :b)
+        end
+    end
+
+    # Step 4: Transform the conditional
+    transformed_ifex = replace_let_and_stamps(ifex, alloc_replacements, stamp_replacements)
+
+    return hoisted_exprs, transformed_ifex
+end
+
 function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
     aif = stmt.aif
     function if_body_to_julia(ifstmt)
@@ -779,7 +1217,16 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
             push!(ex.args, if_body_to_julia(case.stmt))
         end
     end
-    ifex
+
+    # Apply hoisting transformation for voltage-dependent conditionals
+    # This ensures stamp allocations happen in fixed order regardless of which branch executes
+    hoisted_exprs, transformed_ifex = hoist_conditional_stamps(ifex)
+
+    if isempty(hoisted_exprs)
+        return ifex
+    else
+        return Expr(:block, hoisted_exprs..., transformed_ifex)
+    end
 end
 
 # Handle system identifiers like $mfactor

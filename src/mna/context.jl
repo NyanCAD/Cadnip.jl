@@ -15,6 +15,7 @@ export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
 export stamp_G!, stamp_C!, stamp_b!, stamp_b_ac!
 export stamp_conductance!, stamp_capacitance!
+export get_G_idx!, get_C_idx!, get_b_idx!, stamp_G_at_idx!, stamp_C_at_idx!, stamp_b_at_idx!
 export system_size
 
 #==============================================================================#
@@ -757,6 +758,112 @@ This is the standard 2-terminal reactive element pattern.
     stamp_C!(ctx, p, n, -C)
     stamp_C!(ctx, n, p, -C)
     stamp_C!(ctx, n, n,  C)
+    return nothing
+end
+
+#==============================================================================#
+# Hoisted Stamping Primitives (for voltage-dependent conditionals)
+#
+# These functions separate allocation from value assignment, allowing
+# allocations to be hoisted outside conditionals. This ensures that the
+# positional counter in DirectStampContext stays synchronized regardless
+# of which branch executes at runtime.
+#
+# Usage pattern:
+#   # HOISTED: allocate positions for ALL branches (fixed order)
+#   idx_A = get_G_idx!(ctx, nodeA, nodeB)  # Always executes
+#   idx_B = get_G_idx!(ctx, nodeC, nodeD)  # Always executes
+#
+#   # Inside conditional: use pre-calculated index
+#   if condition
+#       stamp_G_at_idx!(ctx, idx_A, val)
+#   else
+#       stamp_G_at_idx!(ctx, idx_B, val)
+#   end
+#==============================================================================#
+
+"""
+    get_G_idx!(ctx::MNAContext, i, j) -> Int
+
+Allocate a G matrix position for (i,j) and return its COO index.
+Used for hoisted stamping where allocation is separated from value assignment.
+
+Returns 0 for ground indices (which should be skipped during stamping).
+"""
+@inline function get_G_idx!(ctx::MNAContext, i, j)::Int
+    iszero(i) && return 0
+    iszero(j) && return 0
+    push!(ctx.G_I, _to_typed(i))
+    push!(ctx.G_J, _to_typed(j))
+    push!(ctx.G_V, 0.0)
+    return length(ctx.G_V)
+end
+
+"""
+    stamp_G_at_idx!(ctx::MNAContext, idx::Int, val)
+
+Add value to a previously allocated G matrix position.
+If idx <= 0 (e.g., from a ground node), the stamp is skipped.
+"""
+@inline function stamp_G_at_idx!(ctx::MNAContext, idx::Int, val)
+    idx <= 0 && return nothing
+    ctx.G_V[idx] += extract_value(val)
+    return nothing
+end
+
+"""
+    get_C_idx!(ctx::MNAContext, i, j) -> Int
+
+Allocate a C matrix position for (i,j) and return its COO index.
+Used for hoisted stamping where allocation is separated from value assignment.
+
+Returns 0 for ground indices (which should be skipped during stamping).
+"""
+@inline function get_C_idx!(ctx::MNAContext, i, j)::Int
+    iszero(i) && return 0
+    iszero(j) && return 0
+    push!(ctx.C_I, _to_typed(i))
+    push!(ctx.C_J, _to_typed(j))
+    push!(ctx.C_V, 0.0)
+    return length(ctx.C_V)
+end
+
+"""
+    stamp_C_at_idx!(ctx::MNAContext, idx::Int, val)
+
+Add value to a previously allocated C matrix position.
+If idx <= 0 (e.g., from a ground node), the stamp is skipped.
+"""
+@inline function stamp_C_at_idx!(ctx::MNAContext, idx::Int, val)
+    idx <= 0 && return nothing
+    ctx.C_V[idx] += extract_value(val)
+    return nothing
+end
+
+"""
+    get_b_idx!(ctx::MNAContext, i) -> Int
+
+Allocate a b vector position for index i and return its COO index.
+Used for hoisted stamping where allocation is separated from value assignment.
+
+Returns 0 for ground index (which should be skipped during stamping).
+"""
+@inline function get_b_idx!(ctx::MNAContext, i)::Int
+    iszero(i) && return 0
+    push!(ctx.b_I, _to_typed(i))
+    push!(ctx.b_V, 0.0)
+    return length(ctx.b_V)
+end
+
+"""
+    stamp_b_at_idx!(ctx::MNAContext, idx::Int, val)
+
+Add value to a previously allocated b vector position.
+If idx <= 0 (e.g., from a ground node), the stamp is skipped.
+"""
+@inline function stamp_b_at_idx!(ctx::MNAContext, idx::Int, val)
+    idx <= 0 && return nothing
+    ctx.b_V[idx] += extract_value(val)
     return nothing
 end
 
