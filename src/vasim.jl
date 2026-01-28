@@ -1035,6 +1035,27 @@ function _collect_alloc_names!(names::Set{Symbol}, expr)
         end
     end
 
+    # Check for stamp_G!/stamp_C!/stamp_b! calls
+    # These calls affect matrix topology even without alloc_current! calls
+    # Add synthetic names based on stamp call details to detect topology differences
+    if expr.head == :call && length(expr.args) >= 1
+        fn = expr.args[1]
+        if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+            mod_chain = fn.args
+            if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                fn_name = mod_chain[end].value
+                if fn_name in (:stamp_G!, :stamp_C!, :stamp_b!)
+                    # Create a synthetic name based on the stamp call signature
+                    # This allows us to detect when branches stamp to different positions
+                    stamp_id = Symbol("_stamp_", fn_name, "_", hash(expr))
+                    push!(names, stamp_id)
+                    # Don't recurse into this call's args since we've processed it
+                    return
+                end
+            end
+        end
+    end
+
     # Recurse
     for arg in expr.args
         _collect_alloc_names!(names, arg)
