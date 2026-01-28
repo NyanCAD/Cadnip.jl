@@ -960,7 +960,9 @@ end
 """
     count_branch_allocs(branch_expr) -> Int
 
-Count the number of alloc_current! calls in a branch expression.
+Count the number of hoistable allocation calls in a branch expression.
+This includes alloc_current! calls AND stamp_G!/stamp_C!/stamp_b! calls,
+since all of these allocate positions in the matrix structure.
 """
 function count_branch_allocs(expr)
     count = Ref(0)
@@ -984,6 +986,22 @@ function _count_branch_allocs!(count::Ref{Int}, expr)
                     if fn.args[end] isa QuoteNode && fn.args[end].value == :alloc_current!
                         count[] += 1
                     end
+                end
+            end
+        end
+    end
+
+    # Check for stamp_G!/stamp_C!/stamp_b! calls (which get hoisted to get_*_idx! calls)
+    if expr.head == :call && length(expr.args) >= 1
+        fn = expr.args[1]
+        if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+            mod_chain = fn.args
+            if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                fn_name = mod_chain[end].value
+                if fn_name in (:stamp_G!, :stamp_C!, :stamp_b!)
+                    count[] += 1
+                    # Don't recurse into this call's args since we've counted it
+                    return
                 end
             end
         end
