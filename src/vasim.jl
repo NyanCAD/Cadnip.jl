@@ -160,7 +160,9 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
         Dict{Symbol, VAFunction}(), true, ddx_order,
-        Dict{Symbol, Pair{Symbol,Symbol}}())
+        Dict{Symbol, Pair{Symbol,Symbol}}(),
+        false, NamedTuple{(:name, :body), Tuple{Symbol, Expr}}[],
+        Ref(0))
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -260,14 +262,20 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     end
 
     # Build scope for code generation
+    # State struct mode: enabled to detect named blocks (like PSP103's begin : blockname)
+    # Named blocks become separate @noinline functions for compilation time reduction
     node_order = [ps; internal_nodes; Symbol("0")]
+    named_blocks = NamedTuple{(:name, :body), Tuple{Symbol, Expr}}[]
     to_julia_mna = MNAScope(parameter_names, node_order, length(internal_nodes),
         collect(map(x->Pair(x...), combinations(node_order, 2))),
         Set{Pair{Symbol}}(),
         var_types,
         Dict{Symbol, VAFunction}(), false,
         ddx_order,
-        named_branches)
+        named_branches,
+        true,  # use_state_struct - enabled to detect named blocks
+        named_blocks,
+        Ref(0))  # block_counter for unique function names
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -314,6 +322,13 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         :($id = $(undefault)(dev.$id))
     end
 
+    # Check if we have named blocks (will be populated during contribution collection)
+    # State struct mode is ONLY enabled when there are explicit named blocks (like PSP103)
+    # named_blocks is populated during mna_collect_contributions! call below
+    # For now, we generate local_var_decls in the old style (local name::T = init)
+    # and will re-generate them if named_blocks are found
+    use_state_struct = false  # Will be updated after contribution collection
+
     # Generate variable declarations for non-parameter local vars
     # Use initialization expression if provided, otherwise default to type-appropriate zero value
     local_var_decls = Any[]
@@ -322,6 +337,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             # Type-appropriate default: zero for numeric, "" for String
             default_init = T === String ? "" : :(zero($T))
             init_expr = get(var_inits, name, default_init)
+            # Use traditional local variable style - state struct vars will be handled separately
             push!(local_var_decls, :(local $name::$T = $init_expr))
         end
     end
@@ -331,7 +347,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
-        function_defs, contributions, to_julia_mna, short_circuits; noinline)
+        function_defs, contributions, to_julia_mna, short_circuits, named_blocks,
+        var_types, parameter_names; noinline)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -450,6 +467,65 @@ struct MNAScope
     undefault_ids::Bool
     ddx_order::Vector{Symbol}
     named_branches::Dict{Symbol, Pair{Symbol,Symbol}}  # Maps branch name -> (pos, neg) nodes
+    # State struct mode: when true, local variables are accessed via s.varname
+    use_state_struct::Bool
+    # Collected named blocks for separate function generation
+    named_blocks::Vector{NamedTuple{(:name, :body), Tuple{Symbol, Expr}}}
+    # Counter for unique block function names (PSP103 has duplicate block names)
+    block_counter::Ref{Int}
+end
+
+# Helper to check if a symbol is a local variable (not a parameter or node)
+function is_local_variable(scope::MNAScope, sym::Symbol)
+    return haskey(scope.var_types, sym) && !(sym in scope.parameters) && !(sym in scope.node_order)
+end
+
+"""
+    analyze_var_usage(expr, local_vars::Set{Symbol}) -> (reads::Set{Symbol}, writes::Set{Symbol})
+
+Walk a Julia expression and find which local variables are read and written.
+Only considers symbols that are in `local_vars` set (excludes parameters, nodes, etc.)
+"""
+function analyze_var_usage(expr, local_vars::Set{Symbol})
+    reads = Set{Symbol}()
+    writes = Set{Symbol}()
+    _analyze_var_usage!(expr, local_vars, reads, writes)
+    return reads, writes
+end
+
+function _analyze_var_usage!(expr::Symbol, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    if expr in local_vars
+        push!(reads, expr)
+    end
+end
+
+function _analyze_var_usage!(expr::Expr, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    if expr.head == :(=)
+        # Assignment: lhs is written, rhs is read
+        lhs = expr.args[1]
+        if lhs isa Symbol && lhs in local_vars
+            push!(writes, lhs)
+        elseif lhs isa Expr
+            # Could be destructuring or indexed assignment - analyze lhs for reads
+            _analyze_var_usage!(lhs, local_vars, reads, writes)
+        end
+        # Analyze RHS for reads
+        for arg in expr.args[2:end]
+            _analyze_var_usage!(arg, local_vars, reads, writes)
+        end
+    elseif expr.head == :call && length(expr.args) >= 3 && expr.args[1] == :_safe_set!
+        # _safe_set!(s, :varname, value) - the varname is written, value is read
+        # Skip - these are our own generated pack statements
+    else
+        # Recursively analyze all subexpressions
+        for arg in expr.args
+            _analyze_var_usage!(arg, local_vars, reads, writes)
+        end
+    end
+end
+
+function _analyze_var_usage!(expr, local_vars::Set{Symbol}, reads::Set{Symbol}, writes::Set{Symbol})
+    # Non-Symbol, non-Expr (literals, etc.) - nothing to do
 end
 
 # Literal parsing methods
@@ -473,6 +549,11 @@ end
 
 function (scope::MNAScope)(ip::VANode{IdentifierPrimary})
     id = Symbol(assemble_id_string(ip.id))
+    # In state struct mode, parameters are accessed directly from dev
+    # to avoid extracting 782 params in every block function
+    if scope.use_state_struct && id in scope.parameters
+        return :(CedarSim.undefault(dev.$id))
+    end
     if scope.undefault_ids
         id = Expr(:call, undefault, id)
     end
@@ -539,6 +620,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
         push!(to_julia.used_branches, id1 => id2)
 
+        # V(A, K) returns the port symbols directly
+        # In main stamp! body, after dual_creation, these are voltage duals
+        # In block functions, these are unpacked from _mna_node_voltages_
         if id2 == Symbol("0")
             return id1
         else
@@ -731,6 +815,8 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogVariableAssignment})
          eq == VAT.SLASH_EQ ? :(/=) :
          :(=)
 
+    # In state struct mode, we use locals (unpacked at block start, packed at end)
+    # so no s.varname prefix needed here - just assign to local variable
     return Expr(op, assignee,
         Expr(:call, VerilogAEnvironment.vaconvert, varT, to_julia(stmt.rvalue)))
 end
@@ -743,11 +829,34 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCallStatement})
 end
 
 function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})
-    ret = Expr(:block)
-    for stmt in asb.stmts
-        push!(ret.args, to_julia(stmt))
+    # Check if this is a named block (begin : blockname)
+    if to_julia.use_state_struct && asb.decl !== nothing
+        # Extract block name with unique counter (PSP103 has duplicate block names like evaluateDynamic)
+        block_name = Symbol(assemble_id_string(asb.decl.id))
+        to_julia.block_counter[] += 1
+        func_name = Symbol("_block_", to_julia.block_counter[], "_", block_name, "!")
+
+        # Translate the block's statements
+        body = Expr(:block)
+        for stmt in asb.stmts
+            push!(body.args, to_julia(stmt))
+        end
+
+        # Register this block for separate function generation
+        push!(to_julia.named_blocks, (name=func_name, body=body))
+
+        # Return a call to the generated function
+        # The function will be generated later with signature:
+        # @noinline function _block_name!(s, dev, ctx, node_idx, node_voltages, x, t, spec, instance)
+        return :($func_name(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_, _mna_instance_))
+    else
+        # Unnamed block - inline as before
+        ret = Expr(:block)
+        for stmt in asb.stmts
+            push!(ret.args, to_julia(stmt))
+        end
+        return ret
     end
-    ret
 end
 
 (to_julia::MNAScope)(stmt::VANode{AnalogStatement}) = to_julia(stmt.stmt)
@@ -1064,7 +1173,9 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
-        to_julia.named_branches)
+        to_julia.named_branches,
+        to_julia.use_state_struct, to_julia.named_blocks,
+        to_julia.block_counter)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -1095,8 +1206,21 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
     if stmt isa VANode{ContributionStatement}
         push!(contributions, mna_translate_contribution(to_julia, stmt))
     elseif stmt isa VANode{AnalogSeqBlock}
-        for s in stmt.stmts
-            mna_collect_contributions!(contributions, to_julia, s)
+        # Check if this is a named block (begin : blockname)
+        # Named blocks should be compiled as separate functions
+        if to_julia.use_state_struct && stmt.decl !== nothing
+            # Add the translated function call as a contribution (to_julia will handle the split)
+            push!(contributions, (kind=:block_call, expr=to_julia(stmt)))
+            # ALSO recurse into the block to collect contribution statements
+            # These will be stamped in the main body using variables computed by the block functions
+            for s in stmt.stmts
+                mna_collect_contributions!(contributions, to_julia, s)
+            end
+        else
+            # Unnamed block - recurse into statements
+            for s in stmt.stmts
+                mna_collect_contributions!(contributions, to_julia, s)
+            end
         end
     elseif stmt isa VANode{AnalogStatement}
         mna_collect_contributions!(contributions, to_julia, stmt.stmt)
@@ -1383,7 +1507,10 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
-                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}();
+                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}(),
+                                          named_blocks=NamedTuple{(:name, :body), Tuple{Symbol, Expr}}[],
+                                          var_types=Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
+                                          parameter_names=Set{Symbol}();
                                           noinline::Union{Bool,Nothing}=nothing)
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
@@ -1406,15 +1533,24 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     local_var_init = Expr(:block)
     contrib_eval = Expr(:block)
 
+    # Check if we're using state struct mode (have named blocks)
+    # Only use state struct when there are named blocks to split into separate functions
+    use_state_struct = !isempty(named_blocks)
+
     # For n-terminal devices:
     # 1. Don't use `local` - variables need to be visible in outer scope for stamp_code
     # 2. Initialize with Float64 first (for short-circuit condition evaluation)
     # 3. Integer variables stay as Int (for control flow - booleans, counters)
     # 4. String variables stay as String (for parameter comparisons)
+    # 5. Skip local_var_init when using state struct (struct constructor handles init)
     first_port = port_args[1]
     for decl in local_var_decls
-        # Convert `local name::T = init_expr` appropriately
-        if decl.head == :local
+        if use_state_struct
+            # State struct mode: skip local_var_init - struct constructor handles initialization
+            # Block functions will unpack from struct into locals
+            continue
+        elseif decl.head == :local
+            # Non-state-struct mode: Convert `local name::T = init_expr` appropriately
             inner = decl.args[1]
             if inner isa Expr && inner.head == :(=)
                 lhs = inner.args[1]
@@ -1499,6 +1635,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             push!(contrib_eval.args, c.expr)
         elseif c.kind == :assignment
             # Regular assignment (e.g., cdrain = R*V(g,s)**2)
+            push!(contrib_eval.args, c.expr)
+        elseif c.kind == :block_call
+            # Named block function call (begin : blockname)
             push!(contrib_eval.args, c.expr)
         end
     end
@@ -1992,6 +2131,120 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(twonode_voltage_stamp_code.args, v_stamp)
     end
 
+    # Check if we're using state struct mode (only when we have named blocks to split)
+    use_state_struct = !isempty(named_blocks)
+
+    # Generate state struct definition with all local variables as fields
+    state_struct_name = Symbol(symname, "_State")
+    state_struct_def = if use_state_struct
+        # Build struct fields for all non-parameter local variables
+        struct_fields = Expr(:block)
+        for (name, T) in var_types
+            if !(name in parameter_names)
+                push!(struct_fields.args, Expr(:(::), name, T))
+            end
+        end
+
+        # Build inner constructor that initializes all fields to defaults
+        init_body = Expr(:block)
+        push!(init_body.args, :(s = new()))
+        for (name, T) in var_types
+            if !(name in parameter_names)
+                default_val = T === String ? "" : T === Int ? 0 : 0.0
+                push!(init_body.args, :(s.$name = $default_val))
+            end
+        end
+        push!(init_body.args, :(return s))
+
+        inner_constructor = Expr(:function,
+            Expr(:call, state_struct_name),
+            init_body)
+
+        # Combine into mutable struct definition
+        struct_body_with_ctor = Expr(:block, struct_fields.args..., inner_constructor)
+        Expr(:struct, true, state_struct_name, struct_body_with_ctor)
+    else
+        nothing
+    end
+
+    # Generate @noinline block functions
+    # Each block function needs to:
+    # 1. Unpack struct fields into locals at start
+    # 2. Destructure node voltages from _mna_node_indices_ so V(p,n) works
+    # 3. Execute the block body (using locals)
+    # 4. Pack locals back to struct using _safe_set! (no-op for duals)
+    # 5. Be @noinline to prevent LLVM from re-inlining into stamp!
+    block_functions = Expr[]
+
+    # Build destructuring expressions for block functions:
+    # 1. A, K, etc. = voltage duals (from _mna_node_voltages_) - for V() access
+    # 2. _node_A, _node_K, etc. = node indices (from _mna_node_idx_) - for I() stamping
+    # 3. V_1, V_2, etc. = Float64 voltage values (from _mna_x_) - for RHS calculations
+    # This matches the convention in the main stamp! body where:
+    # - Port symbols (A, K) contain voltage duals after dual_creation
+    # - _node_ prefixed symbols (_node_A, _node_K) contain integer indices
+    # - V_k symbols contain Float64 voltage values for Newton companion model
+    all_node_syms_for_blocks = [port_args; internal_nodes]
+    node_destructure = if !isempty(all_node_syms_for_blocks)
+        expr = Expr(:block)
+        for (k, sym) in enumerate(all_node_syms_for_blocks)
+            # Voltage dual for V() access - uses port symbol directly (A, K, etc.)
+            push!(expr.args, :($sym = _mna_node_voltages_.$sym))
+            # Node index for I() stamping - uses _node_ prefix (_node_A, _node_K, etc.)
+            node_var = Symbol("_node_", sym)
+            push!(expr.args, :($node_var = _mna_node_idx_.$sym))
+            # Float64 voltage value for RHS calculations - V_1, V_2, etc.
+            V_k = Symbol("V_", k)
+            push!(expr.args, :($V_k = $node_var == 0 ? 0.0 : _mna_x_[$node_var]))
+        end
+        expr
+    else
+        :()
+    end
+
+    # Build set of local variable names for dependency analysis
+    local_var_names = Set{Symbol}(name for (name, _) in var_types if !(name in parameter_names))
+
+    # Generate per-block functions with optimized unpack/pack
+    # Only unpack variables the block reads, only pack variables it writes
+    for block in named_blocks
+        # Analyze which variables this block reads and writes
+        reads, writes = analyze_var_usage(block.body, local_var_names)
+
+        # Build per-block unpack: only variables this block reads
+        unpack_vars = Expr(:block)
+        for name in reads
+            push!(unpack_vars.args, :($name = s.$name))
+        end
+
+        # Build per-block pack: only variables this block writes
+        pack_vars = Expr(:block)
+        for name in writes
+            push!(pack_vars.args, :(_safe_set!(s, $(QuoteNode(name)), $name)))
+        end
+
+        func_def = quote
+            Base.@noinline function $(block.name)(s, dev, ctx, _mna_node_idx_, _mna_node_voltages_, _mna_x_, _mna_t_, _mna_spec_, _mna_instance_)
+                # Parameters are accessed directly via dev.X in generated code
+                # (no extract_params needed - saves ~782 statements per block!)
+                # Unpack struct fields into locals (only vars this block reads)
+                $unpack_vars
+                # Destructure node indices and voltages
+                # _node_X = node index (for I() stamping)
+                # _V_X = voltage dual (for V() access)
+                $node_destructure
+                # Extract branch currents (for I(branch) probes in block body)
+                $branch_current_extraction
+                # Execute block body
+                $(block.body)
+                # Pack locals back to struct (only vars this block writes)
+                $pack_vars
+                return nothing
+            end
+        end
+        push!(block_functions, func_def)
+    end
+
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2001,10 +2254,63 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # to prevent LLVM SROA from blowing up. By default, stamp! is inlineable for performance.
     use_noinline = noinline === true
 
+    # Create state struct initialization at start of stamp_body
+    state_init = if use_state_struct
+        :(s = $state_struct_name())
+    else
+        :()
+    end
+
+    # Create two tuples for block functions:
+    # 1. node_idx_tuple - actual node indices (integers) for I() stamping - BEFORE dual_creation
+    # 2. node_voltages_tuple - voltage duals for V() access - AFTER dual_creation
+    all_node_syms_for_tuple = [port_args; internal_nodes]
+
+    # Node indices tuple: captures _node_X values (integers) before dual_creation
+    node_idx_tuple = if use_state_struct && !isempty(all_node_syms_for_tuple)
+        nt_pairs = []
+        for sym in all_node_syms_for_tuple
+            node_var = Symbol("_node_", sym)
+            push!(nt_pairs, :($sym = $node_var))
+        end
+        Expr(:tuple, Expr(:parameters, nt_pairs...))
+    else
+        :()
+    end
+
+    # Node voltages tuple: captures node symbols (duals) after dual_creation
+    node_voltages_tuple = if use_state_struct && !isempty(all_node_syms_for_tuple)
+        nt_pairs = []
+        for sym in all_node_syms_for_tuple
+            push!(nt_pairs, :($sym = $sym))
+        end
+        Expr(:tuple, Expr(:parameters, nt_pairs...))
+    else
+        :()
+    end
+
+    # Create unpack expression for stamp! body (after contrib_eval)
+    # This brings computed values from struct back into local scope for stamp_code
+    unpack_for_stamp = if use_state_struct
+        expr = Expr(:block)
+        for (name, _) in var_types
+            if !(name in parameter_names)
+                push!(expr.args, :($name = s.$name))
+            end
+        end
+        expr
+    else
+        :()
+    end
+
     # Build the function body
     stamp_body = quote
         # Convert empty vectors to ZERO_VECTOR for safe indexing
         _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+
+        # Create state struct for local variables (if using state struct mode)
+        $state_init
+
         $(params_to_locals...)
         $(function_defs...)
 
@@ -2038,13 +2344,25 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
         CedarSim.MNA.reset_detection_counter!(ctx)
 
+        # Capture node indices BEFORE dual_creation (for I() stamping in block functions)
+        _mna_node_idx_ = $node_idx_tuple
+
         # Create duals with partials for each node voltage (terminals + internal)
         # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
         # This overwrites node symbols (p, n, etc.) with JacobianTag duals
         $dual_creation
 
+        # Capture node voltages AFTER dual_creation (for V() access in block functions)
+        _mna_node_voltages_ = $node_voltages_tuple
+
         # Evaluate contribution expressions with duals
+        # (includes block function calls that compute local variables)
         $contrib_eval
+
+        # Unpack local variables from state struct (for contributions outside named blocks)
+        # Block functions have packed their computed values into s.varname
+        # This makes them accessible as locals for stamp_code expressions
+        $unpack_for_stamp
 
         # Stamp current contributions
         $stamp_code
@@ -2068,7 +2386,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end)
 
     # Conditionally add @noinline for large models
-    if use_noinline
+    stamp_method_expr = if use_noinline
         quote
             Base.@noinline $func_sig
         end
@@ -2077,6 +2395,19 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             $func_sig
         end
     end
+
+    # Combine state struct, block functions, and stamp method into toplevel expression
+    result_exprs = Any[]
+    if state_struct_def !== nothing
+        push!(result_exprs, state_struct_def)
+    end
+    for func in block_functions
+        push!(result_exprs, func)
+    end
+    push!(result_exprs, stamp_method_expr)
+
+    # Return as a single block that can be splatted into toplevel
+    Expr(:block, result_exprs...)
 end
 
 """
