@@ -961,9 +961,9 @@ end
     count_branch_allocs(branch_expr) -> Int
 
 Count the number of alloc_current! calls in a branch expression.
-Note: stamp_G!/stamp_C!/stamp_b! calls are NOT counted because they don't
-change topology - they just fill in matrix values. Branches can have different
-numbers of stamps as long as they reference the same nodes.
+Note: This only counts alloc_current! calls, not stamps. Stamp patterns are
+checked separately via collect_stamp_signatures() to ensure branches have the
+same stamp structure before hoisting.
 """
 function count_branch_allocs(expr)
     count = Ref(0)
@@ -1042,22 +1042,74 @@ function _collect_alloc_names!(names::Set{Symbol}, expr)
 end
 
 """
+    collect_stamp_signatures(expr) -> Set{Tuple{Symbol, Any, Any}}
+
+Collect signatures of all stamp calls in an expression.
+Each signature is (stamp_type, row_expr, col_expr) where stamp_type is :G, :C, or :b.
+For :b stamps, col_expr is nothing.
+This is used to check if conditional branches have the same stamp patterns.
+"""
+function collect_stamp_signatures(expr)
+    sigs = Set{Tuple{Symbol, Any, Any}}()
+    _collect_stamp_signatures!(sigs, expr)
+    return sigs
+end
+
+function _collect_stamp_signatures!(sigs::Set{Tuple{Symbol, Any, Any}}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check for stamp_G!/stamp_C!/stamp_b! calls
+    if expr.head == :call && length(expr.args) >= 1
+        fn = expr.args[1]
+        if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+            mod_chain = fn.args
+            if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                fn_name = mod_chain[end].value
+                if fn_name == :stamp_G! && length(expr.args) == 5
+                    # Normalize the signature to handle expression equivalence
+                    push!(sigs, (:G, expr.args[3], expr.args[4]))
+                    return
+                elseif fn_name == :stamp_C! && length(expr.args) == 5
+                    push!(sigs, (:C, expr.args[3], expr.args[4]))
+                    return
+                elseif fn_name == :stamp_b! && length(expr.args) == 4
+                    push!(sigs, (:b, expr.args[3], nothing))
+                    return
+                end
+            end
+        end
+    end
+
+    # Recurse
+    for arg in expr.args
+        _collect_stamp_signatures!(sigs, arg)
+    end
+end
+
+"""
     branches_have_same_allocs(ifex::Expr) -> Bool
 
-Check if all branches of a conditional have the same allocations.
-This checks both COUNT and NAMES of alloc_current! calls.
+Check if all branches of a conditional have the same allocations AND stamp patterns.
+This checks:
+1. COUNT and NAMES of alloc_current! calls (topology)
+2. Stamp signatures (stamp_G!/stamp_C!/stamp_b! patterns)
 
-- Same count AND same names → safe to hoist (PSP103: same nodes, different order)
-- Same count but different names → topology change, don't hoist (BJT: different nodes)
-- Different count → topology change, don't hoist (diode rs==0: aliased nodes)
+Both must match for safe hoisting:
+- Same alloc names AND same stamp sigs → safe to hoist (PSP103: value-affecting)
+- Different alloc names → topology change, don't hoist (BJT: different nodes)
+- Different stamp sigs → value-affecting with different structure, don't hoist
+- Different alloc count → topology change, don't hoist (diode rs==0: aliased nodes)
 """
 function branches_have_same_allocs(ifex::Expr)
     if ifex.head != :if || length(ifex.args) < 2
         return true
     end
 
-    # Collect allocations in IF branch (args[2])
+    # Collect allocations and stamps in IF branch (args[2])
     if_names = collect_alloc_names(ifex.args[2])
+    if_stamps = collect_stamp_signatures(ifex.args[2])
 
     # If there's an ELSE/ELSEIF branch (args[3]), check it too
     if length(ifex.args) >= 3
@@ -1065,7 +1117,9 @@ function branches_have_same_allocs(ifex::Expr)
         if else_branch isa Expr && else_branch.head == :elseif
             # Check elseif branch
             elseif_names = collect_alloc_names(else_branch.args[2])
-            if if_names != elseif_names
+            elseif_stamps = collect_stamp_signatures(else_branch.args[2])
+            # Both alloc names AND stamp signatures must match
+            if if_names != elseif_names || if_stamps != elseif_stamps
                 return false
             end
             # Recursively check rest of chain
@@ -1076,13 +1130,15 @@ function branches_have_same_allocs(ifex::Expr)
         else
             # Regular else branch
             else_names = collect_alloc_names(else_branch)
-            if if_names != else_names
+            else_stamps = collect_stamp_signatures(else_branch)
+            # Both alloc names AND stamp signatures must match
+            if if_names != else_names || if_stamps != else_stamps
                 return false
             end
         end
     else
-        # No else branch - if there are any allocations, it's topology-affecting
-        if !isempty(if_names)
+        # No else branch - if there are any allocations or stamps, it's topology-affecting
+        if !isempty(if_names) || !isempty(if_stamps)
             return false
         end
     end
@@ -1099,12 +1155,19 @@ branches_have_same_alloc_count(ifex::Expr) = branches_have_same_allocs(ifex)
 Transform a conditional expression to use hoisted allocations.
 Returns a tuple of (hoisted allocation expressions, transformed conditional).
 
-Only hoists when all branches have the SAME allocations (same names, not just count).
+Only hoists when all branches have the SAME allocations AND stamp patterns.
+This checks:
+1. alloc_current! names (topology - which nodes are allocated)
+2. stamp_G!/stamp_C!/stamp_b! signatures (value patterns - which stamps are issued)
+
 This distinguishes:
-- Value-affecting conditionals: branches stamp to same nodes, different order → HOIST
-  Example: PSP103's sigVds check swaps DI/SI positions but same node set
-- Topology-affecting conditionals: branches stamp to different nodes → DON'T HOIST
+- Safe to hoist: branches have same allocs AND same stamp patterns
+  Example: PSP103's sigVds conditional (if both branches have same stamps)
+- DON'T HOIST if different alloc names (topology-affecting):
   Example: BJT's subs check connects sub_con to b_int OR c_int (different nodes)
+- DON'T HOIST if different stamp patterns (different matrix structure):
+  Example: Conditionals where branches issue different numbers of stamps
+- DON'T HOIST if different alloc count:
   Example: Diode's rs==0 check aliases nodes (different allocation count)
 
 Hoists both:
@@ -1115,11 +1178,12 @@ This ensures all counter-based allocations happen in a fixed order regardless
 of which conditional branch executes at runtime.
 """
 function hoist_conditional_stamps(ifex::Expr)
-    # Check if branches have the same allocations (same names, not just same count)
-    # Different allocations means topology-affecting conditional - don't hoist
+    # Check if branches have the same allocations AND stamp patterns
+    # Different allocations or stamp patterns means don't hoist
     # Examples:
-    # - PSP103: both branches stamp to same nodes (DI,SI,BP) → HOIST
-    # - BJT subs: branches stamp to different nodes (b_int vs c_int) → DON'T HOIST
+    # - Same allocs + same stamps → HOIST
+    # - Different alloc names → DON'T HOIST (BJT: different nodes)
+    # - Different stamp patterns → DON'T HOIST (different matrix structure)
     if !branches_have_same_allocs(ifex)
         return Expr[], ifex
     end
