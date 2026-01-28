@@ -1151,7 +1151,14 @@ function hoist_conditional_stamps(ifex::Expr)
 
     # Hoist alloc_current! calls
     for alloc in allocs
-        push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+        # Generate appropriate call based on whether instance_arg was present
+        # If instance_arg is :_, the original call had only one argument (name)
+        # and we should generate a single-argument call to avoid creating wrong symbols
+        if alloc.instance_arg == :_
+            push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name))))
+        else
+            push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+        end
         alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
     end
 
