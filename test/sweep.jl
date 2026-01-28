@@ -407,10 +407,38 @@ end
     @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
 end
 
-# TODO: Subcircuit parameter passing not yet working in MNA codegen
-# The subcircuit ports are being reassigned instead of using passed-in ports
-@testset "dc! sweep on SPICE-generated circuit" begin
-    @test_skip "Subcircuit parameter passing not yet implemented"
+@testset "dc! sweep on SPICE-generated circuit with subcircuit params" begin
+    using CedarSim.MNA: voltage
+
+    # Subcircuit with parameterized resistors
+    spice_code = """
+        * Subcircuit parameter test
+        .subckt divider in out vss r1val=1k r2val=1k
+        R1 in out r1val
+        R2 out vss r2val
+        .ends divider
+
+        Xdiv1 vin vout 0 divider r1val=2k r2val=1k
+        V1 vin 0 DC 3.0
+    """
+
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = CedarSim.make_mna_circuit(ast)
+
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    circuit_fn = Base.eval(m, circuit_code)
+
+    spec = CedarSim.MNA.MNASpec()
+    wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+    sol = CedarSim.dc!(circuit)
+
+    # With r1val=2k and r2val=1k, vout = 3.0 * 1k/(2k+1k) = 1.0V
+    @test isapprox(voltage(sol, :vin), 3.0; atol=deftol)
+    @test isapprox(voltage(sol, :vout), 1.0; atol=deftol)
 end
 
 @testset "find_param_ranges" begin
