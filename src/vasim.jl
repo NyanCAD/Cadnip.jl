@@ -1060,15 +1060,17 @@ function _collect_stamp_signatures!(sigs::Set{Tuple{Symbol, Any, Any}}, expr)
         return
     end
 
-    # Check for stamp_G!/stamp_C!/stamp_b! calls
+    # Check for stamp_G!/stamp_C!/stamp_b! calls AND their hoisted variants
+    # When nested conditionals have already been hoisted, they contain stamp_G_at_idx! calls
+    # instead of stamp_G! calls, so we need to detect both forms.
     if expr.head == :call && length(expr.args) >= 1
         fn = expr.args[1]
         if fn isa Expr && fn.head == :. && length(fn.args) >= 2
             mod_chain = fn.args
             if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
                 fn_name = mod_chain[end].value
+                # Regular stamp calls: stamp_G!(ctx, row, col, val)
                 if fn_name == :stamp_G! && length(expr.args) == 5
-                    # Normalize the signature to handle expression equivalence
                     push!(sigs, (:G, expr.args[3], expr.args[4]))
                     return
                 elseif fn_name == :stamp_C! && length(expr.args) == 5
@@ -1076,6 +1078,18 @@ function _collect_stamp_signatures!(sigs::Set{Tuple{Symbol, Any, Any}}, expr)
                     return
                 elseif fn_name == :stamp_b! && length(expr.args) == 4
                     push!(sigs, (:b, expr.args[3], nothing))
+                    return
+                # Hoisted stamp calls: stamp_G_at_idx!(ctx, idx, val)
+                # The idx variable (like _hoist_G_idx_123) uniquely identifies the stamp
+                elseif fn_name == :stamp_G_at_idx! && length(expr.args) == 4
+                    # Use the index variable as the signature - it's unique per stamp
+                    push!(sigs, (:G_hoisted, expr.args[3], nothing))
+                    return
+                elseif fn_name == :stamp_C_at_idx! && length(expr.args) == 4
+                    push!(sigs, (:C_hoisted, expr.args[3], nothing))
+                    return
+                elseif fn_name == :stamp_b_at_idx! && length(expr.args) == 4
+                    push!(sigs, (:b_hoisted, expr.args[3], nothing))
                     return
                 end
             end
@@ -1131,6 +1145,7 @@ function branches_have_same_allocs(ifex::Expr)
             # Regular else branch
             else_names = collect_alloc_names(else_branch)
             else_stamps = collect_stamp_signatures(else_branch)
+
             # Both alloc names AND stamp signatures must match
             if if_names != else_names || if_stamps != else_stamps
                 return false
