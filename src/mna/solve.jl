@@ -12,6 +12,7 @@
 using LinearAlgebra
 using SparseArrays
 using Accessors
+using Random
 
 # real_time is defined in precompile.jl (handles ForwardDiff.Dual for tgrad)
 
@@ -627,10 +628,15 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
 end
 
 # Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
+# Uses a fixed seed for deterministic voltage-dependent capacitor detection.
 function _detect_structure(builder, params, spec)
-    N_DETECTION_PASSES = 3
+    N_DETECTION_PASSES = 5
     ctx = nothing
     known_size = 0
+
+    # Fixed seed for deterministic detection - ensures consistent results
+    # across different calling contexts
+    rng = Random.MersenneTwister(0xDEADBEEF)
 
     for pass in 1:N_DETECTION_PASSES
         if ctx === nothing
@@ -639,7 +645,8 @@ function _detect_structure(builder, params, spec)
         else
             known_size = system_size(ctx)
             reset_for_restamping!(ctx)
-            x = rand(known_size) * 0.8
+            # Symmetric range [-1, +1] to cover all operating regions
+            x = (rand(rng, known_size) .- 0.5) .* 2.0
             builder(params, spec, 0.0; x=x, ctx=ctx)
         end
     end
@@ -1436,12 +1443,18 @@ to detect which charges have voltage-dependent capacitance (Q/V ratio varies).
 All code paths that build from MNACircuit should use this function to ensure
 consistent detection results.
 
+Uses a fixed seed for deterministic detection - ensures consistent results
+across different calling contexts.
+
 Returns an MNAContext with accurate charge_is_vdep detection cache.
 """
 function build_with_detection(circuit::MNACircuit)
-    N_DETECTION_PASSES = 3
+    N_DETECTION_PASSES = 5
     ctx = nothing
     known_size = 0
+
+    # Fixed seed for deterministic detection
+    rng = Random.MersenneTwister(0xDEADBEEF)
 
     for pass in 1:N_DETECTION_PASSES
         if ctx === nothing
@@ -1455,8 +1468,8 @@ function build_with_detection(circuit::MNACircuit)
             # Reset structure but preserve detection cache (charge_is_vdep, charge_Q_values, charge_V_values)
             reset_for_restamping!(ctx)
 
-            # Generate random operating point using known size (avoid V=0 for Q/V comparison)
-            x = rand(known_size) * 0.8
+            # Symmetric range [-1, +1] to cover all operating regions
+            x = (rand(rng, known_size) .- 0.5) .* 2.0
 
             # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
             circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
