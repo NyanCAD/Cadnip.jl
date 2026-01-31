@@ -1,0 +1,25 @@
+# GDB commands for debugging Julia segfault
+# Run this with: gdb --batch -x gdb-julia.txt --args julia <julia-args>
+
+# Set up better output
+set pagination off
+set print pretty on
+set print thread-events off
+
+# Catch the segfault
+catch signal SIGSEGV
+
+# When segfault happens, print backtrace and thread info
+commands
+  echo \n===== SEGFAULT DETECTED =====\n
+  info threads
+  thread apply all bt
+  echo \n===== REGISTERS =====\n
+  info registers
+  echo \n===== FULL BACKTRACE OF CURRENT THREAD =====\n
+  bt full
+  quit
+end
+
+# Run the program
+run
