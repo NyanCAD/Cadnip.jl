@@ -1242,7 +1242,13 @@ function hoist_conditional_stamps(ifex::Expr)
     end
 
     # Hoist stamp calls (with resolved index expressions)
-    for (i, stamp) in enumerate(stamps)
+    # IMPORTANT: Deduplicate stamps by their resolved signature (matrix, row, col)
+    # When both branches of a conditional stamp to the same position, we should
+    # allocate ONE index and share it, not allocate separate indices per branch.
+    signature_to_idx = Dict{Tuple{Symbol, Any, Any}, Symbol}()
+    idx_counter = 0
+
+    for stamp in stamps
         row_resolved, row_ok = resolve_index_expr(stamp.row_expr, let_var_map)
         if stamp.matrix == :b
             col_resolved, col_ok = nothing, true
@@ -1255,19 +1261,29 @@ function hoist_conditional_stamps(ifex::Expr)
             continue
         end
 
-        if stamp.matrix == :G
-            idx_sym = Symbol("_hoist_G_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :G)
-        elseif stamp.matrix == :C
-            idx_sym = Symbol("_hoist_C_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :C)
-        elseif stamp.matrix == :b
-            idx_sym = Symbol("_hoist_b_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :b)
+        # Create signature key for deduplication
+        sig_key = (stamp.matrix, row_resolved, col_resolved)
+
+        if haskey(signature_to_idx, sig_key)
+            # Reuse existing hoisted index for this signature
+            idx_sym = signature_to_idx[sig_key]
+        else
+            # Create new hoisted index for this signature
+            idx_counter += 1
+            if stamp.matrix == :G
+                idx_sym = Symbol("_hoist_G_idx_", idx_counter)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
+            elseif stamp.matrix == :C
+                idx_sym = Symbol("_hoist_C_idx_", idx_counter)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
+            elseif stamp.matrix == :b
+                idx_sym = Symbol("_hoist_b_idx_", idx_counter)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
+            end
+            signature_to_idx[sig_key] = idx_sym
         end
+
+        stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, stamp.matrix)
     end
 
     # Step 4: Transform the conditional
