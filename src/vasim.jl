@@ -797,6 +797,64 @@ struct StampInfo
 end
 
 """
+    IndexAllocInfo
+
+Holds information about a get_G_idx!/get_C_idx!/get_b_idx! call from inner hoisting.
+These are index allocation calls that advance counters and must be hoisted out of
+outer conditionals to prevent counter mismatches.
+"""
+struct IndexAllocInfo
+    matrix::Symbol      # :G, :C, or :b
+    assign_var::Symbol  # Variable the result is assigned to (e.g., _hoist_G_idx_1)
+    row_expr::Any       # Row index expression
+    col_expr::Any       # Column index expression (nothing for :b)
+    original_expr::Expr # Original assignment expression
+end
+
+"""
+    collect_index_alloc_calls!(allocs::Vector{IndexAllocInfo}, expr)
+
+Walk an Expr tree and collect all get_G_idx!/get_C_idx!/get_b_idx! assignment calls.
+These are hoisted allocations from inner conditionals that need to be hoisted out of outer conditionals.
+"""
+function collect_index_alloc_calls!(allocs::Vector{IndexAllocInfo}, expr)
+    if !isa(expr, Expr)
+        return
+    end
+
+    # Check if this is an assignment with get_*_idx! call
+    # Pattern: _hoist_G_idx_1 = CedarSim.MNA.get_G_idx!(ctx, row, col)
+    if expr.head == :(=) && length(expr.args) == 2
+        lhs = expr.args[1]
+        rhs = expr.args[2]
+        if lhs isa Symbol && rhs isa Expr && rhs.head == :call
+            fn = rhs.args[1]
+            if fn isa Expr && fn.head == :. && length(fn.args) >= 2
+                mod_chain = fn.args
+                if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
+                    fn_name = mod_chain[end].value
+                    if fn_name == :get_G_idx! && length(rhs.args) == 4
+                        push!(allocs, IndexAllocInfo(:G, lhs, rhs.args[3], rhs.args[4], expr))
+                        return
+                    elseif fn_name == :get_C_idx! && length(rhs.args) == 4
+                        push!(allocs, IndexAllocInfo(:C, lhs, rhs.args[3], rhs.args[4], expr))
+                        return
+                    elseif fn_name == :get_b_idx! && length(rhs.args) == 3
+                        push!(allocs, IndexAllocInfo(:b, lhs, rhs.args[3], nothing, expr))
+                        return
+                    end
+                end
+            end
+        end
+    end
+
+    # Recurse into subexpressions
+    for arg in expr.args
+        collect_index_alloc_calls!(allocs, arg)
+    end
+end
+
+"""
     collect_alloc_current_calls!(allocs::Vector{AllocInfo}, expr, counter::Ref{Int})
 
 Walk an Expr tree and collect all let bindings with alloc_current! calls.
@@ -917,12 +975,19 @@ Walk an Expr tree and:
 Returns the modified expression.
 """
 function replace_let_and_stamps(expr, alloc_replacements::Dict{UInt64, Symbol},
-                                 stamp_replacements::Dict{UInt64, Tuple{Symbol, Symbol}})
+                                 stamp_replacements::Dict{UInt64, Tuple{Symbol, Symbol}},
+                                 index_alloc_replacements::Dict{UInt64, Nothing}=Dict{UInt64, Nothing}())
     if !isa(expr, Expr)
         return expr
     end
 
     oid = objectid(expr)
+
+    # Check if this is an index allocation to remove (now hoisted)
+    if haskey(index_alloc_replacements, oid)
+        # Return nothing - this assignment is now hoisted outside the conditional
+        return nothing
+    end
 
     # Check if this is a let expression to replace
     if haskey(alloc_replacements, oid)
@@ -932,7 +997,7 @@ function replace_let_and_stamps(expr, alloc_replacements::Dict{UInt64, Symbol},
         bindings = expr.args[1]
         let_var = bindings.args[1]
         new_bindings = :($let_var = $hoisted_sym)
-        new_body = replace_let_and_stamps(expr.args[2], alloc_replacements, stamp_replacements)
+        new_body = replace_let_and_stamps(expr.args[2], alloc_replacements, stamp_replacements, index_alloc_replacements)
         return Expr(:let, new_bindings, new_body)
     end
 
@@ -950,10 +1015,20 @@ function replace_let_and_stamps(expr, alloc_replacements::Dict{UInt64, Symbol},
     end
 
     # Recurse and rebuild expression with replaced children
+    # Filter out nothing results (from removed index allocations)
     new_args = Any[]
     for arg in expr.args
-        push!(new_args, replace_let_and_stamps(arg, alloc_replacements, stamp_replacements))
+        result = replace_let_and_stamps(arg, alloc_replacements, stamp_replacements, index_alloc_replacements)
+        if result !== nothing
+            push!(new_args, result)
+        end
     end
+
+    # If all args were removed, return nothing
+    if isempty(new_args) && expr.head == :block
+        return nothing
+    end
+
     return Expr(expr.head, new_args...)
 end
 
@@ -1091,6 +1166,19 @@ function _collect_stamp_signatures!(sigs::Set{Tuple{Symbol, Any, Any}}, expr)
                 elseif fn_name == :stamp_b_at_idx! && length(expr.args) == 4
                     push!(sigs, (:b_hoisted, expr.args[3], nothing))
                     return
+                # Hoisted index allocation calls: get_G_idx!(ctx, row, col)
+                # These advance the counter and MUST be counted in signature comparison
+                # to prevent counter mismatches when nested hoisted blocks are inside
+                # conditionals that aren't hoisted themselves.
+                elseif fn_name == :get_G_idx! && length(expr.args) == 4
+                    push!(sigs, (:G_alloc, expr.args[3], expr.args[4]))
+                    return
+                elseif fn_name == :get_C_idx! && length(expr.args) == 4
+                    push!(sigs, (:C_alloc, expr.args[3], expr.args[4]))
+                    return
+                elseif fn_name == :get_b_idx! && length(expr.args) == 3
+                    push!(sigs, (:b_alloc, expr.args[3], nothing))
+                    return
                 end
             end
         end
@@ -1218,8 +1306,14 @@ function hoist_conditional_stamps(ifex::Expr)
     stamps = StampInfo[]
     collect_stamp_calls!(stamps, ifex)
 
+    # Step 2b: Collect all index allocation calls from inner hoisting
+    # These are get_G_idx!/get_C_idx!/get_b_idx! calls that need to be hoisted
+    # out of this conditional to prevent counter mismatches
+    index_allocs = IndexAllocInfo[]
+    collect_index_alloc_calls!(index_allocs, ifex)
+
     # If nothing to hoist, return unchanged
-    if isempty(allocs) && isempty(stamps)
+    if isempty(allocs) && isempty(stamps) && isempty(index_allocs)
         return Expr[], ifex
     end
 
@@ -1241,8 +1335,35 @@ function hoist_conditional_stamps(ifex::Expr)
         alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
     end
 
+    # Hoist index allocation calls from inner hoisting (get_G_idx!, etc.)
+    # These need to be moved outside this conditional to prevent counter mismatches
+    # We keep the same variable name since stamp_G_at_idx! calls reference it
+    index_alloc_replacements = Dict{UInt64, Nothing}()
+    for ia in index_allocs
+        # Move the allocation call outside the conditional
+        if ia.matrix == :G
+            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_G_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+        elseif ia.matrix == :C
+            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_C_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+        elseif ia.matrix == :b
+            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_b_idx!(ctx, $(ia.row_expr))))
+        end
+        # Mark for removal from the conditional body (will be replaced with nothing)
+        index_alloc_replacements[objectid(ia.original_expr)] = nothing
+    end
+
     # Hoist stamp calls (with resolved index expressions)
-    for (i, stamp) in enumerate(stamps)
+    # IMPORTANT: Deduplicate stamps by (matrix, row, col) signature.
+    # Multiple stamps in different branches may target the same position - they should
+    # share ONE hoisted index, not get separate indices (which would create duplicate
+    # matrix entries and waste memory).
+
+    # Map from (matrix, row_resolved, col_resolved) -> (idx_sym, already_emitted)
+    # Using string representation of expressions as key since Expr objects aren't hashable
+    signature_to_idx = Dict{Tuple{Symbol, String, String}, Symbol}()
+    idx_counter = Ref(0)
+
+    for stamp in stamps
         row_resolved, row_ok = resolve_index_expr(stamp.row_expr, let_var_map)
         if stamp.matrix == :b
             col_resolved, col_ok = nothing, true
@@ -1255,23 +1376,38 @@ function hoist_conditional_stamps(ifex::Expr)
             continue
         end
 
-        if stamp.matrix == :G
-            idx_sym = Symbol("_hoist_G_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :G)
-        elseif stamp.matrix == :C
-            idx_sym = Symbol("_hoist_C_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :C)
-        elseif stamp.matrix == :b
-            idx_sym = Symbol("_hoist_b_idx_", i)
-            push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
-            stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, :b)
+        # Create signature key using string representation of resolved expressions
+        row_str = string(row_resolved)
+        col_str = stamp.matrix == :b ? "" : string(col_resolved)
+        sig_key = (stamp.matrix, row_str, col_str)
+
+        if haskey(signature_to_idx, sig_key)
+            # Reuse existing hoisted index for this position
+            idx_sym = signature_to_idx[sig_key]
+        else
+            # Create new hoisted index for this unique position
+            idx_counter[] += 1
+            i = idx_counter[]
+
+            if stamp.matrix == :G
+                idx_sym = Symbol("_hoist_G_idx_", i)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
+            elseif stamp.matrix == :C
+                idx_sym = Symbol("_hoist_C_idx_", i)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
+            elseif stamp.matrix == :b
+                idx_sym = Symbol("_hoist_b_idx_", i)
+                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
+            end
+
+            signature_to_idx[sig_key] = idx_sym
         end
+
+        stamp_replacements[objectid(stamp.original_expr)] = (idx_sym, stamp.matrix)
     end
 
     # Step 4: Transform the conditional
-    transformed_ifex = replace_let_and_stamps(ifex, alloc_replacements, stamp_replacements)
+    transformed_ifex = replace_let_and_stamps(ifex, alloc_replacements, stamp_replacements, index_alloc_replacements)
 
     return hoisted_exprs, transformed_ifex
 end
