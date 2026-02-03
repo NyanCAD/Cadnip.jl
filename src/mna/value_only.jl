@@ -510,10 +510,14 @@ end
 
 Stamp to deferred b value at pre-calculated index.
 If idx <= 0 (e.g., from ground or overflow), the stamp is skipped.
+
+Note: Uses assignment (=) not accumulation (+=) because b_V is not zeroed
+in reset_direct_stamp! (unlike G_nzval/C_nzval which are zeroed).
+Each b_V position represents a distinct deferred stamp, not a sum.
 """
 @inline function stamp_b_at_idx!(dctx::DirectStampContext, idx::Int, val)
     idx <= 0 && return nothing
-    dctx.b_V[idx] += extract_value(val)
+    dctx.b_V[idx] = extract_value(val)
     return nothing
 end
 
