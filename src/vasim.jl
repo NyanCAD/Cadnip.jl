@@ -1377,6 +1377,7 @@ function hoist_conditional_stamps(ifex::Expr)
         end
 
         # Create signature key using string representation of resolved expressions
+        # Deduplicate stamps to same position - they share one hoisted index and accumulate
         row_str = string(row_resolved)
         col_str = stamp.matrix == :b ? "" : string(col_resolved)
         sig_key = (stamp.matrix, row_str, col_str)
