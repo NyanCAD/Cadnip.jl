@@ -174,10 +174,11 @@ Reset counters and zero sparse matrix values for a new iteration.
     # dctx.warned_G_overflow = false
     # dctx.warned_C_overflow = false
 
-    # Zero sparse matrices and b vector
+    # Zero sparse matrices, b vector, and deferred b stamps
     fill!(dctx.G_nzval, 0.0)
     fill!(dctx.C_nzval, 0.0)
     fill!(dctx.b, 0.0)
+    fill!(dctx.b_V, 0.0)  # Zero b_V so stamp_b_at_idx! can use += like G/C
 
     return nothing
 end
@@ -511,13 +512,12 @@ end
 Stamp to deferred b value at pre-calculated index.
 If idx <= 0 (e.g., from ground or overflow), the stamp is skipped.
 
-Note: Uses assignment (=) not accumulation (+=) because b_V is not zeroed
-in reset_direct_stamp! (unlike G_nzval/C_nzval which are zeroed).
-Each b_V position represents a distinct deferred stamp, not a sum.
+Uses accumulation (+=) like stamp_G_at_idx! and stamp_C_at_idx!.
+b_V is zeroed in reset_direct_stamp! to support this.
 """
 @inline function stamp_b_at_idx!(dctx::DirectStampContext, idx::Int, val)
     idx <= 0 && return nothing
-    dctx.b_V[idx] = extract_value(val)
+    dctx.b_V[idx] += extract_value(val)
     return nothing
 end
 
