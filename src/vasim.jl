@@ -1665,54 +1665,69 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Detect voltage-dependence by comparing Q/V ratio across runs
                 # q_val is the charge value, V_branch is the branch voltage
                 _V_branch = $v_branch_expr
+
+                # ALWAYS allocate charge variable BEFORE detection (keeps counter consistent)
+                # This ensures DirectStampContext's counter-based allocation matches MNAContext
+                # regardless of which if-branch is taken during evaluation.
+                # Structure-altering decisions are assumed parameter-dependent, not voltage-dependent.
+                _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
+
                 _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_base_name, _mna_instance_, _V_branch, q_val)
-                if _is_voltage_dependent
-                    # Voltage-dependent charge: use charge formulation for constant mass matrix
-                    # Allocate charge variable (or get existing one)
-                    # NOTE: Charge state is stored as q_scaled = q * CHARGE_SCALE for conditioning
-                    _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
 
-                    # --- Mass matrix (constant entries with CHARGE_SCALE!) ---
-                    # KCL coupling: I = dq/dt = (1/CHARGE_SCALE) * d(q_scaled)/dt
-                    # The (1/CHARGE_SCALE) factor converts scaled charge derivative to current
-                    if $p_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $p_node, _q_idx, 1.0 / CedarSim.MNA.CHARGE_SCALE)
-                    end
-                    if $n_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $n_node, _q_idx, -1.0 / CedarSim.MNA.CHARGE_SCALE)
-                    end
+                # ALWAYS stamp BOTH patterns to ensure consistent COO structure.
+                # Use scale factors to select which pattern is active (zeros for inactive).
+                # This is critical for DirectStampContext which uses counter-based mapping.
+                #
+                # IMPORTANT: For linear capacitors, the charge variable becomes a "dummy"
+                # constrained to q=0. This is less efficient (extra variable) but maintains
+                # consistent structure for DirectStampContext's counter-based access.
+                _vdep_scale = _is_voltage_dependent ? 1.0 : 0.0
+                _linear_scale = _is_voltage_dependent ? 0.0 : 1.0
 
-                    # --- Constraint Jacobian (in G matrix, scaled) ---
-                    # Scaled constraint: F_scaled = q_scaled - CHARGE_SCALE*Q(V) = 0
-                    # ∂F_scaled/∂q_scaled = 1 (keeps diagonal well-conditioned)
-                    CedarSim.MNA.stamp_G!(ctx, _q_idx, _q_idx, 1.0)
-
-                    # ∂F_scaled/∂V_k = -CHARGE_SCALE * ∂Q/∂V_k for each node k
-                    $([quote
-                        if $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -CedarSim.MNA.CHARGE_SCALE * $(Symbol("dq_dV", k)))
-                        end
-                    end for k in 1:n_all_nodes]...)
-
-                    # --- Constraint RHS (Newton companion, scaled) ---
-                    # For scaled constraint F_scaled = q_scaled - CHARGE_SCALE*Q(V):
-                    # b = CHARGE_SCALE * (Q(V₀) - Σ(dQ/dV_k * V_k))
-                    _b_constraint = q_val  # Q(V₀)
-                    $([quote
-                        _b_constraint -= $(Symbol("dq_dV", k)) * $(Symbol("V_", k))  # - dQ/dV_k * V_k
-                    end for k in 1:n_all_nodes]...)
-                    CedarSim.MNA.stamp_b!(ctx, _q_idx, CedarSim.MNA.CHARGE_SCALE * _b_constraint)
-                else
-                    # Linear capacitor: use standard C matrix stamping
-                    $([quote
-                        if $p_node != 0 && $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_C!(ctx, $p_node, $(all_node_params[k]), $(Symbol("dq_dV", k)))
-                        end
-                        if $n_node != 0 && $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_C!(ctx, $n_node, $(all_node_params[k]), -$(Symbol("dq_dV", k)))
-                        end
-                    end for k in 1:n_all_nodes]...)
+                # --- Charge formulation pattern ---
+                # Mass matrix (KCL coupling): I = dq/dt = (1/CHARGE_SCALE) * d(q_scaled)/dt
+                # For linear caps (_vdep_scale=0): no current contribution from charge variable
+                if $p_node != 0
+                    CedarSim.MNA.stamp_C!(ctx, $p_node, _q_idx, _vdep_scale / CedarSim.MNA.CHARGE_SCALE)
                 end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_C!(ctx, $n_node, _q_idx, -_vdep_scale / CedarSim.MNA.CHARGE_SCALE)
+                end
+
+                # Constraint Jacobian (in G matrix)
+                # ALWAYS stamp 1.0 on diagonal to keep matrix non-singular!
+                # For vdep: constraint is q_scaled = CHARGE_SCALE * Q(V)
+                # For linear: constraint is q_scaled = 0 (dummy variable)
+                CedarSim.MNA.stamp_G!(ctx, _q_idx, _q_idx, 1.0)
+
+                # ∂F_scaled/∂V_k = -CHARGE_SCALE * ∂Q/∂V_k for each node k
+                # For linear (_vdep_scale=0): no voltage coupling
+                $([quote
+                    if $(all_node_params[k]) != 0
+                        CedarSim.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -_vdep_scale * CedarSim.MNA.CHARGE_SCALE * $(Symbol("dq_dV", k)))
+                    end
+                end for k in 1:n_all_nodes]...)
+
+                # Constraint RHS (Newton companion, scaled)
+                # For vdep: b = CHARGE_SCALE * (Q(V₀) - Σ(dQ/dV_k * V_k))
+                # For linear (_vdep_scale=0): b = 0 (constraint q = 0)
+                _b_constraint = q_val  # Q(V₀)
+                $([quote
+                    _b_constraint -= $(Symbol("dq_dV", k)) * $(Symbol("V_", k))  # - dQ/dV_k * V_k
+                end for k in 1:n_all_nodes]...)
+                CedarSim.MNA.stamp_b!(ctx, _q_idx, _vdep_scale * CedarSim.MNA.CHARGE_SCALE * _b_constraint)
+
+                # --- Linear capacitor pattern (active when constant capacitance) ---
+                # Standard C matrix stamping for linear capacitors
+                # For vdep (_linear_scale=0): zeros (current comes from charge variable)
+                $([quote
+                    if $p_node != 0 && $(all_node_params[k]) != 0
+                        CedarSim.MNA.stamp_C!(ctx, $p_node, $(all_node_params[k]), _linear_scale * $(Symbol("dq_dV", k)))
+                    end
+                    if $n_node != 0 && $(all_node_params[k]) != 0
+                        CedarSim.MNA.stamp_C!(ctx, $n_node, $(all_node_params[k]), -_linear_scale * $(Symbol("dq_dV", k)))
+                    end
+                end for k in 1:n_all_nodes]...)
             end
         end)
 
