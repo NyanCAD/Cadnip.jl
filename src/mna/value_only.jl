@@ -78,6 +78,11 @@ mutable struct DirectStampContext
     # Internal node indices for counter-based allocation (avoids Symbol interpolation)
     internal_node_indices::Vector{Int}
     internal_node_pos::Int
+
+    # Warning flags for stamp overflow (when more stamps than detected)
+    warned_G_overflow::Bool
+    warned_C_overflow::Bool
+    warned_b_overflow::Bool
 end
 
 """
@@ -117,7 +122,8 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         copy(ctx.charge_is_vdep),
         1,
         internal_node_indices,
-        1  # internal_node_pos
+        1,  # internal_node_pos
+        false, false, false  # warning flags (G, C, b)
     )
 end
 
@@ -163,10 +169,16 @@ Reset counters and zero sparse matrix values for a new iteration.
     dctx.charge_detection_pos = 1
     dctx.internal_node_pos = 1
 
-    # Zero sparse matrices and b vector
+    # Reset overflow warning flags (warn once per solve, not once per iteration)
+    # Don't reset these here - we want to warn only once per solve
+    # dctx.warned_G_overflow = false
+    # dctx.warned_C_overflow = false
+
+    # Zero sparse matrices, b vector, and deferred b stamps
     fill!(dctx.G_nzval, 0.0)
     fill!(dctx.C_nzval, 0.0)
     fill!(dctx.b, 0.0)
+    fill!(dctx.b_V, 0.0)  # Zero b_V so stamp_b_at_idx! can use += like G/C
 
     return nothing
 end
@@ -278,6 +290,17 @@ No intermediate array - single memory write.
     pos = dctx.G_pos
     dctx.G_pos = pos + 1
 
+    # Bounds check - if we get more stamps than discovered, skip the extra ones
+    # This can happen when PSP103VA has conditional code paths not taken during detection
+    if pos > length(dctx.G_mapping)
+        # Warn once per context
+        if !dctx.warned_G_overflow
+            @warn "DirectStampContext: more G stamps than detected (pos=$pos, expected=$(length(dctx.G_mapping))). Extra stamps ignored."
+            dctx.warned_G_overflow = true
+        end
+        return nothing
+    end
+
     # Direct write to sparse matrix nzval
     nz_idx = dctx.G_mapping[pos]
     if nz_idx > 0
@@ -300,6 +323,15 @@ Stamp C matrix value DIRECTLY to sparse nzval using precomputed mapping.
     pos = dctx.C_pos
     dctx.C_pos = pos + 1
 
+    # Bounds check - if we get more stamps than discovered, skip the extra ones
+    if pos > length(dctx.C_mapping)
+        if !dctx.warned_C_overflow
+            @warn "DirectStampContext: more C stamps than detected (pos=$pos, expected=$(length(dctx.C_mapping))). Extra stamps ignored."
+            dctx.warned_C_overflow = true
+        end
+        return nothing
+    end
+
     nz_idx = dctx.C_mapping[pos]
     if nz_idx > 0
         v = extract_value(val)
@@ -321,8 +353,18 @@ This provides a consistent interface matching G and C stamping.
 
     # All b stamps are deferred - applied via pre-resolved indices after stamping
     pos = dctx.b_deferred_pos
-    dctx.b_V[pos] = v
     dctx.b_deferred_pos = pos + 1
+
+    # Bounds check
+    if pos > length(dctx.b_V)
+        if !dctx.warned_b_overflow
+            @warn "DirectStampContext: more b stamps than detected (pos=$pos, expected=$(length(dctx.b_V))). Extra stamps ignored."
+            dctx.warned_b_overflow = true
+        end
+        return nothing
+    end
+
+    dctx.b_V[pos] = v
     return nothing
 end
 
@@ -360,6 +402,122 @@ Stamp capacitance pattern for 2-terminal element.
     stamp_C!(dctx, p, n, -C)
     stamp_C!(dctx, n, p, -C)
     stamp_C!(dctx, n, n,  C)
+    return nothing
+end
+
+#==============================================================================#
+# Hoisted Stamping Primitives (for voltage-dependent conditionals)
+#
+# These functions separate allocation from value assignment, allowing
+# allocations to be hoisted outside conditionals. Since allocations are
+# hoisted, they execute in the same fixed order during both detection
+# and runtime, so the positional counter works correctly.
+#==============================================================================#
+
+"""
+    get_G_idx!(dctx::DirectStampContext, i, j) -> Int
+
+Get the nzval index for G[i,j] using positional counter.
+Since allocations are hoisted, the counter order matches detection order.
+
+Returns 0 for ground indices or if position exceeds detected count.
+"""
+@inline function get_G_idx!(dctx::DirectStampContext, i, j)::Int
+    iszero(i) && return 0
+    iszero(j) && return 0
+    pos = dctx.G_pos
+    dctx.G_pos = pos + 1
+    if pos > length(dctx.G_mapping)
+        if !dctx.warned_G_overflow
+            @warn "DirectStampContext: more G allocations than detected (pos=$pos, expected=$(length(dctx.G_mapping)))"
+            dctx.warned_G_overflow = true
+        end
+        return 0
+    end
+    return dctx.G_mapping[pos]
+end
+
+"""
+    stamp_G_at_idx!(dctx::DirectStampContext, idx::Int, val)
+
+Stamp directly to G.nzval[idx] using pre-calculated index.
+If idx <= 0 (e.g., from ground or overflow), the stamp is skipped.
+"""
+@inline function stamp_G_at_idx!(dctx::DirectStampContext, idx::Int, val)
+    idx <= 0 && return nothing
+    dctx.G_nzval[idx] += extract_value(val)
+    return nothing
+end
+
+"""
+    get_C_idx!(dctx::DirectStampContext, i, j) -> Int
+
+Get the nzval index for C[i,j] using positional counter.
+Since allocations are hoisted, the counter order matches detection order.
+
+Returns 0 for ground indices or if position exceeds detected count.
+"""
+@inline function get_C_idx!(dctx::DirectStampContext, i, j)::Int
+    iszero(i) && return 0
+    iszero(j) && return 0
+    pos = dctx.C_pos
+    dctx.C_pos = pos + 1
+    if pos > length(dctx.C_mapping)
+        if !dctx.warned_C_overflow
+            @warn "DirectStampContext: more C allocations than detected (pos=$pos, expected=$(length(dctx.C_mapping)))"
+            dctx.warned_C_overflow = true
+        end
+        return 0
+    end
+    return dctx.C_mapping[pos]
+end
+
+"""
+    stamp_C_at_idx!(dctx::DirectStampContext, idx::Int, val)
+
+Stamp directly to C.nzval[idx] using pre-calculated index.
+If idx <= 0 (e.g., from ground or overflow), the stamp is skipped.
+"""
+@inline function stamp_C_at_idx!(dctx::DirectStampContext, idx::Int, val)
+    idx <= 0 && return nothing
+    dctx.C_nzval[idx] += extract_value(val)
+    return nothing
+end
+
+"""
+    get_b_idx!(dctx::DirectStampContext, i) -> Int
+
+Get the deferred b index using positional counter.
+Since allocations are hoisted, the counter order matches detection order.
+
+Returns 0 for ground index or if position exceeds detected count.
+"""
+@inline function get_b_idx!(dctx::DirectStampContext, i)::Int
+    iszero(i) && return 0
+    pos = dctx.b_deferred_pos
+    dctx.b_deferred_pos = pos + 1
+    if pos > length(dctx.b_V)
+        if !dctx.warned_b_overflow
+            @warn "DirectStampContext: more b allocations than detected (pos=$pos, expected=$(length(dctx.b_V)))"
+            dctx.warned_b_overflow = true
+        end
+        return 0
+    end
+    return pos
+end
+
+"""
+    stamp_b_at_idx!(dctx::DirectStampContext, idx::Int, val)
+
+Stamp to deferred b value at pre-calculated index.
+If idx <= 0 (e.g., from ground or overflow), the stamp is skipped.
+
+Uses accumulation (+=) like stamp_G_at_idx! and stamp_C_at_idx!.
+b_V is zeroed in reset_direct_stamp! to support this.
+"""
+@inline function stamp_b_at_idx!(dctx::DirectStampContext, idx::Int, val)
+    idx <= 0 && return nothing
+    dctx.b_V[idx] += extract_value(val)
     return nothing
 end
 
