@@ -65,7 +65,9 @@ ENV JULIAUP_DEPOT_PATH="/opt/juliaup"
 ENV JULIA_DEPOT_PATH="/opt/julia-depot"
 
 RUN mkdir -p "$JULIAUP_DEPOT_PATH" "$JULIA_DEPOT_PATH" && \
-  curl -fsSL https://install.julialang.org | sh -s -- -y --default-channel "$JULIA_VERSION" && \
+  curl -fsSL https://install.julialang.org -o /tmp/julia-installer.sh && \
+  bash /tmp/julia-installer.sh -y --default-channel "$JULIA_VERSION" && \
+  rm /tmp/julia-installer.sh && \
   # Symlink juliaup and julia into PATH for all users
   ln -sf /root/.juliaup/bin/juliaup /usr/local/bin/juliaup && \
   ln -sf /root/.juliaup/bin/julia   /usr/local/bin/julia && \
@@ -78,13 +80,14 @@ ARG OPENVAF_VERSION=osdi_0.4-146-g75df7b36
 RUN wget -q "https://fides.fe.uni-lj.si/openvaf/download/openvaf-reloaded-${OPENVAF_VERSION}-linux_x64.tar.gz" \
       -O /tmp/openvaf.tar.gz && \
   mkdir -p /opt/openvaf && \
-  tar xzf /tmp/openvaf.tar.gz -C /opt/openvaf --strip-components=1 && \
+  tar xzf /tmp/openvaf.tar.gz -C /opt/openvaf && \
   ln -sf /opt/openvaf/openvaf-r /usr/local/bin/openvaf-r && \
   rm /tmp/openvaf.tar.gz
 
 # ── VACASK (prebuilt .deb package) ────────────────────────────────────────────
 ARG VACASK_VERSION=0.3.2
-RUN wget -q "https://codeberg.org/arpadbuermen/VACASK/releases/download/${VACASK_VERSION}/vacask_${VACASK_VERSION}_amd64.deb" \
+ARG VACASK_TAG=_0.3.2
+RUN wget -q "https://codeberg.org/arpadbuermen/VACASK/releases/download/${VACASK_TAG}/vacask_${VACASK_VERSION}_amd64.deb" \
       -O /tmp/vacask.deb && \
   apt-get update && \
   apt-get install -y --no-install-recommends /tmp/vacask.deb && \
