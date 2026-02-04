@@ -138,15 +138,22 @@ Note: First run adds ~400s compilation overhead.
 | **`psp103_bridge.jl`** | **Full model scaling** | **Slow (~8min first run)** |
 | `benchmarks/vacask/ring/runme.jl` | Production benchmark | Very slow (~10min) |
 
-## CI Recommendations
+## CI Integration
 
-Include bridge tests in CI to catch:
+Bridge tests are now integrated into CI as a separate job (`test-bridge`):
+
+✅ **Automatic execution** on all PRs and pushes to main/master
+✅ **Parallel execution** with core and integration tests
+✅ **Matrix testing** on Julia 1.11 and 1.12
+✅ **20-minute timeout** to accommodate JIT compilation
+✅ **Precompile workloads disabled** to prevent segfaults
+
+The CI setup catches:
 - Full model card regressions
 - Transient initialization failures
 - Ring oscillator convergence issues
 - Memory/compilation problems
-
-Consider running as separate CI job due to time requirements.
+- Scaling behavior regressions
 
 ## Future Enhancements
 

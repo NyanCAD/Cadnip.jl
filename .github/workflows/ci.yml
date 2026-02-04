@@ -128,3 +128,61 @@ jobs:
 
       - name: Run CedarSim integration tests
         run: julia --project=test test/runtests.jl integration
+
+  # Bridge tests - PSP103 progressive complexity scaling (DC → ring oscillators)
+  test-bridge:
+    name: Bridge Tests (PSP103) - Julia ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Install dependencies
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+          '
+
+      - name: Disable heavy precompile workloads
+        run: |
+          cat > test/LocalPreferences.toml << 'EOF'
+          [PSPModels]
+          precompile_workload = false
+
+          [VADistillerModels]
+          precompile_workload = false
+
+          [VACASKModels]
+          precompile_workload = false
+          EOF
+
+      - name: Install and precompile test dependencies
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="SpectreNetlistParser.jl"),
+              PackageSpec(path="VerilogAParser.jl"),
+              PackageSpec(path="Lexers.jl")
+            ])
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run PSP103 bridge tests
+        run: julia --project=test test/runtests.jl bridge
+        timeout-minutes: 20

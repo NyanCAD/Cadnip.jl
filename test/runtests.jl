@@ -8,11 +8,13 @@ Random.seed!(10)
 # Test group filtering via ARGS (from Pkg.test(test_args=[...]))
 # Supported groups:
 #   - "integration": Run only vadistiller integration tests (large VA models)
-#   - "core": Run core tests only (excludes integration)
-#   - "all": Run all tests including integration
-#   - (default): Same as "core" - integration tests are opt-in
+#   - "bridge": Run only PSP103 bridge tests (progressive complexity scaling)
+#   - "core": Run core tests only (excludes integration and bridge)
+#   - "all": Run all tests including integration and bridge
+#   - (default): Same as "core" - integration and bridge tests are opt-in
 const RUN_INTEGRATION = "integration" in ARGS || "all" in ARGS
-const RUN_CORE = !("integration" in ARGS) || "all" in ARGS
+const RUN_BRIDGE = "bridge" in ARGS || "all" in ARGS
+const RUN_CORE = !("integration" in ARGS) && !("bridge" in ARGS) || "all" in ARGS
 
 # Phase 0: Check if we're running with full dependencies or minimal (parsing only)
 const PHASE0_MINIMAL = !isdefined(Main, :DAECompiler) &&
@@ -20,7 +22,7 @@ const PHASE0_MINIMAL = !isdefined(Main, :DAECompiler) &&
                        !@isdefined(Sky130PDK)
 
 if PHASE0_MINIMAL
-    if RUN_INTEGRATION && !RUN_CORE
+    if RUN_INTEGRATION && !RUN_CORE && !RUN_BRIDGE
         # Integration-only mode
         @info "Running integration tests only (large VA models)"
         using CedarSim
@@ -32,6 +34,13 @@ if PHASE0_MINIMAL
         end
         @testset "PSP103VA Integration" begin
             @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
+        end
+    elseif RUN_BRIDGE && !RUN_CORE && !RUN_INTEGRATION
+        # Bridge-only mode (PSP103 progressive complexity scaling)
+        @info "Running PSP103 bridge tests only (progressive complexity: DC → ring oscillators)"
+        using CedarSim
+        @testset "PSP103VA Bridge Tests" begin
+            @testset "mna/psp103_bridge.jl" include("mna/psp103_bridge.jl")
         end
     elseif RUN_CORE
         @info "Running Phase 0/1 tests (parsing/codegen + MNA core)"
@@ -87,6 +96,14 @@ if PHASE0_MINIMAL
             end
             @testset "PSP103VA Integration" begin
                 @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
+            end
+        end
+
+        # Bridge tests (only if explicitly requested with "all")
+        if RUN_BRIDGE
+            GC.gc()  # Clean up before heavy PSP103 compilation
+            @testset "PSP103VA Bridge Tests" begin
+                @testset "mna/psp103_bridge.jl" include("mna/psp103_bridge.jl")
             end
         end
     end

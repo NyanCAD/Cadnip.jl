@@ -108,10 +108,20 @@ Subsequent runs are much faster (~10-20s solve time) once functions are compiled
 
 ## Running the Tests
 
-### Full Suite
+### Full Suite (Direct)
 
 ```bash
 julia --project=test test/mna/psp103_bridge.jl
+```
+
+### Via Test Runner
+
+```bash
+# Run only bridge tests
+julia --project=test test/runtests.jl bridge
+
+# Run all tests (core + integration + bridge)
+julia --project=test test/runtests.jl all
 ```
 
 ### Individual Test Sets
@@ -132,6 +142,21 @@ end
     # Test 4 takes ~1-2 minutes after compilation
 end
 ```
+
+### CI Integration
+
+The bridge tests run automatically in CI as a separate job:
+
+- **Job**: `test-bridge`
+- **Matrix**: Julia 1.11 and 1.12
+- **Trigger**: All PRs and pushes to main/master
+- **Timeout**: 20 minutes (allows for JIT compilation)
+- **Configuration**: Disables precompile workloads to avoid segfaults
+
+CI runs three parallel jobs:
+1. `test-core`: Fast core tests (~5-10 min)
+2. `test-integration`: VA integration tests (~10-15 min)
+3. `test-bridge`: PSP103 bridge tests (~15-20 min)
 
 ## Expected Results
 
