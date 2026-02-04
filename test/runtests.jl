@@ -33,6 +33,9 @@ if PHASE0_MINIMAL
         @testset "PSP103VA Integration" begin
             @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
         end
+        @testset "PSP103 Bridge" begin
+            @testset "mna/psp103_bridge.jl" include("mna/psp103_bridge.jl")
+        end
     elseif RUN_CORE
         @info "Running Phase 0/1 tests (parsing/codegen + MNA core)"
 
@@ -87,6 +90,9 @@ if PHASE0_MINIMAL
             end
             @testset "PSP103VA Integration" begin
                 @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
+            end
+            @testset "PSP103 Bridge" begin
+                @testset "mna/psp103_bridge.jl" include("mna/psp103_bridge.jl")
             end
         end
     end
