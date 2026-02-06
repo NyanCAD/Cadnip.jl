@@ -12,6 +12,7 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp
 using OrdinaryDiffEq: FBDF
+using SciMLBase
 using BenchmarkTools
 using Printf
 
@@ -69,7 +70,7 @@ function run_benchmark(solver; tspan=(0.0, 100e-9), dtmax=0.01e-9, maxiters=10_0
         @printf("  Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
     end
 
-    if sol.retcode == :Success || sol.retcode == SciMLBase.ReturnCode.Success
+    if sol.retcode == SciMLBase.ReturnCode.Success
         # Benchmark the actual simulation
         println("\nBenchmarking (3 samples)...")
         circuit = setup_simulation()
@@ -86,7 +87,6 @@ end
 
 # Run if executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
-    using SciMLBase
     solver = FBDF(autodiff=false)
     run_benchmark(solver)
 end

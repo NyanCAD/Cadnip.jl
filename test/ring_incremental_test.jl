@@ -11,6 +11,7 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp
 using OrdinaryDiffEq: FBDF
+using SciMLBase
 using Printf
 using Test
 
@@ -51,7 +52,7 @@ if sol.stats !== nothing && sol.stats.nnonliniter > 0
 end
 
 @testset "Ring oscillator transient" begin
-    @test sol.retcode == :Success
+    @test sol.retcode == SciMLBase.ReturnCode.Success
     @test sol.t[end] >= 1e-9 * 0.99  # Allow small tolerance
 end
 
