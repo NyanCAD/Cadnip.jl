@@ -7,6 +7,8 @@
       "CLAUDE_CODE_VERSION": "latest",
       "GIT_DELTA_VERSION": "0.18.2",
       "ZSH_IN_DOCKER_VERSION": "1.2.0",
+      "NGSPICE_VERSION": "45",
+      "VACASK_VERSION": "0.3.2",
     },
   },
   "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],

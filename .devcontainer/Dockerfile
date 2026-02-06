@@ -1,4 +1,4 @@
-FROM node:20
+FROM node:20-trixie
 
 ARG TZ
 ENV TZ="$TZ"
@@ -25,6 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   jq \
   nano \
   vim \
+  autoconf \
+  automake \
+  libtool \
+  bison \
+  flex \
+  libreadline-dev \
+  python3 \
+  python3-numpy \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Ensure default node user has access to /usr/local/share
@@ -53,6 +61,25 @@ RUN ARCH=$(dpkg --print-architecture) && \
   wget "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
+
+# Build ngspice from source with OSDI support
+ARG NGSPICE_VERSION=45
+RUN git clone --depth 1 --branch ngspice-${NGSPICE_VERSION} https://github.com/imr/ngspice.git /tmp/ngspice && \
+  cd /tmp/ngspice && \
+  ./autogen.sh && \
+  ./configure --without-x --with-readline=yes --enable-osdi --disable-openmp --disable-debug && \
+  make -j$(nproc) && \
+  make install && \
+  ldconfig && \
+  rm -rf /tmp/ngspice
+
+# Install VACASK with OpenVAF Reloaded
+ARG VACASK_VERSION=0.3.2
+RUN wget "https://codeberg.org/arpadbuermen/VACASK/releases/download/_${VACASK_VERSION}/vacask_${VACASK_VERSION}_amd64.deb" -O /tmp/vacask.deb && \
+  apt-get update && \
+  apt-get install -y --no-install-recommends /tmp/vacask.deb && \
+  apt-get clean && rm -rf /var/lib/apt/lists/* && \
+  rm /tmp/vacask.deb
 
 # Set up non-root user
 USER node
