@@ -3036,6 +3036,33 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     # These need to be accessible by subcircuit builders and the main circuit
     model_defs = codegen_toplevel_models!(state)
 
+    # Propagate parent-level model definitions to subcircuit semas (same as make_mna_pdk_module).
+    for (_, subckt_list) in sema_result.subckts
+        for (_, subckt_entry) in subckt_list
+            ss = subckt_entry.val
+            for (model_name, model_defs) in sema_result.models
+                if model_name in ss.exposed_models && !haskey(ss.models, model_name)
+                    ss.models[model_name] = model_defs
+                end
+            end
+        end
+    end
+
+    # Import precompiled subcircuit builders from imported modules.
+    # When a subcircuit is referenced but not defined locally (e.g., `nmos`/`pmos` from VACASKModels),
+    # it appears in exposed_subckts. If the imported module exports a matching `_mna_builder` function,
+    # generate a GlobalRef binding so locally-generated builders can call it.
+    subckt_builder_imports = Expr[]
+    for subckt_name in sema_result.exposed_subckts
+        builder_name = Symbol(subckt_name, "_mna_builder")
+        for hdl_mod in sema_result.imported_hdl_modules
+            if isdefined(hdl_mod, builder_name)
+                push!(subckt_builder_imports, :($builder_name = $(GlobalRef(hdl_mod, builder_name))))
+                break
+            end
+        end
+    end
+
     # Generate subcircuit builders
     subckt_defs = Expr[]
     for (name, subckt_list) in sema_result.subckts
@@ -3064,6 +3091,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
 
         # Top-level model factory functions (accessible by subcircuit builders and main circuit)
         $(model_defs...)
+
+        # Precompiled subcircuit builders from imported modules
+        $(subckt_builder_imports...)
 
         # Subcircuit builders
         $(subckt_defs...)
@@ -3202,6 +3232,20 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
                 end
                 # Generate: model_name = spicecall(ParsedModel, model_ref, (params...))
                 push!(model_bindings, :($model_name = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+            end
+        end
+    end
+
+    # Propagate parent-level model definitions to subcircuit semas.
+    # This allows is_large_va_model() to detect large VA models (like PSP103 with 200+ params)
+    # referenced via model cards in subcircuits, enabling invokelatest to prevent LLVM blow-up.
+    for (_, subckt_list) in sema_result.subckts
+        for (_, subckt_entry) in subckt_list
+            ss = subckt_entry.val
+            for (model_name, model_defs) in sema_result.models
+                if model_name in ss.exposed_models && !haskey(ss.models, model_name)
+                    ss.models[model_name] = model_defs
+                end
             end
         end
     end

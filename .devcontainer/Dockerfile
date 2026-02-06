@@ -5,7 +5,7 @@ ENV TZ="$TZ"
 
 ARG CLAUDE_CODE_VERSION=latest
 
-# Install basic development tools, iptables/ipset, and ngspice
+# Install basic development tools and iptables/ipset
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
   git \
@@ -25,11 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   jq \
   nano \
   vim \
-  curl \
-  wget \
-  ca-certificates \
-  python3 \
-  ngspice \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Ensure default node user has access to /usr/local/share
@@ -38,7 +33,7 @@ RUN mkdir -p /usr/local/share/npm-global && \
 
 ARG USERNAME=node
 
-# Persist bash history
+# Persist bash history.
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   && mkdir /commandhistory \
   && touch /commandhistory/.bash_history \
@@ -59,51 +54,17 @@ RUN ARCH=$(dpkg --print-architecture) && \
   sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
 
-# ── Julia via juliaup ──────────────────────────────────────────────────────────
-ARG JULIA_VERSION=1.11
-ENV JULIAUP_DEPOT_PATH="/opt/juliaup"
-ENV JULIA_DEPOT_PATH="/opt/julia-depot"
-
-RUN mkdir -p "$JULIAUP_DEPOT_PATH" "$JULIA_DEPOT_PATH" && \
-  curl -fsSL https://install.julialang.org -o /tmp/julia-installer.sh && \
-  bash /tmp/julia-installer.sh -y --default-channel "$JULIA_VERSION" && \
-  rm /tmp/julia-installer.sh && \
-  # Symlink juliaup and julia into PATH for all users
-  ln -sf /root/.juliaup/bin/juliaup /usr/local/bin/juliaup && \
-  ln -sf /root/.juliaup/bin/julia   /usr/local/bin/julia && \
-  # Make the installation accessible to non-root users
-  chmod -R a+rX /root/.juliaup && \
-  chmod -R a+rwX "$JULIA_DEPOT_PATH"
-
-# ── OpenVAF Reloaded (prebuilt binary) ────────────────────────────────────────
-ARG OPENVAF_VERSION=osdi_0.4-146-g75df7b36
-RUN wget -q "https://fides.fe.uni-lj.si/openvaf/download/openvaf-reloaded-${OPENVAF_VERSION}-linux_x64.tar.gz" \
-      -O /tmp/openvaf.tar.gz && \
-  mkdir -p /opt/openvaf && \
-  tar xzf /tmp/openvaf.tar.gz -C /opt/openvaf && \
-  ln -sf /opt/openvaf/openvaf-r /usr/local/bin/openvaf-r && \
-  rm /tmp/openvaf.tar.gz
-
-# ── VACASK (prebuilt .deb package) ────────────────────────────────────────────
-ARG VACASK_VERSION=0.3.2
-ARG VACASK_TAG=_0.3.2
-RUN wget -q "https://codeberg.org/arpadbuermen/VACASK/releases/download/${VACASK_TAG}/vacask_${VACASK_VERSION}_amd64.deb" \
-      -O /tmp/vacask.deb && \
-  apt-get update && \
-  apt-get install -y --no-install-recommends /tmp/vacask.deb && \
-  apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/vacask.deb
-
-# ── Non-root user setup ───────────────────────────────────────────────────────
+# Set up non-root user
 USER node
 
 # Install global packages
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=$PATH:/usr/local/share/npm-global/bin
 
-# Set the default shell to zsh
+# Set the default shell to zsh rather than sh
 ENV SHELL=/bin/zsh
 
-# Set the default editor
+# Set the default editor and visual
 ENV EDITOR=nano
 ENV VISUAL=nano
 
@@ -117,8 +78,12 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
   -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   -x
 
-# Install Claude Code
+# Install Claude
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Install juliaup and latest stable Julia
+ENV PATH="/home/node/.juliaup/bin:$PATH"
+RUN curl -fsSL https://install.julialang.org | sh -s -- -y
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/

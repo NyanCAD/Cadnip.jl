@@ -8,9 +8,11 @@ PSPModels = "abf2981e-f194-4833-b9e6-388029af7f41"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Sundials = "c3572dad-4567-51f8-b174-8c6c989267f4"
+VACASKModels = "a2b3c4d5-6789-4abc-def0-123456789abc"
 VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
 
 [sources]
 CedarSim = {path = ".."}
 PSPModels = {path = "../models/PSPModels.jl"}
+VACASKModels = {path = "../models/VACASKModels.jl"}
 VADistillerModels = {path = "../models/VADistillerModels.jl"}
