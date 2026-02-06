@@ -41,7 +41,7 @@ const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=false))
 const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_ABDF2, SOLVER_RODAS3]
 # Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
 const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
-# Ring Oscillator (PSP103 MOSFETs): FBDF handles oscillation well with 5pF load caps
+# Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
 # Results storage

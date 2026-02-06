@@ -63,7 +63,7 @@ SpectreNetlistParser = {path = "SpectreNetlistParser.jl"}
 VerilogAParser = {path = "VerilogAParser.jl"}
 
 [extensions]
-CedarSimMakieExt = "Makie"
+# CedarSimMakieExt = "Makie"  # disabled: needs DAECompiler update
 CedarSimModelingToolkitExt = "ModelingToolkit"
 CedarSimReviseExt = "Revise"
 

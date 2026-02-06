@@ -4,6 +4,7 @@
 #
 # 9-stage ring oscillator using PSP103 MOSFET model.
 # Uses VACASKModels' precompiled nmos/pmos builders for fast startup.
+# Circuit matches ngspice/VACASK reference (no load caps, 10uA pulse).
 #
 # Usage: julia runme.jl
 #==============================================================================#
@@ -42,7 +43,7 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(solver; tspan=(0.0, 100e-9), dtmax=0.01e-9, maxiters=10_000_000)
+function run_benchmark(solver; tspan=(0.0, 1e-6), dtmax=0.05e-9, maxiters=100_000_000)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
     solver_name = nameof(typeof(solver))
@@ -53,13 +54,17 @@ function run_benchmark(solver; tspan=(0.0, 100e-9), dtmax=0.01e-9, maxiters=10_0
     println("  Solver:  $solver_name")
     println("  Init:    CedarTranOp (homotopy)")
     println("  dtmax:   $(dtmax*1e9) ns")
-    println("  tspan:   $(tspan[2]*1e9) ns")
+    println("  tspan:   $(tspan[2]*1e6) μs")
     println()
 
     # Run once to verify it works and get statistics
+    # force_dtmin + relaxed tolerances needed for no-cap circuit
+    # (PSP103 internal caps ~1fF cause sub-ps switching transitions)
     println("Running transient analysis...")
     sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver,
-                initializealg=init, maxiters=maxiters, dense=false)
+                initializealg=init, maxiters=maxiters, dense=false,
+                force_dtmin=true, abstol=1e-4, reltol=1e-2,
+                unstable_check=(dt,u,p,t)->false)
 
     println("\n=== Results ===")
     println("  Status:     $(sol.retcode)")
@@ -75,7 +80,9 @@ function run_benchmark(solver; tspan=(0.0, 100e-9), dtmax=0.01e-9, maxiters=10_0
         println("\nBenchmarking (3 samples)...")
         circuit = setup_simulation()
         bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver,
-                                 initializealg=$init, maxiters=$maxiters, dense=false) samples=3 evals=1 seconds=600
+                                 initializealg=$init, maxiters=$maxiters, dense=false,
+                                 force_dtmin=true, abstol=1e-4, reltol=1e-2,
+                                 unstable_check=(dt,u,p,t)->false) samples=3 evals=1 seconds=1800
         display(bench)
         println()
         return bench, sol
