@@ -1,7 +1,7 @@
 9 stage ring oscillator with PSP103 MOSFETs
 
-* Include full PSP103VA model cards (200+ params each, matching ngspice)
-.include "models.inc"
+* nmos/pmos subcircuit builders provided by VACASKModels (precompiled PSP103)
+* Circuit matches ngspice/VACASK reference (no load caps)
 
 * Inverter subcircuit
 .subckt inverter in out vdd vss w=1u l=0.2u pfact=2

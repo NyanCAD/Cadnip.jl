@@ -20,7 +20,7 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: ABDF2, Rodas3, ImplicitEuler
+using OrdinaryDiffEq: ABDF2, FBDF, Rodas3, ImplicitEuler
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
@@ -33,11 +33,16 @@ const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization()))
 const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization()))
 
+# Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
+const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=false))
+
 # Per-benchmark solver configurations
 # RC Circuit (linear): ImplicitEuler 2.6x faster than IDA (1.0s vs 2.6s)
 const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_ABDF2, SOLVER_RODAS3]
 # Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
 const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
+# Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
+const SOLVERS_RING = [SOLVER_FBDF_RING]
 
 # Results storage
 struct BenchmarkResult
@@ -231,13 +236,12 @@ function main()
         SOLVERS_NONLINEAR
     ))
 
-    # # Ring Oscillator - all solvers
-    # # TODO: Ring oscillators need special initialization (no stable DC equilibrium)
-    # # Currently times out - needs more work on oscillator initialization
-    # append!(results, run_benchmark_all_solvers(
-    #     "Ring Oscillator",
-    #     joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl")
-    # ))
+    # Ring Oscillator - IDA only (needs tuned settings for oscillation)
+    append!(results, run_benchmark_all_solvers(
+        "Ring Oscillator (PSP103)",
+        joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"),
+        SOLVERS_RING
+    ))
 
     # # C6288 Multiplier - all solvers
     # append!(results, run_benchmark_all_solvers(

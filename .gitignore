@@ -17,3 +17,8 @@ refs/
 # Downloaded reference documentation (not committed due to copyright)
 doc/*.pdf
 doc/*.txt
+
+# Generated benchmark data and plots
+benchmarks/vacask/ring/ngspice/ring_ngspice.csv
+benchmarks/vacask/ring/ngspice/psp103v4.osdi
+benchmarks/vacask/ring/cedarsim/ring_oscillator_waveforms.png

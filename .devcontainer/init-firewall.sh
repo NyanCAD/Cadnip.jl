@@ -73,22 +73,22 @@ for domain in \
     "marketplace.visualstudio.com" \
     "vscode.blob.core.windows.net" \
     "update.code.visualstudio.com" \
+    "install.julialang.org" \
+    "julialang-s3.julialang.org" \
     "pkg.julialang.org" \
-    "us-east.storage.juliahub.com" \
-    "kr.storage.juliahub.com" \
-    "eu-central.storage.juliahub.com" \
-    "in.storage.juliahub.com" \
-    "juliahub.com" \
-    "julialang.s3.amazonaws.com" \
-    "github-cloud.s3.amazonaws.com" \
-    "objects.githubusercontent.com" \
-    "codeberg.org" \
-    "fides.fe.uni-lj.si"; do
+    "us-east.pkg.julialang.org" \
+    "us-west.pkg.julialang.org" \
+    "eu-central.pkg.julialang.org" \
+    "au.pkg.julialang.org" \
+    "kr.pkg.julialang.org" \
+    "sg.pkg.julialang.org" \
+    "in.pkg.julialang.org" \
+    "storage.julialang.net"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
-        echo "WARNING: Failed to resolve $domain, skipping"
-        continue
+        echo "ERROR: Failed to resolve $domain"
+        exit 1
     fi
 
     while read -r ip; do
@@ -145,4 +145,12 @@ if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
     exit 1
 else
     echo "Firewall verification passed - able to reach https://api.github.com as expected"
+fi
+
+# Verify Julia Pkg server access
+if ! curl --connect-timeout 5 -sL https://pkg.julialang.org/registries >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - unable to reach https://pkg.julialang.org"
+    exit 1
+else
+    echo "Firewall verification passed - able to reach https://pkg.julialang.org as expected"
 fi
