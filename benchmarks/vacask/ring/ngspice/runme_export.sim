@@ -27,7 +27,9 @@ vdd vdd 0 1.2
   pre_osdi psp103v4.osdi
   tran 0.05n 1u 0 0.05n
   rusage all
-  wrdata ring_ngspice.csv v(1) v(2) v(3) v(4) v(5) v(6) v(7) v(8) v(9)
+  * Export voltages (cols 2,4,6,...,18) and VDD supply current (col 20)
+  * I(VDD) shows shoot-through spikes when both NMOS/PMOS conduct during switching
+  wrdata ring_ngspice.csv v(1) v(2) v(3) v(4) v(5) v(6) v(7) v(8) v(9) @vdd[i]
   quit
 .endc
 
