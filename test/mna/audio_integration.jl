@@ -536,3 +536,193 @@ end
     end
 
 end  # testset "Zero-Allocation Transient"
+
+#==============================================================================#
+# Real-Time Audio Performance Test
+#
+# Measures whether the transient simulation can run faster than real time,
+# which is the key requirement for real-time audio processing.
+#
+# The real-time factor (RTF) is defined as:
+#   RTF = simulated_time / wall_clock_time
+#
+# RTF > 1.0 means faster than real time (good for audio).
+#
+# Uses the CE amplifier with SIN source (time-dependent, nonlinear BJT),
+# which is representative of a real audio circuit.
+#
+# SOLVER COMPARISON (CE amplifier, 5-state system, 100ms sim):
+#
+# Variable timestep (adaptive, zero-allocation):
+#   Rodas5P  reltol=1e-4  →  ~80x RTF, ~230 steps (highest throughput)
+#   QNDF     reltol=1e-4  →  ~12x RTF, ~2000 steps
+#   Rodas5P  reltol=1e-5  →  ~33x RTF, ~700 steps
+#
+# Fixed timestep (zero-allocation, one sample per step):
+#   Trapezoid  48kHz  →  ~12x RTF, 4800 steps
+#   Trapezoid  96kHz  →  ~6x RTF, 9600 steps
+#   Trapezoid 192kHz  →  ~4x RTF, 19200 steps
+#
+# For real-time audio rendering at 48kHz:
+# - Trapezoid at dt=1/48000 produces one output sample per solver step
+# - Variable-step solvers can interpolate output at any sample rate
+# - Both approaches are zero-allocation and faster than real time
+#==============================================================================#
+
+using OrdinaryDiffEq: Rodas5P, Trapezoid
+
+"""
+    measure_rtf(prob, solver, sim_duration; kwargs...) -> NamedTuple
+
+Run a transient simulation and measure the real-time factor.
+Returns (rtf, steps, t_wall, valid).
+"""
+function measure_rtf(prob, solver, sim_duration; warmup_steps=5000, kwargs...)
+    integrator = init(prob, solver;
+        save_on=false,
+        dense=false,
+        maxiters=100_000_000,
+        initializealg=MNA.CedarTranOp(),
+        kwargs...)
+
+    # JIT warmup
+    for _ in 1:warmup_steps
+        MNA.blind_step!(integrator)
+    end
+
+    # Reset and time the full simulation
+    reinit!(integrator, prob.u0)
+    steps = 0
+    t_start = time_ns()
+    while integrator.t < sim_duration
+        MNA.blind_step!(integrator)
+        steps += 1
+    end
+    t_wall = (time_ns() - t_start) / 1e9
+
+    rtf = sim_duration / t_wall
+    valid = all(isfinite, integrator.u)
+
+    return (; rtf, steps, t_wall, valid)
+end
+
+@testset "Real-Time Audio Performance" begin
+
+    # Use the CE amplifier circuit (SIN source + BJT + RC load)
+    circuit = MNACircuit(ce_amplifier; vac=0.001, freq=1000.0)
+
+    # Simulate 100ms of audio (100 cycles at 1kHz) - enough to get stable timing
+    sim_duration = 0.1
+    tspan = (0.0, sim_duration)
+
+    # Create ODEProblem with dense matrices for zero-allocation stepping
+    prob = ODEProblem(circuit, tspan; dense=true)
+
+    # --- Rodas5P: Adaptive Rosenbrock, highest throughput ---
+    # Best choice when output sample rate is decoupled from solver steps.
+    # Takes ~230 large steps for 100ms, achieving ~80x real time.
+    # Audio-grade tolerances: reltol=1e-4 (~80dB accuracy, ample for 16-bit).
+    @testset "Rodas5P adaptive (variable timestep)" begin
+        result = measure_rtf(prob, Rodas5P(autodiff=false), sim_duration;
+            adaptive=true, dt=1e-7, abstol=1e-5, reltol=1e-4)
+
+        avg_dt = sim_duration / result.steps
+        @info "Rodas5P adaptive" rtf=result.rtf steps=result.steps avg_dt_μs=avg_dt*1e6 t_wall_ms=result.t_wall*1000
+        @test result.valid
+        @test result.rtf > 1.0
+    end
+
+    # --- Trapezoid: Fixed timestep at 48kHz, one sample per step ---
+    # Natural choice for real-time audio: each solver step produces one output sample.
+    # A-stable, second-order accurate, zero-allocation.
+    @testset "Trapezoid fixed 48kHz (one sample per step)" begin
+        sample_rate = 48000.0
+        dt = 1.0 / sample_rate
+
+        result = measure_rtf(prob, Trapezoid(autodiff=false), sim_duration;
+            adaptive=false, dt=dt, abstol=1e-5, reltol=1e-4)
+
+        expected_steps = round(Int, sim_duration * sample_rate)
+        @info "Trapezoid 48kHz" rtf=result.rtf steps=result.steps expected_steps t_wall_ms=result.t_wall*1000
+        @test result.valid
+        @test result.rtf > 1.0
+        @test result.steps ≈ expected_steps atol=2
+    end
+
+    # --- Trapezoid: Fixed timestep at 96kHz ---
+    @testset "Trapezoid fixed 96kHz" begin
+        sample_rate = 96000.0
+        dt = 1.0 / sample_rate
+
+        result = measure_rtf(prob, Trapezoid(autodiff=false), sim_duration;
+            adaptive=false, dt=dt, abstol=1e-5, reltol=1e-4)
+
+        @info "Trapezoid 96kHz" rtf=result.rtf steps=result.steps t_wall_ms=result.t_wall*1000
+        @test result.valid
+        @test result.rtf > 1.0
+    end
+
+    # --- Zero allocation verification ---
+    @testset "Zero allocation (Trapezoid 48kHz)" begin
+        dt = 1.0 / 48000.0
+        integrator = init(prob, Trapezoid(autodiff=false);
+            adaptive=false, dt=dt,
+            save_on=false, dense=false,
+            maxiters=100_000_000,
+            abstol=1e-5, reltol=1e-4,
+            initializealg=MNA.CedarTranOp())
+
+        allocs = measure_allocations(; warmup=1000, iters=10000) do
+            MNA.blind_step!(integrator)
+        end
+        @test allocs == 0
+        @info "Trapezoid 48kHz: $(allocs) bytes/step"
+    end
+
+    @testset "Zero allocation (Rodas5P adaptive)" begin
+        integrator = init(prob, Rodas5P(autodiff=false);
+            adaptive=true, dt=1e-7,
+            save_on=false, dense=false,
+            maxiters=100_000_000,
+            abstol=1e-5, reltol=1e-4,
+            initializealg=MNA.CedarTranOp())
+
+        allocs = measure_allocations(; warmup=1000, iters=10000) do
+            MNA.blind_step!(integrator)
+        end
+        @test allocs == 0
+        @info "Rodas5P adaptive: $(allocs) bytes/step"
+    end
+
+    # --- Solution quality: verify gain matches expected amplifier behavior ---
+    @testset "Solution quality (Trapezoid 48kHz)" begin
+        dt = 1.0 / 48000.0
+        sol = tran!(circuit, (0.0, 0.01); solver=Trapezoid(autodiff=false),
+            adaptive=false, dt=dt, abstol=1e-5, reltol=1e-4)
+        @test sol.retcode == ReturnCode.Success
+
+        sys = assemble!(circuit)
+        acc = MNASolutionAccessor(sol, sys)
+
+        # Measure gain in last 2 cycles (after initial transient settles)
+        freq = 1000.0
+        period = 1.0 / freq
+        times = range(8*period, 10*period; length=200)
+        V_coll = [voltage(acc, :coll, t) for t in times]
+        V_base = [voltage(acc, :base, t) for t in times]
+
+        Vout_pp = maximum(V_coll) - minimum(V_coll)
+        Vin_pp = maximum(V_base) - minimum(V_base)
+        gain = Vout_pp / Vin_pp
+
+        # CE amplifier gain ≈ gm*Rc ≈ (Ic/Vt)*Rc
+        # With Ic ≈ 1.9mA, Vt=25mV, Rc=4.7k: gain ≈ 357
+        @info "Trapezoid 48kHz gain" gain Vout_pp Vin_pp
+        @test gain > 100.0
+        @test gain < 1000.0
+
+        # Input amplitude should be close to expected 2mV p-p
+        @test isapprox(Vin_pp, 0.002; rtol=0.15)
+    end
+
+end  # testset "Real-Time Audio Performance"
