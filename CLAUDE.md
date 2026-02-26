@@ -22,17 +22,18 @@ When running in gVisor-sandboxed environment (check with `uname -r` showing `run
   - Set as default: `~/.juliaup/bin/juliaup default 1.11`
   - Use `~/.juliaup/bin/julia` to run Julia (full path required)
 - **Use Julia 1.11** - more stable in sandbox environment
-  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads in gVisor
+  - Julia 1.12 (tested through 1.12.5) segfaults during precompilation of VA model packages in gVisor
 - **Memory limited** - large VA model compilations (PSP103VA with 200+ params) may OOM
-- **Precompilation issues** - may need to disable compile workloads
-
-**Fix for precompilation segfaults:** Create `test/LocalPreferences.toml`:
+- **Precompilation segfaults** - `@compile_workload` blocks in PSPModels, VADistillerModels, and VACASKModels all crash with signal 11 on Julia 1.12 in gVisor. Fix by creating `test/LocalPreferences.toml`:
 
 ```toml
 [PSPModels]
 precompile_workload = false
 
 [VADistillerModels]
+precompile_workload = false
+
+[VACASKModels]
 precompile_workload = false
 ```
 
