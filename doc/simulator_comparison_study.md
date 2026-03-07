@@ -359,7 +359,104 @@ Most features CAN be ported in weeks (not months), but the estimates should be 2
 
 ---
 
-## 5. Deeper Analysis: Solver Quality Matters
+## 5. Companion Model vs Mass Matrix: Reactive Device Formulations
+
+This is a fundamental design choice with real consequences for accuracy and stiffness.
+
+### Background: How SPICE Handles ddt(Q(V))
+
+When a device has a reactive contribution `I = ddt(Q(V))` — like a junction capacitor where `Q` is a nonlinear function of voltage — there are two ways to handle it:
+
+**Companion Model (ngspice, VAJAX, Circulax):**
+Discretize `ddt(Q)` inside the device stamp using the integration method. For backward Euler:
+```
+I_cap = (Q(V_n+1) - Q(V_n)) / dt
+```
+The device returns `f_resist` (DC currents) and `f_react` (charge contributions) separately. The solver combines them: `residual = f_resist + c0*Q_new + c1*Q_prev + ...`. The system is a nonlinear algebraic equation at each timestep — NOT a DAE. All states are node voltages. Charges are "hidden" inside the companion model.
+
+This is what VAJAX does (`integration.py`):
+```python
+# dQ/dt = c0 * Q_new + c1 * Q_prev + d1 * dQdt_prev + c2 * Q_prev2
+dQdt = coeffs.c0 * Q_new + coeffs.c1 * Q_prev
+```
+
+And Circulax (`transient.py`):
+```python
+residual = total_f + (total_q - q_prev) / dt  # BE discretization
+j_eff = df_l + (dq_l / dt)  # Effective Jacobian
+```
+
+Both evaluate Q(V) at each Newton iteration, compute the companion current, and add it to the residual. The integration coefficients are baked into the system.
+
+**Mass Matrix / Charge Formulation (Cadnip):**
+Keep the charge as an explicit state variable. The system becomes a DAE:
+```
+C * dx/dt + G*x = b    (mass matrix ODE)
+```
+where `C` is the mass matrix (capacitance) and `x` includes both voltages AND charge states.
+
+For **constant** capacitors, `C` is constant and this is straightforward — the ODE solver (IDA, Rosenbrock) handles the time integration internally.
+
+For **voltage-dependent** capacitors (junction caps, MOSFET gate charge), Cadnip does something clever:
+
+### Cadnip's Charge State Approach
+
+Cadnip detects voltage-dependent capacitors via multi-pass evaluation:
+
+```julia
+# build_with_detection(): Run builder 5 times with random x
+# Compare Q/V ratios - if they differ, capacitance is V-dependent
+for pass in 1:N_DETECTION_PASSES
+    x = random_operating_point()
+    builder(params, spec, 0.0; x=x, ctx=ctx)
+    # detect_or_cached!() compares Q/V ratios across passes
+end
+```
+
+When a V-dependent cap is detected, it's reformulated as a charge state variable:
+
+```julia
+# stamp_charge_state!(): Add q as explicit state with constant mass entry
+# Instead of: C(V)*dV/dt (V-dependent mass matrix)
+# Reformulate as:
+#   dq/dt = I          (constant mass entry = 1/CHARGE_SCALE)
+#   q = Q(V)           (algebraic constraint, Newton-solved)
+```
+
+This adds an extra state variable per voltage-dependent capacitor, but the mass matrix `C` remains **constant** — critical for Rosenbrock methods which factor `(I - γ*dt*J)` once per step assuming constant mass.
+
+The charge is scaled by `CHARGE_SCALE = 1e12` to improve Jacobian conditioning (charges are O(1e-12), voltages are O(1)).
+
+### Trade-offs
+
+| Aspect | Companion Model (VAJAX, Circulax) | Mass Matrix + Charge States (Cadnip) |
+|---|---|---|
+| **System size** | N (node voltages only) | N + K (voltages + charge states for V-dep caps) |
+| **DAE index** | Index-0 (algebraic at each step) | Index-1 DAE (or semi-explicit ODE with mass matrix) |
+| **Error control on charges** | None — charges are internal, solver only controls voltage error | Full — charge states are solver unknowns with their own error tolerances |
+| **Higher-order methods** | Limited — must manually implement BE/Trap/Gear2 with Q history | Free — any ODE/DAE solver works (IDA, Rosenbrock, Radau, ...) |
+| **Stiffness** | Charge dynamics don't see the stiff solver directly | Adding fast charge states can increase stiffness ratio |
+| **V-dep cap accuracy** | Good with small enough dt; no error estimate on charge | Charge error controlled by solver tolerances |
+| **Implementation complexity** | Simple — devices return (f, Q), solver combines | Complex — multi-pass detection, charge scaling, index analysis |
+| **GPU compatibility** | Better — fixed system size, no dynamic state allocation | Harder — system size varies with V-dep cap count |
+
+### Why This Matters for the Comparison
+
+**VAJAX and Circulax** use the same approach as ngspice: companion model with the integration baked into the residual. This is simpler, GPU-friendly, and well-understood. But it means:
+- Error control applies only to voltages, not charges
+- You're locked to whatever integration methods you implement manually
+- No free lunch from solver library advances
+
+**Cadnip** gets access to IDA's variable-order BDF and Rosenbrock methods *because* it formulates the problem as a proper ODE/DAE with constant mass matrix. The charge state approach is the price of admission. But:
+- The detection is heuristic (multi-pass Q/V ratio comparison)
+- Extra states increase system size and potentially stiffness
+- It's more complex to implement and debug
+
+**For the unified project**, this is a real design decision, not just an implementation detail. The companion model is the pragmatic choice for GPU work and compatibility with custom solvers. The mass matrix formulation is the theoretically cleaner choice that enables better solver integration. A merged project could support both: companion model for JAX/GPU path, mass matrix for Diffrax/library-solver path.
+
+---
+
+## 7. Deeper Analysis: Solver Quality Matters
 
 Your point about VAJAX using custom solvers deserves emphasis. Here's why this matters:
 
@@ -391,7 +488,7 @@ Option 2 seems most practical: use VAJAX's MNA builder + OpenVAF device evaluati
 
 ---
 
-## 6. The OpenVAF Question
+## 8. The OpenVAF Question
 
 OpenVAF integration is the critical differentiator. Without it:
 - You're limited to hand-written device models (Circulax's square-law MOSFET, Ebers-Moll BJT)
@@ -405,11 +502,11 @@ Cadnip's custom VA codegen is a heroic effort but hits structural limits:
 
 **Integrating OpenVAF into Cadnip** (replacing custom codegen) would solve the PSP103 problem and give access to all validated models. The cost is needing Julia↔Rust FFI (via CBinding.jl or similar). This is real work but bounded.
 
-**Integrating OpenVAF into Circulax** is simpler than it first appears — `openvaf_jax` is a self-contained module that could be imported as a library. The work is writing an adapter between OpenVAF's device function signature and Circulax's `@component` interface (see Section 4).
+**Integrating OpenVAF into Circulax** is simpler than it first appears — `openvaf_jax` is a self-contained module that could be imported as a library. The work is writing an adapter between OpenVAF's device function signature and Circulax's `@component` interface (see Section 4). The deeper question is whether Circulax should also adopt the companion model pattern to match OpenVAF's resist/react output format (see Section 5).
 
 ---
 
-## 7. The GPU Question (Honest Assessment)
+## 9. The GPU Question (Honest Assessment)
 
 Your pushback is fair. Let me be precise:
 
@@ -421,7 +518,7 @@ Your pushback is fair. Let me be precise:
 
 ---
 
-## 8. Revised Recommendation
+## 10. Revised Recommendation
 
 Rather than picking a winner, here's what each project should contribute to a unified effort, based on **actual demonstrated strengths** not potential:
 
@@ -475,7 +572,7 @@ The decision should come down to:
 
 ---
 
-## 9. A Pragmatic Middle Path
+## 11. A Pragmatic Middle Path
 
 Rather than "pick one core and port everything," consider:
 
@@ -490,7 +587,7 @@ Each simulator keeps its own solver/engine but shares the hard-to-build infrastr
 
 ---
 
-## 10. Summary
+## 12. Summary
 
 The first version of this study over-weighted VAJAX based on commit counts and LOC. Here's the corrected picture:
 
