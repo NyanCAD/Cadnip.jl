@@ -27,7 +27,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | **GMIN stepping** | Yes (exponential backoff, max 20 steps) | Yes (1e-3 → 1e-13, adaptive) | No |
 | **Source stepping** | Yes (max 50 steps) | Yes (0→100%, with GMIN fallback) | No |
 | **Homotopy chain** | Newton → GMIN → Source | gdev → gshunt → src (configurable) | None |
-| **Transient solver** | Sundials IDA (DAE), Rosenbrock (ODE) via DifferentialEquations.jl | Custom BE/Trap/Gear2 (2nd order max) | Backward Euler only (despite Diffrax having more) |
+| **Transient solver** | Sundials IDA (DAE), Rosenbrock (ODE) via DifferentialEquations.jl | Custom BE/Trap/Gear2 (2nd order max) | Backward Euler only (Diffrax has more but lacks mass matrix support — see Section 6) |
 | **Adaptive timestepping** | IDA's built-in (production-grade) | Custom LTE-based, polynomial predictor (2nd order) | PIDController via Diffrax |
 | **Higher-order methods** | Rodas5P (5th order Rosenbrock), IDA (variable order BDF) | Gear2 max (2nd order) | BE only (1st order) |
 | **AC small-signal** | Yes (descriptor state-space, frequency sweep) | Yes (linearization + sweep) | No |
@@ -116,7 +116,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 
 | Gap | Effort | Notes |
 |---|---|---|
-| Better transient solvers | **Large** | Current custom BE/Trap/Gear2 is limited to 2nd order. Options: (a) contribute higher-order methods to VAJAX, (b) integrate Diffrax as alternative backend, (c) port DifferentialEquations.jl solvers. Option (b) is most practical — Diffrax already has implicit RK methods. |
+| Better transient solvers | **Large** | Current custom BE/Trap/Gear2 is limited to 2nd order. Options: (a) extend BDF to order 3-5 in VAJAX's custom solver (reimplementing IDA), (b) integrate Diffrax — but Diffrax lacks mass matrix support (Section 6), so this only helps if mass matrix is contributed upstream first, (c) port DifferentialEquations.jl solvers to JAX. Option (a) is most practical but means maintaining a custom solver indefinitely. |
 | Photonic simulation | **Medium** | Port Circulax's S-param→Y-matrix transform, complex-valued MNA assembly, and photonic component library. The three-layer architecture maps cleanly. |
 | SPICE/Spectre parsing | **Medium** | Has ngspice converter already. Could improve it or integrate Cadnip's parser as a standalone frontend. |
 | Controlled sources (VCVS, CCCS, etc.) | **Small-Medium** | Listed as TODO in VAJAX. Cadnip and Circulax both have these. |
@@ -139,7 +139,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | AC analysis | **Medium** | Standard linearization + frequency sweep. Well-understood algorithm. |
 | Noise analysis | **Medium-Large** | Requires per-device noise models, correlation matrix, spectral density computation. |
 | SPICE netlist parser | **Large** | Could use Cadnip's parser as standalone tool generating SAX-format output, or write a new one. |
-| Unlock Diffrax solvers | **Small** | Currently locked to BE — should be straightforward to expose Diffrax's Kvaerno/RadauIIA methods. |
+| Unlock Diffrax solvers | **Large — blocked upstream** | Currently locked to BE. Diffrax has NO native mass matrix / DAE support (see Section 6). The only workaround is a user-contributed ImplicitEuler-only hack ([diffrax#710](https://github.com/patrick-kidger/diffrax/issues/710)). Extending to Kvaerno/RadauIIA requires either contributing mass matrix support to Diffrax (significant upstream effort across all implicit solver types) or reimplementing each solver from scratch. This is NOT a small engineering task. |
 | Scale to large circuits | **Unknown** | The sparse infrastructure exists (KLU, BiCGStab) but has never been tested beyond ~10 nodes. May need significant work. |
 | Subcircuit hierarchy | **Medium** | No .subckt support. |
 | Parameter sweeps | **Small** | Just engineering, no algorithmic challenge. |
@@ -470,6 +470,78 @@ The charge is scaled by `CHARGE_SCALE = 1e12` to improve Jacobian conditioning (
 
 ---
 
+## 6. The Diffrax Mass Matrix Barrier: Why JAX Simulators Are Locked to BDF Methods
+
+A critical finding that affects both VAJAX and Circulax: **Diffrax has no native mass matrix or DAE support**, and adding it is not a small task. This has direct consequences for any attempt to move beyond basic BDF methods in the JAX ecosystem.
+
+### The Problem
+
+Circuit simulation produces systems of the form `C * dx/dt = f(x, t)` where `C` is a (possibly singular) mass matrix. This is a differential-algebraic equation (DAE). To use a solver library's built-in implicit methods (Kvaerno, Radau, Rosenbrock, etc.), the library must understand mass matrices — it can't just solve `dx/dt = f(x, t)`.
+
+Diffrax's implicit solvers (`ImplicitEuler`, `Kvaerno3`, `Kvaerno4`, `Kvaerno5`) solve standard ODEs: `dy/dt = f(t, y)`. They do not accept a mass matrix. You cannot simply invert `C` to get `dx/dt = C^{-1} * f(x, t)` because `C` is singular in MNA systems (nodes without reactive devices have zero rows in `C`).
+
+### Evidence: diffrax#710
+
+[GitHub Issue #710](https://github.com/patrick-kidger/diffrax/issues/710) (opened December 2025) documents a user-contributed workaround for mass matrix support. Key findings:
+
+1. **The workaround only covers ImplicitEuler** — the simplest possible implicit method, 1st order. The author explicitly states: *"I don't have the bandwidth/time/knowledge to make this work for general cases (e.g., DAEs, IRK/DIRK/SDIRK/ESDIRK solvers, etc)"*
+
+2. **The maintainer's response** (Patrick Kidger): *"Very nice! Thankyou for writing this down – this will be an excellent example to share for solving with mass matrices."* — treating it as documentation, not a roadmap item. No commitment to native support.
+
+3. **The approach requires per-solver reimplementation.** The workaround modifies `_implicit_relation` inside a custom solver subclass. Each solver type (SDIRK, ESDIRK, fully implicit RK) has a different `_implicit_relation` structure. There is no generic hook to inject a mass matrix.
+
+4. **Users must pass the mass transform via the `args` tuple** — a convention, not an API. This means no type safety, no solver-level error control on mass matrix states, and no integration with Diffrax's adaptive stepping logic.
+
+### What This Means for Each JAX Simulator
+
+**Circulax** already subclasses `diffrax.AbstractSolver` with a custom `VectorizedTransientSolver` that implements BE with companion model. It gains nothing from Diffrax's solver suite — the study previously estimated "Unlock Diffrax solvers: Small effort" but this is wrong. To use Kvaerno3/4/5 or RadauIIA from Diffrax for circuit simulation, you would need to:
+
+1. Contribute mass matrix support to Diffrax itself (touching the `_implicit_relation` of every implicit solver — `ImplicitEuler`, `Kvaerno3`, `Kvaerno4`, `Kvaerno5`, plus the abstract base), OR
+2. Fork each solver into a mass-matrix variant (multiplying maintenance burden), OR
+3. Stay on companion model and manually extend BDF order (reimplementing what IDA does, but in JAX)
+
+None of these are small tasks. Option 1 requires upstream buy-in that doesn't appear forthcoming. Option 2 creates a maintenance fork. Option 3 means building your own solver library.
+
+**VAJAX** doesn't use Diffrax at all (custom `lax.while_loop` solver), but the same barrier applies if anyone suggests "just use Diffrax for better solvers." The suggestion in Section 10 Path A ("swap VAJAX's custom transient solver for Diffrax") would NOT unlock higher-order methods — it would just replace one BE-equivalent with another unless Diffrax adds mass matrix support.
+
+### The Broader JAX Ecosystem Gap
+
+This is not just a Diffrax limitation. The JAX scientific computing ecosystem lacks a general-purpose DAE solver equivalent to Sundials IDA or DifferentialEquations.jl. The options are:
+
+| Library | Mass matrix / DAE support | Status |
+|---|---|---|
+| **Diffrax** | No. User workaround for ImplicitEuler only (issue #710) | No plans for native support |
+| **jax.experimental.ode** | No. Forward Euler / Dormand-Prince only (explicit methods) | Not suitable for stiff circuits |
+| **Sundials via JAX** | No JAX-compatible wrapper exists | Would lose AD/JIT benefits |
+| **Custom (VAJAX)** | Yes, via companion model (BDF1-2) | Limited to what you implement manually |
+
+**Compare with the Julia ecosystem:**
+- DifferentialEquations.jl has native mass matrix support across 100+ solvers
+- `ODEProblem(f, u0, tspan; mass_matrix=M)` — one keyword argument
+- Works with IDA (variable-order BDF 1-5), Rosenbrock (Rodas5P), Radau, SDIRK, etc.
+- Full error control, automatic stiffness detection, order selection
+
+This is a **structural advantage** of the Julia/SciML ecosystem for circuit simulation, not just a convenience difference. In Julia, supporting a new solver method is one line of code. In JAX, it requires either contributing upstream to Diffrax (uncertain timeline) or building solver infrastructure from scratch.
+
+### Implications for Higher-Order Methods
+
+The companion model approach (used by both JAX simulators) naturally supports **only multistep methods** (BDF family):
+
+| Method family | Companion model feasibility | Mass matrix feasibility |
+|---|---|---|
+| **BDF 1-2** (BE, Trap) | Works — current state of VAJAX | Works — current state of Cadnip |
+| **BDF 3-5** | Extend coefficients + history. Straightforward but must implement manually | Already available via IDA |
+| **SDIRK/ESDIRK** (Kvaerno) | Each stage resembles BE with modified coefficients. Possible but complex | Works directly (if solver supports mass matrix) |
+| **Fully implicit RK** (Radau) | All stages coupled — system size multiplied by stage count. Impractical with companion model | Works directly |
+| **Rosenbrock** | Incompatible — needs explicit `M*y'` form | Works directly |
+| **Variable-order adaptive** | Must implement Nordsieck vector or equivalent. Significant effort | Handled by solver library (IDA) |
+
+The practical ceiling for companion model in JAX is **BDF5 with variable timestep** — equivalent to reimplementing IDA in JAX. This is doable but represents months of careful numerical work, and the result would be less tested than Sundials IDA (which has decades of production use).
+
+For methods beyond the BDF family (Rosenbrock, Radau, SDIRK), the JAX ecosystem currently offers no path. Diffrax has the solver implementations but lacks the mass matrix support to use them for circuits. This is a real architectural barrier, not a missing feature that could be added in a weekend.
+
+---
+
 ## 7. Deeper Analysis: Solver Quality Matters
 
 Your point about VAJAX using custom solvers deserves emphasis. Here's why this matters:
@@ -616,6 +688,6 @@ The first version of this study over-weighted VAJAX based on commit counts and L
 | Netlist parsing | **Cadnip** | Full SPICE + Spectre parser |
 | Convergence robustness | **Cadnip** ≈ VAJAX | Both have GMIN + source stepping; Cadnip also has pseudo-transient init |
 | Scalability (tested) | **VAJAX** | Only one tested beyond ~100 nodes |
-| Solver ecosystem leverage | **Cadnip** > Circulax > VAJAX | DiffEq.jl > Diffrax (underused) > custom from scratch |
+| Solver ecosystem leverage | **Cadnip** > Circulax > VAJAX | DiffEq.jl (native mass matrix) > Diffrax (no mass matrix — Section 6) > custom from scratch |
 
 There is no clear winner. The "right" choice depends on priorities, and the most productive collaboration might be sharing infrastructure rather than forcing a single core.
