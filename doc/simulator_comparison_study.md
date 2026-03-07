@@ -169,61 +169,193 @@ What matters is: **what actually works, what's actually tested, and what would n
 
 ---
 
-## 4. Architectural Portability: VAJAX ↔ Circulax
+## 4. Architectural Portability: VAJAX ↔ Circulax (Code-Level Comparison)
 
-A critical question: since both VAJAX and Circulax are Python/JAX MNA simulators, how much work is porting features between them — really?
+A critical question: since both VAJAX and Circulax are Python/JAX MNA simulators, how much work is porting features between them — really? Having read the actual source code of both, here's what they look like inside.
 
-### The MNA core is structurally identical
+### Device Interface: Different Abstractions, Same Shape
 
-MNA is MNA. Both simulators do the same thing:
-1. Assemble G, C, b in COO sparse format by iterating over devices
-2. Each device stamps conductance/capacitance/current at (i,j) positions
-3. Convert to CSR/CSC, solve `(G + sC)x = b`
-4. Newton-Raphson: linearize nonlinear devices around current x, rebuild G/b, re-solve
+**Circulax** uses a `@component` decorator that compiles a physics function into an Equinox module:
 
-The stamp patterns are textbook. A resistor stamps `1/R` at `(p,p)`, `(p,n)`, `(n,p)`, `(n,n)` in all three projects. A voltage source adds a current variable. The data structures (sparse COO → compressed sparse, RHS vector) are the same JAX arrays.
+```python
+# circulax/components/base_component.py
+@component(ports=("p1", "p2"))
+def Resistor(signals: Signals, s: States, R: float = 1.0):
+    i = (signals.p1 - signals.p2) / R
+    return {"p1": i, "p2": -i}, {}  # f_dict, q_dict
 
-### What differs (and what doesn't)
+# The decorator generates a solver-facing function:
+#   _fast_physics(vars_vec, params, t) -> (f_vec, q_vec)
+```
+
+**VAJAX** uses OpenVAF-compiled functions via openvaf_jax:
+
+```python
+# vajax/devices/verilog_a.py
+device = VerilogADevice.from_va_file("resistor.va")
+# Produces: vmapped_split_eval(shared_params, device_params, shared_cache,
+#           device_cache, simparams, limit_state)
+#   -> (res_resist, res_react, jac_resist, jac_react, ...)
+```
+
+**Key difference:** Circulax devices return `(f_vec, q_vec)` — the Jacobian is computed externally via `jax.jvp`. VAJAX's OpenVAF devices return both residuals AND Jacobian entries directly from the compiled model (OpenVAF computes analytic derivatives internally). This is more efficient but means the device interface is fundamentally different — VAJAX devices produce 9-tuple outputs with separate resist/react residual AND Jacobian arrays.
+
+### Assembly: Same Algorithm, Different Granularity
+
+**Circulax** (`solvers/assembly.py`) — clean, compact:
+
+```python
+# For each component group, vmap the physics + jvp:
+(f_l, q_l), (df_l, dq_l) = jax.vmap(
+    partial(_primal_and_jac_real, physics_at_t1)
+)(v_locs, group.params)
+total_f = total_f.at[group.eq_indices].add(f_l)
+total_q = total_q.at[group.eq_indices].add(q_l)
+j_eff = df_l + (dq_l / dt)  # Effective Jacobian for transient
+```
+
+Components are grouped by type into `ComponentGroup` objects with batched `var_indices`, `eq_indices`, and `params` — all stacked JAX arrays for efficient vmap. The Jacobian is dense per-group (shape `(n_instances, n_vars, n_vars)`), extracted as non-zero values.
+
+**VAJAX** (`analysis/mna_builder.py`) — more complex, handles two assembly modes:
+
+```python
+# COO mode: collect COO triples, assemble at end
+(batch_res_resist, batch_res_react, batch_jac_resist, batch_jac_react,
+ ...) = split_info["vmapped_split_eval"](
+    shared_params, device_params_updated, shared_cache, cache, simparams, ...)
+
+f_resist_parts.append(mask_coo_vector(res_idx, batch_res_resist.ravel()))
+j_resist_parts.append(mask_coo_matrix(jac_row_idx, jac_col_idx, batch_jac_resist.ravel()))
+
+# CSR direct mode: stamp directly into pre-allocated CSR array
+csr_data = csr_data.at[model_positions].add(batch_jac_resist.ravel() + integ_c0 * ...)
+```
+
+VAJAX also handles full MNA augmentation (branch currents for voltage sources) inline during assembly, which adds complexity.
+
+**Verdict:** The assembly is structurally similar — both vmap over batched component groups and scatter results into global arrays. But VAJAX carries significantly more complexity: separate resist/react channels, COO vs CSR mode switching, device limiting state, voltage source branch currents. This is not just style — it's needed for the features VAJAX supports (transient with reactive devices, large-circuit CSR optimization).
+
+### Transient Solver: Fundamentally Different Integration
+
+**Circulax** subclasses `diffrax.AbstractSolver`:
+
+```python
+# circulax/solvers/transient.py
+class VectorizedTransientSolver(AbstractSolver):
+    def step(self, terms, t0, t1, y0, args, solver_state, options):
+        # Newton loop via Optimistix fixed_point:
+        solver = optx.FixedPointIteration(rtol=1e-5, atol=1e-5)
+        sol = optx.fixed_point(newton_update_step, solver, y_pred, max_steps=20)
+        return y_next, y_error, dense_info, new_state, result
+
+# Used via Diffrax:
+diffrax.diffeqsolve(terms=term, solver=tsolver, t0=t0, t1=t1, ...)
+```
+
+**VAJAX** uses `jax.lax.while_loop` with custom adaptive stepping:
+
+```python
+# vajax/analysis/transient/full_mna.py
+# Custom NR with lax.while_loop, custom LTE-based adaptive timestep,
+# integration methods (BE/Trap/Gear2), polynomial predictor
+def _time_step_body(carry):
+    # ... 200+ lines of NR solve + timestep control + checkpointing
+    return new_carry
+
+result = lax.while_loop(lambda c: c.step < max_steps, _time_step_body, init_carry)
+```
+
+**Verdict:** These are *not* plug-compatible. Circulax uses Diffrax's solver interface (inheriting `AbstractSolver`), which gives it access to Diffrax's step-size controllers and interpolation. VAJAX has a completely custom time integration loop. Swapping one for the other is NOT just "wrap MNA as ODETerm" — it requires rethinking how NR convergence interacts with time-step control.
+
+### OpenVAF Integration: Deeper Coupling Than Expected
+
+`openvaf_jax` is NOT just "load .so, call function." It's a MIR-to-JAX transpiler:
+
+```python
+# openvaf_jax/codegen/function_builder.py
+class FunctionBuilder:
+    def __init__(self, mir_func: MIRFunction):
+        self.cfg = CFGAnalyzer(mir_func)      # Control flow graph analysis
+        self.ssa = SSAAnalyzer(mir_func, self.cfg)  # SSA form analysis
+```
+
+It parses OpenVAF's MIR (mid-level IR), analyzes control flow, resolves SSA phi nodes, does constant propagation, and generates Python/JAX AST nodes. The output is a JIT-compilable JAX function. This is a proper compiler backend, not a thin wrapper.
+
+The generated functions return a specific tuple structure that VAJAX's `mna_builder.py` expects:
+`(res_resist, res_react, jac_resist, jac_react, lim_rhs_resist, lim_rhs_react, noise_resist, noise_react, limit_state_out)`
+
+To use this in Circulax, you'd need an adapter that:
+1. Takes openvaf_jax's 9-tuple output
+2. Combines resist+react into `(f_vec, q_vec)` format
+3. Either passes through the Jacobian (bypassing Circulax's `jax.jvp` path) or discards it and lets Circulax re-derive it via AD
+
+Option 2 wastes the analytic Jacobian. Option 1 requires changes to Circulax's assembly loop to accept pre-computed Jacobians.
+
+### What Differs and What Doesn't (Corrected)
 
 | Aspect | VAJAX | Circulax | Portability |
 |---|---|---|---|
-| NR loop | `jax.lax.while_loop` (manual) | Optimistix (library) | Different API, same math |
-| Transient | Custom BE/Trap/Gear2 | Diffrax BE | Different, but both are JAX |
-| Device interface | Function: voltages → (I, Q) | `@component` decorator → same | Thin adapter |
-| Sparse format | `jax.experimental.sparse` | `jax.experimental.sparse` | **Same** |
-| AD | `jax.jacfwd`/`jax.jacrev` | `jax.jacfwd`/`jax.jacrev` | **Same** |
-| JIT | `@jax.jit` | `@eqx.filter_jit` (Equinox) | Compatible |
+| **Device output** | 9-tuple (resist/react residuals + Jacobians + noise + limiting) | 2-tuple `(f_vec, q_vec)`, Jacobian via AD | **Different** — adapter needed, design choice about Jacobian |
+| **Assembly** | COO or CSR direct stamping, resist/react separate | Dense per-group Jacobian blocks, single effective J | **Similar pattern** but VAJAX is more granular |
+| **NR loop** | `jax.lax.while_loop` (manual convergence check) | `optimistix.fixed_point` (library) | **Different API**, same math. Convergence criteria differ |
+| **Transient** | Custom BE/Trap/Gear2 + adaptive LTE + predictor | Diffrax `AbstractSolver` subclass (BE only) | **Fundamentally different** integration approaches |
+| **Component batching** | `jax.vmap` over device groups | `jax.vmap` over `ComponentGroup` | **Same pattern** |
+| **Sparse format** | COO → dense or CSR (with Spineax/UMFPACK) | Dense per-group → BCOO sparse via klujax | **Different** sparse strategies |
+| **Netlist** | Custom `.sim` parser + SPICE converter | SAX-compatible dicts + networkx connectivity | **Different** format, not interchangeable |
+| **Complex support** | Not in core solver | Full unrolled complex assembly (real/imag block format) | **Circulax only** — needed for photonics |
 
-### Porting effort (corrected estimates)
+### Porting Effort (Corrected with Code Evidence)
 
 **OpenVAF from VAJAX → Circulax:**
-`openvaf_jax` is a self-contained module (~4,500 LOC) that loads OpenVAF-compiled `.so` files and creates JAX-callable device functions: `(terminal_voltages, params) → (currents, charges)`. It doesn't depend on VAJAX's solver. To use it in Circulax, you need an adapter that maps OpenVAF output to Circulax's `@component` interface. Both sides are JAX pytrees.
-**Effort: 1-3 weeks, not months.** The adapter is mechanical — match function signatures, wrap in Equinox module.
+`openvaf_jax` IS self-contained (separate package, own `__init__.py`). But the integration is not trivial:
+- openvaf_jax generates functions returning 9-tuple with separate resist/react Jacobians
+- Circulax expects `(f_vec, q_vec)` with Jacobian computed via `jax.jvp`
+- Options: (a) adapter that discards openvaf Jacobians, re-derives via AD — wastes work but clean; (b) modify Circulax assembly to accept pre-computed Jacobians — more efficient but touches core loop
+- Must also handle: device parameter preparation, voltage-to-branch mapping, init/eval split, simparams, device limiting state
 
-**Diffrax from Circulax → VAJAX:**
-VAJAX's custom transient loop needs to be wrapped as a Diffrax `ODETerm(vector_field)` where `vector_field(t, y, args) → dy/dt`. This means expressing the MNA rebuild as a pure function (which it already is in JAX). The main subtlety is handling the mass matrix (C may be singular → DAE). Circulax already solved this pattern.
-**Effort: 1-2 weeks.** Well-defined refactor with a working reference implementation.
+**Effort: 2-4 weeks** for option (a), **4-6 weeks** for option (b). Not months, but not a weekend either.
+
+**Diffrax into VAJAX (replacing custom solver):**
+VAJAX's custom transient loop (`full_mna.py`) is deeply integrated:
+- Custom adaptive timestep with LTE control
+- Polynomial predictor (2nd order)
+- Force-accept after 5 rejects
+- Checkpoint intervals for GPU memory management
+- Integration method enum (BE/Trap/Gear2) with coefficients baked into the build_system function
+
+Replacing this with Diffrax means:
+- Wrapping `build_system` as a Diffrax-compatible vector field (the resist/react split complicates this)
+- Giving up VAJAX's checkpoint-based GPU memory management (Diffrax doesn't have this)
+- Mapping Diffrax's step controller to VAJAX's LTE-based control
+- The `integ_c0, integ_c1, integ_d1` coefficients that `build_system` takes as args are tied to the integration method — Diffrax handles this differently
+
+**Effort: 4-8 weeks.** The build_system interface is entangled with the integration method. This is a significant refactor, not a wrapper.
 
 **GMIN/source stepping:**
-These are ~100-200 lines of algorithm code each. Independent of framework — just wrap the NR solve in a loop that adjusts gmin/source scaling. The algorithm is identical in Cadnip and VAJAX.
-**Effort: days.** Literal copy-paste with minor API adaptation.
+VAJAX already has this (`analysis/homotopy.py`). Circulax doesn't.
 
-**Noise/AC/transfer function analysis:**
-Standard textbook algorithms operating on the assembled G, C, b matrices. Once you have the matrices (which all three produce), the analysis code is framework-independent.
-**Effort: 1-2 weeks each.** The hard part is per-device noise models, not the analysis framework.
+Porting to Circulax: VAJAX's homotopy wraps the NR solve in a loop, adjusting `gmin`/`gshunt`/`srcFact` parameters. This IS mostly algorithm-level code.
+
+**Effort: 1-2 weeks.** Need to add gmin/srcFact parameters to Circulax's component evaluation (currently not parameterized for this).
 
 ### What's genuinely hard to port
 
 | Task | Why it's actually hard |
 |---|---|
-| **VAJAX's GPU scaling** | Not just "run on GPU" — required solving JAX-specific sparse↔dense auto-switching, vmap over devices, memory layout optimization. This is engineering that took iteration and profiling. |
-| **VAJAX's validation suite** | Years of comparison against VACASK + ngspice. Can't be ported — must be re-run against any new codebase. |
-| **Cadnip's SPICE parser** | Written in Julia (~20K LOC). Would need rewriting in Python or calling via subprocess. Not portable. |
-| **Circulax's photonic models** | Domain expertise in photonic circuit theory (S-param → Y-matrix → complex MNA). The code is small but the physics knowledge behind it isn't trivial. |
+| **VAJAX's GPU scaling** | CSR direct stamping, Spineax/cuDSS GPU solver integration, checkpoint-based memory management, dense↔sparse auto-switching. This is ~2000 LOC of GPU-specific engineering. |
+| **VAJAX's validation suite** | Comparison infrastructure against VACASK + ngspice. Not code to port — it's a methodology and reference data. |
+| **Cadnip's SPICE parser** | Written in Julia (~20K LOC). Language barrier is real. |
+| **Circulax's complex MNA** | Unrolled real/imag block format for frequency-domain analysis. VAJAX would need this for photonic support. |
 
-### Bottom line
+### Bottom line (corrected)
 
-VAJAX and Circulax are more similar than different. Most features can be ported in weeks, not months. The previous estimates in this study were inflated by treating each project as a monolith. In reality, both use the same JAX primitives, the same sparse matrix types, and the same MNA algorithm. The barriers to collaboration are developer preferences and project direction, not architecture.
+VAJAX and Circulax are more similar than different at the *algorithm* level, but the *implementation* details matter more than I initially estimated. The key friction points are:
+
+1. **Device interface mismatch** — openvaf's 9-tuple with pre-computed Jacobians vs Circulax's AD-derived Jacobians. This is a design choice, not just a format difference.
+2. **Transient solver entanglement** — VAJAX's build_system takes integration coefficients as args, coupling the MNA assembly to the time integration method. Can't just swap the outer loop.
+3. **Sparse strategy difference** — VAJAX's COO/CSR with UMFPACK/Spineax vs Circulax's BCOO/klujax. Different sparse ecosystem choices.
+
+Most features CAN be ported in weeks (not months), but the estimates should be 2-6 weeks per feature, not days. The exception is GPU scaling work which is genuinely hard to replicate.
 
 ---
 
@@ -304,19 +436,19 @@ Rather than picking a winner, here's what each project should contribute to a un
 ### Three Viable Paths (All Require Real Work)
 
 **Path A: VAJAX + Diffrax solvers + photonics + better parsing**
-- Swap VAJAX's custom transient solver for Diffrax (1-2 weeks)
-- Port Circulax's photonic support (2-4 weeks)
+- Swap VAJAX's custom transient solver for Diffrax (4-8 weeks — build_system is entangled with integration method coefficients)
+- Port Circulax's photonic support including complex MNA (3-5 weeks)
 - Improve SPICE parsing (extend existing converter or integrate Cadnip's parser as frontend tool)
 - Keep OpenVAF + GPU as-is
-- **Estimated effort:** 1-2 months for Diffrax integration + photonics. Parsing is ongoing.
+- **Estimated effort:** 3-4 months for Diffrax integration + photonics. Parsing is ongoing.
 
 **Path B: Circulax + OpenVAF + convergence aids + scaling**
-- Import openvaf_jax as library, write adapter for `@component` interface (1-3 weeks)
-- Add GMIN/source stepping homotopy (days — copy algorithm from VAJAX)
-- Add AC + noise analysis (2-4 weeks)
-- Unlock Diffrax's higher-order solvers (days — currently stuck on BE)
+- Import openvaf_jax as library, write adapter for device interface (2-4 weeks — 9-tuple vs 2-tuple mismatch, Jacobian routing decision)
+- Add GMIN/source stepping homotopy (1-2 weeks — algorithm is portable, but need to parameterize component eval for gmin/srcFact)
+- Add AC + noise analysis (3-5 weeks)
+- Unlock Diffrax's higher-order solvers (1-2 weeks — currently stuck on BE, need to handle mass matrix for DAE)
 - Validate at scale (ongoing — requires running benchmark suite)
-- **Estimated effort:** 2-3 months. OpenVAF is weeks not months since openvaf_jax exists.
+- **Estimated effort:** 3-4 months. openvaf_jax is self-contained but integration touches core assembly loop.
 
 **Path C: Cadnip + OpenVAF + photonics**
 - Replace custom VA codegen with OpenVAF (via Rust FFI) — genuinely harder here due to Julia↔Rust FFI
