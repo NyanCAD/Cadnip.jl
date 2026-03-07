@@ -37,7 +37,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | **Corner/PVT sweeps** | Parameter sweeps (Product/Tandem/Serial) | Yes (dedicated corner analysis) | No (manual loop) |
 | **Oscillator init** | CedarUICOp pseudo-transient relaxation | Not mentioned | No |
 
-**Verdict on solvers:** Cadnip has the best solver *ecosystem* via DifferentialEquations.jl — IDA is a production-grade DAE solver used in industry, Rosenbrock methods are excellent for stiff circuits. VAJAX has the most analysis *types* but its custom transient solver is limited to 2nd order. Circulax underutilizes Diffrax (locked to BE despite having access to better methods).
+**Verdict on solvers:** Cadnip has the best solver *ecosystem* via DifferentialEquations.jl — IDA is a production-grade DAE solver used in industry, Rosenbrock methods are excellent for stiff circuits. VAJAX has the most analysis *types* but its custom transient solver is limited to 2nd order. Circulax is locked to BE — and contrary to first impressions, Diffrax's higher-order implicit solvers (Kvaerno3/4/5) are *not* usable for circuit simulation due to missing mass matrix / DAE support in the entire JAX ecosystem (see Section 6).
 
 ### 2.2 Verilog-A / Device Model Support
 
@@ -82,7 +82,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | **Language** | Julia | Python/JAX | Python/JAX |
 | **GPU** | Not currently, but Julia can compile to GPU (significant effort to eliminate allocations) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) |
 | **AD** | ForwardDiff (forward-mode, through entire solver) | JAX AD (forward + reverse). Less natural than Cadnip's for circuit-specific use | JAX AD (forward + reverse). Cleanest integration of the three |
-| **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (underutilized) |
+| **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (but Diffrax lacks mass matrix/DAE support — see Section 6) |
 | **ML integration** | Julia ML ecosystem (Flux, Lux) | JAX/Flax/Optax native | JAX/Flax/Optax native |
 | **Startup time** | Slow (Julia JIT compilation, minutes for first sim) | Fast | Fast |
 | **PyPI/package** | No | Yes (`pip install vajax`) | Yes (pixi) |
@@ -331,6 +331,8 @@ Replacing this with Diffrax means:
 
 **Effort: 4-8 weeks.** The build_system interface is entangled with the integration method. This is a significant refactor, not a wrapper.
 
+**Important caveat (see Section 6):** Even after this effort, Diffrax's higher-order implicit solvers (Kvaerno3/4/5) would NOT be usable for circuit simulation because Diffrax lacks mass matrix / DAE support. The swap would give VAJAX Diffrax's adaptive stepping infrastructure but not better integration methods. The more pragmatic path is extending VAJAX's existing BDF solver to higher orders.
+
 **GMIN/source stepping:**
 VAJAX already has this (`analysis/homotopy.py`). Circulax doesn't.
 
@@ -466,7 +468,7 @@ The charge is scaled by `CHARGE_SCALE = 1e12` to improve Jacobian conditioning (
 - Extra charge states increase system size and potentially stiffness
 - It's more complex to implement and debug
 
-**For the unified project**, this is a real design decision, not just an implementation detail. The companion model is the pragmatic choice for GPU work and compatibility with custom solvers. The mass matrix formulation is the theoretically cleaner choice that enables better solver integration. A merged project could support both: companion model for JAX/GPU path, mass matrix for Diffrax/library-solver path.
+**For the unified project**, this is a real design decision, not just an implementation detail. The companion model is the pragmatic choice for GPU work and the JAX ecosystem, where no library-solver DAE support exists (see Section 6). The mass matrix formulation is the theoretically cleaner choice that enables better solver integration — but currently only the Julia/DifferentialEquations.jl ecosystem can leverage it. A merged project could support both: companion model for JAX/GPU path (extending BDF order manually), mass matrix for Julia/DifferentialEquations.jl path (accessing IDA, Rosenbrock, etc. for free).
 
 ---
 
@@ -569,7 +571,7 @@ Keep the algebraic-at-each-timestep formulation, add BDF3-5 with variable step s
 
 **Circulax** already subclasses `diffrax.AbstractSolver` with a custom `VectorizedTransientSolver` that implements BE with companion model. It gains nothing from Diffrax's solver suite. To use Kvaerno3/4/5 from Diffrax for circuit simulation, you would need to contribute mass matrix support upstream (Option 1) — a large effort with uncertain acceptance.
 
-**VAJAX** doesn't use Diffrax at all (custom `lax.while_loop` solver). The suggestion in Section 10 Path A ("swap VAJAX's custom transient solver for Diffrax") would NOT unlock higher-order methods — it would just replace one BE-equivalent with another unless Diffrax adds mass matrix support. VAJAX's best path is Option 4: extend its existing custom BDF solver to higher orders.
+**VAJAX** doesn't use Diffrax at all (custom `lax.while_loop` solver), and switching to Diffrax would NOT unlock higher-order methods — it would just replace one BE-equivalent with another unless Diffrax adds mass matrix support. VAJAX's best path is Option 4: extend its existing custom BDF solver to higher orders.
 
 ### Comparison with Julia Ecosystem
 
@@ -622,16 +624,16 @@ Your point about VAJAX using custom solvers deserves emphasis. Here's why this m
 
 **Circulax via Diffrax:**
 - Currently only uses Backward Euler (1st order)
-- But Diffrax has Kvaerno3/4/5, RadauIIA, Tsit5, Dopri5
-- Unlocking these is straightforward engineering
-- Maintained by Patrick Kidger (well-respected in scientific ML)
+- Diffrax has Kvaerno3/4/5, Tsit5, Dopri5 — but these solve `dy/dt = f(t,y)`, not `M*dy/dt = f(t,y)`
+- Diffrax has no mass matrix or DAE support (see Section 6) — these solvers are unusable for circuit simulation
+- Maintained by Patrick Kidger (well-respected in scientific ML), but DAE support has been requested since 2022 with no progress
 
-**The gap:** VAJAX's custom solver works for its demonstrated use cases but is fundamentally less mature than IDA or even what Diffrax offers. If you want the solver quality Cadnip has, contributing it to VAJAX means either:
-1. Porting IDA-equivalent logic to JAX (very hard, JAX's functional constraints fight imperative solver algorithms)
-2. Integrating Diffrax into VAJAX (medium — rewrite the transient loop to use Diffrax's ODE interface)
-3. Contributing better methods to Diffrax itself (the Julia DifferentialEquations.jl team already has a pattern for this — Chris Rackauckas contributes to both ecosystems)
+**The gap:** VAJAX's custom solver works for its demonstrated use cases but is limited to 2nd order BDF. Diffrax's higher-order solvers exist but can't be used for circuits (Section 6). If you want the solver quality Cadnip has, the realistic options are:
+1. Extend VAJAX's custom BDF solver to orders 3-5 (most pragmatic — months of work, stays on companion model)
+2. Contribute mass matrix support to Diffrax upstream (2-4 months, uncertain acceptance — see Section 6)
+3. Write a standalone JAX DAE solver from scratch (4-8 months — reimplementing Sundials)
 
-Option 2 seems most practical: use VAJAX's MNA builder + OpenVAF device evaluation + homotopy, but swap the time integration to Diffrax.
+Option 1 is the most pragmatic: keep VAJAX's companion model approach and extend BDF order, which is exactly what traditional SPICE simulators do.
 
 ---
 
@@ -675,24 +677,24 @@ Rather than picking a winner, here's what each project should contribute to a un
 |---|---|---|
 | **VAJAX (Rob)** | OpenVAF→JAX pipeline, GPU MNA solver, large-circuit validation, noise/AC/HB/xfer analyses | OpenVAF integration is ~4,500 LOC of careful MIR→JAX translation. GPU solver required solving JAX-specific challenges (lax.while_loop NR, vmap device eval, sparse auto-switching). Years of validation work against VACASK + ngspice. |
 | **Cadnip (Pepijn)** | SPICE/Spectre parser (~20K LOC across two packages), DifferentialEquations.jl integration patterns, convergence aids, zero-allocation patterns | Parser covers multiple SPICE dialects + Spectre. The IDA/Rosenbrock integration with circuit-specific initialization (CedarDCOp, CedarTranOp, CedarUICOp) represents deep domain expertise. |
-| **Circulax (Chris)** | Photonic simulation, clean component API, Diffrax/Optimistix integration, SAX ecosystem bridge | Photonic circuit simulation (S-param→Y-matrix→complex MNA) is genuinely unique. The `@component` decorator pattern is the best API design of the three. Building on Diffrax/Optimistix rather than custom solvers is a strategic advantage. |
+| **Circulax (Chris)** | Photonic simulation, clean component API, Optimistix integration, SAX ecosystem bridge | Photonic circuit simulation (S-param→Y-matrix→complex MNA) is genuinely unique. The `@component` decorator pattern is the best API design of the three. Note: the Diffrax dependency provides less value than expected for circuit simulation due to missing mass matrix support (Section 6). |
 
 ### Three Viable Paths (All Require Real Work)
 
-**Path A: VAJAX + Diffrax solvers + photonics + better parsing**
-- Swap VAJAX's custom transient solver for Diffrax (4-8 weeks — build_system is entangled with integration method coefficients)
+**Path A: VAJAX + higher-order BDF + photonics + better parsing**
+- Extend VAJAX's custom BDF solver to orders 3-5 with variable step/order (1-3 months — Nordsieck vector, LTE-based order selection). Diffrax integration would NOT help here due to missing mass matrix support (Section 6).
 - Port Circulax's photonic support including complex MNA (3-5 weeks)
 - Improve SPICE parsing (extend existing converter or integrate Cadnip's parser as frontend tool)
 - Keep OpenVAF + GPU as-is
-- **Estimated effort:** 3-4 months for Diffrax integration + photonics. Parsing is ongoing.
+- **Estimated effort:** 3-5 months for solver extension + photonics. Parsing is ongoing.
 
 **Path B: Circulax + OpenVAF + convergence aids + scaling**
 - Import openvaf_jax as library, write adapter for device interface (2-4 weeks — 9-tuple vs 2-tuple mismatch, Jacobian routing decision)
 - Add GMIN/source stepping homotopy (1-2 weeks — algorithm is portable, but need to parameterize component eval for gmin/srcFact)
 - Add AC + noise analysis (3-5 weeks)
-- Unlock Diffrax's higher-order solvers (1-2 weeks — currently stuck on BE, need to handle mass matrix for DAE)
+- Higher-order transient: either extend companion model to BDF3-5 (1-3 months) or contribute mass matrix support to Diffrax upstream (2-4 months, uncertain acceptance — see Section 6). Diffrax's existing Kvaerno/Radau solvers are NOT usable for circuits without mass matrix support.
 - Validate at scale (ongoing — requires running benchmark suite)
-- **Estimated effort:** 3-4 months. openvaf_jax is self-contained but integration touches core assembly loop.
+- **Estimated effort:** 4-6 months. openvaf_jax is self-contained but integration touches core assembly loop. Solver improvement is a separate, significant effort.
 
 **Path C: Cadnip + OpenVAF + photonics**
 - Replace custom VA codegen with OpenVAF (via Rust FFI) — genuinely harder here due to Julia↔Rust FFI
@@ -709,7 +711,7 @@ The decision should come down to:
 
 2. **GPU priority:** If GPU acceleration for large circuits is a near-term priority, VAJAX is ahead. If it's a long-term goal, it's less decisive.
 
-3. **Solver quality priority:** If you want the best transient solvers *now*, Cadnip wins (IDA is hard to beat). If you're willing to invest in integrating Diffrax properly, Path A or B can get close.
+3. **Solver quality priority:** If you want the best transient solvers *now*, Cadnip wins (IDA is hard to beat). The JAX paths require building custom BDF3-5 solvers — Diffrax can't help here due to missing mass matrix support (Section 6). This is months of custom solver work for either JAX simulator.
 
 4. **OpenVAF:** This is non-negotiable for production use. VAJAX has it. The others would need to build or port it.
 
@@ -744,11 +746,11 @@ The first version of this study over-weighted VAJAX based on commit counts and L
 | Verilog-A / PDK models | **VAJAX** | OpenVAF with proper static analysis, validated at scale |
 | GPU acceleration | **VAJAX** | Actually working, tested to 133K nodes |
 | Analysis breadth | **VAJAX** | DC, AC, tran, noise, HB, xfer, corners |
-| Architecture & code quality | **Circulax** | Cleanest design, best use of library ecosystem |
+| Architecture & code quality | **Circulax** | Cleanest design, though Diffrax dependency provides less value than expected (Section 6) |
 | Photonic simulation | **Circulax** | Unique capability, no equivalent in others |
 | Netlist parsing | **Cadnip** | Full SPICE + Spectre parser |
 | Convergence robustness | **Cadnip** ≈ VAJAX | Both have GMIN + source stepping; Cadnip also has pseudo-transient init |
 | Scalability (tested) | **VAJAX** | Only one tested beyond ~100 nodes |
-| Solver ecosystem leverage | **Cadnip** > Circulax > VAJAX | DiffEq.jl (native mass matrix) > Diffrax (no mass matrix — Section 6) > custom from scratch |
+| Solver ecosystem leverage | **Cadnip** ≫ VAJAX ≈ Circulax | DiffEq.jl (native mass matrix, 100+ solvers) ≫ Diffrax ≈ custom (neither has mass matrix/DAE support — Section 6) |
 
 There is no clear winner. The "right" choice depends on priorities, and the most productive collaboration might be sharing infrastructure rather than forcing a single core.
