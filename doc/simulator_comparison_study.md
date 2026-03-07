@@ -64,7 +64,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Max scale tested | ~100s of nodes | ~133K nodes (mul64 on GPU) | ~10s of nodes |
 | Reference comparison | Against expected values | VACASK (C++) + ngspice | Against expected values |
 
-**Verdict on scale:** VAJAX is the only one that has been tested at serious circuit scale. The mul64 benchmark (266K MOSFETs, ~133K nodes) is genuinely impressive. Cadnip and Circulax are untested beyond small circuits.
+**Verdict on scale:** VAJAX is the only one that has been tested at serious circuit scale. The mul64 benchmark (266K MOSFETs, ~133K nodes) is genuinely impressive. Cadnip and Circulax are untested beyond small circuits. Circulax's lack of convergence aids (no GMIN stepping, no source stepping, no homotopy) is a particularly strong signal here — these are essential for any circuit with significant nonlinearity, and their absence implies the simulator hasn't been exercised on circuits where convergence is hard.
 
 ### 2.4 Netlist & Input Format Support
 
@@ -80,7 +80,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Aspect | Cadnip | VAJAX | Circulax |
 |---|---|---|---|
 | **Language** | Julia | Python/JAX | Python/JAX |
-| **GPU** | Not currently, but Julia can compile to GPU (significant effort to eliminate allocations) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) |
+| **GPU** | Two paths: (1) CuArray for large circuits (requires allocation-free solver loop), (2) EnsembleGPUKernel for massively parallel sweeps (more tractable — see Section 9) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) |
 | **AD** | ForwardDiff (forward-mode, through entire solver) | JAX AD (forward + reverse). Less natural than Cadnip's for circuit-specific use | JAX AD (forward + reverse). Cleanest integration of the three |
 | **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (but Diffrax lacks mass matrix/DAE support — see Section 6) |
 | **ML integration** | Julia ML ecosystem (Flux, Lux) | JAX/Flax/Optax native | JAX/Flax/Optax native |
@@ -145,7 +145,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Parameter sweeps | **Small** | Just engineering, no algorithmic challenge. |
 | Dense HB Jacobian | **Medium** | Current HB won't scale. Needs sparse HB formulation. |
 
-**Risk:** The OpenVAF integration is a massive effort and is the critical path to production models. Without VA support, you can't run real PDK models, which limits the simulator to educational/research use.
+**Risk:** The OpenVAF integration is a massive effort and is the critical path to production models. Without VA support, you can't run real PDK models, which limits the simulator to educational/research use. The absence of convergence aids (GMIN stepping, source stepping, homotopy) is also telling — these aren't optional features for production circuits. Any circuit with more than a handful of diodes or transistors will fail to converge without them. Their absence suggests Circulax has not yet been tested on circuits where convergence is non-trivial, which raises questions about what other production-readiness gaps may surface at scale.
 
 ### Path C: Cadnip as Core
 
@@ -156,7 +156,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Gap | Effort | Notes |
 |---|---|---|
 | OpenVAF integration | **Large** | Replace custom VA codegen with OpenVAF. Need Julia bindings for OpenVAF (Rust). This solves the PSP103-blows-up-LLVM problem at the root — OpenVAF's static analysis produces much more compact output. |
-| GPU acceleration | **Very Large** | Julia can theoretically compile to GPU (CUDA.jl, KernelAbstractions.jl) but eliminating allocations from the inner loop is significant work. The zero-allocation DirectStampContext is a good start but the full solver loop needs to be GPU-friendly. |
+| GPU acceleration | **Medium (sweeps) / Very Large (single circuit)** | Two paths: EnsembleGPUKernel for parallel sweeps is tractable (parameter sweeps already work, just need GPU dispatch). CuArray for large single circuits requires allocation-free solver loop — DirectStampContext is a start but full solver needs work. See Section 9. |
 | Photonic simulation | **Medium** | Port Circulax's photonic components. Julia's type system could make this elegant (complex-valued MNA via parametric types). |
 | Noise analysis | **Medium** | AC infrastructure exists. Need per-device noise sources. |
 | Harmonic balance | **Medium-Large** | Not implemented. Could port Circulax's approach. |
@@ -165,7 +165,7 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Startup latency | **Ongoing** | Julia's JIT compilation means minutes to first simulation. PackageCompiler.jl can help but adds deployment complexity. |
 | Controlled sources | **Small** | Basic structure exists, needs completion. |
 
-**Risk:** Julia's smaller ecosystem is both a strength (better numerical libraries) and weakness (fewer users, harder to hire contributors). The GPU story is real but unproven in practice. The VA codegen limitation (PSP103 → 100K statements → LLVM explosion) is a fundamental issue that needs OpenVAF to solve properly.
+**Risk:** Julia's smaller ecosystem is both a strength (better numerical libraries) and weakness (fewer users, harder to hire contributors). The GPU story has two paths: EnsembleGPUKernel for parallel sweeps is tractable near-term; CuArray for large single circuits is a bigger investment (see Section 9). The VA codegen limitation (PSP103 → 100K statements → LLVM explosion) is a fundamental issue that needs OpenVAF to solve properly.
 
 ---
 
@@ -661,9 +661,13 @@ Your pushback is fair. Let me be precise:
 
 - **VAJAX**: GPU works and is tested at scale. 12.8x speedup on mul64 is real. But only pays off at 500+ nodes (small circuits are 5-10x slower than C++ due to JAX overhead).
 - **Circulax**: Has the same JAX options as VAJAX in theory. In practice, untested. The sparse infrastructure (KLU) is CPU-only; the dense solver would work on GPU but won't scale. Would need significant work to match VAJAX's GPU story.
-- **Cadnip**: Julia can compile to GPU via CUDA.jl/KernelAbstractions.jl. The zero-allocation DirectStampContext is a good foundation. But GPU-ifying the full solver loop (including IDA or Rosenbrock) is a substantial project — DifferentialEquations.jl's GPU support exists but is experimental for DAEs.
+- **Cadnip**: Julia's GPU story is more nuanced than "not currently." DifferentialEquations.jl supports two distinct GPU modes ([SciML GPU docs](https://docs.sciml.ai/Overview/stable/showcase/massively_parallel_gpu/)):
+  - **CUDA arrays for large systems:** Replace `Array` with `CuArray` and the solver runs sparse linear algebra on GPU. This is the analog of what VAJAX does — accelerating a single large circuit. Requires GPU-compatible sparse solvers and allocation-free inner loops. The zero-allocation DirectStampContext is a good foundation, but the full solver loop (IDA, Rosenbrock) needs work.
+  - **Ensemble problems for many small systems:** Run thousands of independent small simulations (e.g., parameter sweeps, Monte Carlo) in parallel on GPU via `EnsembleGPUArray` or `EnsembleGPUKernel`. This is fundamentally different from JAX's approach — JAX uses `vmap` over device instances *within* a single simulation, while Julia parallelizes *across* independent simulations. For parameter sweeps and corner analysis, this could be very effective without modifying the solver at all.
 
-**Bottom line:** GPU is a genuine advantage of VAJAX today. It's theoretically possible for all three but only VAJAX has done the work.
+  The ensemble approach is the more tractable near-term path: parameter sweeps already work on CPU, and `EnsembleGPUKernel` can parallelize them with minimal code changes. The single-large-circuit GPU path requires more investment.
+
+**Bottom line:** GPU is a genuine advantage of VAJAX today for large single-circuit simulation. But Julia has a distinct advantage for massively parallel sweeps via ensemble GPU support — a use case JAX handles less naturally (you'd need to restructure the entire simulation to vmap over parameter sets). The right framing is: VAJAX wins at GPU-accelerated large circuits, Julia/Cadnip has a natural path to GPU-accelerated parameter sweeps.
 
 ---
 
@@ -744,7 +748,8 @@ The first version of this study over-weighted VAJAX based on commit counts and L
 |---|---|---|
 | Transient solver quality | **Cadnip** | IDA (production BDF) + Rosenbrock via DifferentialEquations.jl |
 | Verilog-A / PDK models | **VAJAX** | OpenVAF with proper static analysis, validated at scale |
-| GPU acceleration | **VAJAX** | Actually working, tested to 133K nodes |
+| GPU acceleration (large circuits) | **VAJAX** | Actually working, tested to 133K nodes |
+| GPU acceleration (parallel sweeps) | **Cadnip** (potential) | EnsembleGPUKernel parallelizes independent sims naturally; JAX requires restructuring |
 | Analysis breadth | **VAJAX** | DC, AC, tran, noise, HB, xfer, corners |
 | Architecture & code quality | **Circulax** | Cleanest design, though Diffrax dependency provides less value than expected (Section 6) |
 | Photonic simulation | **Circulax** | Unique capability, no equivalent in others |
