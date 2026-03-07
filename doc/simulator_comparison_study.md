@@ -363,16 +363,16 @@ Most features CAN be ported in weeks (not months), but the estimates should be 2
 
 This is a fundamental design choice with real consequences for accuracy and stiffness.
 
-### Background: How SPICE Handles ddt(Q(V))
+### Background: How Simulators Handle ddt(Q(V))
 
-When a device has a reactive contribution `I = ddt(Q(V))` — like a junction capacitor where `Q` is a nonlinear function of voltage — there are two ways to handle it:
+When a device has a reactive contribution `I = ddt(Q(V))` — like a junction capacitor where `Q` is a nonlinear function of voltage — there are two fundamentally different approaches:
 
 **Companion Model (ngspice, VAJAX, Circulax):**
-Discretize `ddt(Q)` inside the device stamp using the integration method. For backward Euler:
+Discretize `ddt(Q)` inside the solver's residual using the integration method. For backward Euler:
 ```
 I_cap = (Q(V_n+1) - Q(V_n)) / dt
 ```
-The device returns `f_resist` (DC currents) and `f_react` (charge contributions) separately. The solver combines them: `residual = f_resist + c0*Q_new + c1*Q_prev + ...`. The system is a nonlinear algebraic equation at each timestep — NOT a DAE. All states are node voltages. Charges are "hidden" inside the companion model.
+The device returns `f_resist` (DC currents) and `f_react` (charge contributions) separately. The solver combines them: `residual = f_resist + c0*Q_new + c1*Q_prev + ...`. The system is a nonlinear algebraic equation at each timestep — NOT a DAE. All states are node voltages. Charges are "hidden" inside the companion model. This applies to ALL capacitive devices — both constant and voltage-dependent.
 
 This is what VAJAX does (`integration.py`):
 ```python
@@ -388,18 +388,23 @@ j_eff = df_l + (dq_l / dt)  # Effective Jacobian
 
 Both evaluate Q(V) at each Newton iteration, compute the companion current, and add it to the residual. The integration coefficients are baked into the system.
 
-**Mass Matrix / Charge Formulation (Cadnip):**
-Keep the charge as an explicit state variable. The system becomes a DAE:
+**Mass Matrix Formulation (Cadnip):**
+Cadnip does NOT use companion models for capacitors at all — not even for basic constant capacitors. Instead, ALL reactive devices are handled through a mass matrix formulation:
 ```
 C * dx/dt + G*x = b    (mass matrix ODE)
 ```
-where `C` is the mass matrix (capacitance) and `x` includes both voltages AND charge states.
+where `C` is the mass matrix containing capacitance entries and `x` includes both voltages and (for V-dependent caps) charge states.
 
-For **constant** capacitors, `C` is constant and this is straightforward — the ODE solver (IDA, Rosenbrock) handles the time integration internally.
+For **constant** capacitors, the capacitance value is stamped directly into the `C` mass matrix:
+```julia
+# devices.jl: stamp_C!() — constant cap goes straight into mass matrix
+ctx.C[i, j] += C_value
+```
+The ODE solver (IDA, Rosenbrock) handles the time integration internally. There is no companion model, no integration coefficient, no charge history — the solver sees `C*dV/dt = I` and integrates it with whatever method it chooses (variable-order BDF, Rosenbrock, etc.).
 
-For **voltage-dependent** capacitors (junction caps, MOSFET gate charge), Cadnip does something clever:
+For **voltage-dependent** capacitors (junction caps, MOSFET gate charge), the mass matrix entry `C(V)` would be voltage-dependent, which breaks Rosenbrock methods that factor `(I - γ*dt*J)` assuming constant mass. Cadnip solves this by reformulating as charge state variables:
 
-### Cadnip's Charge State Approach
+### Cadnip's Charge State Approach for V-Dependent Caps
 
 Cadnip detects voltage-dependent capacitors via multi-pass evaluation:
 
@@ -413,11 +418,11 @@ for pass in 1:N_DETECTION_PASSES
 end
 ```
 
-When a V-dependent cap is detected, it's reformulated as a charge state variable:
+When a V-dependent cap is detected, it's reformulated as an explicit charge state variable:
 
 ```julia
 # stamp_charge_state!(): Add q as explicit state with constant mass entry
-# Instead of: C(V)*dV/dt (V-dependent mass matrix)
+# Instead of: C(V)*dV/dt (V-dependent mass matrix — breaks Rosenbrock)
 # Reformulate as:
 #   dq/dt = I          (constant mass entry = 1/CHARGE_SCALE)
 #   q = Q(V)           (algebraic constraint, Newton-solved)
@@ -427,13 +432,22 @@ This adds an extra state variable per voltage-dependent capacitor, but the mass 
 
 The charge is scaled by `CHARGE_SCALE = 1e12` to improve Jacobian conditioning (charges are O(1e-12), voltages are O(1)).
 
+**Note:** The term "Newton companion model" appears in Cadnip's `devices.jl` (around line 1035), but this refers to **Newton linearization of nonlinear I-V curves** (diode exponential → conductance + current source), not to capacitor time integration. This is standard Newton-Raphson linearization, unrelated to the "companion model" concept in the context of reactive device formulations.
+
+### Summary: Who Does What
+
+| | Constant Cap | V-Dependent Cap |
+|---|---|---|
+| **ngspice / VAJAX / Circulax** | Companion model: `I = (Q_new - Q_prev)/dt` | Companion model: same formula, Q(V) evaluated at each NR iteration |
+| **Cadnip** | Direct C matrix stamp: solver integrates `C*dV/dt = I` | Charge state variable: `dq/dt = I`, `q = Q(V)` — keeps C constant |
+
 ### Trade-offs
 
-| Aspect | Companion Model (VAJAX, Circulax) | Mass Matrix + Charge States (Cadnip) |
+| Aspect | Companion Model (VAJAX, Circulax) | Mass Matrix (Cadnip) |
 |---|---|---|
 | **System size** | N (node voltages only) | N + K (voltages + charge states for V-dep caps) |
 | **DAE index** | Index-0 (algebraic at each step) | Index-1 DAE (or semi-explicit ODE with mass matrix) |
-| **Error control on charges** | None — charges are internal, solver only controls voltage error | Full — charge states are solver unknowns with their own error tolerances |
+| **Error control on charges** | None — charges are internal, solver only controls voltage error | Full — charge states (and constant cap currents) are solver unknowns with their own error tolerances |
 | **Higher-order methods** | Limited — must manually implement BE/Trap/Gear2 with Q history | Free — any ODE/DAE solver works (IDA, Rosenbrock, Radau, ...) |
 | **Stiffness** | Charge dynamics don't see the stiff solver directly | Adding fast charge states can increase stiffness ratio |
 | **V-dep cap accuracy** | Good with small enough dt; no error estimate on charge | Charge error controlled by solver tolerances |
@@ -447,9 +461,9 @@ The charge is scaled by `CHARGE_SCALE = 1e12` to improve Jacobian conditioning (
 - You're locked to whatever integration methods you implement manually
 - No free lunch from solver library advances
 
-**Cadnip** gets access to IDA's variable-order BDF and Rosenbrock methods *because* it formulates the problem as a proper ODE/DAE with constant mass matrix. The charge state approach is the price of admission. But:
-- The detection is heuristic (multi-pass Q/V ratio comparison)
-- Extra states increase system size and potentially stiffness
+**Cadnip** takes a fundamentally different approach: ALL reactive devices go through the mass matrix, and the ODE/DAE solver handles time integration. Constant caps stamp directly into C; voltage-dependent caps become charge state variables to keep C constant. This gives Cadnip access to IDA's variable-order BDF and Rosenbrock methods. But:
+- The V-dependent cap detection is heuristic (multi-pass Q/V ratio comparison)
+- Extra charge states increase system size and potentially stiffness
 - It's more complex to implement and debug
 
 **For the unified project**, this is a real design decision, not just an implementation detail. The companion model is the pragmatic choice for GPU work and compatibility with custom solvers. The mass matrix formulation is the theoretically cleaner choice that enables better solver integration. A merged project could support both: companion model for JAX/GPU path, mass matrix for Diffrax/library-solver path.
