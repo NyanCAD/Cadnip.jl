@@ -169,7 +169,65 @@ What matters is: **what actually works, what's actually tested, and what would n
 
 ---
 
-## 4. Deeper Analysis: Solver Quality Matters
+## 4. Architectural Portability: VAJAX ↔ Circulax
+
+A critical question: since both VAJAX and Circulax are Python/JAX MNA simulators, how much work is porting features between them — really?
+
+### The MNA core is structurally identical
+
+MNA is MNA. Both simulators do the same thing:
+1. Assemble G, C, b in COO sparse format by iterating over devices
+2. Each device stamps conductance/capacitance/current at (i,j) positions
+3. Convert to CSR/CSC, solve `(G + sC)x = b`
+4. Newton-Raphson: linearize nonlinear devices around current x, rebuild G/b, re-solve
+
+The stamp patterns are textbook. A resistor stamps `1/R` at `(p,p)`, `(p,n)`, `(n,p)`, `(n,n)` in all three projects. A voltage source adds a current variable. The data structures (sparse COO → compressed sparse, RHS vector) are the same JAX arrays.
+
+### What differs (and what doesn't)
+
+| Aspect | VAJAX | Circulax | Portability |
+|---|---|---|---|
+| NR loop | `jax.lax.while_loop` (manual) | Optimistix (library) | Different API, same math |
+| Transient | Custom BE/Trap/Gear2 | Diffrax BE | Different, but both are JAX |
+| Device interface | Function: voltages → (I, Q) | `@component` decorator → same | Thin adapter |
+| Sparse format | `jax.experimental.sparse` | `jax.experimental.sparse` | **Same** |
+| AD | `jax.jacfwd`/`jax.jacrev` | `jax.jacfwd`/`jax.jacrev` | **Same** |
+| JIT | `@jax.jit` | `@eqx.filter_jit` (Equinox) | Compatible |
+
+### Porting effort (corrected estimates)
+
+**OpenVAF from VAJAX → Circulax:**
+`openvaf_jax` is a self-contained module (~4,500 LOC) that loads OpenVAF-compiled `.so` files and creates JAX-callable device functions: `(terminal_voltages, params) → (currents, charges)`. It doesn't depend on VAJAX's solver. To use it in Circulax, you need an adapter that maps OpenVAF output to Circulax's `@component` interface. Both sides are JAX pytrees.
+**Effort: 1-3 weeks, not months.** The adapter is mechanical — match function signatures, wrap in Equinox module.
+
+**Diffrax from Circulax → VAJAX:**
+VAJAX's custom transient loop needs to be wrapped as a Diffrax `ODETerm(vector_field)` where `vector_field(t, y, args) → dy/dt`. This means expressing the MNA rebuild as a pure function (which it already is in JAX). The main subtlety is handling the mass matrix (C may be singular → DAE). Circulax already solved this pattern.
+**Effort: 1-2 weeks.** Well-defined refactor with a working reference implementation.
+
+**GMIN/source stepping:**
+These are ~100-200 lines of algorithm code each. Independent of framework — just wrap the NR solve in a loop that adjusts gmin/source scaling. The algorithm is identical in Cadnip and VAJAX.
+**Effort: days.** Literal copy-paste with minor API adaptation.
+
+**Noise/AC/transfer function analysis:**
+Standard textbook algorithms operating on the assembled G, C, b matrices. Once you have the matrices (which all three produce), the analysis code is framework-independent.
+**Effort: 1-2 weeks each.** The hard part is per-device noise models, not the analysis framework.
+
+### What's genuinely hard to port
+
+| Task | Why it's actually hard |
+|---|---|
+| **VAJAX's GPU scaling** | Not just "run on GPU" — required solving JAX-specific sparse↔dense auto-switching, vmap over devices, memory layout optimization. This is engineering that took iteration and profiling. |
+| **VAJAX's validation suite** | Years of comparison against VACASK + ngspice. Can't be ported — must be re-run against any new codebase. |
+| **Cadnip's SPICE parser** | Written in Julia (~20K LOC). Would need rewriting in Python or calling via subprocess. Not portable. |
+| **Circulax's photonic models** | Domain expertise in photonic circuit theory (S-param → Y-matrix → complex MNA). The code is small but the physics knowledge behind it isn't trivial. |
+
+### Bottom line
+
+VAJAX and Circulax are more similar than different. Most features can be ported in weeks, not months. The previous estimates in this study were inflated by treating each project as a monolith. In reality, both use the same JAX primitives, the same sparse matrix types, and the same MNA algorithm. The barriers to collaboration are developer preferences and project direction, not architecture.
+
+---
+
+## 5. Deeper Analysis: Solver Quality Matters
 
 Your point about VAJAX using custom solvers deserves emphasis. Here's why this matters:
 
@@ -201,7 +259,7 @@ Option 2 seems most practical: use VAJAX's MNA builder + OpenVAF device evaluati
 
 ---
 
-## 5. The OpenVAF Question
+## 6. The OpenVAF Question
 
 OpenVAF integration is the critical differentiator. Without it:
 - You're limited to hand-written device models (Circulax's square-law MOSFET, Ebers-Moll BJT)
@@ -215,11 +273,11 @@ Cadnip's custom VA codegen is a heroic effort but hits structural limits:
 
 **Integrating OpenVAF into Cadnip** (replacing custom codegen) would solve the PSP103 problem and give access to all validated models. The cost is needing Julia↔Rust FFI (via CBinding.jl or similar). This is real work but bounded.
 
-**Integrating OpenVAF into Circulax** means essentially writing openvaf_jax from scratch — the same ~4,500 LOC effort VAJAX already invested.
+**Integrating OpenVAF into Circulax** is simpler than it first appears — `openvaf_jax` is a self-contained module that could be imported as a library. The work is writing an adapter between OpenVAF's device function signature and Circulax's `@component` interface (see Section 4).
 
 ---
 
-## 6. The GPU Question (Honest Assessment)
+## 7. The GPU Question (Honest Assessment)
 
 Your pushback is fair. Let me be precise:
 
@@ -231,7 +289,7 @@ Your pushback is fair. Let me be precise:
 
 ---
 
-## 7. Revised Recommendation
+## 8. Revised Recommendation
 
 Rather than picking a winner, here's what each project should contribute to a unified effort, based on **actual demonstrated strengths** not potential:
 
@@ -246,26 +304,26 @@ Rather than picking a winner, here's what each project should contribute to a un
 ### Three Viable Paths (All Require Real Work)
 
 **Path A: VAJAX + Diffrax solvers + photonics + better parsing**
-- Swap VAJAX's custom transient solver for Diffrax
-- Port Circulax's photonic support
+- Swap VAJAX's custom transient solver for Diffrax (1-2 weeks)
+- Port Circulax's photonic support (2-4 weeks)
 - Improve SPICE parsing (extend existing converter or integrate Cadnip's parser as frontend tool)
 - Keep OpenVAF + GPU as-is
-- **Estimated effort:** 3-6 months for Diffrax integration + photonics. Parsing is ongoing.
+- **Estimated effort:** 1-2 months for Diffrax integration + photonics. Parsing is ongoing.
 
 **Path B: Circulax + OpenVAF + convergence aids + scaling**
-- Port openvaf_jax to Circulax (or collaborate with VAJAX on shared bindings)
-- Add GMIN/source stepping homotopy
-- Add AC + noise analysis
-- Unlock Diffrax's higher-order solvers (currently stuck on BE)
-- Validate at scale
-- **Estimated effort:** 6-12 months. OpenVAF integration alone is 3-6 months.
+- Import openvaf_jax as library, write adapter for `@component` interface (1-3 weeks)
+- Add GMIN/source stepping homotopy (days — copy algorithm from VAJAX)
+- Add AC + noise analysis (2-4 weeks)
+- Unlock Diffrax's higher-order solvers (days — currently stuck on BE)
+- Validate at scale (ongoing — requires running benchmark suite)
+- **Estimated effort:** 2-3 months. OpenVAF is weeks not months since openvaf_jax exists.
 
 **Path C: Cadnip + OpenVAF + photonics**
-- Replace custom VA codegen with OpenVAF (via Rust FFI)
-- Port photonic simulation from Circulax
+- Replace custom VA codegen with OpenVAF (via Rust FFI) — genuinely harder here due to Julia↔Rust FFI
+- Port photonic simulation from Circulax (needs Python→Julia rewrite)
 - Add noise, HB, transfer function analyses
 - GPU work is a separate, longer-term effort
-- **Estimated effort:** 3-6 months for OpenVAF integration. Photonics + new analyses: 3-6 more months.
+- **Estimated effort:** 2-4 months for OpenVAF integration (harder than Python paths). Photonics + new analyses: 1-2 more months.
 
 ### What Actually Determines the Choice
 
@@ -285,7 +343,7 @@ The decision should come down to:
 
 ---
 
-## 8. A Pragmatic Middle Path
+## 9. A Pragmatic Middle Path
 
 Rather than "pick one core and port everything," consider:
 
@@ -300,7 +358,7 @@ Each simulator keeps its own solver/engine but shares the hard-to-build infrastr
 
 ---
 
-## 9. Summary
+## 10. Summary
 
 The first version of this study over-weighted VAJAX based on commit counts and LOC. Here's the corrected picture:
 
