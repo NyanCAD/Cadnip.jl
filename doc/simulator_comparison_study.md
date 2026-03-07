@@ -1,329 +1,320 @@
 # Comparative Study: Cadnip.jl vs VAJAX vs Circulax
 
 **Date:** 2026-03-07
-**Purpose:** Evaluate three open-source one-person analog circuit simulator projects to identify the best path forward for joining forces.
+**Purpose:** Evaluate three open-source analog circuit simulator projects to identify the best path forward for joining forces.
 
 ---
 
-## 1. Executive Summary
+## 1. Honest Context
 
-| Dimension | **Cadnip.jl** | **VAJAX** | **Circulax** |
-|-----------|---------------|-----------|--------------|
-| Language | Julia | Python/JAX | Python/JAX |
-| LOC (core) | ~18K (src), ~52K total | ~65K | ~4.8K |
-| Commits | 50 | 1,018 | 168 |
-| Contributors | 1 (Pepijn de Vos) | 1 (Rob Taylor) | 1 (Chris Daunt) |
-| Last active | Feb 2026 | Mar 2026 | Mar 2026 |
-| License | MIT (CedarSim fork) | Apache-2.0 | Apache-2.0 |
-| Maturity | Early-stage | Most mature | Early-stage |
+All three projects are single-developer efforts. Metrics like lines of code and commit counts are misleading:
 
-All three projects are actively developed single-person efforts building open-source analog circuit simulators from scratch. They share the same MNA (Modified Nodal Analysis) core algorithm but differ significantly in language, architecture, device model strategy, and GPU acceleration approach.
+- **Cadnip** (~18K src): Much of this is parser/codegen code inherited from CedarSim. The actual MNA simulator engine is ~7,600 LOC. CedarSim has a longer private history at JuliaComputing.
+- **VAJAX** (~65K): Includes ~4,500 LOC of OpenVAF bindings, ~4,500 LOC of SPICE netlist converter, ~10K LOC of tests. Core solver engine is ~8-10K LOC. The MNA port to Cadnip and vajax as a whole relied more on vibe coding, which inflates commits/LOC.
+- **Circulax** (~4.8K): Smallest and cleanest, but this is genuinely less code rather than hiding complexity — many features simply don't exist yet. Well-designed code by a developer who clearly cares about architecture.
+
+What matters is: **what actually works, what's actually tested, and what would need to happen to make each one the unified core.**
 
 ---
 
-## 2. Project-by-Project Analysis
+## 2. What Each Simulator Actually Has (Feature Truth Table)
 
-### 2.1 Cadnip.jl (NyanCAD)
+### 2.1 Solver & Analysis Capabilities
 
-**What it is:** A Julia-based MNA circuit simulator, forked from JuliaComputing's CedarSim. Replaces the DAECompiler backend with a hand-written MNA engine. Targets simplicity and maintainability.
+| Capability | Cadnip | VAJAX | Circulax |
+|---|---|---|---|
+| **DC Operating Point** | Newton-Raphson via NonlinearSolve.jl (RobustMultiNewton + LevenbergMarquardt + PseudoTransient) | Custom NR in `jax.lax.while_loop` | NR via Optimistix |
+| **GMIN stepping** | Yes (exponential backoff, max 20 steps) | Yes (1e-3 → 1e-13, adaptive) | No |
+| **Source stepping** | Yes (max 50 steps) | Yes (0→100%, with GMIN fallback) | No |
+| **Homotopy chain** | Newton → GMIN → Source | gdev → gshunt → src (configurable) | None |
+| **Transient solver** | Sundials IDA (DAE), Rosenbrock (ODE) via DifferentialEquations.jl | Custom BE/Trap/Gear2 (2nd order max) | Backward Euler only (despite Diffrax having more) |
+| **Adaptive timestepping** | IDA's built-in (production-grade) | Custom LTE-based, polynomial predictor (2nd order) | PIDController via Diffrax |
+| **Higher-order methods** | Rodas5P (5th order Rosenbrock), IDA (variable order BDF) | Gear2 max (2nd order) | BE only (1st order) |
+| **AC small-signal** | Yes (descriptor state-space, frequency sweep) | Yes (linearization + sweep) | No |
+| **Noise analysis** | No (stubs return 0.0) | Yes (thermal/shot/flicker, small-signal) | No |
+| **Harmonic balance** | No | Yes (DDT-based) | Yes (FFT-based, but dense Jacobian limits scalability) |
+| **Transfer function** | No | Yes (DC/AC) | No |
+| **Corner/PVT sweeps** | Parameter sweeps (Product/Tandem/Serial) | Yes (dedicated corner analysis) | No (manual loop) |
+| **Oscillator init** | CedarUICOp pseudo-transient relaxation | Not mentioned | No |
 
-**Architecture:**
-- **Simulation engine:** Custom MNA with G (conductance), C (capacitance), and b (source) matrix stamping. Newton-Raphson for DC, DifferentialEquations.jl ecosystem for transient (Sundials IDA, Rosenbrock methods).
-- **Two-phase stamping:** `MNAContext` for structure discovery (sparse pattern), `DirectStampContext` for zero-allocation restamping during Newton iterations. This is a clever optimization - the circuit topology is discovered once, then values are updated in-place during solve.
-- **Builder function pattern:** Circuits are compiled to Julia functions with signature `circuit(params, spec, t; x, ctx)`. This enables Julia's JIT compiler to optimize the inner loop.
-- **Parser ecosystem:** Full SPICE multi-dialect parser (`SpectreNetlistParser.jl`) and Verilog-A parser (`VerilogAParser.jl`) - both written from scratch in Julia, totaling ~20K lines.
+**Verdict on solvers:** Cadnip has the best solver *ecosystem* via DifferentialEquations.jl — IDA is a production-grade DAE solver used in industry, Rosenbrock methods are excellent for stiff circuits. VAJAX has the most analysis *types* but its custom transient solver is limited to 2nd order. Circulax underutilizes Diffrax (locked to BE despite having access to better methods).
 
-**Verilog-A approach:** Parses VA source code and generates Julia code that performs MNA stamping directly. The VA model becomes a native Julia function with `stamp_G!`, `stamp_C!` calls. This means VA models get full Julia JIT optimization, ForwardDiff AD, and type specialization. The tradeoff is that the parser must handle the full VA language (a significant effort).
-
-**Analysis types:**
-- DC operating point (Newton-Raphson with homotopy: GMIN stepping, source stepping)
-- Transient (via DifferentialEquations.jl - many ODE/DAE solvers available)
-- AC small-signal (linearized frequency sweep)
-- Parameter sweeps (`CircuitSweep`)
-- Full differentiability via ForwardDiff (sensitivities, optimization)
-
-**Device models:**
-- Basic passives (R, L, C) via direct MNA stamps
-- Voltage/current sources (DC, PWL, SIN, PULSE)
-- Verilog-A compiled models: PSP103 (MOSFET), BSIM4, BJT models
-- PDK integration via `VADistillerModels` and `PSPModels` packages
-
-**Key strengths:**
-- Julia's type system enables zero-allocation inner loops after compilation
-- Full ForwardDiff AD through the entire simulation (sensitivities for free)
-- Rich ODE/DAE solver ecosystem via DifferentialEquations.jl (adaptive timestepping, stiff solvers, Rosenbrock methods)
-- Native SPICE/Spectre netlist parsing
-- Verilog-A models compile to native Julia (no FFI overhead)
-
-**Key weaknesses:**
-- Julia startup latency (time-to-first-simulation can be minutes due to compilation)
-- Smaller ecosystem than Python for ML/optimization integration
-- No GPU acceleration
-- VA parser doesn't cover 100% of the Verilog-A spec
-
-**Code quality:** Well-structured with clear module separation. Extensive documentation in `doc/` (40+ design documents). Good test coverage (38 test files). The codebase shows careful thought about performance (zero-allocation patterns, precompiled circuits).
-
----
-
-### 2.2 VAJAX (ChipFlow)
-
-**What it is:** A Python/JAX GPU-accelerated analog circuit simulator. The most mature of the three projects (1,018 commits). Focuses on running existing Verilog-A models on GPUs for large-circuit speedups.
-
-**Architecture:**
-- **Simulation engine:** Full MNA with JAX arrays. Newton-Raphson in `jax.lax.while_loop` for on-device iteration. Custom COO sparse matrix assembly.
-- **MNA builder:** `mna_builder.py` constructs stamp index mappings. Device contributions are computed by OpenVAF and scattered into the MNA matrix.
-- **Solver pipeline:** DC op (with homotopy/GMIN stepping) -> Transient (adaptive timestep with LTE control) or AC sweep.
-- **GPU strategy:** Devices are evaluated via `jax.vmap` for GPU parallelism. Large circuits (>500 nodes) automatically use GPU. Small circuits stay on CPU to avoid kernel launch overhead.
-
-**Verilog-A approach:** Uses [OpenVAF](https://openvaf.semimod.de/) to compile VA models to a MIR (Mid-level IR), then `openvaf_jax` translates MIR to JAX operations. This is a fundamentally different approach from Cadnip - instead of parsing VA and generating simulator-native code, VAJAX uses OpenVAF's established compiler and adds a JAX backend. This gives access to production VA models (PSP103, BSIM-CMG, etc.) with higher fidelity.
-
-**Analysis types:**
-- DC operating point (Newton-Raphson with homotopy chain)
-- Transient (adaptive BDF2/Trap/BE with LTE control, predictor-corrector)
-- AC small-signal frequency sweep
-- Noise analysis
-- Transfer function analysis (DC/AC)
-- Corner sweeps
-- Harmonic balance
-- GPU-accelerated large-circuit simulation
-
-**Device models:**
-- All devices via Verilog-A/OpenVAF (resistor, capacitor, diode, PSP103, etc.)
-- Voltage/current sources (DC, pulse, sine, PWL)
-- Validated against VACASK (C++ reference) and ngspice
-
-**Performance results (impressive):**
-- C6288 16-bit multiplier (~5000 nodes): **2.9x faster than C++ (VACASK)** on GPU
-- Mul64 64-bit multiplier (~133K nodes, ~266K MOSFETs): 12.8x GPU speedup over CPU; VACASK times out
-- Small circuits: ~5-10x slower than C++ due to JAX overhead
-
-**Key strengths:**
-- GPU acceleration that actually works for large circuits
-- OpenVAF integration gives access to production Verilog-A models
-- Validated against two reference simulators (VACASK, ngspice)
-- Comprehensive analysis suite (DC, AC, tran, noise, HB, transfer function, corners)
-- CLI interface (`vajax circuit.sim`)
-- SPICE netlist converter (ngspice -> VAJAX format)
-- Published on PyPI (`pip install vajax`)
-- Extensive benchmarking infrastructure
-- Most features of any of the three simulators
-
-**Key weaknesses:**
-- JAX's functional paradigm adds per-step overhead for small circuits
-- `jnp.where` evaluates both branches (no short-circuit), wasteful for conditionals
-- COO matrix assembly adds indirection vs direct stamping
-- Complex build system (OpenVAF Rust + Python bindings + JAX custom ops)
-- Less natural AD integration compared to Cadnip's ForwardDiff
-
-**Code quality:** Very well-organized with clear module separation. Comprehensive docstrings. Good test suite (38 test files). Detailed performance analysis documentation. The codebase is the largest and most feature-complete.
-
----
-
-### 2.3 Circulax
-
-**What it is:** A differentiable, functional circuit simulator built on JAX, Diffrax, and Optimistix. The smallest and youngest of the three. Unique in supporting both electronic and photonic circuit simulation.
-
-**Architecture:**
-- **Three-layer design:** Physics (components) / Topology (compiler) / Analysis (solvers) with strict separation.
-- **Functional components:** Devices are plain Python functions decorated with `@component` or `@source`. They return `(f_dict, q_dict)` - flow equations and storage terms. This is the cleanest API of the three.
-- **Compiler:** `compile_netlist()` takes a SAX-format netlist dict, groups components by type, creates `ComponentGroup` objects with batched parameters and pre-computed indices.
-- **Solvers:** Strategy pattern for linear algebra (Dense/KLU/BiCGStab). Newton-Raphson via Optimistix. Transient via Diffrax. Jacobians computed automatically via `jax.jacfwd`.
-
-**Verilog-A approach:** None. Circulax has no Verilog-A support. Device models are defined as Python functions. This is both its greatest strength (simplicity, full AD) and greatest weakness (no access to production PDK models).
-
-**Analysis types:**
-- DC operating point (Newton-Raphson via Optimistix)
-- Transient (Diffrax implicit solvers, adaptive timestepping)
-- Harmonic balance (FFT-based, Newton via Optimistix)
-- Photonic simulation (S-parameter based, complex-valued nodal analysis)
-
-**Device models:**
-- All hand-written in Python: Resistor, Capacitor, Inductor
-- Diode (Shockley), Zener diode
-- NMOS/PMOS (square-law with channel-length modulation)
-- NMOSDynamic (Meyer capacitance model)
-- BJT_NPN, BJT_NPN_Dynamic (Ebers-Moll with junction charges)
-- VCVS, VCCS, CCVS, CCCS (controlled sources)
-- IdealOpAmp, VoltageControlledSwitch
-- Photonic: OpticalWaveguide, DirectionalCoupler, MachZehnder, RingResonator, PhotoDetector, LaserSource
-
-**Key strengths:**
-- Cleanest, most elegant API of the three
-- Photonic circuit support is unique
-- Fully Jacobian-free: `jax.jacfwd` computes all derivatives automatically
-- Built on well-maintained scientific Python libraries (Diffrax, Optimistix, Equinox)
-- Mixed electronic-photonic simulation
-- True differentiability through the solver (reverse-mode AD possible via Diffrax)
-- SAX netlist format integrates with photonic design tools
-- Harmonic balance implementation
-
-**Key weaknesses:**
-- No Verilog-A support (no path to production PDK models)
-- Only basic device models (square-law MOSFET, Ebers-Moll BJT)
-- Smallest codebase (~4.8K lines) - many features still missing
-- No SPICE netlist parser
-- Dense Jacobian computation via `jax.jacfwd` scales as O(n^2) - won't work for large circuits
-- No GPU benchmarks
-- No validation against reference simulators
-
-**Code quality:** Excellent. Clean, well-documented code. Good use of JAX/Equinox patterns. The component decorator system is elegant. Type annotations throughout. Ruff linting. Small but well-structured test suite (8 test files).
-
----
-
-## 3. Technical Comparison
-
-### 3.1 Core Algorithms
-
-| Algorithm | Cadnip | VAJAX | Circulax |
-|-----------|--------|-------|----------|
-| MNA formulation | G*x + C*dx/dt = b | J_res + J_react stamping | F(y) + dQ/dt = 0 |
-| DC solver | Newton-Raphson + homotopy | Newton-Raphson + homotopy | Newton-Raphson (Optimistix) |
-| Transient | DifferentialEquations.jl | Custom adaptive BDF2/Trap/BE | Diffrax implicit solvers |
-| Jacobian | ForwardDiff AD + analytic stamps | OpenVAF analytic + JAX AD | jax.jacfwd (fully automatic) |
-| Sparse solver | SparseArrays (Julia) | UMFPACK, dense JAX | KLU (klujax), dense, BiCGStab |
-| AC analysis | Yes | Yes | No (but HB available) |
-| Noise | No | Yes | No |
-| HB | No | Yes | Yes |
-
-### 3.2 Verilog-A Integration
+### 2.2 Verilog-A / Device Model Support
 
 | Aspect | Cadnip | VAJAX | Circulax |
-|--------|--------|-------|----------|
-| VA compiler | Custom Julia parser | OpenVAF (Rust) | None |
-| Output | Julia stamp functions | JAX operations via MIR | N/A |
-| PDK models | PSP103, BSIM4 (partial) | PSP103, full VACASK suite | None |
-| Model validation | Basic tests | 3-way comparison (VACASK+ngspice) | N/A |
+|---|---|---|---|
+| **VA compiler** | Custom Julia parser + codegen | OpenVAF (Rust, industry-standard) | None |
+| **VA approach** | Parse VA → generate Julia stamp functions | OpenVAF MIR → JAX operations | N/A |
+| **PSP103** | Compiles but generates 100K+ statement functions that blow up LLVM SROA | Works, validated against VACASK + ngspice | N/A |
+| **BSIM4** | Via VADistillerModels (partial) | Via OpenVAF (validated) | N/A |
+| **Model validation** | Basic tests, some regression | 3-way comparison (VACASK + ngspice) | N/A |
+| **Production models tested** | PSP103 (with LLVM issues), BSIM4 | PSP103, BSIM4, EKV, HiSIM | None |
+| **Static analysis** | Minimal (parser does less optimization) | OpenVAF does full static analysis, node collapse, parameter caching | N/A |
 
-### 3.3 Performance & Scalability
+**Verdict on VA:** VAJAX wins decisively here. OpenVAF is an established, well-tested VA compiler that does proper static analysis, dead code elimination, and node collapsing. Cadnip's custom VA codegen is a heroic effort but fundamentally limited — it does less optimization, and complex models like PSP103 generate functions so large that LLVM chokes on them. This is a structural limitation of the "parse VA, generate native code" approach without a sophisticated intermediate optimization pass.
 
-| Metric | Cadnip | VAJAX | Circulax |
-|--------|--------|-------|----------|
-| GPU support | No | Yes (CUDA) | Theoretically (JAX) |
-| Small circuits | Fast (native Julia) | ~5-10x slower than C++ | Unknown |
-| Large circuits | Untested at scale | 2.9x faster than C++ on GPU | Won't scale (dense Jacobian) |
-| Startup time | Slow (Julia compilation) | Fast (Python) | Fast (Python) |
-| AD capability | ForwardDiff (forward-mode) | JAX (forward + reverse) | JAX (forward + reverse) |
+### 2.3 Circuit Scale & Validation
 
-### 3.4 Ecosystem & Usability
+| Circuit | Cadnip | VAJAX | Circulax |
+|---|---|---|---|
+| Simple RC/RLC | Tested | Tested | Tested |
+| Diode circuits | Tested | Graetz (99.5% — stiff transition issue) | Diode clipper tested |
+| BJT amplifiers | Audio integration tests (CE, emitter degen) | Converter exists, not validated in solver | Ebers-Moll model, basic tests |
+| MOSFET circuits | PSP103 (with LLVM caveats) | PSP103 ring osc, c6288 (86K MOSFETs), mul64 (266K MOSFETs) | Square-law only |
+| Max scale tested | ~100s of nodes | ~133K nodes (mul64 on GPU) | ~10s of nodes |
+| Reference comparison | Against expected values | VACASK (C++) + ngspice | Against expected values |
+
+**Verdict on scale:** VAJAX is the only one that has been tested at serious circuit scale. The mul64 benchmark (266K MOSFETs, ~133K nodes) is genuinely impressive. Cadnip and Circulax are untested beyond small circuits.
+
+### 2.4 Netlist & Input Format Support
 
 | Aspect | Cadnip | VAJAX | Circulax |
-|--------|--------|-------|----------|
-| Package manager | Julia Pkg | pip/uv | pip/pixi |
-| CLI | No | Yes (`vajax circuit.sim`) | No |
-| Netlist format | SPICE/Spectre | VACASK .sim files + ngspice converter | SAX dict (Python) |
-| Documentation | Extensive internal docs | Growing docs site | MkDocs site |
-| PyPI/registry | No | Yes | Yes |
-| ML integration | Julia ML ecosystem | JAX/Flax/Optax native | JAX/Flax/Optax native |
+|---|---|---|---|
+| **SPICE netlist** | Full parser (SpectreNetlistParser.jl, ~10K LOC) | Converter from ngspice/HSPICE/LTSpice (~4.5K LOC) | None |
+| **Spectre netlist** | Yes (native) | No | No |
+| **Native format** | Julia code (compiled circuits) | VACASK .sim files | SAX Python dicts |
+| **Subcircuits** | Yes (.subckt hierarchy) | Yes | No |
 
----
+### 2.5 Platform & Ecosystem
 
-## 4. Complementary Strengths
+| Aspect | Cadnip | VAJAX | Circulax |
+|---|---|---|---|
+| **Language** | Julia | Python/JAX | Python/JAX |
+| **GPU** | Not currently, but Julia can compile to GPU (significant effort to eliminate allocations) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) |
+| **AD** | ForwardDiff (forward-mode, through entire solver) | JAX AD (forward + reverse). Less natural than Cadnip's for circuit-specific use | JAX AD (forward + reverse). Cleanest integration of the three |
+| **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (underutilized) |
+| **ML integration** | Julia ML ecosystem (Flux, Lux) | JAX/Flax/Optax native | JAX/Flax/Optax native |
+| **Startup time** | Slow (Julia JIT compilation, minutes for first sim) | Fast | Fast |
+| **PyPI/package** | No | Yes (`pip install vajax`) | Yes (pixi) |
 
-The three projects have remarkably complementary capabilities:
+### 2.6 Unique Capabilities
 
-```
-                  Cadnip          VAJAX           Circulax
-                  ------          -----           --------
-VA models:        Julia codegen   OpenVAF/MIR     (none)
-GPU:              (none)          CUDA/JAX        (theoretical)
-Photonics:        (none)          (none)          S-param/complex
-Differentiability: ForwardDiff    JAX AD          JAX AD (best)
-Netlist parsing:  SPICE/Spectre   VACASK+ngspice  SAX dict
-Solver ecosystem: DiffEq.jl      Custom          Diffrax/Optimistix
-Code elegance:    Good            Good            Best
-Scale tested:     ~100 nodes      ~133K nodes     ~10 nodes
-```
-
----
-
-## 5. Path Forward: Recommendations
-
-### Option A: Unite Around VAJAX (Recommended)
-
-**Rationale:** VAJAX is the most mature, has the best performance story, validated results, and the critical OpenVAF integration that gives access to production models. The two key missing pieces (photonic simulation and cleaner component API) can be added.
-
-**Concrete steps:**
-
-1. **Circulax -> VAJAX:** Port the photonic component system and harmonic balance solver. The `@component` decorator pattern could inspire a cleaner Python-native device API in VAJAX alongside the OpenVAF path. Chris Daunt's S-parameter/Y-matrix transforms and complex-valued MNA assembly are directly reusable.
-
-2. **Cadnip -> VAJAX:** Port the SPICE/Spectre netlist parser or create a converter. Cadnip's ngspice-style DC initialization heuristics (GMIN stepping, source stepping) are already in VAJAX. The ForwardDiff-through-the-solver story is less critical since JAX already provides AD.
-
-3. **Keep Cadnip as Julia frontend:** For users who prefer the Julia ecosystem, Cadnip could become a Julia frontend that generates VAJAX-compatible netlists or calls VAJAX's Python solver via PythonCall.jl. The Julia VA parser could also serve as an alternative VA compilation path.
-
-**Why this works:** VAJAX already has the hardest pieces done (GPU solver, OpenVAF integration, validation). Adding photonic support and a nicer component API is incremental work.
-
-### Option B: Shared Core Library (More Ambitious)
-
-Create a language-agnostic core simulation kernel (in Rust or C++) that all three projects use:
-
-```
-                    ┌─────────────────┐
-                    │   Shared Core   │
-                    │  (Rust/C++)     │
-                    │  - MNA engine   │
-                    │  - NR solver    │
-                    │  - Sparse math  │
-                    │  - OpenVAF      │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-         Julia FFI      Python FFI     Photonic ext
-         (Cadnip)     (VAJAX/Circulax)  (Circulax)
-```
-
-**Pros:** Each project keeps its language/ecosystem. Shared effort on the hard parts.
-**Cons:** FFI complexity. JAX's value proposition (GPU, AD) doesn't work through FFI. This is essentially rewriting VACASK.
-
-### Option C: Convergence on a Common Specification
-
-Rather than merging codebases, define a shared:
-- **Netlist interchange format** (superset of SPICE/SAX/VACASK)
-- **Device model interface** (input/output contract for VA models)
-- **Result format** (for cross-validation)
-- **Benchmark suite** (shared circuits for regression testing)
-
-Each project implements the spec in its own language. This enables cross-validation and shared benchmarks without forcing a single implementation.
-
----
-
-## 6. Specific Contributions Each Developer Could Make
-
-### Pepijn (Cadnip)
-- **SPICE/Spectre parser:** Already the most complete open-source parser. Could be extracted as a standalone tool that outputs a common netlist IR.
-- **Julia VA codegen:** The approach of parsing VA and generating native simulator code is valuable for non-JAX backends.
-- **DiffEq.jl integration patterns:** The ODE/DAE solver integration patterns are well-tested.
-
-### Rob (VAJAX)
-- **OpenVAF + JAX pipeline:** The critical path for production PDK model support on GPU.
-- **Large-circuit performance:** The only project that has actually scaled to 100K+ nodes.
-- **Validation infrastructure:** Three-way comparison tooling.
-
-### Chris (Circulax)
-- **Component API design:** The `@component` decorator pattern is the cleanest API. Could become the standard for hand-written models.
-- **Photonic simulation:** Unique capability. S-parameter transforms, complex MNA, ring resonator models.
-- **Diffrax/Optimistix integration:** Clean use of state-of-the-art numerical libraries.
-- **Harmonic Balance:** Clean FFT-based implementation.
-
----
-
-## 7. Conclusion
-
-The three projects together cover nearly everything needed for a world-class open-source analog simulator:
-
-| Need | Who has it |
-|------|-----------|
-| GPU-accelerated MNA solver | VAJAX |
-| Production VA model support | VAJAX (OpenVAF) |
-| Large-circuit validation | VAJAX |
-| SPICE/Spectre netlist parsing | Cadnip |
-| Julia ecosystem integration | Cadnip |
-| Differentiable simulation | All three (Circulax best) |
-| Photonic/mixed-domain | Circulax |
-| Elegant component API | Circulax |
-| Harmonic balance | VAJAX + Circulax |
+| Capability | Only in |
+|---|---|
+| Photonic circuit simulation (S-param → Y-matrix, ring resonators, MZI) | Circulax |
+| SPICE/Spectre netlist parsing (native, not conversion) | Cadnip |
+| GPU-accelerated large-circuit simulation (actually tested) | VAJAX |
+| Production VA models via OpenVAF | VAJAX |
+| IDA DAE solver (variable-order BDF, production-grade) | Cadnip |
 | Noise analysis | VAJAX |
+| Transfer function analysis | VAJAX |
+| Mixed electronic-photonic simulation | Circulax |
+| SAX photonic library integration | Circulax |
+| `@component` decorator API for model definition | Circulax |
+| Zero-allocation transient inner loop | Cadnip |
+| Pseudo-transient oscillator initialization | Cadnip |
 
-**The recommended path is Option A: unite around VAJAX as the primary engine**, with Circulax's photonic capabilities and component API patterns merged in, and Cadnip's parser potentially providing SPICE/Spectre frontend support. This avoids the language-barrier problem (VAJAX and Circulax are both Python/JAX) while leveraging the most mature and performant codebase.
+---
 
-The single biggest risk to any collaboration is that one-person projects are deeply personal - each developer has made fundamental architectural choices that reflect their priorities. The key to success is respecting these choices while finding concrete, bounded contributions each person can make to the shared effort.
+## 3. Three Paths: What Would Each Require?
+
+### Path A: VAJAX as Core
+
+**What you'd get for free:** OpenVAF VA models, GPU acceleration, noise/AC/HB/transfer function analyses, large-circuit scalability, SPICE netlist converter, PyPI distribution.
+
+**What's missing and needs work:**
+
+| Gap | Effort | Notes |
+|---|---|---|
+| Better transient solvers | **Large** | Current custom BE/Trap/Gear2 is limited to 2nd order. Options: (a) contribute higher-order methods to VAJAX, (b) integrate Diffrax as alternative backend, (c) port DifferentialEquations.jl solvers. Option (b) is most practical — Diffrax already has implicit RK methods. |
+| Photonic simulation | **Medium** | Port Circulax's S-param→Y-matrix transform, complex-valued MNA assembly, and photonic component library. The three-layer architecture maps cleanly. |
+| SPICE/Spectre parsing | **Medium** | Has ngspice converter already. Could improve it or integrate Cadnip's parser as a standalone frontend. |
+| Controlled sources (VCVS, CCCS, etc.) | **Small-Medium** | Listed as TODO in VAJAX. Cadnip and Circulax both have these. |
+| Transmission lines | **Medium** | Not in any of the three. |
+| Convergence robustness | **Ongoing** | Graetz benchmark still has edge case. Homotopy chain exists but could be more robust. |
+| Cleaner component API | **Small** | Circulax's `@component` pattern could be added for hand-written Python models alongside OpenVAF path. |
+
+**Risk:** Custom solver quality is a long-term maintenance burden. Solver code is subtle — bugs manifest as wrong answers, not crashes. Relying on Diffrax/Optimistix (as Circulax does) or DifferentialEquations.jl (as Cadnip does) offloads this to dedicated library maintainers.
+
+### Path B: Circulax as Core
+
+**What you'd get for free:** Clean architecture, photonic simulation, Diffrax/Optimistix/Equinox ecosystem, elegant component API, HB solver, SAX integration.
+
+**What's missing and needs work:**
+
+| Gap | Effort | Notes |
+|---|---|---|
+| Verilog-A support | **Very Large** | The biggest gap. Options: (a) integrate OpenVAF (requires Python bindings for MIR→JAX, essentially rewriting openvaf_jax), (b) write a new VA→JAX compiler. Either way this is months of work and the hardest piece of the puzzle. |
+| Convergence aids | **Medium** | No GMIN stepping, no source stepping, no homotopy. Must be added for any non-trivial circuit to converge reliably. |
+| AC analysis | **Medium** | Standard linearization + frequency sweep. Well-understood algorithm. |
+| Noise analysis | **Medium-Large** | Requires per-device noise models, correlation matrix, spectral density computation. |
+| SPICE netlist parser | **Large** | Could use Cadnip's parser as standalone tool generating SAX-format output, or write a new one. |
+| Unlock Diffrax solvers | **Small** | Currently locked to BE — should be straightforward to expose Diffrax's Kvaerno/RadauIIA methods. |
+| Scale to large circuits | **Unknown** | The sparse infrastructure exists (KLU, BiCGStab) but has never been tested beyond ~10 nodes. May need significant work. |
+| Subcircuit hierarchy | **Medium** | No .subckt support. |
+| Parameter sweeps | **Small** | Just engineering, no algorithmic challenge. |
+| Dense HB Jacobian | **Medium** | Current HB won't scale. Needs sparse HB formulation. |
+
+**Risk:** The OpenVAF integration is a massive effort and is the critical path to production models. Without VA support, you can't run real PDK models, which limits the simulator to educational/research use.
+
+### Path C: Cadnip as Core
+
+**What you'd get for free:** DifferentialEquations.jl solver ecosystem (IDA, Rosenbrock — best transient solvers of the three), SPICE/Spectre parsing, ForwardDiff AD, convergence aids (GMIN + source stepping + pseudo-transient), subcircuit hierarchy, zero-allocation optimization.
+
+**What's missing and needs work:**
+
+| Gap | Effort | Notes |
+|---|---|---|
+| OpenVAF integration | **Large** | Replace custom VA codegen with OpenVAF. Need Julia bindings for OpenVAF (Rust). This solves the PSP103-blows-up-LLVM problem at the root — OpenVAF's static analysis produces much more compact output. |
+| GPU acceleration | **Very Large** | Julia can theoretically compile to GPU (CUDA.jl, KernelAbstractions.jl) but eliminating allocations from the inner loop is significant work. The zero-allocation DirectStampContext is a good start but the full solver loop needs to be GPU-friendly. |
+| Photonic simulation | **Medium** | Port Circulax's photonic components. Julia's type system could make this elegant (complex-valued MNA via parametric types). |
+| Noise analysis | **Medium** | AC infrastructure exists. Need per-device noise sources. |
+| Harmonic balance | **Medium-Large** | Not implemented. Could port Circulax's approach. |
+| Transfer function | **Small** | Standard analysis, AC infrastructure exists. |
+| Python ecosystem access | **Medium** | PythonCall.jl works but adds complexity. Julia's ML ecosystem is smaller. |
+| Startup latency | **Ongoing** | Julia's JIT compilation means minutes to first simulation. PackageCompiler.jl can help but adds deployment complexity. |
+| Controlled sources | **Small** | Basic structure exists, needs completion. |
+
+**Risk:** Julia's smaller ecosystem is both a strength (better numerical libraries) and weakness (fewer users, harder to hire contributors). The GPU story is real but unproven in practice. The VA codegen limitation (PSP103 → 100K statements → LLVM explosion) is a fundamental issue that needs OpenVAF to solve properly.
+
+---
+
+## 4. Deeper Analysis: Solver Quality Matters
+
+Your point about VAJAX using custom solvers deserves emphasis. Here's why this matters:
+
+**DifferentialEquations.jl (Cadnip):**
+- Sundials IDA: Variable-order BDF (up to 5th order), used in MATLAB/Simulink, battle-tested in industry
+- Error control: Per-step and global, with automatic order selection
+- Stiffness handling: Automatic detection and method switching
+- Maintained by a large team (SciML), not one person
+
+**VAJAX custom solver:**
+- BE/Trap/Gear2 only (max 2nd order)
+- LTE control with polynomial predictor (ok but basic)
+- Force-accepts after 5 consecutive rejects (risky for accuracy)
+- Known issues: Graetz benchmark stiff transitions
+- One person maintaining solver code where bugs = wrong answers
+
+**Circulax via Diffrax:**
+- Currently only uses Backward Euler (1st order)
+- But Diffrax has Kvaerno3/4/5, RadauIIA, Tsit5, Dopri5
+- Unlocking these is straightforward engineering
+- Maintained by Patrick Kidger (well-respected in scientific ML)
+
+**The gap:** VAJAX's custom solver works for its demonstrated use cases but is fundamentally less mature than IDA or even what Diffrax offers. If you want the solver quality Cadnip has, contributing it to VAJAX means either:
+1. Porting IDA-equivalent logic to JAX (very hard, JAX's functional constraints fight imperative solver algorithms)
+2. Integrating Diffrax into VAJAX (medium — rewrite the transient loop to use Diffrax's ODE interface)
+3. Contributing better methods to Diffrax itself (the Julia DifferentialEquations.jl team already has a pattern for this — Chris Rackauckas contributes to both ecosystems)
+
+Option 2 seems most practical: use VAJAX's MNA builder + OpenVAF device evaluation + homotopy, but swap the time integration to Diffrax.
+
+---
+
+## 5. The OpenVAF Question
+
+OpenVAF integration is the critical differentiator. Without it:
+- You're limited to hand-written device models (Circulax's square-law MOSFET, Ebers-Moll BJT)
+- No access to foundry PDK models
+- Not usable for real IC design work
+
+Cadnip's custom VA codegen is a heroic effort but hits structural limits:
+- Less static analysis → larger generated code → LLVM problems on complex models
+- Ongoing maintenance burden of a custom VA compiler
+- Missing optimizations that OpenVAF has (node collapse, parameter caching, dead code elimination)
+
+**Integrating OpenVAF into Cadnip** (replacing custom codegen) would solve the PSP103 problem and give access to all validated models. The cost is needing Julia↔Rust FFI (via CBinding.jl or similar). This is real work but bounded.
+
+**Integrating OpenVAF into Circulax** means essentially writing openvaf_jax from scratch — the same ~4,500 LOC effort VAJAX already invested.
+
+---
+
+## 6. The GPU Question (Honest Assessment)
+
+Your pushback is fair. Let me be precise:
+
+- **VAJAX**: GPU works and is tested at scale. 12.8x speedup on mul64 is real. But only pays off at 500+ nodes (small circuits are 5-10x slower than C++ due to JAX overhead).
+- **Circulax**: Has the same JAX options as VAJAX in theory. In practice, untested. The sparse infrastructure (KLU) is CPU-only; the dense solver would work on GPU but won't scale. Would need significant work to match VAJAX's GPU story.
+- **Cadnip**: Julia can compile to GPU via CUDA.jl/KernelAbstractions.jl. The zero-allocation DirectStampContext is a good foundation. But GPU-ifying the full solver loop (including IDA or Rosenbrock) is a substantial project — DifferentialEquations.jl's GPU support exists but is experimental for DAEs.
+
+**Bottom line:** GPU is a genuine advantage of VAJAX today. It's theoretically possible for all three but only VAJAX has done the work.
+
+---
+
+## 7. Revised Recommendation
+
+Rather than picking a winner, here's what each project should contribute to a unified effort, based on **actual demonstrated strengths** not potential:
+
+### What Each Brings (Proven, Not Aspirational)
+
+| Contributor | Proven Contribution | Why It's Hard to Replicate |
+|---|---|---|
+| **VAJAX (Rob)** | OpenVAF→JAX pipeline, GPU MNA solver, large-circuit validation, noise/AC/HB/xfer analyses | OpenVAF integration is ~4,500 LOC of careful MIR→JAX translation. GPU solver required solving JAX-specific challenges (lax.while_loop NR, vmap device eval, sparse auto-switching). Years of validation work against VACASK + ngspice. |
+| **Cadnip (Pepijn)** | SPICE/Spectre parser (~20K LOC across two packages), DifferentialEquations.jl integration patterns, convergence aids, zero-allocation patterns | Parser covers multiple SPICE dialects + Spectre. The IDA/Rosenbrock integration with circuit-specific initialization (CedarDCOp, CedarTranOp, CedarUICOp) represents deep domain expertise. |
+| **Circulax (Chris)** | Photonic simulation, clean component API, Diffrax/Optimistix integration, SAX ecosystem bridge | Photonic circuit simulation (S-param→Y-matrix→complex MNA) is genuinely unique. The `@component` decorator pattern is the best API design of the three. Building on Diffrax/Optimistix rather than custom solvers is a strategic advantage. |
+
+### Three Viable Paths (All Require Real Work)
+
+**Path A: VAJAX + Diffrax solvers + photonics + better parsing**
+- Swap VAJAX's custom transient solver for Diffrax
+- Port Circulax's photonic support
+- Improve SPICE parsing (extend existing converter or integrate Cadnip's parser as frontend tool)
+- Keep OpenVAF + GPU as-is
+- **Estimated effort:** 3-6 months for Diffrax integration + photonics. Parsing is ongoing.
+
+**Path B: Circulax + OpenVAF + convergence aids + scaling**
+- Port openvaf_jax to Circulax (or collaborate with VAJAX on shared bindings)
+- Add GMIN/source stepping homotopy
+- Add AC + noise analysis
+- Unlock Diffrax's higher-order solvers (currently stuck on BE)
+- Validate at scale
+- **Estimated effort:** 6-12 months. OpenVAF integration alone is 3-6 months.
+
+**Path C: Cadnip + OpenVAF + photonics**
+- Replace custom VA codegen with OpenVAF (via Rust FFI)
+- Port photonic simulation from Circulax
+- Add noise, HB, transfer function analyses
+- GPU work is a separate, longer-term effort
+- **Estimated effort:** 3-6 months for OpenVAF integration. Photonics + new analyses: 3-6 more months.
+
+### What Actually Determines the Choice
+
+The decision should come down to:
+
+1. **Language preference:** If the team prefers Python/JAX (likely, larger ecosystem), it's Path A vs B. If Julia is important, Path C.
+
+2. **GPU priority:** If GPU acceleration for large circuits is a near-term priority, VAJAX is ahead. If it's a long-term goal, it's less decisive.
+
+3. **Solver quality priority:** If you want the best transient solvers *now*, Cadnip wins (IDA is hard to beat). If you're willing to invest in integrating Diffrax properly, Path A or B can get close.
+
+4. **OpenVAF:** This is non-negotiable for production use. VAJAX has it. The others would need to build or port it.
+
+5. **Photonics:** If mixed electronic-photonic simulation is important, Circulax's work is the starting point regardless of which path you choose.
+
+6. **Developer preferences:** Each developer has made deep architectural choices. The most productive path is the one that lets each person contribute what they're best at without requiring them to abandon their approach.
+
+---
+
+## 8. A Pragmatic Middle Path
+
+Rather than "pick one core and port everything," consider:
+
+**Shared infrastructure, separate frontends:**
+
+1. **OpenVAF bindings** as a shared library — VAJAX's openvaf_jax already works. Could be extracted and made reusable.
+2. **SPICE parser** as a standalone tool — Cadnip's parser outputs an intermediate representation that any simulator can consume.
+3. **Benchmark suite** — shared test circuits with reference results from VACASK/ngspice for cross-validation.
+4. **Photonic components** — Circulax's component library, extracted as a reusable package.
+
+Each simulator keeps its own solver/engine but shares the hard-to-build infrastructure pieces. This is less ambitious than a full merge but more realistic for three independent developers.
+
+---
+
+## 9. Summary
+
+The first version of this study over-weighted VAJAX based on commit counts and LOC. Here's the corrected picture:
+
+| What matters | Best | Why |
+|---|---|---|
+| Transient solver quality | **Cadnip** | IDA (production BDF) + Rosenbrock via DifferentialEquations.jl |
+| Verilog-A / PDK models | **VAJAX** | OpenVAF with proper static analysis, validated at scale |
+| GPU acceleration | **VAJAX** | Actually working, tested to 133K nodes |
+| Analysis breadth | **VAJAX** | DC, AC, tran, noise, HB, xfer, corners |
+| Architecture & code quality | **Circulax** | Cleanest design, best use of library ecosystem |
+| Photonic simulation | **Circulax** | Unique capability, no equivalent in others |
+| Netlist parsing | **Cadnip** | Full SPICE + Spectre parser |
+| Convergence robustness | **Cadnip** ≈ VAJAX | Both have GMIN + source stepping; Cadnip also has pseudo-transient init |
+| Scalability (tested) | **VAJAX** | Only one tested beyond ~100 nodes |
+| Solver ecosystem leverage | **Cadnip** > Circulax > VAJAX | DiffEq.jl > Diffrax (underused) > custom from scratch |
+
+There is no clear winner. The "right" choice depends on priorities, and the most productive collaboration might be sharing infrastructure rather than forcing a single core.
