@@ -315,14 +315,19 @@ Combines all algorithms from RobustMultiNewton with LevenbergMarquardt
 and PseudoTransient for maximum robustness on difficult circuits
 (oscillators, singular Jacobians, etc.).
 
+Uses AutoFiniteDiff instead of ForwardDiff for any internal autodiff needs,
+since OSDI devices use ccall which is incompatible with ForwardDiff.
+The explicit Jacobian is provided via NonlinearFunction's jac parameter.
+
 The algorithm order is:
 1. RobustMultiNewton algorithms (6 trust region / Newton variants)
 2. LevenbergMarquardt (GMIN-like regularization via damping)
 3. PseudoTransient (pseudo-transient continuation)
 """
 function CedarRobustNLSolve()
-    rmn = RobustMultiNewton()
-    algs = (rmn.algs..., LevenbergMarquardt(), PseudoTransient())
+    ad = AutoFiniteDiff()
+    rmn = RobustMultiNewton(; autodiff=ad)
+    algs = (rmn.algs..., LevenbergMarquardt(; autodiff=ad), PseudoTransient(; autodiff=ad))
     return NonlinearSolvePolyAlgorithm(algs)
 end
 
@@ -345,6 +350,9 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
                               abstol::Real=1e-10, maxiters::Int=100,
                               nlsolve=CedarRobustNLSolve())
     n = length(u0)
+
+    # Reset Newton iteration counter (used by OSDI $limit for INIT_LIM)
+    ws.dctx.newton_iter = 0
 
     # Check if linear solution is good enough
     resid = zeros(n)
@@ -624,7 +632,7 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     # The Newton solver handles the nonlinearity more carefully from zeros.
     u0 = zeros(n)
 
-    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
+    return _dc_solve_with_fallbacks(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
 # Internal: Run detection passes for a bare builder (like build_with_detection but for builder)

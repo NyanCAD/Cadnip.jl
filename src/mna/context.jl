@@ -208,6 +208,10 @@ mutable struct MNAContext
 
     # Track if system has been finalized
     finalized::Bool
+
+    # Post-compile setup hooks (called by create_workspace with nzval arrays)
+    # Used by OSDI devices to bind Jacobian pointers after sparse matrices exist.
+    setup_hooks::Vector{Any}
 end
 
 """
@@ -240,7 +244,8 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
-        false               # finalized
+        false,              # finalized
+        Any[]               # setup_hooks
     )
 end
 
@@ -942,6 +947,7 @@ function reset_for_restamping!(ctx::MNAContext)
     # Reset charge detection counter for re-stamping (cache is preserved)
     ctx.charge_detection_pos = 1
 
+    empty!(ctx.setup_hooks)
     ctx.finalized = false
     return nothing
 end
@@ -977,6 +983,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_Q_values)
     empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
+    empty!(ctx.setup_hooks)
     ctx.finalized = false
     return nothing
 end

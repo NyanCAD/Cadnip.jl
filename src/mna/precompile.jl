@@ -115,6 +115,10 @@ struct CompiledStructure{F,P,S,M<:AbstractMatrix{Float64}}
     # For sparse: index into G.nzval
     # For dense: linear index (i + (i-1)*n)
     G_diag_idx::Vector{Int}
+
+    # Post-compile setup hooks from discovery (e.g., OSDI Jacobian pointer binding)
+    # Called by create_workspace with (G_nzval, G_coo_to_idx, C_nzval, C_coo_to_idx)
+    setup_hooks::Vector{Any}
 end
 
 """
@@ -207,6 +211,11 @@ function create_workspace(cs::CompiledStructure{F,P,S,M}; ctx::Union{MNAContext,
         cs.C_coo_to_idx,
         cs.b_deferred_resolved
     )
+
+    # Execute post-compile setup hooks (e.g., OSDI Jacobian pointer binding)
+    for hook in cs.setup_hooks
+        hook(G_storage, cs.G_coo_to_idx, C_storage, cs.C_coo_to_idx)
+    end
 
     EvalWorkspace{Float64,typeof(cs)}(
         cs,
@@ -327,7 +336,8 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices
             G_empty, C_empty,
             Int[], 0,
-            Int[]
+            Int[],
+            Any[]
         )
     end
 
@@ -393,7 +403,8 @@ function compile_structure(builder::F, params::P, spec::S;
             G_I_resolved, G_J_resolved, C_I_resolved, C_J_resolved,
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx
+            G_diag_idx,
+            copy(ctx0.setup_hooks)
         )
     else
         # Sparse matrix compilation (original path)
@@ -426,7 +437,8 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices for sparse
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx
+            G_diag_idx,
+            copy(ctx0.setup_hooks)
         )
     end
 end
@@ -481,6 +493,9 @@ for dcop mode) while still using the same workspace for stamping.
 """
 function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVector, t::Real)
     dctx = ws.dctx
+
+    # Increment Newton iteration counter (used by OSDI $limit)
+    dctx.newton_iter += 1
 
     # Reset counters and zero matrices
     reset_direct_stamp!(dctx)

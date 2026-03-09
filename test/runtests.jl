@@ -64,6 +64,11 @@ if PHASE0_MINIMAL
             @testset "mna/vadistiller.jl" include("mna/vadistiller.jl")
         end
 
+        # Phase 7: OSDI loader tests (precompiled .osdi devices)
+        @testset "Phase 7: OSDI Loader" begin
+            @testset "osdi/test_osdi.jl" include("osdi/test_osdi.jl")
+        end
+
         # Phase 4: Basic tests using MNA backend
         @testset "Phase 4: MNA Basic Tests" begin
             @testset "basic.jl" include("basic.jl")

@@ -29,6 +29,11 @@ using .ModelRegistry
 export ModelRegistry, getmodel, getparams, AbstractSimulator
 include("vasim.jl")
 
+# OSDI device loader (OpenVAF compiled .osdi shared libraries)
+include("osdi/OsdiLoader.jl")
+using .OsdiLoader
+export OsdiLoader
+
 # Minimal simulation environment (previously in simulate_ir.jl)
 using Base.ScopedValues
 
