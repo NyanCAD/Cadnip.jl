@@ -5,7 +5,7 @@ using Test
 
 const OSDI_DIR = @__DIR__
 
-# Path to compiled .osdi file (compile with: openvaf resistor.va)
+# Compiled from models/VADistillerModels.jl/va/resistor.va (openvaf)
 const RESISTOR_OSDI = joinpath(OSDI_DIR, "resistor.osdi")
 
 @testset "OSDI Loader" begin
@@ -16,21 +16,20 @@ const RESISTOR_OSDI = joinpath(OSDI_DIR, "resistor.osdi")
     @test length(f.devices) == 1
 
     dev = f.devices[1]
-    @test dev.name == "resistor"
+    @test dev.name == "sp_resistor"
     @test dev.num_terminals == 2
-    @test dev.num_nodes == 2
     @test dev.instance_size > 0
     @test dev.model_size > 0
 
     # Check nodes
-    @test dev.nodes[1].name == "p"
-    @test dev.nodes[2].name == "n"
+    @test dev.nodes[1].name == "pos"
+    @test dev.nodes[2].name == "neg"
 
     # Check parameters
-    @test haskey(dev.param_by_name, "R")
-    R_param = dev.param_by_name["R"]
+    @test haskey(dev.param_by_name, "resistance")
+    R_param = dev.param_by_name["resistance"]
     @test R_param.type == Float64
-    @test R_param.kind == :model
+    @test R_param.kind == :instance
 
     println("  Device: $(dev.name)")
     println("  Nodes: $(dev.num_nodes) ($(dev.num_terminals) terminals)")
@@ -52,6 +51,7 @@ end
     @test model.initialized
 
     inst = OsdiInstance(model)
+    set_param!(inst, "resistance", 1000.0)
     setup_instance!(inst)
     @test inst.initialized
 end
@@ -61,10 +61,10 @@ end
     dev = f.devices[1]
 
     model = OsdiModel(dev)
-    set_param!(model, "R", 2000.0)
     setup_model!(model)
 
     inst = OsdiInstance(model)
+    set_param!(inst, "resistance", 2000.0)
     setup_instance!(inst)
 end
 
@@ -72,10 +72,11 @@ end
     f = osdi_load(RESISTOR_OSDI)
     dev = f.devices[1]
 
-    # Create OSDI resistor with R=1000
+    # Create OSDI resistor with resistance=1000
     model = OsdiModel(dev)
     setup_model!(model)
     inst = OsdiInstance(model)
+    set_param!(inst, "resistance", 1000.0)
     setup_instance!(inst)
 
     # Stamp into MNAContext
@@ -111,6 +112,7 @@ end
     model = OsdiModel(dev)
     setup_model!(model)
     inst = OsdiInstance(model)
+    set_param!(inst, "resistance", 1000.0)
     setup_instance!(inst)
 
     ctx_osdi = MNAContext()
@@ -142,6 +144,7 @@ end
     model_r1 = OsdiModel(dev)
     setup_model!(model_r1)
     inst_r1 = OsdiInstance(model_r1)
+    set_param!(inst_r1, "resistance", 1000.0)
     setup_instance!(inst_r1)
 
     # Build a voltage divider: Vsrc -> R1(OSDI) -> R2(native) -> GND

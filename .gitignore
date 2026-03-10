@@ -18,6 +18,9 @@ refs/
 doc/*.pdf
 doc/*.txt
 
+# Compiled OSDI shared libraries (platform-specific, built from VA source)
+test/osdi/*.osdi
+
 # Generated benchmark data and plots
 benchmarks/vacask/ring/ngspice/ring_ngspice.csv
 benchmarks/vacask/ring/ngspice/psp103v4.osdi
