@@ -1,19 +1,20 @@
-# Comparative Study: Cadnip.jl vs VAJAX vs Circulax
+# Comparative Study: Cadnip.jl vs VAJAX vs Circulax vs VACASK
 
-**Date:** 2026-03-07
-**Purpose:** Evaluate three open-source analog circuit simulator projects to identify the best path forward for joining forces.
+**Date:** 2026-03-07 (updated 2026-03-12: VACASK added)
+**Purpose:** Evaluate open-source analog circuit simulator projects to identify the best path forward for joining forces. VACASK is included as the reference C++ implementation that all others benchmark against.
 
 ---
 
 ## 1. Honest Context
 
-All three projects are single-developer efforts. Metrics like lines of code and commit counts are misleading:
+All four projects are single-developer efforts. Metrics like lines of code and commit counts are misleading:
 
 - **Cadnip** (~18K src): Much of this is parser/codegen code inherited from CedarSim. The actual MNA simulator engine is ~7,600 LOC. CedarSim has a longer private history at JuliaComputing.
 - **VAJAX** (~65K): Includes ~4,500 LOC of OpenVAF bindings, ~4,500 LOC of SPICE netlist converter, ~10K LOC of tests. Core solver engine is ~8-10K LOC. The MNA port to Cadnip and vajax as a whole relied more on vibe coding, which inflates commits/LOC.
 - **Circulax** (~4.8K): Smallest and cleanest, but this is genuinely less code rather than hiding complexity — many features simply don't exist yet. Well-designed code by a developer who clearly cares about architecture.
+- **VACASK** (~45K C++): The most mature codebase. Written in C++20 by Árpád Bűrmen (University of Ljubljana). Includes full netlist parser, all standard SPICE analyses, harmonic balance, and a comprehensive benchmark suite. VACASK is already used as the reference simulator for validating VAJAX's results.
 
-What matters is: **what actually works, what's actually tested, and what would need to happen to make each one the unified core.**
+What matters is: **what actually works, what's actually tested, and what would need to happen to make each one the unified core.** VACASK occupies a different position than the other three — it's a traditional compiled-language simulator, not a Python/JAX or Julia project. It's included because: (1) it's the performance bar everyone else is trying to beat, (2) its architecture decisions are instructive, and (3) collaboration with VACASK (shared benchmarks, shared device models via OpenVAF/VADistiller) is already happening.
 
 ---
 
@@ -21,71 +22,84 @@ What matters is: **what actually works, what's actually tested, and what would n
 
 ### 2.1 Solver & Analysis Capabilities
 
-| Capability | Cadnip | VAJAX | Circulax |
-|---|---|---|---|
-| **DC Operating Point** | Newton-Raphson via NonlinearSolve.jl (RobustMultiNewton + LevenbergMarquardt + PseudoTransient) | Custom NR in `jax.lax.while_loop` | NR via Optimistix |
-| **GMIN stepping** | Yes (exponential backoff, max 20 steps) | Yes (1e-3 → 1e-13, adaptive) | No |
-| **Source stepping** | Yes (max 50 steps) | Yes (0→100%, with GMIN fallback) | No |
-| **Homotopy chain** | Newton → GMIN → Source | gdev → gshunt → src (configurable) | None |
-| **Transient solver** | Sundials IDA (DAE), Rosenbrock (ODE) via DifferentialEquations.jl | Custom BE/Trap/Gear2 (2nd order max) | Backward Euler only (Diffrax has more but lacks mass matrix support — see Section 6) |
-| **Adaptive timestepping** | IDA's built-in (production-grade) | Custom LTE-based, polynomial predictor (2nd order) | PIDController via Diffrax |
-| **Higher-order methods** | Rodas5P (5th order Rosenbrock), IDA (variable order BDF) | Gear2 max (2nd order) | BE only (1st order) |
-| **AC small-signal** | Yes (descriptor state-space, frequency sweep) | Yes (linearization + sweep) | No |
-| **Noise analysis** | No (stubs return 0.0) | Yes (thermal/shot/flicker, small-signal) | No |
-| **Harmonic balance** | No | Yes (DDT-based) | Yes (FFT-based, but dense Jacobian limits scalability) |
-| **Transfer function** | No | Yes (DC/AC) | No |
-| **Corner/PVT sweeps** | Parameter sweeps (Product/Tandem/Serial) | Yes (dedicated corner analysis) | No (manual loop) |
-| **Oscillator init** | CedarUICOp pseudo-transient relaxation | Not mentioned | No |
+| Capability | Cadnip | VAJAX | Circulax | VACASK |
+|---|---|---|---|---|
+| **DC Operating Point** | Newton-Raphson via NonlinearSolve.jl (RobustMultiNewton + LevenbergMarquardt + PseudoTransient) | Custom NR in `jax.lax.while_loop` | NR via Optimistix | Custom NR with residual convergence check |
+| **GMIN stepping** | Yes (exponential backoff, max 20 steps) | Yes (1e-3 → 1e-13, adaptive) | No | Yes (SPICE3/adaptive gmin, gdev and gshunt modes) |
+| **Source stepping** | Yes (max 50 steps) | Yes (0→100%, with GMIN fallback) | No | Yes (SPICE3-style source stepping) |
+| **Homotopy chain** | Newton → GMIN → Source | gdev → gshunt → src (configurable) | None | Configurable chain with state storage between methods |
+| **Transient solver** | Sundials IDA (DAE), Rosenbrock (ODE) via DifferentialEquations.jl | Custom BE/Trap/Gear2 (2nd order max) | Backward Euler only (Diffrax has more but lacks mass matrix support — see Section 6) | BE, Trapezoidal, Gear (BDF), Adams-Moulton. All with variable-step coefficients via general IntegratorCoeffs framework |
+| **Adaptive timestepping** | IDA's built-in (production-grade) | Custom LTE-based, polynomial predictor (2nd order) | PIDController via Diffrax | Predictor-corrector LTE control with polynomial extrapolation predictor, breakpoint handling |
+| **Higher-order methods** | Rodas5P (5th order Rosenbrock), IDA (variable order BDF) | Gear2 max (2nd order) | BE only (1st order) | General-order BDF/AM via IntegratorCoeffs (computes coefficients for arbitrary order from timestep history). Default Gear2/Trap |
+| **AC small-signal** | Yes (descriptor state-space, frequency sweep) | Yes (linearization + sweep) | No | Yes (linearized, frequency sweep) |
+| **Noise analysis** | No (stubs return 0.0) | Yes (thermal/shot/flicker, small-signal) | No | Yes (full noise analysis with per-device noise sources) |
+| **Harmonic balance** | No | Yes (DDT-based) | Yes (FFT-based, but dense Jacobian limits scalability) | Yes (multitone HB with colocation method) |
+| **Transfer function** | No | Yes (DC/AC) | No | Yes (DC and AC transfer function) |
+| **Corner/PVT sweeps** | Parameter sweeps (Product/Tandem/Serial) | Yes (dedicated corner analysis) | No (manual loop) | Yes (arbitrary-depth nested parametric sweeps — anything sweepable can also be altered without re-elaboration) |
+| **Oscillator init** | CedarUICOp pseudo-transient relaxation | Not mentioned | No | Nodesets + analysis results as nodesets (enables custom arc-length homotopy at netlist level) |
 
-**Verdict on solvers:** Cadnip has the best solver *ecosystem* via DifferentialEquations.jl — IDA is a production-grade DAE solver used in industry, Rosenbrock methods are excellent for stiff circuits. VAJAX has the most analysis *types* but its custom transient solver is limited to 2nd order. Circulax is locked to BE — and contrary to first impressions, Diffrax's higher-order implicit solvers (Kvaerno3/4/5) are *not* usable for circuit simulation due to missing mass matrix / DAE support in the entire JAX ecosystem (see Section 6).
+**Verdict on solvers:** VACASK has the most complete traditional solver implementation — it covers every standard SPICE analysis plus multitone HB, with a general-purpose integration coefficient framework that can compute BDF/AM/polynomial predictor coefficients at arbitrary order. Cadnip has the best solver *ecosystem* via DifferentialEquations.jl — IDA is a production-grade DAE solver used in industry, Rosenbrock methods are excellent for stiff circuits. VAJAX has the most analysis *types* among the Python projects but its custom transient solver is limited to 2nd order. Circulax is locked to BE — and contrary to first impressions, Diffrax's higher-order implicit solvers (Kvaerno3/4/5) are *not* usable for circuit simulation due to missing mass matrix / DAE support in the entire JAX ecosystem (see Section 6).
 
 ### 2.2 Verilog-A / Device Model Support
 
-| Aspect | Cadnip | VAJAX | Circulax |
-|---|---|---|---|
-| **VA compiler** | Custom Julia parser + codegen | OpenVAF (Rust, industry-standard) | None |
-| **VA approach** | Parse VA → generate Julia stamp functions | OpenVAF MIR → JAX operations | N/A |
-| **PSP103** | Compiles but generates 100K+ statement functions that blow up LLVM SROA | Works, validated against VACASK + ngspice | N/A |
-| **BSIM4** | Via VADistillerModels (partial) | Via OpenVAF (validated) | N/A |
-| **Model validation** | Basic tests, some regression | 3-way comparison (VACASK + ngspice) | N/A |
-| **Production models tested** | PSP103 (with LLVM issues), BSIM4 | PSP103, BSIM4, EKV, HiSIM | None |
-| **Static analysis** | Minimal (parser does less optimization) | OpenVAF does full static analysis, node collapse, parameter caching | N/A |
+| Aspect | Cadnip | VAJAX | Circulax | VACASK |
+|---|---|---|---|---|
+| **VA compiler** | Custom Julia parser + codegen | OpenVAF (Rust, industry-standard) | None | OpenVAF-reloaded (OSDI 0.4, fork with extensions) |
+| **VA approach** | Parse VA → generate Julia stamp functions | OpenVAF MIR → JAX operations | N/A | OpenVAF → .osdi shared library → runtime dlopen via OSDI API |
+| **PSP103** | Compiles but generates 100K+ statement functions that blow up LLVM SROA | Works, validated against VACASK + ngspice | N/A | Reference implementation, validated with benchmarks |
+| **BSIM4** | Via VADistillerModels (partial) | Via OpenVAF (validated) | N/A | Yes (native VA + VADistiller converted SPICE version) |
+| **BSIM3** | No | Via OpenVAF | N/A | Yes (both native VA from Cogenda and VADistiller SPICE conversion) |
+| **BSIMBULK** | No | No | N/A | Yes (106.2.0) |
+| **VBIC** | No | No | N/A | Yes (1.3 — 3, 4, and 5 terminal variants) |
+| **Legacy SPICE models** | No | No | N/A | Yes (~20 models via VADistiller: MOS1-3,6,9, VDMOS, JFET, MESFET, Gummel-Poon BJT, BSIM3/4) |
+| **Model validation** | Basic tests, some regression | 3-way comparison (VACASK + ngspice) | N/A | Comprehensive benchmarks vs ngspice and Xyce on 5 circuits |
+| **Production models tested** | PSP103 (with LLVM issues), BSIM4 | PSP103, BSIM4, EKV, HiSIM | None | PSP103, BSIM3, BSIM4, BSIMBULK, VBIC, plus all VADistiller legacy models |
+| **Static analysis** | Minimal (parser does less optimization) | OpenVAF does full static analysis, node collapse, parameter caching | N/A | Full OpenVAF static analysis (same compiler) |
+| **Model variants** | N/A | N/A | N/A | `sn` (simplified noise, no extra nodes — fastest), `default` (no extra output nodes, full noise), `full` (all output variables and noise) |
 
-**Verdict on VA:** VAJAX wins decisively here. OpenVAF is an established, well-tested VA compiler that does proper static analysis, dead code elimination, and node collapsing. Cadnip's custom VA codegen is a heroic effort but fundamentally limited — it does less optimization, and complex models like PSP103 generate functions so large that LLVM chokes on them. This is a structural limitation of the "parse VA, generate native code" approach without a sophisticated intermediate optimization pass.
+**Verdict on VA:** VACASK has the most comprehensive device model library — it's the only project with both native Verilog-A models AND converted legacy SPICE3 models via VADistiller, plus multiple model variants optimized for different use cases. VAJAX uses the same OpenVAF compiler (though the original, not the -reloaded fork) and has validated its models against VACASK. Cadnip's custom VA codegen is fundamentally limited — complex models like PSP103 generate functions so large that LLVM chokes on them. This is a structural limitation that needs OpenVAF integration to solve.
 
 ### 2.3 Circuit Scale & Validation
 
-| Circuit | Cadnip | VAJAX | Circulax |
-|---|---|---|---|
-| Simple RC/RLC | Tested | Tested | Tested |
-| Diode circuits | Tested | Graetz (99.5% — stiff transition issue) | Diode clipper tested |
-| BJT amplifiers | Audio integration tests (CE, emitter degen) | Converter exists, not validated in solver | Ebers-Moll model, basic tests |
-| MOSFET circuits | PSP103 (with LLVM caveats) | PSP103 ring osc, c6288 (86K MOSFETs), mul64 (266K MOSFETs) | Square-law only |
-| Max scale tested | ~100s of nodes | ~133K nodes (mul64 on GPU) | ~10s of nodes |
-| Reference comparison | Against expected values | VACASK (C++) + ngspice | Against expected values |
+| Circuit | Cadnip | VAJAX | Circulax | VACASK |
+|---|---|---|---|---|
+| Simple RC/RLC | Tested | Tested | Tested | Tested (1M timesteps, 0.94s) |
+| Diode circuits | Tested | Graetz (99.5% — stiff transition issue) | Diode clipper tested | Graetz (1M steps, 1.89s), voltage multiplier (500K steps, 0.97s) |
+| BJT amplifiers | Audio integration tests (CE, emitter degen) | Converter exists, not validated in solver | Ebers-Moll model, basic tests | VBIC BJT ring oscillator (via VADistiller) |
+| MOSFET circuits | PSP103 (with LLVM caveats) | PSP103 ring osc, c6288 (86K MOSFETs), mul64 (266K MOSFETs) | Square-law only | PSP103 ring osc (18 transistors, 1.18s), c6288 (10112 transistors, 57.98s) |
+| Max scale tested | ~100s of nodes | ~133K nodes (mul64 on GPU) | ~10s of nodes | 25,380 nodes (c6288), 10,112 transistors |
+| Memory usage | Not benchmarked | Not benchmarked | Not benchmarked | 138.5 MB for c6288 (vs Xyce 775.7 MB, ngspice+KLU 200.5 MB) |
+| Reference comparison | Against expected values | VACASK (C++) + ngspice | Against expected values | Against ngspice + Xyce with matched timepoints/iterations |
 
-**Verdict on scale:** VAJAX is the only one that has been tested at serious circuit scale. The mul64 benchmark (266K MOSFETs, ~133K nodes) is genuinely impressive. Cadnip and Circulax are untested beyond small circuits. Circulax's lack of convergence aids (no GMIN stepping, no source stepping, no homotopy) is a particularly strong signal here — these are essential for any circuit with significant nonlinearity, and their absence implies the simulator hasn't been exercised on circuits where convergence is hard.
+**Verdict on scale:** VAJAX is the only Python/Julia project that has been tested at serious circuit scale. The mul64 benchmark (266K MOSFETs, ~133K nodes) is genuinely impressive. VACASK holds the performance crown on the c6288 benchmark — 57.98s vs ngspice 71.81s vs Xyce 151.57s — with the lowest memory footprint (138.5 MB). VACASK's comprehensive benchmark methodology (6 runs, cache warming, matched timepoints, std dev <2%) sets the bar for how performance comparisons should be done. Cadnip and Circulax are untested beyond small circuits.
 
 ### 2.4 Netlist & Input Format Support
 
-| Aspect | Cadnip | VAJAX | Circulax |
-|---|---|---|---|
-| **SPICE netlist** | Full parser (SpectreNetlistParser.jl, ~10K LOC) | Converter from ngspice/HSPICE/LTSpice (~4.5K LOC) | None |
-| **Spectre netlist** | Yes (native) | No | No |
-| **Native format** | Julia code (compiled circuits) | VACASK .sim files | SAX Python dicts |
-| **Subcircuits** | Yes (.subckt hierarchy) | Yes | No |
+| Aspect | Cadnip | VAJAX | Circulax | VACASK |
+|---|---|---|---|---|
+| **SPICE netlist** | Full parser (SpectreNetlistParser.jl, ~10K LOC) | Converter from ngspice/HSPICE/LTSpice (~4.5K LOC) | None | Ngspice converter (python/ng2vc.py, under development) |
+| **Spectre netlist** | Yes (native) | No | No | Spectre-like native syntax (.sim files) — the original |
+| **Native format** | Julia code (compiled circuits) | VACASK .sim files | SAX Python dicts | .sim netlist files + C++ API (ParserTables builder) |
+| **Subcircuits** | Yes (.subckt hierarchy) | Yes | No | Yes (full parameterized hierarchy with conditional blocks) |
+| **Conditional netlist** | No | No | No | Yes (@if/@elseif/@else/@end blocks — topology can change based on parameters) |
+| **On-the-fly VA compilation** | N/A | N/A | N/A | Yes (detects .va files in `load` directive, invokes OpenVAF automatically) |
+| **Xschem integration** | No | No | No | Yes (schematic entry, analysis setup, results display) |
+| **PDK support** | No | No | No | Yes (IHP Open PDK SG13G2 demonstrated) |
 
 ### 2.5 Platform & Ecosystem
 
-| Aspect | Cadnip | VAJAX | Circulax |
-|---|---|---|---|
-| **Language** | Julia | Python/JAX | Python/JAX |
-| **GPU** | Two paths: (1) CuArray for large circuits (easy to get working, but CPU-orchestrated — won't match JAX's fused execution), (2) EnsembleGPUKernel for massively parallel sweeps (natural fit — see Section 9) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) |
-| **AD** | ForwardDiff (forward-mode, through entire solver) | JAX AD (forward + reverse). Less natural than Cadnip's for circuit-specific use | JAX AD (forward + reverse). Cleanest integration of the three |
-| **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (but Diffrax lacks mass matrix/DAE support — see Section 6) |
-| **ML integration** | Julia ML ecosystem (Flux, Lux) | JAX/Flax/Optax native | JAX/Flax/Optax native |
-| **Startup time** | Slow (Julia JIT compilation, minutes for first sim) | Fast | Fast |
-| **PyPI/package** | No | Yes (`pip install vajax`) | Yes (pixi) |
+| Aspect | Cadnip | VAJAX | Circulax | VACASK |
+|---|---|---|---|---|
+| **Language** | Julia | Python/JAX | Python/JAX | C++20 |
+| **GPU** | Two paths: (1) CuArray for large circuits (easy to get working, but CPU-orchestrated — won't match JAX's fused execution), (2) EnsembleGPUKernel for massively parallel sweeps (natural fit — see Section 9) | Yes, working (CUDA via JAX). 12.8x speedup on mul64 | Theoretically via JAX (untested, same JAX options as VAJAX) | No (planned: MPI, CUDA, OpenMP on roadmap) |
+| **AD** | ForwardDiff (forward-mode, through entire solver) | JAX AD (forward + reverse). Less natural than Cadnip's for circuit-specific use | JAX AD (forward + reverse). Cleanest integration of the three | None (analytic Jacobians from OpenVAF OSDI) |
+| **Solver libraries** | DifferentialEquations.jl (IDA, Rosenbrock, many more) | Custom from scratch | Diffrax + Optimistix (but Diffrax lacks mass matrix/DAE support — see Section 6) | All custom, KLU only external dependency |
+| **ML integration** | Julia ML ecosystem (Flux, Lux) | JAX/Flax/Optax native | JAX/Flax/Optax native | None (not a goal — VACASK targets traditional circuit simulation) |
+| **Startup time** | Slow (Julia JIT compilation, minutes for first sim) | Fast | Fast | Instant (compiled binary, including on-the-fly VA compilation) |
+| **PyPI/package** | No | Yes (`pip install vajax`) | Yes (pixi) | Pre-built .deb/.tgz/.zip packages, nightly builds |
+| **Embeddable API** | Via Julia `include` / package | Python import | Python import | C++ library API (ParserTables builder, Circuit, Analysis classes — see demo/api/) |
+| **Dependencies** | Julia ecosystem (SciML, SparseArrays, etc.) | Python/JAX/NumPy/SciPy | Python/JAX/Equinox/Diffrax | Only KLU + Boost + toml++ (minimal by design) |
+| **License** | MIT | MIT | Apache 2.0 | AGPL 3.0 |
 
 ### 2.6 Unique Capabilities
 
@@ -94,15 +108,188 @@ What matters is: **what actually works, what's actually tested, and what would n
 | Photonic circuit simulation (S-param → Y-matrix, ring resonators, MZI) | Circulax |
 | SPICE/Spectre netlist parsing (native, not conversion) | Cadnip |
 | GPU-accelerated large-circuit simulation (actually tested) | VAJAX |
-| Production VA models via OpenVAF | VAJAX |
 | IDA DAE solver (variable-order BDF, production-grade) | Cadnip |
-| Noise analysis | VAJAX |
-| Transfer function analysis | VAJAX |
 | Mixed electronic-photonic simulation | Circulax |
 | SAX photonic library integration | Circulax |
 | `@component` decorator API for model definition | Circulax |
 | Zero-allocation transient inner loop | Cadnip |
 | Pseudo-transient oscillator initialization | Cadnip |
+| Conditional netlist blocks (@if/@else) with topology changes | VACASK |
+| Multi-topology simulation without restart | VACASK |
+| Automatic partial re-elaboration on parameter change | VACASK |
+| VADistiller legacy SPICE3→VA model conversion | VACASK |
+| Continuation bypass (skip first NR eval in continuation mode) | VACASK |
+| Inactive element bypass with configurable tolerances | VACASK |
+| Residual-based convergence test (stricter than SPICE) | VACASK |
+| Multitone harmonic balance | VACASK |
+| Xschem schematic integration | VACASK |
+| IHP Open PDK support | VACASK |
+| Analysis results as nodesets for subsequent analyses | VACASK |
+
+---
+
+## 2.7 VACASK Deep Dive: Architecture & Performance
+
+VACASK deserves a dedicated section because it's the reference implementation that all other projects benchmark against, and its architectural decisions illuminate the design space for circuit simulators.
+
+### Why VACASK Matters for This Comparison
+
+VACASK is NOT a competitor to join forces with — it's a different kind of project:
+- **Language:** C++20, not Python or Julia. No ML integration, no AD, no GPU.
+- **Goal:** Be a better SPICE, not a differentiable simulator or ML-friendly tool.
+- **License:** AGPL 3.0, which restricts proprietary use more than MIT/Apache.
+
+But it matters because:
+1. **Performance bar:** VACASK is 19-24% faster than ngspice and 2.6x faster than Xyce on the c6288 benchmark, with 5.6x less memory than Xyce. Any Julia/Python simulator needs to understand why.
+2. **Shared infrastructure:** VAJAX already validates against VACASK. Cadnip uses VACASK's benchmarks. VADistiller models work in both VACASK and Cadnip.
+3. **Design lessons:** VACASK's continuation bypass, residual convergence testing, and inactive element bypass are techniques that inform Cadnip's optimization path.
+4. **OpenVAF ecosystem:** VACASK drives OpenVAF-reloaded development, which benefits everyone using OpenVAF.
+
+### Architecture (~45K LOC C++20)
+
+```
+VACASK Architecture:
+
+Netlist (.sim)  ──→  Parser  ──→  ParserTables  ──→  Circuit
+                                                        │
+                                  OpenVAF (.va)  ──→  OSDI (.osdi)  ──→  Device instances
+                                                        │
+                              ┌──────────────────────────┘
+                              │
+                    ┌─────────┼──────────────────────────────────────┐
+                    │         │                                      │
+                  Analysis  AnalysisCore  ──→  NRSolver              │
+                    │         │                   │                   │
+                    │    ┌────┴────┐          KluRealMatrix          │
+                    │    │         │              │                   │
+                    OP  Tran   AC/Noise/HB    SparsityMap            │
+                    │    │         │              │                   │
+                    │  IntegratorCoeffs       factor/solve           │
+                    │    │                       │                   │
+                    └────┼───────────────────────┘                   │
+                         │                                           │
+                    VectorRepository<double>  ── solution history    │
+                         │                                           │
+                    Homotopy chain (gdev → gshunt → src)            │
+                         │                                           │
+                    Sweep (arbitrary depth, auto re-elaboration)     │
+                    └────────────────────────────────────────────────┘
+```
+
+**Key classes:**
+- `Circuit`: Manages instances, models, subcircuits, topology. Supports conditional blocks and partial re-elaboration.
+- `KluRealMatrix` / `KluComplexMatrix`: Sparse matrix wrappers around SuiteSparse KLU. Typed templates (`KluMatrixCore<IndexType, ValueType>`). SparsityMap tracks resistive vs reactive entries separately.
+- `OpNRSolver`: Newton-Raphson with force slots for nodesets, ICs, and homotopy. Supports residual convergence check (not just delta convergence like SPICE).
+- `TranNRSolver`: Extends OpNRSolver with integration coefficients.
+- `IntegratorCoeffs`: General-purpose integration coefficient framework. Supports Adams-Moulton, BDF, Adams-Bashforth, and polynomial extrapolation at arbitrary order. Computes coefficients from variable timestep history by solving a linear system.
+- `Homotopy`: Base class with gdev, gshunt, spice3Gmin, src, spice3Src derived classes. State storage between methods for continuation.
+- `VectorRepository<T>`: Circular buffer of solution vectors for time history. Enables O(1) push/pop for BDF history management.
+
+### What Makes VACASK Fast
+
+VACASK's c6288 advantage over ngspice (57.98s vs 71.81s, 20.7ms/iter vs 15.6ms/iter with continuation bypass) comes from several techniques:
+
+1. **Continuation bypass** (`nr_contbypass`, default enabled): In continuation mode (accepted transient step, sweep step, converged homotopy step), skip device evaluation in the first NR iteration — reuse the previous Jacobian and residual. Since continuation points usually converge in 2-3 iterations, this saves ~33-50% of device evaluations. This is the single biggest optimization, taking c6288 from 63.19s to 48.34s (23% improvement).
+
+2. **Residual-based convergence test** (`nr_residualcheck`, default enabled): After delta convergence, also check that KCL residuals are within tolerance. This is *stricter* than SPICE (which only checks deltas) and actually *slows down* simulation slightly (3487 vs 3090 iterations on c6288) but produces more accurate results. Can be disabled for speed.
+
+3. **Inactive element bypass** (`nr_bypass`, default disabled): Skip device evaluation for instances whose terminal voltages haven't changed significantly. Similar to SPICE's bypass mode but with configurable tolerances (`nr_convtol`, `nr_bypasstol`). Effective for large circuits where most elements are inactive most of the time (digital circuits).
+
+4. **Minimal dependencies:** Only KLU + C++ stdlib. No framework overhead, no memory management layers, no abstraction taxes. The entire simulator is a single executable.
+
+5. **Direct pointer binding:** Devices bind directly to matrix element pointers at elaboration time (`Device::bind()` → `MatrixAccess::valuePtr()`). During simulation, stamping is a direct pointer write — no hash lookups, no COO assembly, no sparse matrix rebuilds.
+
+6. **General IntegratorCoeffs framework:** Instead of hardcoding BE/Trap/Gear2 coefficients, VACASK computes them from the timestep history by solving a linear system. This means arbitrary-order BDF/AM is supported by changing one parameter, without code changes. The coefficient computation is done once per timestep, not per NR iteration.
+
+### Performance Data (from VACASK benchmark suite)
+
+All benchmarks on AMD Threadripper 7970, single-threaded, KLU sparse solver, 5 timed runs after 1 warmup:
+
+**RC circuit** (2 elements, ~1M timesteps, linear):
+
+| Simulator | Time (s) | Timepoints | Iterations |
+|---|---|---|---|
+| Xyce | 9.39 | 1,011,527 | 2,029,571 |
+| Xyce-fast | 4.12 | 1,011,527 | 2,029,571 |
+| Gnucap | 8.54 | 1,006,982 | 2,018,061 |
+| Ngspice | 1.31 | 1,006,013 | 2,012,031 |
+| **VACASK** | **0.94** | 1,005,006 | 2,010,014 |
+
+**Graetz rectifier** (4 diodes + RC, ~1M timesteps):
+
+| Simulator | Time (s) | Timepoints | Rejected | Iterations |
+|---|---|---|---|---|
+| Gnucap | 15.16 | 1,000,026 | 12 | 3,459,503 |
+| Xyce | 10.60 | 1,000,002 | 0 | 2,000,014 |
+| Xyce-fast | 5.34 | 1,000,002 | 0 | 2,000,014 |
+| Ngspice | 2.21 | 1,000,008 | 0 | 2,000,024 |
+| **VACASK** | **1.89** | 1,000,003 | 0 | 2,000,277 |
+
+**Voltage multiplier** (4 diodes + 4 caps, ~500K timesteps):
+
+| Simulator | Time (s) | Timepoints | Rejected | Iterations |
+|---|---|---|---|---|
+| Gnucap | 9.94 | 520,797 | 739 | 2,300,992 |
+| Xyce | 5.51 | 502,341 | 1,270 | 1,041,833 |
+| Xyce-fast | 2.78 | 502,341 | 1,270 | 1,041,833 |
+| Ngspice | 1.16 | 500,467 | 957 | 1,019,733 |
+| **VACASK** | **0.97** | 500,056 | 3 | 1,001,233 |
+
+**9-stage CMOS ring oscillator** (18 PSP103 transistors):
+
+| Simulator | Time (s) | Timepoints | Rejected | Iterations |
+|---|---|---|---|---|
+| Xyce | 3.33 | 27,310 | 0 | 95,462 |
+| Xyce-fast | 3.10 | 27,310 | 0 | 95,462 |
+| Ngspice | 1.60 | 20,556 | 1,037 | 80,018 |
+| **VACASK** | **1.18** | 26,066 | 0 | 81,875 |
+
+**C6288 16×16 multiplier** (10,112 PSP103 transistors, 25,380 nodes):
+
+| Simulator | Time (s) | Timepoints | Rejected | Iterations | Time/iter |
+|---|---|---|---|---|---|
+| Xyce | 151.57 | 1,013 | 37 | 3,559 | 42.6ms |
+| Ngspice | 71.81 | 1,020 | 1 | 3,474 | 20.7ms |
+| **VACASK** (default) | **57.98** | 1,021 | 7 | 3,487 | 16.6ms |
+| **VACASK** (no rtc) | **48.34** | 1,024 | 8 | 3,090 | 15.6ms |
+
+**Memory usage** (c6288):
+
+| Simulator | Sparse solver | Memory (MB) |
+|---|---|---|
+| Xyce | KLU | 775.7 |
+| Ngspice | KLU | 200.5 |
+| Ngspice | SPARSE | 135.3 |
+| **VACASK** | KLU | **138.5** |
+
+### VACASK's Roadmap (from F-Si wiki)
+
+Planned features: damped pseudo-transient analysis, S-parameter analysis, advanced harmonic balance, parallelization (MPI, CUDA, OpenMP), more benchmarks, Skywater PDK support, SPICE3 legacy model support improvements.
+
+### What VACASK Lacks (And Why It Matters)
+
+| Missing | Impact |
+|---|---|
+| **GPU acceleration** | Can't compete with VAJAX on large parallel workloads. Roadmap item but no code yet. |
+| **Automatic differentiation** | No parameter sensitivity, no gradient-based optimization, no ML integration. Analytic Jacobians only (from OpenVAF). |
+| **Higher-level solver library** | Custom solver means custom bugs. No access to method families beyond what's hand-coded. Compare Cadnip's one-line access to IDA, Rosenbrock, Radau, etc. |
+| **Differentiable simulation** | The core value proposition of VAJAX and Circulax is missing entirely. No way to backprop through a simulation for ML training. |
+| **Python/Julia ecosystem** | No Jupyter notebooks, no matplotlib integration beyond postprocessing scripts, no ML framework interop. |
+| **AGPL license** | Restricts proprietary use. Companies may prefer MIT/Apache simulators for embedding. |
+
+### Lessons for Cadnip
+
+VACASK validates several optimization strategies that are directly applicable to Cadnip:
+
+1. **Continuation bypass is the biggest win.** Cadnip's `DirectStampContext` (zero-allocation restamping) is the foundation — adding continuation bypass on top (skip builder call when continuing from a nearby solution) could yield 20-30% speedup on large transient simulations, matching VACASK's most impactful optimization.
+
+2. **Residual convergence check is worth the cost.** VACASK enables it by default despite the speed penalty because it catches convergence failures that delta-only checking misses. Cadnip should consider adding this.
+
+3. **Direct pointer binding matters.** VACASK's devices write directly to matrix element pointers. Cadnip's current COO → sparse assembly path adds overhead. The `DirectStampContext` already moves toward this, but full pointer binding (assign matrix pointers at elaboration, write through them during simulation) would close the gap.
+
+4. **Minimal allocations are king.** VACASK's 138.5 MB footprint for 10K transistors comes from careful memory management — `VectorRepository` reuses buffers, `SparsityMap` is built once, matrices are zeroed not reallocated. Cadnip's GC-based approach (298 MiB + 36-62% GC overhead for a 2-element RC circuit) shows how much room there is to improve.
+
+5. **General IntegratorCoeffs is elegant.** Instead of hard-coding integration methods, VACASK solves for coefficients from timestep history. Cadnip delegates this to IDA/Rosenbrock (which is fine), but the companion model projects (VAJAX, Circulax) could benefit from this approach when extending beyond Gear2.
 
 ---
 
@@ -742,20 +929,36 @@ Each simulator keeps its own solver/engine but shares the hard-to-build infrastr
 
 ## 12. Summary
 
-The first version of this study over-weighted VAJAX based on commit counts and LOC. Here's the corrected picture:
+The first version of this study compared three projects. Adding VACASK as the C++ reference clarifies the picture — it shows where the performance ceiling is and what optimization techniques actually matter.
 
 | What matters | Best | Why |
 |---|---|---|
-| Transient solver quality | **Cadnip** | IDA (production BDF) + Rosenbrock via DifferentialEquations.jl |
-| Verilog-A / PDK models | **VAJAX** | OpenVAF with proper static analysis, validated at scale |
-| GPU acceleration (large circuits) | **VAJAX** | Actually working, tested to 133K nodes |
+| Raw simulation performance | **VACASK** | Fastest on all benchmarks. 20% faster than ngspice, 2.6x faster than Xyce on c6288. Continuation bypass + direct pointer binding + minimal overhead. |
+| Memory efficiency | **VACASK** | 138.5 MB for c6288 vs Xyce 775.7 MB. Minimal dependencies, careful buffer reuse. |
+| Transient solver quality | **Cadnip** ≈ **VACASK** | Cadnip: IDA + Rosenbrock via DifferentialEquations.jl. VACASK: custom BE/Trap/Gear with general IntegratorCoeffs framework. VACASK has more optimizations (continuation bypass, residual check). Cadnip has more solver *methods* available. |
+| Verilog-A / PDK models | **VACASK** | Most comprehensive library: native VA + VADistiller converted SPICE models + multiple variants. Drives OpenVAF-reloaded development. |
+| GPU acceleration (large circuits) | **VAJAX** | Actually working, tested to 133K nodes. VACASK has no GPU. |
 | GPU acceleration (parallel sweeps) | **Cadnip** (potential) | EnsembleGPUKernel parallelizes independent sims naturally; JAX requires restructuring |
-| Analysis breadth | **VAJAX** | DC, AC, tran, noise, HB, xfer, corners |
-| Architecture & code quality | **Circulax** | Cleanest design, though Diffrax dependency provides less value than expected (Section 6) |
+| Analysis breadth | **VACASK** | DC, AC, tran, noise, HB (multitone), DC/AC xfer, arbitrary-depth parametric sweeps. Most complete of all four. |
+| Differentiable simulation | **VAJAX** ≈ Circulax | The key capability VACASK completely lacks. JAX AD enables gradient-based optimization and ML integration. |
+| Architecture & code quality | **Circulax** (Python), **VACASK** (C++) | Circulax: cleanest Python design. VACASK: 45K LOC of well-organized C++20 with clear separation of concerns. |
 | Photonic simulation | **Circulax** | Unique capability, no equivalent in others |
-| Netlist parsing | **Cadnip** | Full SPICE + Spectre parser |
-| Convergence robustness | **Cadnip** ≈ VAJAX | Both have GMIN + source stepping; Cadnip also has pseudo-transient init |
-| Scalability (tested) | **VAJAX** | Only one tested beyond ~100 nodes |
-| Solver ecosystem leverage | **Cadnip** ≫ VAJAX ≈ Circulax | DiffEq.jl (native mass matrix, 100+ solvers) ≫ Diffrax ≈ custom (neither has mass matrix/DAE support — Section 6) |
+| Netlist parsing & ecosystem | **VACASK** | Spectre-like native parser + conditional blocks + Xschem integration + IHP PDK support. Cadnip has good SPICE/Spectre parsing too. |
+| Convergence robustness | **VACASK** ≈ Cadnip | VACASK: GMIN/source stepping + residual convergence check + continuation bypass. Cadnip: GMIN/source stepping + pseudo-transient init. |
+| Scalability (tested) | **VAJAX** (GPU) / **VACASK** (CPU) | VAJAX: 133K nodes on GPU. VACASK: 25K nodes on CPU, fastest per-iteration. |
+| Solver ecosystem leverage | **Cadnip** ≫ others | DiffEq.jl (native mass matrix, 100+ solvers) ≫ all custom solvers. One-line access to IDA, Rosenbrock, Radau, etc. |
+| Benchmark methodology | **VACASK** | The gold standard: 6 runs, cache warming, matched timepoints, controlled for solver differences, std dev <2% |
 
-There is no clear winner. The "right" choice depends on priorities, and the most productive collaboration might be sharing infrastructure rather than forcing a single core.
+### The Four-Way Picture
+
+The four projects occupy distinct positions:
+
+- **VACASK** is the **performance and correctness reference**. It shows what's achievable in single-threaded C++ with careful engineering. Any new simulator should benchmark against it and learn from its optimization techniques (continuation bypass, residual convergence, direct pointer binding). Its limitation is that it's a traditional simulator — no AD, no GPU, no ML integration.
+
+- **VAJAX** is the **differentiable GPU simulator**. It's the only project with working GPU acceleration at scale AND differentiable simulation. Its limitation is solver maturity (2nd order BDF) and the JAX DAE gap (Section 6).
+
+- **Cadnip** is the **solver ecosystem play**. It's the only project with native access to production DAE solvers (IDA, Rosenbrock) without reimplementing them. Its limitation is VA model support (needs OpenVAF) and GPU (needs work).
+
+- **Circulax** is the **clean architecture + photonics** project. It's the only one with electronic-photonic simulation. Its limitation is that it's the least mature for traditional analog simulation (no convergence aids, untested at scale, BE only).
+
+The most productive collaboration is shared infrastructure: OpenVAF/VADistiller device models, VACASK-calibrated benchmarks, and a clear division of effort where each project contributes its proven strengths rather than duplicating the others' work.
