@@ -327,8 +327,11 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
     end
 
     # Check OSDI device types (loaded from .osdi files)
+    # SPICE is case-insensitive, so try both exact match and uppercase
     if haskey(sema.osdi_device_types, devkind)
         return OsdiModelRef(devkind)
+    elseif haskey(sema.osdi_device_types, devkind_upper)
+        return OsdiModelRef(devkind_upper)
     end
 
     # No model found - warn and return UnimplementedDevice
@@ -533,7 +536,7 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                         includee = SpectreNetlistParser.parsefile(path; implicit_title=false)
                     end
                     if !isa(includee, SemaResult)
-                        includee = sema_file_or_section(includee; imps=imps, parse_cache=parse_cache, imported_hdl_modules)
+                        includee = sema_file_or_section(includee; imps=imps, parse_cache=parse_cache, imported_hdl_modules, osdi_device_types=scope.osdi_device_types)
                         if parse_cache !== nothing
                             recache_spc!(parse_cache.thismod, path, includee)
                         end
@@ -589,6 +592,10 @@ function sema_include!(scope::SemaResult, includee::SemaResult)
         for def in defs
             push!(namedefs, offset_cd(def, condition_offset))
         end
+    end
+    for (name, defs) in includee.osdi_models
+        namedefs = get!(()->Pair{UInt, Pair{SNode, OsdiModelRef}}[], scope.osdi_models, name)
+        append!(namedefs, defs)
     end
     for (name, defs) in includee.subckts
         namedefs = get!(()->[], scope.subckts, name)

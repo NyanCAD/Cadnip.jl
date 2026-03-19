@@ -229,6 +229,13 @@ function main()
         SOLVERS_NONLINEAR
     ))
 
+    # Graetz Bridge OSDI variant
+    append!(results, run_benchmark_all_solvers(
+        "Graetz Bridge (OSDI)",
+        joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme_osdi.jl"),
+        SOLVERS_NONLINEAR
+    ))
+
     # Voltage Multiplier - nonlinear (diodes), needs robust DAE solver
     append!(results, run_benchmark_all_solvers(
         "Voltage Multiplier",
@@ -236,17 +243,25 @@ function main()
         SOLVERS_NONLINEAR
     ))
 
-    # Ring Oscillator - IDA only (needs tuned settings for oscillation)
+    # Voltage Multiplier OSDI variant
     append!(results, run_benchmark_all_solvers(
-        "Ring Oscillator (PSP103)",
+        "Voltage Multiplier (OSDI)",
+        joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme_osdi.jl"),
+        SOLVERS_NONLINEAR
+    ))
+
+    # Ring Oscillator - OSDI PSP103, FBDF only (needs tuned settings for oscillation)
+    append!(results, run_benchmark_all_solvers(
+        "Ring Oscillator (PSP103 OSDI)",
         joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"),
         SOLVERS_RING
     ))
 
-    # # C6288 Multiplier - all solvers
+    # # C6288 Multiplier - OSDI PSP103
     # append!(results, run_benchmark_all_solvers(
-    #     "C6288 Multiplier",
-    #     joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl")
+    #     "C6288 Multiplier (PSP103 OSDI)",
+    #     joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl"),
+    #     SOLVERS_NONLINEAR
     # ))
 
     println()

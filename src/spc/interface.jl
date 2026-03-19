@@ -196,9 +196,10 @@ voltage(sol, :out)  # Returns 2.5
 ```
 """
 function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit,
-                            imported_hdl_modules::Vector{Module}=Module[])
+                            imported_hdl_modules::Vector{Module}=Module[],
+                            osdi_files::Vector{String}=String[])
     ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
+    return make_mna_circuit(ast; circuit_name, imported_hdl_modules, osdi_files)
 end
 
 """
@@ -214,9 +215,10 @@ eval(circuit_code)
 ```
 """
 function parse_spice_file_to_mna(filepath::AbstractString; circuit_name::Symbol=:circuit,
-                                  imported_hdl_modules::Vector{Module}=Module[])
+                                  imported_hdl_modules::Vector{Module}=Module[],
+                                  osdi_files::Vector{String}=String[])
     ast = SpectreNetlistParser.parsefile(filepath; start_lang=:spice, implicit_title=true)
-    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
+    return make_mna_circuit(ast; circuit_name, imported_hdl_modules, osdi_files)
 end
 
 """

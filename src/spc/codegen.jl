@@ -1514,8 +1514,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # 3. Passes instance_name as _mna_prefix_ for hierarchical naming
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
 
-    # Check if the target subcircuit has OSDI N devices
-    target_has_osdi = subcircuit_has_osdi(ssema)
+    # Check if the target subcircuit has OSDI N devices (transitively)
+    target_has_osdi = subcircuit_has_osdi(ssema; all_subckts=state.sema.subckts)
     if target_has_osdi
         osdi_insts_var = Symbol("_osdi_insts_", instance_name)
         return quote
@@ -1657,12 +1657,36 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         Expr(:tuple, Expr(:parameters, parent_param_pairs...))
     end
 
+    # Check if the target subcircuit transitively has OSDI N devices
+    # Use subckt_semas (all known subcircuit definitions) for the transitive check
+    all_subckts_for_check = Dict{Symbol, Any}()
+    for (k, v) in subckt_semas
+        all_subckts_for_check[k] = [UInt(0) => MaybeConditional{SemaResult}(0, v)]
+    end
+    # Also include state.sema.subckts (parent-level definitions)
+    for (k, v) in state.sema.subckts
+        if !haskey(all_subckts_for_check, k)
+            all_subckts_for_check[k] = v
+        end
+    end
+    target_has_osdi = callee_sema !== nothing && subcircuit_has_osdi(callee_sema; all_subckts=all_subckts_for_check)
+
     # Pass hierarchical prefix: combine current prefix with instance name
-    return quote
-        let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
-            # Build hierarchical prefix from current _mna_prefix_ + local instance name
-            local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
+    if target_has_osdi
+        # Pass the sub-NamedTuple of OSDI instances for this X call
+        return quote
+            let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
+                local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                local sub_osdi = _osdi_insts_ !== nothing ? Base.getproperty(_osdi_insts_, $(QuoteNode(instance_name))) : nothing
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix, sub_osdi; $(explicit_kwargs...))
+            end
+        end
+    else
+        return quote
+            let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
+                local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
+            end
         end
     end
 end
@@ -2668,63 +2692,29 @@ function codegen_osdi_instance_setup!(state::CodegenState)
             end)
 
         elseif isa(stmt, SNode{SP.SubcktCall})
-            # X instance — check if target subcircuit has OSDI N devices
+            # X instance — check if target subcircuit transitively has OSDI
             subckt_name = LSymbol(stmt.model)
-            if haskey(state.sema.subckts, subckt_name)
-                subckt_list = state.sema.subckts[subckt_name]
-                if !isempty(subckt_list)
-                    _, subckt_sema_mc = first(subckt_list)
-                    ssema = subckt_sema_mc.val
-                    if subcircuit_has_osdi(ssema)
-                        setup_name = Symbol(subckt_name, "_osdi_setup")
-                        all_osdi_models = merge(ssema.osdi_models, state.sema.osdi_models)
+            subckt_list = get(state.sema.subckts, subckt_name, [])
+            if !isempty(subckt_list)
+                _, subckt_sema_mc = first(subckt_list)
+                ssema = subckt_sema_mc.val
+                if subcircuit_has_osdi(ssema; all_subckts=state.sema.subckts)
+                    setup_name = Symbol(subckt_name, "_osdi_setup")
 
-                        # Collect ALL N devices in the subcircuit and their models
-                        n_device_info = Tuple{Symbol, Symbol, Any}[]  # (dev_name, model_sym, model_var)
-                        for (sub_name, sub_inst_list) in ssema.instances
-                            isempty(sub_inst_list) && continue
-                            (_, sub_mc) = last(sub_inst_list)
-                            sub_stmt = sub_mc.val
-                            isa(sub_stmt, SNode{SP.OSDIDevice}) || continue
-                            sub_model_name = sub_stmt.model !== nothing ? sub_stmt.model : sub_stmt.model_after
-                            sub_model_name === nothing && continue
-                            sub_model_sym = LSymbol(sub_model_name)
-                            haskey(all_osdi_models, sub_model_sym) || continue
-                            sub_model_var = cg_model_name!(state, sub_model_name)
-                            push!(n_device_info, (sub_name, sub_model_sym, sub_model_var))
+                    # Build kwargs from X instance params
+                    explicit_kwargs = Expr[]
+                    for child in SpectreNetlistParser.RedTree.children(stmt)
+                        if child !== nothing && isa(child, SNode{SP.Parameter})
+                            name = LSymbol(child.name)
+                            def = cg_expr!(state, child.val)
+                            push!(explicit_kwargs, Expr(:kw, name, def))
                         end
-                        isempty(n_device_info) && continue
-
-                        # Build kwargs from X instance params
-                        explicit_kwargs = Expr[]
-                        for child in SpectreNetlistParser.RedTree.children(stmt)
-                            if child !== nothing && isa(child, SNode{SP.Parameter})
-                                name = LSymbol(child.name)
-                                def = cg_expr!(state, child.val)
-                                push!(explicit_kwargs, Expr(:kw, name, def))
-                            end
-                        end
-
-                        # Build NamedTuple of OsdiInstances + collect defaults
-                        nt_pairs = Expr[]
-                        # Use first device's model for defaults (they share the .model card)
-                        first_model_sym = n_device_info[1][2]
-                        defaults_var = Symbol("_osdi_defaults_", first_model_sym)
-
-                        for (dev_name, model_sym, model_var) in n_device_info
-                            push!(nt_pairs, Expr(:(=), dev_name,
-                                :($(OsdiLoader_ref).OsdiInstance($model_var))))
-                        end
-
-                        insts_var = Symbol("_osdi_insts_", LString(inst_name))
-                        push!(setup_stmts, quote
-                            $insts_var = let
-                                _insts_ = ($(nt_pairs...),)
-                                $setup_name(_insts_, $defaults_var; $(explicit_kwargs...))
-                                _insts_
-                            end
-                        end)
                     end
+
+                    insts_var = Symbol("_osdi_insts_", LString(inst_name))
+                    push!(setup_stmts, quote
+                        $insts_var = $setup_name(; $(explicit_kwargs...))
+                    end)
                 end
             end
         end
@@ -2750,42 +2740,61 @@ function codegen_osdi_instance_setup!(state::CodegenState)
 end
 
 """
-    codegen_subckt_osdi_setup(sema::SemaResult, subckt_name::Symbol, parent_osdi_models)
+    codegen_subckt_osdi_setup(sema::SemaResult, subckt_name::Symbol, parent_osdi_models; all_subckts)
 
-Generate an OSDI setup function for a subcircuit that contains N devices.
+Generate an OSDI setup function for a subcircuit that contains OSDI devices
+(either direct N devices or X calls to subcircuits with OSDI devices).
 
-The setup function takes a NamedTuple of (device_name => OsdiInstance) and
-subcircuit params as kwargs. It applies .model instance defaults then N-line
-params (which may reference subcircuit params) to each instance, then calls
-setup_instance!. Returns the NamedTuple.
+The setup function takes subcircuit params as kwargs, creates OsdiInstances,
+configures them with model defaults and N-line params, and returns a NamedTuple
+keyed by instance name.
 
-Returns nothing if the subcircuit has no OSDI N devices.
+Returns nothing if the subcircuit has no OSDI devices (direct or transitive).
 """
 function codegen_subckt_osdi_setup(sema::SemaResult, subckt_name::Symbol,
-                                    parent_osdi_models::Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}})
-    # Find ALL N device instances in this subcircuit that reference OSDI models
-    osdi_instances = Pair{Symbol, SNode}[]  # (inst_name, stmt)
+                                    parent_osdi_models::Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}};
+                                    all_subckts::Dict=Dict{Symbol, Any}())
     all_osdi_models = merge(sema.osdi_models, parent_osdi_models)
+    combined_subckts = merge(all_subckts, sema.subckts)
 
+    # Find direct N device instances
+    direct_n_devices = Pair{Symbol, SNode}[]
     for (inst_name, inst_list) in sema.instances
         isempty(inst_list) && continue
         (_, mc) = last(inst_list)
         stmt = mc.val
         isa(stmt, SNode{SP.OSDIDevice}) || continue
-
         model_ref_name = stmt.model !== nothing ? stmt.model : stmt.model_after
         model_ref_name === nothing && continue
         model_sym = LSymbol(model_ref_name)
         haskey(all_osdi_models, model_sym) || continue
-
-        push!(osdi_instances, inst_name => stmt)
+        push!(direct_n_devices, inst_name => stmt)
     end
 
-    isempty(osdi_instances) && return nothing
+    # Find X calls to subcircuits that transitively have OSDI
+    x_osdi_calls = Pair{Symbol, SNode}[]
+    for (inst_name, inst_list) in sema.instances
+        isempty(inst_list) && continue
+        (_, mc) = last(inst_list)
+        stmt = mc.val
+        isa(stmt, SNode{SP.SubcktCall}) || continue
+        target_name = LSymbol(stmt.model)
+        target_list = get(combined_subckts, target_name, [])
+        isempty(target_list) && continue
+        _, target_mc = first(target_list)
+        target_sema = target_mc.val
+        if subcircuit_has_osdi(target_sema, all_osdi_models; all_subckts=combined_subckts)
+            push!(x_osdi_calls, inst_name => stmt)
+        end
+    end
+
+    if isempty(direct_n_devices) && isempty(x_osdi_calls)
+        return nothing
+    end
 
     state = CodegenState(sema)
 
-    # Build kwargs matching subcircuit params (same as codegen_mna_subcircuit)
+    # Build kwargs matching subcircuit params
     param_kwargs = Expr[]
     for (name, defs) in sema.params
         if !isempty(defs)
@@ -2797,18 +2806,20 @@ function codegen_subckt_osdi_setup(sema::SemaResult, subckt_name::Symbol,
         end
     end
 
-    # Generate per-device setup code: defaults → N-line params → setup_instance!
-    per_device_stmts = Expr[]
-    for (inst_name, stmt) in osdi_instances
+    # Generate NamedTuple pairs for the return value
+    nt_pairs = Expr[]
+    body_stmts = Expr[]
+
+    # Direct N devices: create instance, apply defaults + N-line params, setup
+    for (inst_name, stmt) in direct_n_devices
         model_ref_name = stmt.model !== nothing ? stmt.model : stmt.model_after
         model_sym = LSymbol(model_ref_name)
         (_, def) = last(all_osdi_models[model_sym])
         model_ref = def[2]
         dev = sema.osdi_device_types[model_ref.device_name]
+        model_var = cg_model_name!(state, model_ref_name)
+        defaults_var = Symbol("_osdi_defaults_", model_sym)
 
-        dev_sym = QuoteNode(inst_name)
-
-        # N-line params (expressions reference subcircuit params — override defaults)
         instance_params = Expr[]
         for p in stmt.parameters
             pname = LSymbol(p.name)
@@ -2819,45 +2830,87 @@ function codegen_subckt_osdi_setup(sema::SemaResult, subckt_name::Symbol,
             end
         end
 
-        push!(per_device_stmts, quote
-            let inst = _insts_[$dev_sym]
-                # Apply .model instance defaults (filled by caller before N-line overrides)
-                for (dname, dval) in _defaults_
+        inst_local = Symbol("_n_", inst_name)
+        push!(body_stmts, quote
+            $inst_local = let
+                inst = $(OsdiLoader_ref).OsdiInstance($model_var)
+                for (dname, dval) in $defaults_var
                     $(OsdiLoader_ref).set_param!(inst, dname, dval)
                 end
-                # Apply N-line params (override defaults)
                 $(instance_params...)
                 $(OsdiLoader_ref).setup_instance!(inst)
+                inst
             end
         end)
+        push!(nt_pairs, Expr(:(=), inst_name, inst_local))
+    end
+
+    # X calls to OSDI subcircuits: call target's setup function
+    for (inst_name, stmt) in x_osdi_calls
+        target_name = LSymbol(stmt.model)
+        target_setup_name = Symbol(target_name, "_osdi_setup")
+
+        # Collect explicit kwargs from X-call params
+        x_kwargs = Expr[]
+        for child in SpectreNetlistParser.RedTree.children(stmt)
+            if child !== nothing && isa(child, SNode{SP.Parameter})
+                pname = LSymbol(child.name)
+                pval = cg_expr!(state, child.val)
+                push!(x_kwargs, Expr(:kw, pname, pval))
+            end
+        end
+
+        inst_local = Symbol("_x_", inst_name)
+        push!(body_stmts, :($inst_local = $target_setup_name(; $(x_kwargs...))))
+        push!(nt_pairs, Expr(:(=), inst_name, inst_local))
     end
 
     setup_name = Symbol(subckt_name, "_osdi_setup")
 
     return quote
-        function $(setup_name)(_insts_::NamedTuple, _defaults_; $(param_kwargs...))
-            $(per_device_stmts...)
-            return _insts_
+        function $(setup_name)(; $(param_kwargs...))
+            $(body_stmts...)
+            return ($(nt_pairs...),)
         end
     end
 end
 
 """
-    subcircuit_has_osdi(sema::SemaResult, parent_osdi_models)
+    subcircuit_has_osdi(sema::SemaResult, parent_osdi_models; all_subckts, _visited)
 
 Check if a subcircuit (transitively) contains OSDI N devices.
+Checks both direct N device instances and X instances that reference
+subcircuits which transitively contain OSDI devices.
 """
-function subcircuit_has_osdi(sema::SemaResult, parent_osdi_models::Dict=Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}}())
+function subcircuit_has_osdi(sema::SemaResult,
+                             parent_osdi_models::Dict=Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}}();
+                             all_subckts::Dict=Dict{Symbol, Any}(),
+                             _visited::Set{Symbol}=Set{Symbol}())
     all_osdi_models = merge(sema.osdi_models, parent_osdi_models)
+    combined_subckts = merge(all_subckts, sema.subckts)
     for (_, inst_list) in sema.instances
         isempty(inst_list) && continue
         (_, mc) = last(inst_list)
         stmt = mc.val
-        isa(stmt, SNode{SP.OSDIDevice}) || continue
-        model_ref_name = stmt.model !== nothing ? stmt.model : stmt.model_after
-        model_ref_name === nothing && continue
-        model_sym = LSymbol(model_ref_name)
-        haskey(all_osdi_models, model_sym) && return true
+        if isa(stmt, SNode{SP.OSDIDevice})
+            model_ref_name = stmt.model !== nothing ? stmt.model : stmt.model_after
+            model_ref_name === nothing && continue
+            model_sym = LSymbol(model_ref_name)
+            haskey(all_osdi_models, model_sym) && return true
+        elseif isa(stmt, SNode{SP.SubcktCall})
+            target_name = LSymbol(stmt.model)
+            target_name in _visited && continue
+            push!(_visited, target_name)
+            target_list = get(combined_subckts, target_name, [])
+            if !isempty(target_list)
+                _, target_mc = first(target_list)
+                target_sema = target_mc.val
+                if subcircuit_has_osdi(target_sema, all_osdi_models;
+                                       all_subckts=combined_subckts, _visited)
+                    return true
+                end
+            end
+        end
     end
     return false
 end
@@ -3288,8 +3341,13 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
-    # Check if this subcircuit has OSDI N devices — if so, add _osdi_inst_ parameter
-    has_osdi_devices = subcircuit_has_osdi(sema)
+    # Check if this subcircuit (transitively) has OSDI N devices — if so, add _osdi_insts_ parameter
+    # Convert subckt_semas Dict{Symbol,SemaResult} to the format used by sema.subckts
+    all_subckts_for_check = Dict{Symbol, Any}()
+    for (k, v) in subckt_semas
+        all_subckts_for_check[k] = [UInt(0) => MaybeConditional{SemaResult}(0, v)]
+    end
+    has_osdi_devices = subcircuit_has_osdi(sema; all_subckts=all_subckts_for_check)
 
     if has_osdi_devices
         return quote
@@ -3413,12 +3471,14 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     osdi_instance_setup = has_osdi ? codegen_osdi_instance_setup!(state) : Expr[]
 
     # Generate subcircuit OSDI setup functions
+    # Process leaf subcircuits first (those with direct N devices), then parents
     subckt_osdi_setups = Expr[]
     if has_osdi
         for (name, subckt_list) in sema_result.subckts
             if !isempty(subckt_list)
                 _, subckt_sema = first(subckt_list)
-                setup_def = codegen_subckt_osdi_setup(subckt_sema.val, name, sema_result.osdi_models)
+                setup_def = codegen_subckt_osdi_setup(subckt_sema.val, name, sema_result.osdi_models;
+                                                       all_subckts=sema_result.subckts)
                 if setup_def !== nothing
                     push!(subckt_osdi_setups, setup_def)
                 end
@@ -3450,9 +3510,6 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
             # Precompiled subcircuit builders from imported modules
             $(subckt_builder_imports...)
 
-            # Subcircuit OSDI setup functions
-            $(subckt_osdi_setups...)
-
             # Subcircuit builders
             $(subckt_defs...)
 
@@ -3460,6 +3517,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
             function $(circuit_name)(params)
                 # OSDI model setup (shared across instances)
                 $(osdi_model_setup...)
+
+                # Subcircuit OSDI setup functions (need access to model variables above)
+                $(subckt_osdi_setups...)
 
                 # OSDI instance setup (per N device / per X instance)
                 $(osdi_instance_setup...)
