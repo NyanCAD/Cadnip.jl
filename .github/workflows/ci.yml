@@ -70,9 +70,6 @@ jobs:
       - name: Disable heavy precompile workloads
         run: |
           cat > test/LocalPreferences.toml << 'EOF'
-          [PSPModels]
-          precompile_workload = false
-
           [VADistillerModels]
           precompile_workload = false
 

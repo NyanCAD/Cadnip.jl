@@ -33,6 +33,15 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      - name: Install OpenVAF and compile OSDI test fixtures
+        run: |
+          curl -fsSL https://fides.fe.uni-lj.si/openvaf/download/openvaf-reloaded-osdi_0.4-153-g2e066436-linux_x64.tar.gz -o openvaf.tar.gz
+          tar xzf openvaf.tar.gz
+          chmod +x openvaf-r
+          ./openvaf-r models/VADistillerModels.jl/va/diode.va -o test/osdi/diode.osdi
+          ./openvaf-r models/PSPModels.jl/va/psp103.va -I models/PSPModels.jl/va -o test/osdi/psp103.osdi
+          ls -la test/osdi/*.osdi
+
       - name: Install dependencies
         run: |
           julia --project=benchmarks -e '
