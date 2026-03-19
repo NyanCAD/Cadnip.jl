@@ -222,7 +222,7 @@ end
 function MNA.stamp!(inst::OsdiInstance, ctx::MNAContext, terminals::Int...;
                     _mna_x_::AbstractVector=Float64[],
                     _mna_spec_=MNA.MNASpec(), t::Real=0.0,
-                    instance_name::Symbol=Symbol(""))
+                    _mna_instance_::Symbol=Symbol(""))
     dev = inst.model.device
 
     # 1. Map terminals
@@ -272,7 +272,7 @@ function MNA.stamp!(inst::OsdiInstance, ctx::MNAContext, terminals::Int...;
             end
         else
             inst.node_mapping[i] = alloc_internal_node!(ctx,
-                Symbol(dev.nodes[i].name), instance_name)
+                Symbol(dev.nodes[i].name), _mna_instance_)
         end
     end
 
@@ -387,7 +387,7 @@ end
 function MNA.stamp!(inst::OsdiInstance, ctx::DirectStampContext, terminals::Int...;
                     _mna_x_::AbstractVector=Float64[],
                     _mna_spec_=MNA.MNASpec(), t::Real=0.0,
-                    instance_name::Symbol=Symbol(""))
+                    _mna_instance_::Symbol=Symbol(""))
     dev = inst.model.device
     ls = inst.limit_state
 

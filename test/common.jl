@@ -44,34 +44,11 @@ ctx, sol = solve_mna_spice_code(code)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
-
-    # Evaluate in temporary module
-    m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
-    # Import VA device types
-    for hdl_mod in imported_hdl_modules
-        for name in names(hdl_mod; all=true, imported=false)
-            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
-                val = getfield(hdl_mod, name)
-                isa(val, Type) && Base.eval(m, :(const $name = $val))
-            end
-        end
-    end
-    circuit_fn = Base.eval(m, code)
-
-    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
-    # for nonlinear devices (VA BJTs, diodes, etc.)
-    spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec)
-
-    # Build context for returning (at the solved operating point)
-    ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
-
+function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[],
+                              osdi_files::Vector{String}=String[])
+    circuit = make_mna_spice_circuit(spice_code; temp, imported_hdl_modules, osdi_files)
+    sol = Base.invokelatest(dc!, circuit)
+    ctx = Base.invokelatest(circuit.builder, circuit.params, circuit.spec, 0.0; x=sol.x)
     return ctx, sol
 end
 
@@ -222,15 +199,19 @@ circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
 sol = tran!(circuit, (0.0, 1e-3))
 ```
 """
-function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
+function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[],
+                                osdi_files::Vector{String}=String[])
     ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
+    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules, osdi_files)
 
     # Evaluate in temporary module
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    if !isempty(osdi_files)
+        Base.eval(m, :(using CedarSim.OsdiLoader))
+    end
     # Import VA device types
     for hdl_mod in imported_hdl_modules
         for name in names(hdl_mod; all=true, imported=false)
@@ -242,12 +223,15 @@ function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hd
     end
     circuit_fn = Base.eval(m, code)
 
-    # Wrap in invokelatest to handle world age issues.
-    # This is needed because circuit_fn was defined via eval and is called from
-    # ODE solver callbacks which are in an older world.
-    # For production performance, use the sp"..." macro instead.
-    wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-
     spec = MNASpec(temp=Float64(temp), mode=:tran)
-    return MNACircuit(wrapped_fn, (;), spec)
+
+    if !isempty(osdi_files)
+        # OSDI path: circuit_fn is a setup function
+        wrapped_setup = (params) -> Base.invokelatest(circuit_fn, params)
+        return MNACircuitFromSetup(wrapped_setup, (;), spec)
+    else
+        # Standard path: circuit_fn IS the builder
+        wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+        return MNACircuit(wrapped_fn, (;), spec)
+    end
 end

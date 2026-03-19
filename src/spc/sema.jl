@@ -13,6 +13,11 @@ Base.convert(::Type{MaybeConditional{SNode}}, x::SNode) = MaybeConditional{SNode
 Base.convert(::Type{MaybeConditional{Pair{SNode, GlobalRef}}}, x::Pair{<:SNode, GlobalRef}) = MaybeConditional{Pair{SNode, GlobalRef}}(0, x)
 Base.convert(::Type{MaybeConditional{T}}, x::MaybeConditional) where {T} = MaybeConditional{T}(x.cond, convert(T, x.val))
 
+"""Sentinel type for OSDI model references in sema. Stored in `osdi_models` dict."""
+struct OsdiModelRef
+    device_name::Symbol  # VA module name to look up in osdi_device_types
+end
+
 @enum CircuitKind begin
     SPICECircuit
     SpectreCircuit
@@ -62,6 +67,10 @@ mutable struct SemaResult
     imported_hdl_modules::Vector{Module}
 
     imps::Union{Nothing, Module, Dict{Symbol, Module}}
+
+    # OSDI device support
+    osdi_device_types::Dict{Symbol, Any}  # VA module name → OsdiDeviceType
+    osdi_models::Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}}  # model_name → (ast, ref)
 end
 
 function SemaResult(ast::SNode)
@@ -70,7 +79,8 @@ function SemaResult(ast::SNode)
         Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Vector(), Vector(),
         OrderedSet{Symbol}(), OrderedSet{Symbol}(), OrderedSet{Symbol}(),
         OrderedSet{Symbol}(),
-        Int[], Module[], nothing)
+        Int[], Module[], nothing,
+        Dict{Symbol, Any}(), Dict{Symbol, Vector{Pair{UInt, Pair{SNode, OsdiModelRef}}}}())
 end
 
 function MaybeConditional(scope::SemaResult, stmt)
@@ -170,7 +180,7 @@ function sema!(scope::SemaResult, n::SNode{<:SC.AbstractBlockASTNode})
             if haskey(scope.subckts, name)
                 warn!(scope, "Duplicate subcircuit definition $name")
             end
-            push!(get!(()->[], scope.subckts, name), scope.global_position=>MaybeConditional(scope, sema_file_or_section(stmt; imps=scope.imps, parse_cache=scope.parse_cache, imported_hdl_modules=scope.imported_hdl_modules)))
+            push!(get!(()->[], scope.subckts, name), scope.global_position=>MaybeConditional(scope, sema_file_or_section(stmt; imps=scope.imps, parse_cache=scope.parse_cache, imported_hdl_modules=scope.imported_hdl_modules, osdi_device_types=scope.osdi_device_types)))
         elseif isa(stmt, SNode{SC.Global})
             # Global node declaration - handled implicitly
         elseif isa(stmt, SNode{SC.Simulator})
@@ -255,7 +265,7 @@ function get_section!(scope::SemaResult, name::Symbol)
         sect = scope.libs[name][end]
         if !isa(sect[2], SemaResult)
             spec = sect[2]::SemaSpec
-            semad = sema_file_or_section(spec.ast; imps=spec.imps, parse_cache=spec.parse_cache, imported_hdl_modules=scope.imported_hdl_modules)
+            semad = sema_file_or_section(spec.ast; imps=spec.imps, parse_cache=spec.parse_cache, imported_hdl_modules=scope.imported_hdl_modules, osdi_device_types=scope.osdi_device_types)
             scope.libs[name][end] = sect[1]=>semad
             return semad
         end
@@ -316,6 +326,11 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
         end
     end
 
+    # Check OSDI device types (loaded from .osdi files)
+    if haskey(sema.osdi_device_types, devkind)
+        return OsdiModelRef(devkind)
+    end
+
     # No model found - warn and return UnimplementedDevice
     file = stmt.ps.srcfile.path
     line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
@@ -347,7 +362,12 @@ function sema_visit_model!(scope::SemaResult, stmt::SNode{SP.Model})
     end
     modelref = spice_select_device(scope, typ, level, version, stmt)
 
-    push!(get!(()->[], scope.models, name), scope.global_position=>(stmt=>modelref))
+    if modelref isa OsdiModelRef
+        push!(get!(()->Pair{UInt, Pair{SNode, OsdiModelRef}}[], scope.osdi_models, name),
+              scope.global_position=>(stmt=>modelref))
+    else
+        push!(get!(()->[], scope.models, name), scope.global_position=>(stmt=>modelref))
+    end
 end
 
 function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.Subckt}, SNode{SP.LibStatement}, SNode{SP.IfElseCase}})
@@ -431,7 +451,7 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
             if haskey(scope.subckts, name)
                 warn!(scope, "Duplicate subcircuit definition $name")
             end
-            push!(get!(()->[], scope.subckts, name), scope.global_position=>MaybeConditional(scope, sema_file_or_section(stmt; imps=scope.imps, parse_cache=scope.parse_cache, imported_hdl_modules=scope.imported_hdl_modules)))
+            push!(get!(()->[], scope.subckts, name), scope.global_position=>MaybeConditional(scope, sema_file_or_section(stmt; imps=scope.imps, parse_cache=scope.parse_cache, imported_hdl_modules=scope.imported_hdl_modules, osdi_device_types=scope.osdi_device_types)))
         elseif isa(stmt, SNode{SP.LibStatement})
             name = LSymbol(stmt.name)
             if haskey(scope.subckts, name)
@@ -593,7 +613,8 @@ function sema_include!(scope::SemaResult, includee::SemaResult)
     union!(scope.exposed_subckts, includee.exposed_subckts)
 end
 
-function sema_file_or_section(n::SNode; imps=nothing, parse_cache=nothing, imported_hdl_modules::Vector{Module}=Module[])
+function sema_file_or_section(n::SNode; imps=nothing, parse_cache=nothing, imported_hdl_modules::Vector{Module}=Module[],
+                              osdi_device_types::Dict{Symbol,Any}=Dict{Symbol,Any}())
     scope = SemaResult(n)
     if imps !== nothing
         scope.imps = imps
@@ -602,12 +623,15 @@ function sema_file_or_section(n::SNode; imps=nothing, parse_cache=nothing, impor
         scope.parse_cache = parse_cache
     end
     scope.imported_hdl_modules = imported_hdl_modules
+    scope.osdi_device_types = osdi_device_types
     sema!(scope, n)
     scope
 end
 
-function sema(n::SNode; imps = nothing, parse_cache=nothing, imported_hdl_modules::Vector{Module}=Module[])
+function sema(n::SNode; imps = nothing, parse_cache=nothing, imported_hdl_modules::Vector{Module}=Module[],
+              osdi_device_types::Dict{Symbol,Any}=Dict{Symbol,Any}())
     scope = SemaResult(n)
+    scope.osdi_device_types = osdi_device_types
     if imps !== nothing
         if isa(imps, NamedTuple)
             scope.imps = Dict(pairs(imps)...)
