@@ -20,22 +20,25 @@
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp, MNASolutionAccessor, voltage
+using CedarSim.OsdiLoader
 using OrdinaryDiffEq: FBDF
 using SciMLBase
 using Printf
-using VACASKModels
 using CairoMakie
 using DelimitedFiles
 
+# Path to precompiled OSDI PSP103
+const PSP103_OSDI = joinpath(@__DIR__, "..", "..", "..", "..", "test", "osdi", "psp103.osdi")
+
 # Parse circuit (same netlist as ngspice — no load caps, 10uA pulse)
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_compare,
-                                         imported_hdl_modules=[VACASKModels])
+const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:ring_compare,
+                                              osdi_files=[PSP103_OSDI])
 eval(circuit_code)
 
 println("Running 1μs transient (matching ngspice settings)...")
-circuit = MNACircuit(ring_compare)
+wrapped_setup = (params) -> Base.invokelatest(ring_compare, params)
+circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec())
 sys = MNA.assemble!(circuit)
 
 t0 = time()

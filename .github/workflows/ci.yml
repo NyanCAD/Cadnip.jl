@@ -76,8 +76,6 @@ jobs:
           [VADistillerModels]
           precompile_workload = false
 
-          [VACASKModels]
-          precompile_workload = false
           EOF
 
       - name: Install and precompile test dependencies

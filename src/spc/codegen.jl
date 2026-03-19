@@ -3440,7 +3440,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     end
 
     # Import precompiled subcircuit builders from imported modules.
-    # When a subcircuit is referenced but not defined locally (e.g., `nmos`/`pmos` from VACASKModels),
+    # When a subcircuit is referenced but not defined locally (e.g., from imported HDL modules),
     # it appears in exposed_subckts. If the imported module exports a matching `_mna_builder` function,
     # generate a GlobalRef binding so locally-generated builders can call it.
     subckt_builder_imports = Expr[]
