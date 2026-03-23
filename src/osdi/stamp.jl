@@ -45,7 +45,7 @@ function count_G_entries(dev::OsdiDeviceType, node_mapping::Vector{Int})
     return n
 end
 
-"""Count non-ground C matrix stamps (entries with reactive pointers, both nodes non-zero)."""
+"""Count non-ground C matrix stamps (REACT entries only, both nodes non-zero)."""
 function count_C_entries(dev::OsdiDeviceType, node_mapping::Vector{Int})
     n = 0
     for entry in dev.jacobian_entries
@@ -281,10 +281,8 @@ function MNA.stamp!(inst::OsdiInstance, ctx::MNAContext, terminals::Int...;
     write_state_idx!(inst)
 
     # 3. Eval with bucketed prev_solve
-    # During discovery (MNAContext), always request reactive eval too so that
-    # C matrix entries have correct initial values for structure detection
     mode = hasproperty(_mna_spec_, :mode) ? _mna_spec_.mode : :dcop
-    flags = eval_flags_for_mode(mode) | CALC_REACT_RESIDUAL | CALC_REACT_JACOBIAN
+    flags = eval_flags_for_mode(mode)
     max_idx = maximum(inst.node_mapping)
     prev_solve = make_bucketed_prev_solve(_mna_x_, max_idx)
     osdi_eval!(inst, flags, t, prev_solve; mode)
@@ -357,16 +355,14 @@ function MNA.stamp!(inst::OsdiInstance, ctx::MNAContext, terminals::Int...;
 
     react_array_k = 0
     for entry in dev.jacobian_entries
-        has_react = (entry.flags & JACOBIAN_ENTRY_REACT) != 0
-        has_react_const = (entry.flags & JACOBIAN_ENTRY_REACT_CONST) != 0
-        (has_react || has_react_const) || continue
+        entry.react_ptr_off == typemax(UInt32) && continue
         row = inst.node_mapping[entry.nodes.node_1 + 1]
         col = inst.node_mapping[entry.nodes.node_2 + 1]
+        has_react = (entry.flags & JACOBIAN_ENTRY_REACT) != 0
         if has_react
             react_array_k += 1
             stamp_C!(ctx, row, col, jacobian_react[react_array_k])
         else
-            # REACT_CONST-only: value loaded via pointer during restamping
             stamp_C!(ctx, row, col, 0.0)
         end
     end
