@@ -420,15 +420,12 @@ function MNA.stamp!(inst::OsdiInstance, ctx::DirectStampContext, terminals::Int.
     prev_solve = make_bucketed_prev_solve(_mna_x_, max_idx)
 
     # Eval
-    eval_ret = osdi_eval!(inst, flags, t, prev_solve; mode, iteration=ls.iteration)
+    osdi_eval!(inst, flags, t, prev_solve; mode, iteration=ls.iteration)
 
     # Rotate limit state after eval
     if limiting_enabled
         rotate!(ls)
     end
-
-    # Check if limiting was applied by the device
-    limiting_applied = (eval_ret & EVAL_RET_FLAG_LIM) != 0
 
     # Load Jacobian directly through bound pointers → writes into G/C nzval
     GC.@preserve inst begin
@@ -450,29 +447,18 @@ function MNA.stamp!(inst::OsdiInstance, ctx::DirectStampContext, terminals::Int.
         ctx.C_pos += n_C_stamps
     end
 
-    # Load SPICE RHS (Newton companion model: J*x - residual)
-    # load_spice_rhs_dc computes: rhs = J(xl) * x_actual - f(xl)
-    # When limiting is applied, we need: rhs = J(xl) * xl - f(xl)
-    # The correction is: load_limit_rhs_resist = J(xl) * (xl - x_actual)
-    # So: rhs_correct = load_spice_rhs_dc + load_limit_rhs_resist
+    # Load SPICE RHS (Newton companion model)
+    # load_spice_rhs_dc computes: rhs = J(xl)*prev_solve + lim_rhs - residual(xl)
+    # Per OSDI v0.3 spec §2, eq (2.2): J*x_{k+1} = J*x_k - F(x_k)
+    # The function ALREADY includes the limit RHS correction (lim_rhs = J*(xl - x))
+    # so no separate load_limit_rhs_resist call is needed.
+    # At convergence (xl == x): rhs = J*x - I(x), which is the standard companion model.
     rhs_buf = zeros(Float64, length(prev_solve))  # same size as bucketed prev_solve
     GC.@preserve inst rhs_buf prev_solve begin
         ccall(dev.fn_load_spice_rhs_dc, Cvoid,
             (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Float64}, Ptr{Float64}),
             pointer(inst.blob), pointer(inst.model.blob),
             pointer(rhs_buf), pointer(prev_solve))
-    end
-
-    # Add limit RHS correction when limiting was applied
-    if limiting_applied
-        lim_rhs_buf = zeros(Float64, length(prev_solve))
-        GC.@preserve inst lim_rhs_buf begin
-            ccall(dev.fn_load_limit_rhs_resist, Cvoid,
-                (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Float64}),
-                pointer(inst.blob), pointer(inst.model.blob),
-                pointer(lim_rhs_buf))
-        end
-        rhs_buf .-= lim_rhs_buf
     end
 
     # Stamp companion current into b vector (each unique MNA index only once)
