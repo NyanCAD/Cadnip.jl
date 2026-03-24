@@ -160,7 +160,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
         Dict{Symbol, VAFunction}(), true, ddx_order,
-        Dict{Symbol, Pair{Symbol,Symbol}}())
+        Dict{Symbol, Pair{Symbol,Symbol}}(), nothing)
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -267,7 +267,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         var_types,
         Dict{Symbol, VAFunction}(), false,
         ddx_order,
-        named_branches)
+        named_branches, nothing)
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -450,7 +450,14 @@ struct MNAScope
     undefault_ids::Bool
     ddx_order::Vector{Symbol}
     named_branches::Dict{Symbol, Pair{Symbol,Symbol}}  # Maps branch name -> (pos, neg) nodes
+    delay_expr::Any  # nothing, or delay expression for absdelay V/I rewriting
 end
+
+"""Create a copy of the scope with delay_expr set for absdelay rewriting."""
+with_delay(s::MNAScope, delay_jl) = MNAScope(
+    s.parameters, s.node_order, s.ninternal_nodes, s.branch_order,
+    s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
+    s.ddx_order, s.named_branches, delay_jl)
 
 # Literal parsing methods
 function (::MNAScope)(cs::VANode{Literal})
@@ -539,11 +546,17 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
         push!(to_julia.used_branches, id1 => id2)
 
-        if id2 == Symbol("0")
-            return id1
-        else
-            return :($id1 - $id2)
+        current_val = id2 == Symbol("0") ? id1 : :($id1 - $id2)
+
+        # Inside absdelay: generate delayed lookup instead of current voltage
+        if to_julia.delay_expr !== nothing
+            node1 = id1 == Symbol("0") ? 0 : Symbol("_node_", id1)
+            node2 = id2 == Symbol("0") ? 0 : Symbol("_node_", id2)
+            delay_jl = to_julia.delay_expr
+            return :(CedarSim.MNA.va_absdelay_V(_mna_h_, _mna_h_p_, $node1, $node2, $delay_jl, $current_val, _mna_t_))
         end
+
+        return current_val
     elseif fname == :I
         # Current access
         @assert length(stmt.args) in (1, 2)
@@ -570,6 +583,14 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     elseif fname == :ddt
         # Time derivative - use va_ddt
         return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
+    elseif fname == :absdelay
+        # Transport delay - absdelay(expr, tdelay [, maxdelay])
+        # Create a delayed scope so V/I calls generate h-based lookups
+        @assert length(stmt.args) in (2, 3) "absdelay requires 2 or 3 arguments"
+        delay_jl = to_julia(stmt.args[2].item)
+        # maxdelay (3rd arg) is ignored for now — constant delay only
+        delayed = with_delay(to_julia, delay_jl)
+        return delayed(stmt.args[1].item)
     elseif fname == :ddx
         # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
         # For n-terminal MNA devices, duals are indexed by node_order (port positions)
@@ -1734,7 +1755,7 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
-        to_julia.named_branches)
+        to_julia.named_branches, nothing)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2733,7 +2754,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                                  $([:($np::Int) for np in node_params]...);
                                  _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                  _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
-                                 _mna_instance_::Symbol=Symbol(""))
+                                 _mna_instance_::Symbol=Symbol(""),
+                                 _mna_h_=nothing, _mna_h_p_=nothing)
         $stamp_body
     end)
 
@@ -2768,7 +2790,7 @@ function make_mna_module(va::VANode)
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+        using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
         using ..CedarSim.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
@@ -2968,7 +2990,7 @@ function load_mna_va_modules(into::Module, file::String)
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment
-                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+                using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
                 using ForwardDiff: Dual, value, partials
                 import ForwardDiff
                 export $typename

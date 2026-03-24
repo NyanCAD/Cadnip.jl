@@ -1451,7 +1451,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                 end
             end
         else
@@ -1461,7 +1461,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                 end
             end
         end
@@ -1520,13 +1520,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         osdi_insts_var = Symbol("_osdi_insts_", instance_name)
         return quote
             let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)), $osdi_insts_var; $(explicit_kwargs...))
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)), $osdi_insts_var; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
             end
         end
     else
         return quote
             let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
             end
         end
     end
@@ -1595,7 +1595,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                     Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                 end
             end
         else
@@ -1606,7 +1606,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                 end
             end
         end
@@ -1678,14 +1678,14 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
             let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
                 local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                 local sub_osdi = _osdi_insts_ !== nothing ? Base.getproperty(_osdi_insts_, $(QuoteNode(instance_name))) : nothing
-                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix, sub_osdi; $(explicit_kwargs...))
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix, sub_osdi; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
             end
         end
     else
         return quote
             let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
                 local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; $(explicit_kwargs...))
+                $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
             end
         end
     end
@@ -1926,7 +1926,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         Base.invokelatest($(MNA).stamp!, dev, ctx, $(port_exprs...);
                             _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                            _mna_instance_ = full_instance_name)
+                            _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                     end
                 end
             else
@@ -1936,7 +1936,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $(MNA).stamp!(dev, ctx, $(port_exprs...);
                             _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                            _mna_instance_ = full_instance_name)
+                            _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
                     end
                 end
             end
@@ -1973,7 +1973,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # Pass instance_name as _mna_prefix_ for hierarchical naming
             return quote
                 let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
                 end
             end
         else
@@ -2035,7 +2035,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, $d, $g, $s, $b;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
             end
         end
     else
@@ -2045,7 +2045,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
             end
         end
     end
@@ -2104,7 +2104,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, $c, $b, $e, $s;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
             end
         end
     else
@@ -2114,7 +2114,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
             end
         end
     end
@@ -3351,7 +3351,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
 
     if has_osdi_devices
         return quote
-            function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""), _osdi_insts_=nothing; $(param_kwargs...))
+            function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""), _osdi_insts_=nothing; _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
                 # Map ports to internal names
                 $(port_mappings...)
                 # Make parent_params available for default expression evaluation
@@ -3362,7 +3362,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         end
     else
         return quote
-            function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
+            function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
                 # Map ports to internal names
                 $(port_mappings...)
                 # Make parent_params available for default expression evaluation
@@ -3527,7 +3527,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
                 # Return builder closure capturing OSDI instances
                 function _builder_(params, spec::$(MNASpec), t::Real=0.0;
                                      x::AbstractVector=ZERO_VECTOR,
-                                     ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing)
+                                     ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing,
+                                     _mna_h_=nothing, _mna_h_p_=nothing)
                     _mna_prefix_ = Symbol("")
                     if ctx === nothing
                         ctx = $(MNAContext)()
@@ -3540,7 +3541,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
 
                 # Also define fast-path method on the closure
                 function _builder_(params, spec::$(MNASpec), t::Real,
-                                          x::AbstractVector, ctx::$(DirectStampContext))
+                                          x::AbstractVector, ctx::$(DirectStampContext);
+                                          _mna_h_=nothing, _mna_h_p_=nothing)
                     _mna_prefix_ = Symbol("")
                     $(reset_for_restamping!)(ctx)
                     $body
@@ -3573,7 +3575,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
             # Main circuit builder
             function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
                                      x::AbstractVector=ZERO_VECTOR,
-                                     ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing)
+                                     ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing,
+                                     _mna_h_=nothing, _mna_h_p_=nothing)
                 _mna_prefix_ = Symbol("")
                 if ctx === nothing
                     ctx = $(MNAContext)()
@@ -3584,8 +3587,10 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
                 return ctx
             end
 
+            # Zero-allocation positional version for DirectStampContext (fast path)
             function $(circuit_name)(params, spec::$(MNASpec), t::Real,
-                                            x::AbstractVector, ctx::$(DirectStampContext))
+                                            x::AbstractVector, ctx::$(DirectStampContext);
+                                            _mna_h_=nothing, _mna_h_p_=nothing)
                 _mna_prefix_ = Symbol("")
                 $(reset_for_restamping!)(ctx)
                 $body

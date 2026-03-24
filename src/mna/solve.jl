@@ -1785,6 +1785,74 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws; kwargs...)
 end
 
+"""
+    SciMLBase.DDEProblem(circuit::MNACircuit, tspan; kwargs...)
+
+Convert MNACircuit to SciML DDEProblem for circuits with transport delay (absdelay).
+
+Uses mass matrix form with DDE: C * du/dt = b(t) - G*u
+where delayed node voltages are accessed via the history function h(p, t-tau).
+
+# Arguments
+- `circuit`: The MNA circuit (must contain absdelay devices)
+- `tspan`: Time span for simulation `(t0, tf)`
+
+# Keyword Arguments
+- `u0`: Initial state (default: zeros, CedarTranOp computes DC during solve)
+- `constant_lags`: Vector of constant delay times for discontinuity tracking
+
+# Solver Recommendations
+- Use `MethodOfSteps(Rodas5P())` - handles stiff problems with singular mass matrices
+
+# Example
+```julia
+circuit = MNACircuit(build_delay_line; tau=1e-9)
+prob = DDEProblem(circuit, (0.0, 1e-6); constant_lags=[1e-9])
+sol = solve(prob, MethodOfSteps(Rodas5P()))
+```
+"""
+function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
+                               u0=nothing, constant_lags=Float64[], kwargs...)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
+
+    # First run multi-pass detection (same as ODEProblem)
+    ctx = build_with_detection(circuit)
+    n = system_size(ctx)
+
+    # Compile circuit structure
+    cs = compile_structure(builder, params, base_spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
+
+    # Use zeros as initial guess - CedarTranOp will compute DC during solve()
+    if u0 === nothing
+        u0 = zeros(n)
+    end
+
+    # Initialize workspace at t=0
+    fast_rebuild!(ws, u0, 0.0)
+
+    # DDE RHS: same as ODE but with h and p threaded as kwargs through
+    # fast_rebuild! → builder → stamp! → va_absdelay_V
+    function rhs!(du, u, h, p, t)
+        fast_rebuild!(p, u, real_time(t); _mna_h_=h, _mna_h_p_=p)
+        # du = b - G*u
+        mul!(du, p.structure.G, u)
+        du .*= -1
+        du .+= p.dctx.b
+        return nothing
+    end
+
+    # History function: DC value for t < t0
+    h_init(p, t; idxs=nothing) = idxs === nothing ? u0 : u0[idxs]
+
+    # Mass matrix C is constant (voltage-dependent caps use charge formulation)
+    f = SciMLBase.DDEFunction(rhs!; mass_matrix=cs.C)
+    return SciMLBase.DDEProblem(f, u0, h_init, Float64.(tspan), ws;
+                                 constant_lags=constant_lags, kwargs...)
+end
+
 # NOTE: make_nonlinear_dae_* removed - use MNACircuit + DAEProblem instead
 # MNACircuit automatically handles nonlinear devices by rebuilding matrices each step.
 
