@@ -2895,25 +2895,21 @@ Example: for `nature OpticalElectricField; access = OptE; endnature` and
 returns Dict(:V => :potential, :I => :flow, :OptE => :potential).
 """
 function build_access_map(va::VANode)
-    # V and I are always available (electrical discipline is implicit in VA)
-    access_map = Dict{Symbol, Symbol}(:V => :potential, :I => :flow)
+    access_map = Dict{Symbol, Symbol}()
 
     # Step 1: Collect nature_name -> access_func_name from NatureDeclarations
-    # Nature items are NatureItem with attribute (Keyword) and value (expression)
     nature_access = Dict{Symbol, Symbol}()
     for stmt in va.stmts
         formof(stmt) == NatureDeclaration || continue
         nature_name = Symbol(stmt.id)
         for ni in stmt.items
             if String(ni.attribute) == "access"
-                # Value is an IdentifierPrimary — extract the identifier name
                 nature_access[nature_name] = Symbol(ni.value)
             end
         end
     end
 
     # Step 2: Walk discipline declarations to map access funcs to potential/flow
-    # DisciplineItems contain NatureBinding (kw=potential/flow, id=nature_name)
     for stmt in va.stmts
         formof(stmt) == DisciplineDeclaration || continue
         for di in stmt.items
@@ -2922,10 +2918,19 @@ function build_access_map(va::VANode)
             role = String(item.kw) == "potential" ? :potential : :flow
             nature_name = Symbol(item.id)
             access_func = get(nature_access, nature_name, nothing)
-            if access_func !== nothing
+            if access_func !== nothing && !haskey(access_map, access_func)
+                # First mapping wins: e.g., electrical's I=>:flow takes precedence
+                # over signal-flow discipline current's I=>:potential
                 access_map[access_func] = role
             end
         end
+    end
+
+    # If no disciplines were found (e.g., inline va"" without includes),
+    # the electrical discipline is implicit in Verilog-A
+    if isempty(access_map)
+        access_map[:V] = :potential
+        access_map[:I] = :flow
     end
 
     return access_map

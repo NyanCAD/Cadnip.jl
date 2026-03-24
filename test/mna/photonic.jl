@@ -21,9 +21,17 @@ end
     va = VerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
     access_map = CedarSim.build_access_map(va)
 
+    # V and I should come from parsed electrical discipline, not hardcoded
     @test access_map[:V] == :potential
     @test access_map[:I] == :flow
+
+    # OptE from optical discipline
     @test access_map[:OptE] == :potential
+
+    # Other standard access functions from parsed disciplines.vams
+    @test access_map[:Temp] == :potential  # thermal
+    @test access_map[:Pwr] == :flow        # thermal
+    @test access_map[:MMF] == :potential   # magnetic (MMF is potential, Phi is flow)
 end
 
 @testset "Array port expansion" begin
