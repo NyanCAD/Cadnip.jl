@@ -322,7 +322,7 @@ function ParseState(str::Union{IOBuffer,String}, fname::Union{String, Nothing} =
         Token(ERROR), ntuple(_->Token(ERROR), PARSER_LOOKAHEAD+PREPROC_LOOKAHEAD-1), Token(ERROR),
         (uz, uz), ntuple(_->(uz, uz), PARSER_LOOKAHEAD+PREPROC_LOOKAHEAD-1), (uz, uz), uz,
         false)
-    fname !== nothing && push!(ps.search_path, dirname(fname))
+    fname !== nothing && pushfirst!(ps.search_path, dirname(fname))
     return next(next(next(ps)))
 end
 

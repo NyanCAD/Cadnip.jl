@@ -596,12 +596,24 @@ end
 function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     fname = Symbol(stmt.id)
 
-    # Check for custom potential access functions (e.g., OptE for optical discipline)
-    # These are treated identically to V() — they read node potentials
-    if fname != :V && fname != :I && get(to_julia.access_map, fname, nothing) == :potential
-        # Custom potential access function (e.g., OptE(cart[0]))
+    # Potential access functions: V(), OptE(), Temp(), etc.
+    # All potential access functions are handled identically — they read node potentials.
+    if get(to_julia.access_map, fname, nothing) == :potential
         @assert length(stmt.args) in (1, 2)
         id1 = resolve_array_ref(to_julia, stmt.args[1].item)
+
+        # Check if this is a named branch (e.g., V(br) where br is a branch)
+        if length(stmt.args) == 1 && haskey(to_julia.named_branches, id1)
+            branch_nodes = to_julia.named_branches[id1]
+            pos_node, neg_node = branch_nodes.first, branch_nodes.second
+            push!(to_julia.used_branches, pos_node => neg_node)
+            if neg_node == Symbol("0")
+                return pos_node
+            else
+                return :($pos_node - $neg_node)
+            end
+        end
+
         id2 = length(stmt.args) > 1 ? resolve_array_ref(to_julia, stmt.args[2].item) : Symbol("0")
         push!(to_julia.used_branches, id1 => id2)
         current_val = id2 == Symbol("0") ? id1 : :($id1 - $id2)
@@ -616,39 +628,8 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return current_val
     end
 
-    if fname == :V
-        # Voltage access - return variable name that will be replaced with Vpn
-        @assert length(stmt.args) in (1, 2)
-        id1 = Symbol(stmt.args[1].item)
-
-        # Check if this is a named branch (e.g., V(br) where br is a branch)
-        if length(stmt.args) == 1 && haskey(to_julia.named_branches, id1)
-            # Named branch: V(br) -> V_pos - V_neg
-            branch_nodes = to_julia.named_branches[id1]
-            pos_node, neg_node = branch_nodes.first, branch_nodes.second
-            push!(to_julia.used_branches, pos_node => neg_node)
-            if neg_node == Symbol("0")
-                return pos_node
-            else
-                return :($pos_node - $neg_node)
-            end
-        end
-
-        id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
-        push!(to_julia.used_branches, id1 => id2)
-
-        current_val = id2 == Symbol("0") ? id1 : :($id1 - $id2)
-
-        # Inside absdelay: generate delayed lookup instead of current voltage
-        if to_julia.delay_expr !== nothing
-            node1 = id1 == Symbol("0") ? 0 : Symbol("_node_", id1)
-            node2 = id2 == Symbol("0") ? 0 : Symbol("_node_", id2)
-            delay_jl = to_julia.delay_expr
-            return :(CedarSim.MNA.va_absdelay_V(_mna_h_, _mna_h_p_, $node1, $node2, $delay_jl, $current_val, _mna_t_))
-        end
-
-        return current_val
-    elseif fname == :I
+    # Flow access functions: I()
+    if get(to_julia.access_map, fname, nothing) == :flow
         # Current access
         @assert length(stmt.args) in (1, 2)
 
@@ -671,7 +652,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # I(a, b) - not directly supported in contribution-based stamping
             return :(error("I(a,b) probe not supported in MNA contribution"))
         end
-    elseif fname == :ddt
+    end
+
+    if fname == :ddt
         # Time derivative - use va_ddt
         return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
     elseif fname == :absdelay
@@ -2912,22 +2895,8 @@ Example: for `nature OpticalElectricField; access = OptE; endnature` and
 returns Dict(:V => :potential, :I => :flow, :OptE => :potential).
 """
 function build_access_map(va::VANode)
-    # Start with well-known VAMS access functions as defaults.
-    # The parser may not successfully parse all natures/disciplines from included
-    # files (RESERVED keywords like `domain discrete` cause cascading parse errors),
-    # so we include common ones from the VAMS standard here.
-    access_map = Dict{Symbol, Symbol}(
-        :V => :potential, :I => :flow,           # electrical
-        :Phi => :potential,                       # magnetic (flow=Flux uses same Phi)
-        :MMF => :flow,                            # magnetic
-        :Temp => :potential, :Pwr => :flow,       # thermal
-        :Pos => :potential, :F => :flow,          # kinematic
-        :Vel => :potential,                       # kinematic_v
-        :Theta => :potential, :Tau => :flow,      # rotational
-        :Omega => :potential,                     # rotational_omega
-        :OptE => :potential,                      # optical
-        :Q => :potential,                         # charge
-    )
+    # V and I are always available (electrical discipline is implicit in VA)
+    access_map = Dict{Symbol, Symbol}(:V => :potential, :I => :flow)
 
     # Step 1: Collect nature_name -> access_func_name from NatureDeclarations
     # Nature items are NatureItem with attribute (Keyword) and value (expression)

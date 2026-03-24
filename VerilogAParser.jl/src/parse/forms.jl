@@ -267,7 +267,7 @@ allchildren(di::DisciplineItem) = (di.item, di.semi)
 struct DisciplineDeclaration
     kw::EXPR{Keyword}
     id::EXPR{Identifier}
-    semi::EXPR{Notation}
+    semi::Maybe{EXPR{Notation}}
     items::EXPRList{DisciplineItem}
     endkw::EXPR{Keyword}
 end
@@ -298,7 +298,7 @@ struct NatureDeclaration
     kw::EXPR{Keyword}
     id::EXPR{Identifier}
     parent::Maybe{EXPR{ParentNatureSpec}}
-    semi::EXPR{Notation}
+    semi::Maybe{EXPR{Notation}}
     items::EXPRList{NatureItem}
     endkw::EXPR{Keyword}
 end
