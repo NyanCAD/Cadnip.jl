@@ -48,10 +48,7 @@ end
     @test array_nodes[:cart] == (0, [:cart_0, :cart_1])
 end
 
-@testset "Simulate: optical constant source" begin
-    # Test that OptE voltage contributions work with constant values.
-    # NOTE: Nonlinear voltage contributions (depending on other node voltages)
-    # need Jacobian enhancement — that's a separate issue tracked in the plan.
+@testset "Simulate: Polar2Cartesian stamp verification" begin
     va"""
     nature OpticalElectricField
         units = "V/m";
@@ -63,37 +60,56 @@ end
         potential OpticalElectricField;
     enddiscipline
 
-    module OptSource(outp);
-        output outp;
-        optical outp;
-        parameter real amplitude = 1.0;
+    module Polar2Cart(pol, cart);
+        input [0:1] pol;
+        output [0:1] cart;
+        optical [0:1] pol, cart;
         analog begin
-            OptE(outp) <+ amplitude;
+            OptE(cart[0]) <+ OptE(pol[0]) * cos(OptE(pol[1]));
+            OptE(cart[1]) <+ OptE(pol[0]) * sin(OptE(pol[1]));
         end
     endmodule
     """
 
-    # Circuit builder: optical source sets output to constant amplitude
-    function opt_source_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-        if ctx === nothing
-            ctx = MNAContext()
-        else
-            CedarSim.MNA.reset_for_restamping!(ctx)
-        end
-        outp = get_node!(ctx, :outp)
-        stamp!(OptSource(amplitude=params.params.amplitude), ctx, outp)
-        return ctx
-    end
+    # Manually invoke stamp! and verify the MNA system
+    ctx = MNAContext()
+    pol_0 = get_node!(ctx, :pol_0)
+    pol_1 = get_node!(ctx, :pol_1)
+    cart_0 = get_node!(ctx, :cart_0)
+    cart_1 = get_node!(ctx, :cart_1)
 
-    # amplitude=1.5 → output=1.5
-    circ = MNACircuit(opt_source_circuit; params=(amplitude=1.5,))
-    sol = dc!(circ)
-    @test voltage(sol, :outp) ≈ 1.5 atol=1e-6
+    # Stamp at: amplitude=2.0, phase=π/4
+    # Expected: cart_0 = 2*cos(π/4) ≈ √2, cart_1 = 2*sin(π/4) ≈ √2
+    x = zeros(4)
+    x[pol_0] = 2.0
+    x[pol_1] = π/4
+    stamp!(Polar2Cart(), ctx, pol_0, pol_1, cart_0, cart_1; _mna_x_=x)
 
-    # amplitude=3.0 → output=3.0
-    circ2 = MNACircuit(opt_source_circuit; params=(amplitude=3.0,))
-    sol2 = dc!(circ2)
-    @test voltage(sol2, :outp) ≈ 3.0 atol=1e-6
+    sys = assemble!(ctx)
+
+    # The device creates two voltage contributions:
+    #   OptE(cart[0]) <+ pol_0 * cos(pol_1)  → V(cart_0) = 2*cos(π/4)
+    #   OptE(cart[1]) <+ pol_0 * sin(pol_1)  → V(cart_1) = 2*sin(π/4)
+    #
+    # Each voltage contribution stamps:
+    #   G[cart, I_var] = 1,  G[I_var, cart] = 1,  b[I_var] = value
+    # So the b vector contains the computed values at the branch current rows.
+
+    # Find the branch current indices (they come after the 4 node voltages)
+    I_cart0 = sys.n_nodes + 1  # first branch current
+    I_cart1 = sys.n_nodes + 2  # second branch current
+
+    # The b vector at the branch current rows should contain the contribution values
+    @test sys.b[I_cart0] ≈ 2.0 * cos(π/4) atol=1e-10
+    @test sys.b[I_cart1] ≈ 2.0 * sin(π/4) atol=1e-10
+
+    # G matrix should enforce voltage constraints:
+    # G[I_cart0, cart_0] = 1  (voltage constraint row)
+    # G[cart_0, I_cart0] = 1  (KCL: current into cart_0)
+    @test sys.G[I_cart0, cart_0] ≈ 1.0
+    @test sys.G[cart_0, I_cart0] ≈ 1.0
+    @test sys.G[I_cart1, cart_1] ≈ 1.0
+    @test sys.G[cart_1, I_cart1] ≈ 1.0
 end
 
 @testset "Code generation: Polar2Cartesian from file" begin
