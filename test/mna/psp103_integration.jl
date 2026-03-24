@@ -45,9 +45,8 @@ Vgs g 0 DC 0.6
         @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
         @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
 
-        # OSDI PSP103 with default params produces ~0 drain current — needs investigation
         Id = current(sol, :I_vds)
-        @test_broken abs(Id) > 100e-6 && abs(Id) < 1e-3
+        @test abs(Id) > 100e-6 && abs(Id) < 1e-3
     end
 
     @testset "DC with full model parameters" begin
@@ -105,9 +104,8 @@ Vgs g 0 DC 0.6
         @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
         @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
 
-        # OSDI PSP103 with partial model params produces ~0 drain current — needs investigation
         Id = current(sol, :I_vds)
-        @test_broken abs(Id) > 10e-6 && abs(Id) < 10e-3
+        @test abs(Id) > 10e-6 && abs(Id) < 10e-3
     end
 
     @testset "Internal nodes with subcircuits" begin
@@ -152,11 +150,10 @@ Vdd vdd 0 DC 1.2
         sol = dc!(circuit)
         @test isapprox(voltage(sol, :vdd), 1.2, atol=1e-6)
 
-        # Internal node count and hierarchical naming checks
-        # OSDI allocates internal nodes differently than the VA path — marked broken
-        @test_broken begin
-            ctx = Base.invokelatest(circuit.builder, (;), MNASpec(temp=27.0), 0.0)
-            n_internal_nodes(ctx) == 32
-        end
+        # Internal node count: 4 devices × 2 uncollapsed internal nodes each (NOI + flow(NOII))
+        # Most PSP103 internal nodes (GP, SI, DI, BP, BI, BS, BD) collapse to terminals
+        # with default parameters (zero series resistances).
+        ctx = Base.invokelatest(circuit.builder, (;), MNASpec(temp=27.0), 0.0)
+        @test n_internal_nodes(ctx) == 8
     end
 end

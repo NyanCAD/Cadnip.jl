@@ -230,49 +230,63 @@ function MNA.stamp!(inst::OsdiInstance, ctx::MNAContext, terminals::Int...;
         inst.node_mapping[i] = terminals[i]
     end
 
-    # 2. Read collapsed flags (set by setup_instance) and build collapse map
-    # collapsed_target[node_idx] = target node_idx if collapsed, 0 otherwise
-    # When a pair is collapsed, BOTH the source voltage node AND its implicit
-    # equation node are eliminated. Implicit equation nodes are the last
-    # num_collapsible nodes in the OSDI descriptor.
-    collapsed_target = zeros(Int, dev.num_nodes)
+    # 2. Read collapsed flags and group nodes using union-find
+    # When a pair (node_1, node_2) is collapsed, both nodes share the same
+    # electrical potential and must get the same MNA index. We use union-find
+    # to handle transitive collapses (e.g., BP→BI, BS→BI, B→BI all share one index).
+    uf_parent = collect(1:dev.num_nodes)
+    uf_find = let p = uf_parent
+        function find(x::Int)
+            while p[x] != x; p[x] = p[p[x]]; x = p[x]; end; x
+        end
+    end
+    ground_collapsed = Set{Int}()  # nodes collapsed to ground
     if !isempty(dev.collapsible)
         base = dev.collapsed_offset
-        # Implicit equation node for pair i is at 0-based index:
-        # num_nodes - num_collapsible + (i-1)
-        n_collapsible = length(dev.collapsible)
         GC.@preserve inst begin
             for (i, pair) in enumerate(dev.collapsible)
                 is_collapsed = unsafe_load(Ptr{Bool}(pointer(inst.blob) + base + (i-1)))
                 if is_collapsed
-                    # Collapse the source voltage node
-                    src = Int(pair.node_1) + 1  # 0-based → 1-based
+                    a = Int(pair.node_1) + 1  # 0-based → 1-based
                     if pair.node_2 == typemax(UInt32)
-                        collapsed_target[src] = -1  # collapse to ground
+                        push!(ground_collapsed, a)
                     else
-                        collapsed_target[src] = Int(pair.node_2) + 1
+                        b = Int(pair.node_2) + 1
+                        # Union: merge groups
+                        ra, rb = uf_find(a), uf_find(b)
+                        ra != rb && (uf_parent[ra] = rb)
                     end
-                    # Also collapse the associated implicit equation node to ground
-                    impl_idx = dev.num_nodes - n_collapsible + i  # 1-based
-                    collapsed_target[impl_idx] = -1  # eliminate
                 end
             end
         end
     end
 
-    # 3. Allocate internal nodes, skipping collapsed ones
+    # 3. Allocate internal nodes, respecting collapse groups
+    # Each collapse group gets a single MNA index. If a group contains a terminal,
+    # all members share the terminal's MNA index.
+    group_mna = Dict{Int,Int}()
+    # First, register ground-collapsed nodes
+    for node in ground_collapsed
+        group_mna[uf_find(node)] = 0
+    end
+    # Then, register terminal groups
+    for i in 1:dev.num_terminals
+        root = uf_find(i)
+        if !haskey(group_mna, root)
+            group_mna[root] = inst.node_mapping[i]
+        end
+    end
+    # Finally, allocate internal nodes
     for i in (dev.num_terminals+1):dev.num_nodes
-        if collapsed_target[i] != 0
-            # Collapsed: map to target's MNA index
-            target = collapsed_target[i]
-            if target == -1
-                inst.node_mapping[i] = 0  # ground
-            else
-                inst.node_mapping[i] = inst.node_mapping[target]
-            end
+        root = uf_find(i)
+        if haskey(group_mna, root)
+            inst.node_mapping[i] = group_mna[root]
+        elseif i in ground_collapsed
+            inst.node_mapping[i] = 0
         else
-            inst.node_mapping[i] = alloc_internal_node!(ctx,
-                Symbol(dev.nodes[i].name), _mna_instance_)
+            idx = alloc_internal_node!(ctx, Symbol(dev.nodes[i].name), _mna_instance_)
+            inst.node_mapping[i] = idx
+            group_mna[root] = idx
         end
     end
 
