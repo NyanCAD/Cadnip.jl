@@ -341,32 +341,59 @@ end
     apply_node_collapse!(inst::OsdiInstance)
 
 Read the collapsed boolean array from the instance blob (set by setup_instance)
-and update node_mapping so collapsed nodes share their target's MNA index.
+and update node_mapping so collapsed nodes share their partner's MNA index.
 
-For each collapsible pair where collapsed[i]==true, node_1 is redirected to node_2's
-mapping. node_2==0xFFFFFFFF means collapse to ground.
+Uses union-find to handle transitive collapses correctly (e.g., BP→BI, BS→BI,
+B→BI all share one index). For each collapse group, if a member already has an
+MNA index assigned (e.g., a terminal), all members get that index.
 """
 function apply_node_collapse!(inst::OsdiInstance)
     dev = inst.model.device
     isempty(dev.collapsible) && return nothing
     base = dev.collapsed_offset
-    n_collapsible = length(dev.collapsible)
+
+    # Union-find
+    uf_parent = collect(1:dev.num_nodes)
+    function uf_find(x::Int)
+        while uf_parent[x] != x; uf_parent[x] = uf_parent[uf_parent[x]]; x = uf_parent[x]; end; x
+    end
+
+    ground_collapsed = Set{Int}()
     GC.@preserve inst begin
         for (i, pair) in enumerate(dev.collapsible)
             is_collapsed = unsafe_load(Ptr{Bool}(pointer(inst.blob) + base + (i-1)))
             if is_collapsed
-                # Collapse the source voltage node
-                src = Int(pair.node_1) + 1  # 0-based → 1-based
+                a = Int(pair.node_1) + 1
                 if pair.node_2 == typemax(UInt32)
-                    inst.node_mapping[src] = 0
+                    push!(ground_collapsed, a)
                 else
-                    dst = Int(pair.node_2) + 1  # 0-based → 1-based
-                    inst.node_mapping[src] = inst.node_mapping[dst]
+                    b = Int(pair.node_2) + 1
+                    ra, rb = uf_find(a), uf_find(b)
+                    ra != rb && (uf_parent[ra] = rb)
                 end
-                # Also collapse the associated implicit equation node to ground
-                impl_idx = dev.num_nodes - n_collapsible + i  # 1-based
-                inst.node_mapping[impl_idx] = 0
             end
+        end
+    end
+
+    # Build group → MNA index map from already-assigned nodes
+    group_mna = Dict{Int,Int}()
+    for node in ground_collapsed
+        group_mna[uf_find(node)] = 0
+    end
+    for i in 1:dev.num_nodes
+        root = uf_find(i)
+        if inst.node_mapping[i] != 0 && !haskey(group_mna, root)
+            group_mna[root] = inst.node_mapping[i]
+        end
+    end
+
+    # Apply: any node whose group has a resolved index gets that index
+    for i in 1:dev.num_nodes
+        root = uf_find(i)
+        if haskey(group_mna, root)
+            inst.node_mapping[i] = group_mna[root]
+        elseif i in ground_collapsed
+            inst.node_mapping[i] = 0
         end
     end
     return nothing
