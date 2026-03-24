@@ -15,7 +15,8 @@ using VerilogAParser.VerilogACSTParser:
     FloatLiteral, ChunkTree, virtrange,
     filerange, LineNumbers, compute_line,
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
-    IdentifierPart, Attributes
+    IdentifierPart, Attributes,
+    NatureDeclaration, DisciplineDeclaration, NatureBinding, NatureItem, RangeSpec
 using VerilogAParser.VerilogATokenize:
     Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, STRING, is_scale_factor
 using Combinatorics
@@ -71,13 +72,48 @@ end
 
 kw_to_T(kw::Kind) = kw === REAL ? Float64 : kw === STRING ? String : Int
 
+"""
+    pins(vm) -> (expanded_pins, array_nodes)
+
+Extract port pins from a VA module. Array ports like `[0:3] in` are expanded to
+individual symbols `in_0, in_1, in_2, in_3`. Returns:
+- `expanded_pins`: flat list of all port node symbols
+- `array_nodes`: mapping from base name to (low_index, [expanded_names...])
+"""
 function pins(vm::VANode{VerilogModule})
     plist = vm.port_list
-    plist === nothing && return []
-    pins = Symbol[]
-    mapreduce(vcat, plist.ports) do port_decl
-        Symbol(port_decl.item)
+    plist === nothing && return (Symbol[], Dict{Symbol, Tuple{Int, Vector{Symbol}}}())
+
+    # First collect port ranges from InOutDeclarations in module body
+    port_ranges = Dict{Symbol, Tuple{Int, Int}}()  # portname -> (low, high)
+    for child in vm.items
+        item = child.item
+        if formof(item) == InOutDeclaration && item.range !== nothing
+            rng = item.range
+            low = parse(Int, String(rng.low))
+            high = parse(Int, String(rng.high))
+            for pname in item.portnames
+                port_sym = Symbol(pname.item)
+                port_ranges[port_sym] = (low, high)
+            end
+        end
     end
+
+    # Expand ports
+    expanded = Symbol[]
+    array_nodes = Dict{Symbol, Tuple{Int, Vector{Symbol}}}()
+    for port_decl in plist.ports
+        name = Symbol(port_decl.item)
+        if haskey(port_ranges, name)
+            low, high = port_ranges[name]
+            names = [Symbol(name, "_", i) for i in low:high]
+            append!(expanded, names)
+            array_nodes[name] = (low, names)
+        else
+            push!(expanded, name)
+        end
+    end
+    return (expanded, array_nodes)
 end
 
 using Base.Meta
@@ -140,8 +176,8 @@ function MNA.stamp!(dev::DeviceName, ctx::MNAContext, p::Int, n::Int;
 end
 ```
 """
-function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing}=nothing)
-    ps = pins(vm)
+function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing}=nothing, access_map::Dict{Symbol,Symbol}=Dict{Symbol,Symbol}(:V => :potential, :I => :flow))
+    (ps, array_nodes) = pins(vm)
     modname = String(vm.id)
     symname = Symbol(modname)
 
@@ -160,7 +196,9 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
         Dict{Symbol, VAFunction}(), true, ddx_order,
-        Dict{Symbol, Pair{Symbol,Symbol}}(), nothing)
+        Dict{Symbol, Pair{Symbol,Symbol}}(), nothing,
+        Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
+        Dict{Symbol, Symbol}(:V => :potential, :I => :flow))
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -175,8 +213,17 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             NetDeclaration => begin
                 for net in item.net_names
                     id = Symbol(assemble_id_string(net.item))
-                    if !(id in ps)
-                        push!(internal_nodes, id)
+                    if !(id in ps) && !haskey(array_nodes, id)
+                        if item.range !== nothing
+                            # Array net: expand to individual nodes
+                            low = parse(Int, String(item.range.low))
+                            high = parse(Int, String(item.range.high))
+                            names = [Symbol(id, "_", i) for i in low:high]
+                            append!(internal_nodes, names)
+                            array_nodes[id] = (low, names)
+                        else
+                            push!(internal_nodes, id)
+                        end
                     end
                 end
             end
@@ -267,7 +314,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         var_types,
         Dict{Symbol, VAFunction}(), false,
         ddx_order,
-        named_branches, nothing)
+        named_branches, nothing,
+        array_nodes, access_map)
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -451,13 +499,36 @@ struct MNAScope
     ddx_order::Vector{Symbol}
     named_branches::Dict{Symbol, Pair{Symbol,Symbol}}  # Maps branch name -> (pos, neg) nodes
     delay_expr::Any  # nothing, or delay expression for absdelay V/I rewriting
+    array_nodes::Dict{Symbol, Tuple{Int, Vector{Symbol}}}  # name -> (low_index, [expanded_names...])
+    access_map::Dict{Symbol, Symbol}  # access_func -> :potential or :flow (OptE -> :potential, V -> :potential, I -> :flow)
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
 with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.parameters, s.node_order, s.ninternal_nodes, s.branch_order,
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
-    s.ddx_order, s.named_branches, delay_jl)
+    s.ddx_order, s.named_branches, delay_jl,
+    s.array_nodes, s.access_map)
+
+"""
+    resolve_array_ref(scope, node_expr) -> Symbol
+
+Resolve a potentially array-indexed node reference to an expanded symbol.
+For `cart[0]` with array_nodes[:cart] = (0, [:cart_0, :cart_1]), returns :cart_0.
+For plain `p`, returns :p.
+"""
+function resolve_array_ref(scope::MNAScope, node_expr)
+    if node_expr isa VANode && formof(node_expr) == IdentifierPrimary
+        base_name = Symbol(node_expr.id)
+        if node_expr.range !== nothing && haskey(scope.array_nodes, base_name)
+            idx = parse(Int, String(node_expr.range.low))
+            (low, names) = scope.array_nodes[base_name]
+            return names[idx - low + 1]
+        end
+        return base_name
+    end
+    return Symbol(node_expr)
+end
 
 # Literal parsing methods
 function (::MNAScope)(cs::VANode{Literal})
@@ -524,6 +595,26 @@ end
 
 function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     fname = Symbol(stmt.id)
+
+    # Check for custom potential access functions (e.g., OptE for optical discipline)
+    # These are treated identically to V() — they read node potentials
+    if fname != :V && fname != :I && get(to_julia.access_map, fname, nothing) == :potential
+        # Custom potential access function (e.g., OptE(cart[0]))
+        @assert length(stmt.args) in (1, 2)
+        id1 = resolve_array_ref(to_julia, stmt.args[1].item)
+        id2 = length(stmt.args) > 1 ? resolve_array_ref(to_julia, stmt.args[2].item) : Symbol("0")
+        push!(to_julia.used_branches, id1 => id2)
+        current_val = id2 == Symbol("0") ? id1 : :($id1 - $id2)
+
+        # Inside absdelay: generate delayed lookup
+        if to_julia.delay_expr !== nothing
+            node1 = id1 == Symbol("0") ? 0 : Symbol("_node_", id1)
+            node2 = id2 == Symbol("0") ? 0 : Symbol("_node_", id2)
+            delay_jl = to_julia.delay_expr
+            return :(CedarSim.MNA.va_absdelay_V(_mna_h_, _mna_h_p_, $node1, $node2, $delay_jl, $current_val, _mna_t_))
+        end
+        return current_val
+    end
 
     if fname == :V
         # Voltage access - return variable name that will be replaced with Vpn
@@ -1548,12 +1639,31 @@ end
 # Handle contribution statements inside conditionals
 # When a contribution is inside an if-block, we generate inline stamping code
 function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
-    bpfc = cs.lvalue
-    kind_sym = Symbol(bpfc.id)
-    kind = kind_sym == :I ? :current : kind_sym == :V ? :voltage : :unknown
+    lv = cs.lvalue
+    kind_sym = Symbol(lv.id)
 
-    refs = map(bpfc.references) do ref
-        Symbol(assemble_id_string(ref.item))
+    # Determine kind from access_map (supports custom access functions like OptE)
+    access_kind = get(to_julia.access_map, kind_sym, nothing)
+    if access_kind == :flow
+        kind = :current
+    elseif access_kind == :potential || kind_sym == :V
+        kind = :voltage
+    elseif kind_sym == :I
+        kind = :current
+    else
+        kind = :unknown
+    end
+
+    # Extract node references — handle both BPFC and FunctionCall lvalues
+    if formof(lv) == BPFC
+        refs = map(lv.references) do ref
+            Symbol(assemble_id_string(ref.item))
+        end
+    else
+        # FunctionCall lvalue (kept when args have array indices, e.g., OptE(cart[0]))
+        refs = map(lv.args) do ref
+            resolve_array_ref(to_julia, ref.item)
+        end
     end
 
     p_sym = refs[1]
@@ -1755,7 +1865,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
-        to_julia.named_branches, nothing)
+        to_julia.named_branches, nothing,
+        to_julia.array_nodes, to_julia.access_map)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2015,12 +2126,31 @@ end
 Translate a contribution statement for MNA.
 """
 function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionStatement})
-    bpfc = cs.lvalue
-    kind_sym = Symbol(bpfc.id)
-    kind = kind_sym == :I ? :current : kind_sym == :V ? :voltage : :unknown
+    lv = cs.lvalue
+    kind_sym = Symbol(lv.id)
 
-    refs = map(bpfc.references) do ref
-        Symbol(assemble_id_string(ref.item))
+    # Determine kind from access_map (supports custom access functions like OptE)
+    access_kind = get(to_julia.access_map, kind_sym, nothing)
+    if access_kind == :flow
+        kind = :current
+    elseif access_kind == :potential || kind_sym == :V
+        kind = :voltage
+    elseif kind_sym == :I
+        kind = :current
+    else
+        kind = :unknown
+    end
+
+    # Extract node references — handle both BPFC and FunctionCall lvalues
+    if formof(lv) == BPFC
+        refs = map(lv.references) do ref
+            Symbol(assemble_id_string(ref.item))
+        end
+    else
+        # FunctionCall lvalue (kept when args have array indices, e.g., OptE(cart[0]))
+        refs = map(lv.args) do ref
+            resolve_array_ref(to_julia, ref.item)
+        end
     end
 
     if length(refs) == 1
@@ -2772,6 +2902,67 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 end
 
 """
+    build_access_map(va::VANode) -> Dict{Symbol, Symbol}
+
+Scan nature/discipline declarations to build a mapping from access function names
+to their role (:potential or :flow). Always includes V -> :potential, I -> :flow.
+
+Example: for `nature OpticalElectricField; access = OptE; endnature` and
+`discipline optical; potential OpticalElectricField; enddiscipline`,
+returns Dict(:V => :potential, :I => :flow, :OptE => :potential).
+"""
+function build_access_map(va::VANode)
+    # Start with well-known VAMS access functions as defaults.
+    # The parser may not successfully parse all natures/disciplines from included
+    # files (RESERVED keywords like `domain discrete` cause cascading parse errors),
+    # so we include common ones from the VAMS standard here.
+    access_map = Dict{Symbol, Symbol}(
+        :V => :potential, :I => :flow,           # electrical
+        :Phi => :potential,                       # magnetic (flow=Flux uses same Phi)
+        :MMF => :flow,                            # magnetic
+        :Temp => :potential, :Pwr => :flow,       # thermal
+        :Pos => :potential, :F => :flow,          # kinematic
+        :Vel => :potential,                       # kinematic_v
+        :Theta => :potential, :Tau => :flow,      # rotational
+        :Omega => :potential,                     # rotational_omega
+        :OptE => :potential,                      # optical
+        :Q => :potential,                         # charge
+    )
+
+    # Step 1: Collect nature_name -> access_func_name from NatureDeclarations
+    # Nature items are NatureItem with attribute (Keyword) and value (expression)
+    nature_access = Dict{Symbol, Symbol}()
+    for stmt in va.stmts
+        formof(stmt) == NatureDeclaration || continue
+        nature_name = Symbol(stmt.id)
+        for ni in stmt.items
+            if String(ni.attribute) == "access"
+                # Value is an IdentifierPrimary — extract the identifier name
+                nature_access[nature_name] = Symbol(ni.value)
+            end
+        end
+    end
+
+    # Step 2: Walk discipline declarations to map access funcs to potential/flow
+    # DisciplineItems contain NatureBinding (kw=potential/flow, id=nature_name)
+    for stmt in va.stmts
+        formof(stmt) == DisciplineDeclaration || continue
+        for di in stmt.items
+            item = di.item
+            formof(item) == NatureBinding || continue
+            role = String(item.kw) == "potential" ? :potential : :flow
+            nature_name = Symbol(item.id)
+            access_func = get(nature_access, nature_name, nothing)
+            if access_func !== nothing
+                access_map[access_func] = role
+            end
+        end
+    end
+
+    return access_map
+end
+
+"""
     make_mna_module(va::VANode)
 
 Generate an MNA-compatible module from a parsed Verilog-A file.
@@ -2781,8 +2972,11 @@ function make_mna_module(va::VANode)
     s = Symbol(String(vamod.id), "_module")
     typename = Symbol(vamod.id)
 
+    # Build access_map from nature/discipline declarations (supports custom disciplines like optical)
+    access_map = build_access_map(va)
+
     # Get the device definition (returns Expr(:toplevel, struct_def, constructor, stamp_method))
-    device_expr = CedarSim.make_mna_device(vamod)
+    device_expr = CedarSim.make_mna_device(vamod; access_map)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length

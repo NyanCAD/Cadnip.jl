@@ -212,7 +212,7 @@ function parse_inout_declaration(ps)
 
 @label range
     kind(nt(ps)) == LSQUARE || @goto port
-    range = parse_range(ps)
+    range = parse_range(ps, false)
 
 @label port
     if !isident(kind(nt(ps)))
@@ -253,8 +253,9 @@ end
 
 function parse_net_declaration(ps)
     discipline = accept_identifier(ps)
+    range = nothing
     if kind(nt(ps)) == LSQUARE
-        range = parse_range(ps)
+        range = parse_range(ps, false)
     end
     is_assignemnts = kind(nt(ps)) == IDENTIFIER && kind(nt(ps, 2)) == EQ
     net_names = is_assignemnts ?
@@ -274,7 +275,7 @@ function parse_net_declaration(ps)
         first = false
         kind(nt(ps)) !== COMMA && break
     end
-    return EXPR(NetDeclaration(nothing, discipline, net_names, accept(ps, SEMICOLON)))
+    return EXPR(NetDeclaration(nothing, discipline, range, net_names, accept(ps, SEMICOLON)))
 end
 
 function parse_primary(ps, isconst::Bool)
@@ -310,7 +311,7 @@ function parse_primary(ps, isconst::Bool)
         end
         range = nothing
         if kind(nt(ps)) == LSQUARE
-            range = parse_range(ps)
+            range = parse_range(ps, false)
         end
         return EXPR(IdentifierPrimary(id, range))
     end
@@ -457,8 +458,14 @@ end
 function parse_range(ps, is_value_range::Bool)
     lsquare = take(ps, is_value_range ? (LSQUARE, LPAREN) : LSQUARE)
     min = parse_range_bound(ps, is_value_range)
-    colon = accept(ps, COLON)
-    max = parse_range_bound(ps, is_value_range)
+    if kind(nt(ps)) == COLON
+        colon = take(ps, COLON)
+        max = parse_range_bound(ps, is_value_range)
+    else
+        # Single-element subscript like [0] — no colon or max
+        colon = EXPR(UInt32(0), UInt32(0), UInt32(0), Notation())
+        max = EXPR(UInt32(0), UInt32(0), UInt32(0), Notation())
+    end
     rsquare = accept(ps, is_value_range ? (RSQUARE, RPAREN) : RSQUARE)
     return EXPR(RangeSpec(lsquare, min, colon, max, rsquare))
 end
@@ -484,7 +491,7 @@ function parse_parameter_declaration(ps)
     end
 
     if kind(nt(ps)) == LSQUARE
-        range = parse_range(ps)
+        range = parse_range(ps, false)
     end
 
 @label norange
@@ -495,7 +502,7 @@ function parse_parameter_declaration(ps)
         id = accept_identifier(ps)
         prange = nothing
         if kind(nt(ps)) == LSQUARE
-            prange = parse_range(ps)
+            prange = parse_range(ps, false)
         end
         eq = accept(ps, EQ)
         @assert prange === nothing # TODO
@@ -630,8 +637,10 @@ function parse_lvalue(ps)
     if kind(nt(ps)) == SYSTEM_IDENTIFIER
     elseif kind(nt(ps)) == IDENTIFIER
         if kind(nt(ps, 2)) == LPAREN
-            # Expect a function call here
-            return parse_analog_expression(ps)
+            # Parse only the function call, NOT a full expression.
+            # parse_analog_expression would consume binary ops like `<` after V(a[0]).
+            id = accept_identifier(ps)
+            return parse_function_call(parse_analog_expression, ps, id)
         end
     end
     return nothing
@@ -644,7 +653,19 @@ function parse_analog_assignment(ps)
             # Function call statement - valid Verilog-A for functions with inout/output parameters
             return EXPR(FunctionCallStatement(lvalue, accept(ps, SEMICOLON)))
         end
-        lvalue = fc_to_bpfc(lvalue)
+        # Check if args have array indices (e.g., OptE(cart[0]))
+        # If so, skip fc_to_bpfc and keep as FunctionCall — codegen handles both forms
+        has_ranged = false
+        for ref in lvalue.args
+            item = ref.item
+            if isa(item, EXPR{IdentifierPrimary}) && item.range !== nothing
+                has_ranged = true
+                break
+            end
+        end
+        if !has_ranged
+            lvalue = fc_to_bpfc(lvalue)
+        end
         cassign = accept(ps, CASSIGN)
         # contribution_statement
         expr = parse_analog_expression(ps)
@@ -888,7 +909,7 @@ function parse_branch_declaration(ps)
         branch_id = accept_identifier(ps)
         rang = nothing
         if kind(nt(ps)) == LSQUARE
-            rang = parse_range(ps)
+            rang = parse_range(ps, false)
         end
         push!(ids, EXPR(ListItem{EXPR{BranchIdentifier}}(comma, EXPR(BranchIdentifier(branch_id, rang)))))
         kind(nt(ps)) == COMMA || break

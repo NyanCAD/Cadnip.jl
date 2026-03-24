@@ -109,11 +109,11 @@ const NetAssignmentListItem = ListItem{EXPR} # XXX
 struct NetDeclaration
     net_type::Maybe{EXPR{Keyword}}
     discipline::Maybe{EXPR{Identifier}}
-    # XXX: More fields
+    range::Maybe{EXPR}
     net_names::Union{EXPRList{NetNameListItem}, EXPRList{NetAssignmentListItem}}
     semi::EXPRErr{Notation}
 end
-allchildren(n::NetDeclaration) = (n.net_type, n.discipline, n.net_names..., n.semi)
+allchildren(n::NetDeclaration) = (n.net_type, n.discipline, n.range, n.net_names..., n.semi)
 
 struct RangeSpec
     lsquare::EXPR{Notation}
