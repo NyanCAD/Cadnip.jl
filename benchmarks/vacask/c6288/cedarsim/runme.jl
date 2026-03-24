@@ -1,8 +1,9 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# VACASK Benchmark: C6288 16x16 Multiplier
+# VACASK Benchmark: C6288 16x16 Multiplier (OSDI PSP103)
 #
-# A 16x16 bit multiplier circuit using PSP103 MOSFETs.
+# A 16x16 bit multiplier circuit using PSP103 MOSFETs via OSDI.
+# Uses the ngspice models.inc for PSP103 model parameters.
 #
 # Benchmark target: High complexity digital circuit (154k variables)
 #
@@ -20,24 +21,22 @@
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarUICOp
+using CedarSim.OsdiLoader
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
 
-# Import pre-parsed PSP103 model from PSPModels package
-using PSPModels
-
-# Alias for compatibility with existing code
-const PSP103VA_module = sp_psp103va_module
-println("PSP103VA loaded from PSPModels package")
+# Path to precompiled OSDI PSP103
+const PSP103_OSDI = joinpath(@__DIR__, "..", "..", "..", "..", "test", "osdi", "psp103.osdi")
+println("PSP103 OSDI: $PSP103_OSDI")
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")
 
-# Parse SPICE file to code, then evaluate to get the builder function
+# Parse SPICE file with OSDI device — returns a setup function
 const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:c6288_circuit,
-                                              imported_hdl_modules=[PSP103VA_module])
+                                              osdi_files=[PSP103_OSDI])
 eval(circuit_code)
 
 """
@@ -46,7 +45,8 @@ eval(circuit_code)
 Create and return a fully-prepared MNACircuit ready for transient analysis.
 """
 function setup_simulation()
-    circuit = MNACircuit(c6288_circuit)
+    wrapped_setup = (params) -> Base.invokelatest(c6288_circuit, params)
+    circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec())
     MNA.assemble!(circuit)
     return circuit
 end

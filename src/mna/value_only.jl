@@ -84,6 +84,9 @@ mutable struct DirectStampContext
     warned_C_overflow::Bool
     warned_b_overflow::Bool
 
+    # Newton iteration counter (managed by solver for OSDI $limit support)
+    # Reset to 0 by solver before each Newton solve; incremented by fast_rebuild!
+    newton_iter::Int
 end
 
 """
@@ -125,6 +128,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
+        0,  # newton_iter
     )
 end
 

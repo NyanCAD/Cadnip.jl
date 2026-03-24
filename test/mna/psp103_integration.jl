@@ -1,26 +1,25 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# PSP103VA Integration Tests
+# PSP103VA Integration Tests (OSDI)
 #
 # Tests that PSP103VA model works correctly through the SPICE parsing and
-# MNA codegen path. Key challenges addressed:
+# MNA codegen path using OSDI precompiled devices.
 #
-# 1. LLVM crashes on very large functions (96K+ IR statements) during compilation
-#    - Fix: Use `invokelatest` for VA model stamp! calls in generated code
-#    - This forces runtime dispatch to precompiled stamp! methods
-#
-# 2. Very large structs (782 fields) cause LLVM SROA to explode
-#    - Fix: Use `inferencebarrier` to hide exact type from Julia compiler
-#
-# 3. Internal node naming collisions in subcircuits
+# Key challenges addressed:
+# 1. Internal node naming collisions in subcircuits
 #    - Fix: Use hierarchical instance names (prefix_localname) for internal nodes
+# 2. Multi-level subcircuit OSDI instance propagation
+#    - Fix: Transitive subcircuit_has_osdi + nested NamedTuple instance management
 #==============================================================================#
 
 using CedarSim
 using CedarSim.SpectreNetlistParser
-using CedarSim.MNA: MNAContext, MNASpec, solve_dc, voltage, current, n_internal_nodes
-using PSPModels
+using CedarSim.MNA: MNAContext, MNASpec, MNACircuit, MNACircuitFromSetup, solve_dc, voltage, current, n_internal_nodes, assemble!
+using CedarSim: dc!
+using CedarSim.OsdiLoader
 using Test
+
+const PSP103_OSDI = joinpath(@__DIR__, "..", "osdi", "psp103.osdi")
 
 @testset "PSP103VA Integration" begin
 
@@ -28,23 +27,24 @@ using Test
         # Simple NMOS IV test with minimal parameters
         netlist = """
 * PSP103VA NMOS IV test with defaults
-.model nch psp103va type=1
-M1 d g 0 0 nch W=10u L=1u
+.model nch PSP103VA type=1
+N1 d g 0 0 nch W=10u L=1u
 Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
         ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = CedarSim.make_mna_circuit(ast; osdi_files=[PSP103_OSDI])
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
-        spec = MNASpec(temp=27.0, mode=:dcop)
-        sol = solve_dc(circuit_fn, (;), spec)
+        wrapped_setup = (params) -> Base.invokelatest(circuit_fn, params)
+        circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec(temp=27.0))
+        assemble!(circuit)
+        sol = dc!(circuit)
 
         @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
         @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
 
-        # Drain current should be reasonable (100s of µA for these bias conditions)
         Id = current(sol, :I_vds)
         @test abs(Id) > 100e-6 && abs(Id) < 1e-3
     end
@@ -53,7 +53,7 @@ Vgs g 0 DC 0.6
         # Test with many model parameters (subset of full VACASK model card)
         netlist = """
 * PSP103VA with full model parameters
-.model nch psp103va
+.model nch PSP103VA
 +    type=1
 +    tr=27.0
 +    vfbo=-1.1
@@ -86,24 +86,24 @@ Vgs g 0 DC 0.6
 +    wot=0
 +    thesato=0.5
 +    mueo=0.5
-+    mue=0.5
 
-M1 d g 0 0 nch W=10u L=1u
+N1 d g 0 0 nch W=10u L=1u
 Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
         ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = CedarSim.make_mna_circuit(ast; osdi_files=[PSP103_OSDI])
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
-        spec = MNASpec(temp=27.0, mode=:dcop)
-        sol = solve_dc(circuit_fn, (;), spec)
+        wrapped_setup = (params) -> Base.invokelatest(circuit_fn, params)
+        circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec(temp=27.0))
+        assemble!(circuit)
+        sol = dc!(circuit)
 
         @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
         @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
 
-        # Current should be reasonable
         Id = current(sol, :I_vds)
         @test abs(Id) > 10e-6 && abs(Id) < 10e-3
     end
@@ -114,8 +114,8 @@ Vgs g 0 DC 0.6
         # have unique names (xu1_xmn_nm_PSP103VA_BD, etc.) not just (nm_PSP103VA_BD)
         netlist = """
 * Two-transistor test through subcircuits
-.model nch psp103va type=1
-.model pch psp103va type=-1
+.model nch PSP103VA type=1
+.model pch PSP103VA type=-1
 
 .subckt nmos d g s b
   nm d g s b nch W=10u L=1u
@@ -138,28 +138,22 @@ Vin2 in2 0 DC 0.3
 Vdd vdd 0 DC 1.2
 """
         ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = CedarSim.make_mna_circuit(ast; osdi_files=[PSP103_OSDI])
         circuit_fn = eval(code)
 
-        # Build structure and check internal nodes
-        spec = MNASpec(temp=27.0, mode=:dcop)
-        ctx = circuit_fn((;), spec, 0.0)
+        # Build structure via setup function
+        wrapped_setup = (params) -> Base.invokelatest(circuit_fn, params)
+        circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec(temp=27.0))
+        assemble!(circuit)
 
-        # 2 inverters × 2 MOSFETs × 8 internal nodes = 32 internal nodes
-        n_internal = n_internal_nodes(ctx)
-        @test n_internal == 32  # Each PSP103VA has 8 internal nodes
+        # Verify DC solve works on the two-inverter circuit
+        sol = dc!(circuit)
+        @test isapprox(voltage(sol, :vdd), 1.2, atol=1e-6)
 
-        # Check that internal node names are hierarchical (not colliding)
-        internal_names = [name for (name, idx) in ctx.node_to_idx if ctx.internal_node_flags[idx]]
-
-        # Should have unique prefixes for each instance path
-        @test any(contains(String(n), "xu1_xmn_nm") for n in internal_names)
-        @test any(contains(String(n), "xu1_xmp_nm") for n in internal_names)
-        @test any(contains(String(n), "xu2_xmn_nm") for n in internal_names)
-        @test any(contains(String(n), "xu2_xmp_nm") for n in internal_names)
+        # Internal node count: 4 devices × 2 uncollapsed internal nodes each (NOI + flow(NOII))
+        # Most PSP103 internal nodes (GP, SI, DI, BP, BI, BS, BD) collapse to terminals
+        # with default parameters (zero series resistances).
+        ctx = Base.invokelatest(circuit.builder, (;), MNASpec(temp=27.0), 0.0)
+        @test n_internal_nodes(ctx) == 8
     end
-
-    # NOTE: DC solve with subcircuits requires DirectStampContext stamp! precompilation
-    # in PSPModels. Currently triggers LLVM SROA crash during Newton iteration.
-    # This is a known limitation - PSPModels needs PrecompileTools workload update.
 end

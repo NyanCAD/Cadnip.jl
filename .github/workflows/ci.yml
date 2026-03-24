@@ -6,15 +6,43 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Build OSDI shared libraries from VA sources (once, shared across all jobs)
+  build-osdi:
+    name: Build OSDI libraries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenVAF and compile OSDI files
+        run: |
+          curl -fsSL https://fides.fe.uni-lj.si/openvaf/download/openvaf-reloaded-osdi_0.4-153-g2e066436-linux_x64.tar.gz -o openvaf.tar.gz
+          tar xzf openvaf.tar.gz
+          chmod +x openvaf-r
+          # Use --target_cpu generic for portable libraries (avoid SIGILL on runners with different CPU features)
+          ./openvaf-r --target_cpu generic models/VADistillerModels.jl/va/resistor.va -o test/osdi/resistor.osdi
+          ./openvaf-r --target_cpu generic models/VADistillerModels.jl/va/diode.va -o test/osdi/diode.osdi
+          ./openvaf-r --target_cpu generic models/VADistillerModels.jl/va/mos1.va -o test/osdi/mos1.osdi
+          ./openvaf-r --target_cpu generic models/PSPModels.jl/va/psp103.va -I models/PSPModels.jl/va -o test/osdi/psp103.osdi
+          ls -la test/osdi/*.osdi
+
+      - name: Upload OSDI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: osdi-libraries
+          path: test/osdi/*.osdi
+          retention-days: 1
+
   # Core tests - run quickly without heavy VA model parsing
   test-core:
     name: Core Tests - Julia ${{ matrix.version }}
+    needs: build-osdi
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,6 +59,12 @@ jobs:
           version: ${{ matrix.version }}
 
       - uses: julia-actions/cache@v2
+
+      - name: Download OSDI libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: osdi-libraries
+          path: test/osdi/
 
       - name: Install dependencies
         run: |
@@ -58,14 +92,9 @@ jobs:
       - name: Disable heavy precompile workloads
         run: |
           cat > test/LocalPreferences.toml << 'EOF'
-          [PSPModels]
-          precompile_workload = false
-
           [VADistillerModels]
           precompile_workload = false
 
-          [VACASKModels]
-          precompile_workload = false
           EOF
 
       - name: Install and precompile test dependencies
@@ -88,6 +117,7 @@ jobs:
   # Integration tests - heavy VA model parsing, run separately to avoid OOM
   test-integration:
     name: Integration Tests - Julia ${{ matrix.version }}
+    needs: build-osdi
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -105,12 +135,26 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      - name: Download OSDI libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: osdi-libraries
+          path: test/osdi/
+
       - name: Install dependencies
         run: |
           julia --project=. -e '
             using Pkg
             Pkg.instantiate()
           '
+
+      - name: Disable heavy precompile workloads
+        run: |
+          cat > test/LocalPreferences.toml << 'EOF'
+          [VADistillerModels]
+          precompile_workload = false
+
+          EOF
 
       - name: Install and precompile test dependencies
         run: |
@@ -128,3 +172,53 @@ jobs:
 
       - name: Run CedarSim integration tests
         run: julia --project=test test/runtests.jl integration
+
+  # VACASK Benchmarks
+  benchmark:
+    name: VACASK Benchmarks - Julia ${{ matrix.version }}
+    needs: build-osdi
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Download OSDI libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: osdi-libraries
+          path: test/osdi/
+
+      - name: Install dependencies
+        run: |
+          julia --project=benchmarks -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run VACASK benchmarks
+        run: |
+          julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl benchmark_results.md
+
+      - name: Publish benchmark results
+        run: cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-julia-${{ matrix.version }}
+          path: benchmark_results.md
+          retention-days: 30

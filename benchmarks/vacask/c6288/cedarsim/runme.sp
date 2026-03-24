@@ -1,15 +1,6 @@
-C6288 16x16 multiplier with PSP103 MOSFETs
+C6288 16x16 multiplier with PSP103 MOSFETs (OSDI)
 
-* NMOS wrapper - uses PSP103VA directly (uppercase params to match VA model)
-.subckt nmos d g s b w=1u l=0.2u ld=0.5u ls=0.5u
-  xm d g s b PSP103VA TYPE=1 W={w} L={l}
-.ends
-
-* PMOS wrapper - uses PSP103VA directly with TYPE=-1
-.subckt pmos d g s b w=1u l=0.2u ld=0.5u ls=0.5u
-  xm d g s b PSP103VA TYPE=-1 W={w} L={l}
-.ends
-
+.include ../ngspice/models.inc
 .include "multiplier.inc"
 
 vdd vdd 0 1.2

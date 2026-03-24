@@ -1,9 +1,9 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# VACASK Benchmark: Ring Oscillator with PSP103 MOSFETs
+# VACASK Benchmark: Ring Oscillator with PSP103 MOSFETs (OSDI)
 #
-# 9-stage ring oscillator using PSP103 MOSFET model.
-# Uses VACASKModels' precompiled nmos/pmos builders for fast startup.
+# 9-stage ring oscillator using PSP103 MOSFET model via OSDI.
+# Uses the ngspice models.inc for PSP103 model parameters.
 # Circuit matches ngspice/VACASK reference (no load caps, 10uA pulse).
 #
 # Usage: julia runme.jl
@@ -12,23 +12,21 @@
 using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: CedarTranOp
+using CedarSim.OsdiLoader
 using OrdinaryDiffEq: FBDF
 using SciMLBase
 using BenchmarkTools
 using Printf
 
-# Import precompiled PSP103 builders (nmos_mna_builder, pmos_mna_builder)
-using VACASKModels
+# Path to precompiled OSDI PSP103
+const PSP103_OSDI = joinpath(@__DIR__, "..", "..", "..", "..", "test", "osdi", "psp103.osdi")
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
 
-# Parse SPICE to code, then evaluate to get the builder function
-# VACASKModels provides precompiled nmos_mna_builder/pmos_mna_builder
-# which are resolved via imported_hdl_modules for the exposed subcircuit references
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_circuit,
-                                         imported_hdl_modules=[VACASKModels])
+# Parse SPICE file with OSDI device — returns a setup function
+const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:ring_circuit,
+                                              osdi_files=[PSP103_OSDI])
 eval(circuit_code)
 
 """
@@ -38,7 +36,8 @@ Create and return a fully-prepared MNACircuit ready for transient analysis.
 This separates problem setup from solve time for accurate benchmarking.
 """
 function setup_simulation()
-    circuit = MNACircuit(ring_circuit)
+    wrapped_setup = (params) -> Base.invokelatest(ring_circuit, params)
+    circuit = MNACircuitFromSetup(wrapped_setup, (;), MNASpec())
     MNA.assemble!(circuit)
     return circuit
 end
@@ -49,7 +48,7 @@ function run_benchmark(solver; tspan=(0.0, 1e-6), dtmax=0.05e-9, maxiters=100_00
     solver_name = nameof(typeof(solver))
     init = CedarTranOp()
 
-    println("Ring Oscillator Benchmark (PSP103)")
+    println("Ring Oscillator Benchmark (PSP103 OSDI)")
     println("="^50)
     println("  Solver:  $solver_name")
     println("  Init:    CedarTranOp (homotopy)")
