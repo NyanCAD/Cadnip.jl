@@ -28,7 +28,7 @@ using Base: @inbounds, @inline, @noinline
 using Base.Experimental: @overlay
 export @inbounds, @inline, @overlay, var"$temperature"
 
-export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
+export pow, ln, ddt, absdelay, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
 
 @noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
@@ -94,6 +94,11 @@ ChainRules.@scalar_rule tan(x) 1 + Ω * Ω
 # ddt stub - MNA handles ddt via ForwardDiff in vasim.jl
 # This is a placeholder for codegen that doesn't go through MNA stamping
 ddt(x) = x
+
+# absdelay stub - MNA handles absdelay via DDE history function in vasim.jl
+# This is a placeholder for codegen that doesn't go through MNA stamping
+absdelay(expr, tdelay) = expr
+absdelay(expr, tdelay, maxdelay) = expr
 
 # Noise stubs - MNA doesn't support noise analysis yet
 # Returns 0 to not affect simulation

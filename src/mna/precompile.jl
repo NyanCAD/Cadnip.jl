@@ -467,8 +467,8 @@ Zero-copy rebuild using DirectStampContext.
 
 Stamps go directly to sparse matrix nzval - no intermediate arrays.
 """
-function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
-    fast_rebuild!(ws, ws.structure, u, t)
+function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real; _mna_h_=nothing, _mna_h_p_=nothing)
+    fast_rebuild!(ws, ws.structure, u, t; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_)
 end
 
 """
@@ -479,14 +479,20 @@ Zero-copy rebuild using DirectStampContext with an explicit CompiledStructure.
 This variant allows passing a different CompiledStructure (e.g., with modified spec
 for dcop mode) while still using the same workspace for stamping.
 """
-function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVector, t::Real)
+function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVector, t::Real; _mna_h_=nothing, _mna_h_p_=nothing)
     dctx = ws.dctx
 
     # Reset counters and zero matrices
     reset_direct_stamp!(dctx)
 
     # Builder stamps directly to matrix storage via DirectStampContext
-    cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx)
+    # Only pass _mna_h_/_mna_h_p_ when set (DDE mode) to avoid breaking
+    # builders that don't accept these kwargs
+    if _mna_h_ !== nothing
+        cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx, _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_)
+    else
+        cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx)
+    end
 
     # Apply deferred b stamps
     n_deferred = cs.n_b_deferred
