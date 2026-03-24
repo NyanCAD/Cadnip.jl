@@ -1,6 +1,7 @@
 module CedarSim
 
 using DiffEqBase
+using DelayDiffEq
 using DynamicScope
 using VectorPrisms
 using StaticArrays

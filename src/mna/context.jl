@@ -208,6 +208,7 @@ mutable struct MNAContext
 
     # Track if system has been finalized
     finalized::Bool
+
 end
 
 """
@@ -240,7 +241,7 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
-        false               # finalized
+        false,              # finalized
     )
 end
 

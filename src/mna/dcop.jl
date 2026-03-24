@@ -15,6 +15,7 @@ using Accessors: @set
 using OrdinaryDiffEq
 using OrdinaryDiffEq.OrdinaryDiffEqCore: ODEIntegrator
 using OrdinaryDiffEq: BrownFullBasicInit, CheckInit, NoInit, DImplicitEuler
+using DelayDiffEq
 using LinearAlgebra
 using NonlinearSolve
 using SciMLBase
@@ -261,6 +262,45 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
     else
         return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
     end
+end
+
+#==============================================================================#
+# DelayDiffEq Integration
+#
+# Same DC operating point solve as ODE path.
+#==============================================================================#
+
+function SciMLBase.initialize_dae!(integrator::DelayDiffEq.DDEIntegrator,
+                                   alg::Union{CedarDCOp, CedarTranOp})
+    prob = integrator.sol.prob
+    abstol = alg.abstol
+
+    ws = prob.p
+    if !(ws isa EvalWorkspace)
+        return
+    end
+
+    u0 = integrator.u
+    cs = ws.structure
+
+    mode = alg isa CedarDCOp ? :dcop : :tranop
+    cs_dc = @set cs.spec = with_mode(cs.spec, mode)
+
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, zeros(length(u0));
+                                                     abstol=abstol, maxiters=alg.maxiters,
+                                                     nlsolve=alg.nlsolve,
+                                                     use_stepping=alg.use_stepping)
+
+    integrator.u .= u_sol
+    if !converged
+        @warn "DC operating point analysis failed. Further failures may follow."
+        integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
+    end
+
+    # DDEIntegrator doesn't support BrownFullBasicInit/DefaultInit —
+    # the DC solution provides consistent u0, and the DDE solver's own
+    # DDEDefaultInit (CheckInit) will verify it.
+    return
 end
 
 #==============================================================================#

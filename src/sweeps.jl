@@ -1,6 +1,6 @@
 using Accessors
 using AxisKeys
-using OrdinaryDiffEq, SciMLBase, Sundials
+using OrdinaryDiffEq, SciMLBase, Sundials, DelayDiffEq
 using LinearSolve: KLUFactorization
 using Base.Iterators
 
@@ -541,6 +541,16 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
                         abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(), kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan)
+    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
+end
+
+# DDE solver dispatch (MethodOfSteps) - for circuits with absdelay
+# Uses CedarTranOp for consistent initialization, same as ODE/DAE paths.
+function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
+                        solver::DelayDiffEq.MethodOfSteps;
+                        abstol=1e-10, reltol=1e-8, constant_lags=Float64[],
+                        initializealg=MNA.CedarTranOp(), kwargs...)
+    prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 

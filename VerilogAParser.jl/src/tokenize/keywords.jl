@@ -1,7 +1,7 @@
 
 const reserved_words = Dict{String, Kind}(
     "above" => RESERVED,
-    "absdelay" => RESERVED,
+    "absdelay" => ABDSDELAY,
     "absdelta" => RESERVED,
     "abstol" => ABSTOL,
     "access" => ACCESS,

@@ -52,6 +52,9 @@ include("build.jl")
 # Basic device stamps
 include("devices.jl")
 
+# DDE delay support (absdelay)
+include("delay.jl")
+
 # VA contribution function support (Phase 5)
 include("contrib.jl")
 
