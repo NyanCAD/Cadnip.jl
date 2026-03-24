@@ -105,6 +105,10 @@ mutable struct OsdiInstance
     # Cached node mapping (OSDI local node → MNA global unknown index)
     node_mapping::Vector{Int}
     initialized::Bool
+    # Implicit equation elimination data (populated during discovery)
+    # Maps implicit OSDI node index → [(physical_osdi_node_idx, coupling_coefficient), ...]
+    implicit_nodes::Set{Int}           # 1-based OSDI node indices that are implicit
+    coupling_map::Dict{Int, Vector{Tuple{Int, Float64}}}
 end
 
 function OsdiInstance(model::OsdiModel)
@@ -119,6 +123,8 @@ function OsdiInstance(model::OsdiModel)
         Float64[0.0],           # ground_scratch: absorbs ground-node Jacobian writes
         zeros(Int, dev.num_nodes),
         false,
+        Set{Int}(),
+        Dict{Int, Vector{Tuple{Int, Float64}}}(),
     )
 end
 
