@@ -92,7 +92,7 @@ end
     I_cart0 = sys.n_nodes + 1
     I_cart1 = sys.n_nodes + 2
 
-    # G matrix should enforce voltage constraints
+    # G matrix should enforce voltage constraints with Jacobian
     @test sys.G[I_cart0, cart_0] ≈ 1.0
     @test sys.G[cart_0, I_cart0] ≈ 1.0
     @test sys.G[I_cart1, cart_1] ≈ 1.0
@@ -102,7 +102,7 @@ end
     @test sys.G[I_cart0, pol_0] ≈ -cos(π/4) atol=1e-10
     @test sys.G[I_cart0, pol_1] ≈ 2.0*sin(π/4) atol=1e-10
 
-    # Verify the linearized constraint is self-consistent
+    # Verify the linearized constraint is self-consistent at the operating point
     @test sys.G[I_cart0, cart_0] * 2*cos(π/4) + sys.G[I_cart0, pol_0] * 2.0 +
           sys.G[I_cart0, pol_1] * (π/4) ≈ sys.b[I_cart0] atol=1e-10
 end

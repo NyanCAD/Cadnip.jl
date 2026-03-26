@@ -2840,19 +2840,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Generate stamping code for two-node voltage contribution
         # V(p,n) <+ expr means V_p - V_n = expr
         # With current variable I:
-        # - KCL at p: current I flows out of p → G[p, I] = 1
-        # - KCL at n: current I flows into n → G[n, I] = -1
-        # - Voltage constraint: V_p - V_n = expr
-        #   Newton linearization: G[I, p] = 1, G[I, n] = -1, G[I, k] -= ∂expr/∂V_k
+        # - KCL at p/n: G[p, I] = 1, G[n, I] = -1
+        # - Voltage constraint (Newton linearization, same pattern as current contributions):
+        #   G[I, p] = 1, G[I, n] = -1, G[I, k] -= ∂expr/∂V_k
         #   b[I] = expr_val - Σ(∂expr/∂V_k * V_k)
+        # For constant expr, partials are zero and this reduces to b[I] = expr_val.
         # Skip if nodes are aliased (short circuit optimization)
         v_stamp = quote
             # Skip if nodes are aliased (p and n point to same index)
             if $p_node != $n_node
-                # Evaluate voltage contribution (may be a JacobianTag dual)
                 V_contrib = $sum_expr
 
-                # Extract value and Jacobian from dual
                 if V_contrib isa ForwardDiff.Dual
                     V_val = ForwardDiff.value(V_contrib)
                     $([:($(Symbol("dV_dV", k)) = ForwardDiff.partials(V_contrib, $k)) for k in 1:n_all_nodes]...)
@@ -2869,22 +2867,18 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
                 end
 
-                # Voltage constraint: V_p - V_n = expr
-                # G[I, p] = 1 (from V_p term)
+                # Voltage constraint with Jacobian
                 if $p_node != 0
                     CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
                 end
-                # G[I, n] = -1 (from -V_n term)
                 if $n_node != 0
                     CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
                 end
-                # G[I, k] -= ∂expr/∂V_k (Jacobian of RHS expression)
                 $([quote
                     if $(all_node_params[k]) != 0
                         CedarSim.MNA.stamp_G!(ctx, $I_var, $(all_node_params[k]), -$(Symbol("dV_dV", k)))
                     end
                 end for k in 1:n_all_nodes]...)
-                # b[I] = expr_val - Σ(∂expr/∂V_k * V_k)  (Newton companion)
                 _b_voltage = V_val
                 $([quote
                     _b_voltage -= $(Symbol("dV_dV", k)) * $(Symbol("V_", k))
