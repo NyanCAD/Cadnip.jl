@@ -186,6 +186,17 @@ struct FunctionCallStatement
 end
 allchildren(fcs::FunctionCallStatement) = (fcs.call, fcs.semi)
 
+# Module instantiation: ModuleName InstanceName(port1, port2, ...);
+struct ModuleInstantiation
+    module_name::EXPR{Identifier}
+    instance_name::EXPR{Identifier}
+    lparen::EXPR{Notation}
+    ports::EXPRList{ListItem{EXPR}}
+    rparen::EXPRErr{Notation}
+    semi::EXPRErr{Notation}
+end
+allchildren(mi::ModuleInstantiation) = (mi.module_name, mi.instance_name, mi.lparen, mi.ports..., mi.rparen, mi.semi)
+
 struct ContributionStatement
     lvalue::EXPR
     cassign::EXPRErr{Notation}

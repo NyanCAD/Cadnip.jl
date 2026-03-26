@@ -278,6 +278,20 @@ function parse_net_declaration(ps)
     return EXPR(NetDeclaration(nothing, discipline, range, net_names, accept(ps, SEMICOLON)))
 end
 
+# Parse module instantiation: ModuleName InstanceName(port1, port2[0:1], ...);
+function parse_module_instantiation(ps)
+    module_name = accept_identifier(ps)
+    instance_name = accept_identifier(ps)
+    lparen = take(ps, LPAREN)
+    ports = EXPRList{ListItem{EXPR}}()
+    if kind(nt(ps)) != RPAREN
+        parse_comma_list!(parse_analog_expression, ps, ports)
+    end
+    rparen = accept(ps, RPAREN)
+    semi = accept(ps, SEMICOLON)
+    return EXPR(ModuleInstantiation(module_name, instance_name, lparen, ports, rparen, semi))
+end
+
 function parse_primary(ps, isconst::Bool)
     if isliteral(kind(nt(ps)))
         lit = take_literal(ps)
@@ -571,6 +585,11 @@ function parse_seq_block(parse_statement, ps)
     while !(kind(nt(ps)) in (END, ENDMARKER,
             # These are parse errors
             ELSE))
+        # Skip extra semicolons (null statements, e.g. `;;` in real-world VA)
+        if kind(nt(ps)) == SEMICOLON
+            take(ps, SEMICOLON)
+            continue
+        end
         push!(stmts, parse_statement(ps))
     end
     return EXPR(AnalogSeqBlock(kw, block_decl, stmts, accept_kw(ps, END)))
@@ -950,8 +969,14 @@ function parse_module_items(ps)
             PARAMETER => (parse_parameter_declaration(ps), accept(ps, SEMICOLON))
             ANALOG => (parse_analog_block(ps), nothing)
             ALIASPARAM => (parse_aliasparameter_declaration(ps), accept(ps, SEMICOLON))
-            # Identifiers interpreted as discipline identifier
-            IDENTIFIER => (parse_net_declaration(ps), nothing)
+            # Identifiers: disambiguate net declaration vs module instantiation
+            # Module instantiation: IDENTIFIER IDENTIFIER LPAREN (e.g. Polar2Cartesian P1(...))
+            # Net declaration: everything else (e.g. electrical p, n;  or  optical [0:3] in;)
+            IDENTIFIER => if kind(nt(ps, 2)) == IDENTIFIER && kind(nt(ps, 3)) == LPAREN
+                (parse_module_instantiation(ps), nothing)
+            else
+                (parse_net_declaration(ps), nothing)
+            end
             BRANCH => (parse_branch_declaration(ps), accept(ps, SEMICOLON))
             (INTEGER | REAL) => (parse_intreal_declaration(ps), accept(ps, SEMICOLON))
             _ => (handle_unexpected_token!(ps), nothing)

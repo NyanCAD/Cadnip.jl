@@ -33,6 +33,9 @@ if PHASE0_MINIMAL
         @testset "PSP103VA Integration" begin
             @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
         end
+        @testset "Photonic Integration" begin
+            @testset "mna/photonic_integration.jl" include("mna/photonic_integration.jl")
+        end
     elseif RUN_CORE
         @info "Running Phase 0/1 tests (parsing/codegen + MNA core)"
 
@@ -71,6 +74,11 @@ if PHASE0_MINIMAL
             @testset "params.jl" include("params.jl")
         end
 
+        # Photonic: unit tests (array ports, custom access functions, module instantiation)
+        @testset "Photonic" begin
+            @testset "mna/photonic.jl" include("mna/photonic.jl")
+        end
+
         # PDK Precompilation tests (load_mna_modules, load_mna_va_module)
         @testset "PDK Precompilation" begin
             @testset "testpdk/pdk_test.jl" include("testpdk/pdk_test.jl")
@@ -87,6 +95,9 @@ if PHASE0_MINIMAL
             end
             @testset "PSP103VA Integration" begin
                 @testset "mna/psp103_integration.jl" include("mna/psp103_integration.jl")
+            end
+            @testset "Photonic Integration" begin
+                @testset "mna/photonic_integration.jl" include("mna/photonic_integration.jl")
             end
         end
     end

@@ -6,8 +6,13 @@ const PREPROC_LOOKAHEAD = 1
 struct VirtPos
     pos::UInt32
 end
-Base.:+(a::VirtPos, b::Integer) = VirtPos(a.pos + UInt32(b))
-Base.:-(a::VirtPos, b::Integer) = VirtPos(a.pos - UInt32(b))
+# Wrapping arithmetic: "before position 0" wraps to 0xFFFFFFFF. This is necessary
+# because the chunk tree always emits a text chunk before the first expansion, even
+# when the file starts with `include at byte 0 (empty text chunk). The range for
+# that empty chunk is VirtPos(0):VirtPos(0xFFFFFFFF), which maintains contiguity
+# with the next node at VirtPos(0) via modular arithmetic.
+Base.:+(a::VirtPos, b::Integer) = VirtPos((Int64(a.pos) + Int64(b)) % UInt32)
+Base.:-(a::VirtPos, b::Integer) = VirtPos((Int64(a.pos) - Int64(b)) % UInt32)
 Base.:-(a::VirtPos, b::VirtPos) = a.pos - b.pos
 Base.isless(a::VirtPos, b::VirtPos) = isless(a.pos, b.pos)
 Base.isfinite(a::VirtPos) = true
