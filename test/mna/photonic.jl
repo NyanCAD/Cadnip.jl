@@ -6,7 +6,7 @@ using CedarSim.MNA: VoltageSource, Resistor, MNACircuit
 using CedarSim: dc!
 using VerilogAParser
 
-const PHOTONIC_DIR = joinpath(@__DIR__, "photonic_models")
+const PHOTONIC_DIR = joinpath(@__DIR__, "..", "..", "models", "PhotonicModels.jl", "va")
 
 @testset "Photonic Models" begin
 

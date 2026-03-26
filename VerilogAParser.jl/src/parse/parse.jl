@@ -585,11 +585,6 @@ function parse_seq_block(parse_statement, ps)
     while !(kind(nt(ps)) in (END, ENDMARKER,
             # These are parse errors
             ELSE))
-        # Skip extra semicolons (null statements, e.g. `;;` in real-world VA)
-        if kind(nt(ps)) == SEMICOLON
-            take(ps, SEMICOLON)
-            continue
-        end
         push!(stmts, parse_statement(ps))
     end
     return EXPR(AnalogSeqBlock(kw, block_decl, stmts, accept_kw(ps, END)))
@@ -800,6 +795,10 @@ function parse_analog_case_statement(parse_statement, ps)
 end
 
 function parse_statement(parse_assignment, parse_statement, ps)
+    # Null statement: bare semicolons (e.g., `;;` in real-world VA)
+    while kind(nt(ps)) == SEMICOLON
+        take(ps, SEMICOLON)
+    end
     attrs = maybe_parse_attributes(ps)
     item = @case kind(nt(ps)) begin
         (CASE | CASEX | CASEZ) => parse_analog_case_statement(parse_statement, ps)
