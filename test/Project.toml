@@ -24,6 +24,7 @@ SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Sundials = "c3572dad-4567-51f8-b174-8c6c989267f4"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+PhotonicModels = "b332cf46-470c-43e0-97f7-46dbfe290ae1"
 VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
 VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
 
@@ -34,6 +35,7 @@ Lexers = {path = "../Lexers.jl"}
 PSPModels = {path = "../models/PSPModels.jl"}
 VACASKModels = {path = "../models/VACASKModels.jl"}
 SpectreNetlistParser = {path = "../SpectreNetlistParser.jl"}
+PhotonicModels = {path = "../models/PhotonicModels.jl"}
 VADistillerModels = {path = "../models/VADistillerModels.jl"}
 VerilogAParser = {path = "../VerilogAParser.jl"}
 

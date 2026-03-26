@@ -38,21 +38,23 @@ The optical discipline has **only a potential nature** (no flow), making `OptE()
 - FunctionCall handler: Added custom potential access function support (OptE, Temp, etc.)
 - ContributionStatement handlers: Both inline and collected paths now support FunctionCall lvalues and use `access_map` instead of hardcoded V/I
 
-## Phase 2: Module Instantiation (Tier 2)
+## Phase 2: Module Instantiation (Tier 2) ✅
 
-**Goal**: Simulate `Attenuator.va` which composes Polar2Cartesian + CartesianMultiplier.
+**Status**: Implemented (runtime composition, not compile-time flattening)
 
-### Parser: Module instantiation syntax
-- Add `ModuleInstantiation` AST node to `forms.jl`
-- In `parse_module_items`, detect `IDENTIFIER IDENTIFIER LPAREN` pattern → parse as instantiation
+### Changes Made
 
-### Code generator: Compile-time flattening
-- Collect all modules from parse tree into `Dict{Symbol, VANode{VerilogModule}}`
-- `flatten_module_instance(child_ast, port_mapping, instance_prefix)`:
-  - Map parent port connections to child ports (with array slice resolution)
-  - Prefix child internal nodes with instance name
-  - Inline child analog block with substituted node names
-  - Recurse for nested instantiations
+**Parser (VerilogAParser.jl):**
+- `forms.jl`: Added `ModuleInstantiation` struct (module_name, instance_name, ports)
+- `parse.jl`: 3-token lookahead in `parse_module_items` IDENTIFIER case: `IDENTIFIER IDENTIFIER LPAREN` → `parse_module_instantiation()`; uses `parse_comma_list!` for port arguments
+
+**Code Generator (src/vasim.jl):**
+- `_resolve_instance_port_nodes!()`: Resolves port expressions (bare identifier, array slice `a[0:1]`) to expanded node symbols
+- `make_mna_device()`: Collects `ModuleInstantiation` items; generates `stamp!()` calls with resolved port nodes and hierarchical instance naming
+- `generate_mna_stamp_method_nterm()`: New `instance_stamp_calls` kwarg injected after internal node allocation
+- `make_mna_module()`: Now iterates ALL `VerilogModule` nodes in file, generates device code for each (children before parent), exports all types
+
+**Approach**: Runtime composition (like SPICE subcircuits), not compile-time flattening. Each child module gets its own struct + stamp! method. Parent's stamp! calls child stamp! with mapped port node indices.
 
 ## Phase 3: `$abstime` + `@(initial_step)` (Tier 3)
 

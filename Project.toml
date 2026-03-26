@@ -107,4 +107,5 @@ projects = [
     "models/VADistillerModels.jl",
     "models/PSPModels.jl",
     "models/CMCModels.jl",
+    "models/PhotonicModels.jl",
 ]

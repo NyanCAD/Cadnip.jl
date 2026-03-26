@@ -1,7 +1,0 @@
-[31m[1m╭ ERROR [VAS46]:[22m[39m[31m Unexpected semicolon.[39m
-[31m│[39m[90m   ╭───── extra_semi.va:5[39m
-[31m│[90m5[0m  [90m│[0m         begin[91m;
-[31m│[0m   [90m┊[0m              [91m┓
-[31m│[0m   [90m┊[0m   [91m✗ Unexpected semicolon[0m
-[31m│[39m[90m   │[39m
-[31m│[39m[90m   ╰───── [39mUnexpected semicolon.

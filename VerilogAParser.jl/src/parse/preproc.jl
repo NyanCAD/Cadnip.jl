@@ -113,7 +113,9 @@ active_lexer(ps::ParseState) = ps.lexer_stack[end][3]
 struct ChunkTree
     ps::ParseState
 end
-Base.length(tree::ChunkTree) = 1 + 2*length(tree.ps.srcfiles[1].offsets)
+# Whether the first text chunk has content (false when file starts with `include at byte 0)
+_has_leading_text(tree::ChunkTree) = isempty(tree.ps.srcfiles[1].offsets) || tree.ps.srcfiles[1].offsets[1].file_pos_start != UInt32(0)
+Base.length(tree::ChunkTree) = 1 + 2*length(tree.ps.srcfiles[1].offsets) - (_has_leading_text(tree) ? 0 : 1)
 
 struct ChunkTreeNode
     ps::ParseState
@@ -170,7 +172,12 @@ end
 
 function virtrange(node::ChunkTreeNode)
     if node.expansion
-        return (last(virtrange(prevsibling(node)))+UInt32(1)):node.offsets[node.chunk_idx].virt_pos_end
+        prev = prevsibling(node)
+        # Empty leading text chunk (file starts with `include at byte 0) — skip it
+        if prev.chunk_idx == 0 && !isempty(prev.offsets) && prev.offsets[1].file_pos_start == UInt32(0)
+            return node.first_virt:node.offsets[node.chunk_idx].virt_pos_end
+        end
+        return (last(virtrange(prev))+UInt32(1)):node.offsets[node.chunk_idx].virt_pos_end
     end
 
     if node.chunk_idx == 0
@@ -271,11 +278,20 @@ end
 
 function Base.iterate(tree::ChunkTree)
     offsets = tree.ps.srcfiles[1].offsets
-    node = ChunkTreeNode(tree.ps, 1, VirtPos(0), file_range(tree.ps, 1), offsets, 0, false)
+    if _has_leading_text(tree)
+        node = ChunkTreeNode(tree.ps, 1, VirtPos(0), file_range(tree.ps, 1), offsets, 0, false)
+    else
+        # Skip empty leading text chunk — start at first expansion
+        node = ChunkTreeNode(tree.ps, 1, VirtPos(0), file_range(tree.ps, 1), offsets, 1, true)
+    end
     return node, node
 end
 
 function Base.getindex(tree::ChunkTree, ind::Int)
+    # When file starts with expansion at byte 0, skip the empty leading text chunk
+    if !_has_leading_text(tree)
+        ind += 1
+    end
     idx, nisexpansion = divrem(ind, 2)
     offsets = tree.ps.srcfiles[1].offsets
     node = ChunkTreeNode(tree.ps, 1, VirtPos(0), file_range(tree.ps, 1),

@@ -6,7 +6,7 @@ using VerilogAParser.VerilogACSTParser:
     InOutDeclaration, NetDeclaration, ParameterDeclaration, AliasParameterDeclaration,
     VerilogModule, Literal, BinaryExpression, BPFC,
     IdentifierPrimary, @case, BranchDeclaration,
-    AnalogFunctionDeclaration,
+    AnalogFunctionDeclaration, ModuleInstantiation,
     IntRealDeclaration, IntRealVarDecl, AnalogStatement,
     AnalogConditionalBlock, AnalogVariableAssignment, AnalogProceduralAssignment,
     Parens, AnalogIf, AnalogFor, AnalogWhile, AnalogRepeat, UnaryOp, Function,
@@ -322,6 +322,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     contributions = Any[]
     function_defs = Any[]
     analog_block_ast = nothing  # Store for short circuit detection
+    module_instantiations = Any[]  # Collected ModuleInstantiation AST nodes
 
     for child in vm.items
         item = child.item
@@ -332,6 +333,9 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             BranchDeclaration => nothing
             ParameterDeclaration => nothing
             AliasParameterDeclaration => nothing
+            ModuleInstantiation => begin
+                push!(module_instantiations, item)
+            end
             AnalogFunctionDeclaration => begin
                 push!(function_defs, to_julia_mna(item))
             end
@@ -374,12 +378,58 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         end
     end
 
+    # Generate stamp! calls for module instantiations
+    # Each instantiation becomes: stamp!(ChildModule(), ctx, port1, port2, ...; kwargs...)
+    instance_stamp_calls = Expr(:block)
+    for mi in module_instantiations
+        child_mod = Symbol(mi.module_name)
+        inst_name = Symbol(mi.instance_name)
+
+        # Resolve port connections to node symbols
+        # Port args can be: simple identifier (transfer), array-sliced (in[0:1]), array-indexed (in[0])
+        port_nodes = Symbol[]
+        for port_arg in mi.ports
+            port_expr = port_arg.item
+            _resolve_instance_port_nodes!(port_nodes, port_expr, array_nodes)
+        end
+
+        port_node_params = map(port_nodes) do sym
+            # Map node symbol to its _node_ param or the internal node param
+            idx = findfirst(==(sym), ps)
+            if idx !== nothing
+                Symbol("_node_", sym)
+            else
+                int_idx = findfirst(==(sym), internal_nodes)
+                if int_idx !== nothing
+                    Symbol("_node_", sym)
+                else
+                    error("Module instantiation port '$sym' not found in ports or internal nodes of $modname")
+                end
+            end
+        end
+
+        # Build instance name expression for hierarchical naming
+        inst_name_expr = :(if _mna_instance_ == Symbol("")
+            $(QuoteNode(inst_name))
+        else
+            Symbol(_mna_instance_, "_", $(QuoteNode(inst_name)))
+        end)
+
+        push!(instance_stamp_calls.args, quote
+            CedarSim.MNA.stamp!($child_mod(), ctx, $(port_node_params...);
+                _mna_t_, _mna_mode_, _mna_x_, _mna_spec_,
+                _mna_instance_ = $inst_name_expr,
+                _mna_h_, _mna_h_p_)
+        end)
+    end
+
     # Generate stamp method using unified n-terminal approach
     # (works for any number of terminals, including 2)
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
-        function_defs, contributions, to_julia_mna, short_circuits; noinline)
+        function_defs, contributions, to_julia_mna, short_circuits;
+        noinline, instance_stamp_calls)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -528,6 +578,34 @@ function resolve_array_ref(scope::MNAScope, node_expr)
         return base_name
     end
     return Symbol(node_expr)
+end
+
+"""
+Resolve a module instantiation port expression to concrete node symbols.
+Handles: simple identifier (expanded if array), array slice `a[0:1]`, array index `a[0]`.
+"""
+function _resolve_instance_port_nodes!(result::Vector{Symbol}, port_expr, array_nodes::Dict{Symbol, Tuple{Int, Vector{Symbol}}})
+    if formof(port_expr) == IdentifierPrimary
+        base_name = Symbol(port_expr.id)
+        if port_expr.range !== nothing && haskey(array_nodes, base_name)
+            rng = port_expr.range
+            low = parse(Int, String(rng.low))
+            high = parse(Int, String(rng.high))
+            (arr_low, names) = array_nodes[base_name]
+            for i in low:high
+                push!(result, names[i - arr_low + 1])
+            end
+        elseif haskey(array_nodes, base_name)
+            # Bare array name: expand to all elements
+            (_, names) = array_nodes[base_name]
+            append!(result, names)
+        else
+            push!(result, base_name)
+        end
+    else
+        # Fallback: just use the string as a symbol
+        push!(result, Symbol(port_expr))
+    end
 end
 
 # Literal parsing methods
@@ -2188,7 +2266,8 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia, short_circuits=Dict{Symbol, NamedTuple}();
-                                          noinline::Union{Bool,Nothing}=nothing)
+                                          noinline::Union{Bool,Nothing}=nothing,
+                                          instance_stamp_calls::Expr=Expr(:block))
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
     n_all_nodes = n_ports + n_internal
@@ -2761,18 +2840,24 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Generate stamping code for two-node voltage contribution
         # V(p,n) <+ expr means V_p - V_n = expr
         # With current variable I:
-        # - KCL at p: current I flows out of p → G[p, I] = 1
-        # - KCL at n: current I flows into n → G[n, I] = -1
-        # - Voltage constraint: V_p - V_n = expr → G[I, p] = 1, G[I, n] = -1, b[I] = expr
+        # - KCL at p/n: G[p, I] = 1, G[n, I] = -1
+        # - Voltage constraint (Newton linearization, same pattern as current contributions):
+        #   G[I, p] = 1, G[I, n] = -1, G[I, k] -= ∂expr/∂V_k
+        #   b[I] = expr_val - Σ(∂expr/∂V_k * V_k)
+        # For constant expr, partials are zero and this reduces to b[I] = expr_val.
         # Skip if nodes are aliased (short circuit optimization)
         v_stamp = quote
             # Skip if nodes are aliased (p and n point to same index)
             if $p_node != $n_node
-                # Evaluate voltage contribution
                 V_contrib = $sum_expr
 
-                # Extract scalar value from dual if needed
-                V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
+                if V_contrib isa ForwardDiff.Dual
+                    V_val = ForwardDiff.value(V_contrib)
+                    $([:($(Symbol("dV_dV", k)) = ForwardDiff.partials(V_contrib, $k)) for k in 1:n_all_nodes]...)
+                else
+                    V_val = Float64(V_contrib)
+                    $([:($(Symbol("dV_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                end
 
                 # Stamp KCL: current I flows from p to n
                 if $p_node != 0
@@ -2782,14 +2867,23 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
                 end
 
-                # Voltage constraint: V_p - V_n = V_val
+                # Voltage constraint with Jacobian
                 if $p_node != 0
                     CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
                 end
                 if $n_node != 0
                     CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
                 end
-                CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
+                $([quote
+                    if $(all_node_params[k]) != 0
+                        CedarSim.MNA.stamp_G!(ctx, $I_var, $(all_node_params[k]), -$(Symbol("dV_dV", k)))
+                    end
+                end for k in 1:n_all_nodes]...)
+                _b_voltage = V_val
+                $([quote
+                    _b_voltage -= $(Symbol("dV_dV", k)) * $(Symbol("V_", k))
+                end for k in 1:n_all_nodes]...)
+                CedarSim.MNA.stamp_b!(ctx, $I_var, _b_voltage)
             end
         end
 
@@ -2821,6 +2915,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Add GMIN to ground for internal nodes (prevents floating nodes)
         $gmin_stamp
+
+        # Stamp child module instances (module instantiation)
+        $instance_stamp_calls
 
         # Allocate current variables for named branches with voltage contributions
         $branch_current_alloc
@@ -2940,17 +3037,39 @@ end
     make_mna_module(va::VANode)
 
 Generate an MNA-compatible module from a parsed Verilog-A file.
+Processes all VerilogModule definitions (children before parent) so that
+module instantiation works: child device types are defined in the same
+baremodule and available for the parent's stamp! calls.
 """
-function make_mna_module(va::VANode)
-    vamod = va.stmts[end]
-    s = Symbol(String(vamod.id), "_module")
-    typename = Symbol(vamod.id)
-
+function make_mna_module(va::VANode; deps::Vector{Symbol}=Symbol[])
     # Build access_map from nature/discipline declarations (supports custom disciplines like optical)
     access_map = build_access_map(va)
 
-    # Get the device definition (returns Expr(:toplevel, struct_def, constructor, stamp_method))
-    device_expr = CedarSim.make_mna_device(vamod; access_map)
+    # Collect all VerilogModule nodes (children first, parent last)
+    all_modules = [stmt for stmt in va.stmts if stmt isa VANode{VerilogModule}]
+    isempty(all_modules) && error("No Verilog-A modules found in file")
+
+    # The last module is the "main" one (exported)
+    main_mod = all_modules[end]
+    s = Symbol(String(main_mod.id), "_module")
+    typename = Symbol(main_mod.id)
+
+    # Import types from already-loaded sibling baremodules (for module instantiation).
+    # Each dep name Foo is expected to live in a sibling baremodule Foo_module.
+    dep_usings = [:(using ..$(Symbol(dep, "_module"))) for dep in deps]
+
+    # Generate device code for ALL modules
+    all_device_exprs = Any[]
+    all_exports = Any[typename]
+    for vamod in all_modules
+        device_expr = CedarSim.make_mna_device(vamod; access_map)
+        append!(all_device_exprs, device_expr.args)
+        # Export child module types too (needed for stamp! dispatch)
+        child_name = Symbol(vamod.id)
+        if child_name != typename
+            push!(all_exports, child_name)
+        end
+    end
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
@@ -2962,8 +3081,9 @@ function make_mna_module(va::VANode)
         using ..CedarSim.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
-        export $typename
-        $(device_expr.args...)
+        $(dep_usings...)
+        $([:( export $e) for e in all_exports]...)
+        $(all_device_exprs...)
     end), :(using .$s))
 end
 
