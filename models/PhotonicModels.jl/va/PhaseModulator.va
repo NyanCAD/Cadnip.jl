@@ -6,7 +6,9 @@
 module PhaseModulator(opt_in, opt_out, ele_in);
     inout [0:3] opt_in, opt_out; // Optical input and output
     input ele_in; // Electrical input
-    optical [0:3] opt_in, opt_out, transfer_pol, transfer, out_tmp;
+    // Fixed: transfer_pol, transfer are [0:1] (used with Polar2Cartesian).
+    // Original had them in both [0:3] and [0:1] declarations (spec violation).
+    optical [0:3] opt_in, opt_out, out_tmp;
     optical [0:1] fwd, bwd, transfer_pol, transfer;
     electrical ele_in;
 

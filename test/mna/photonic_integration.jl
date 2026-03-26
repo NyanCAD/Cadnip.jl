@@ -41,6 +41,10 @@ end
         @test isdefined(PhotonicModels, :Attenuator)
         @test isdefined(PhotonicModels, :Isolator)
         @test isdefined(PhotonicModels, :PhaseShifter)
+        @test isdefined(PhotonicModels, :Waveguide)
+        @test isdefined(PhotonicModels, :Pcw)
+        @test isdefined(PhotonicModels, :PhaseModulator)
+        @test isdefined(PhotonicModels, :PcwPhaseModulator)
     end
 
     @testset "Attenuator: 6dB transfer function" begin
@@ -148,6 +152,118 @@ end
         sys = assemble!(ctx)
         # 8 port nodes + 4 internal (transfer_pol[0:1], transfer[0:1]) + child nodes
         @test sys.n_nodes >= 12
+    end
+
+    @testset "Waveguide: propagation loss" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            n1 = make_optical_port!(ctx, :n1)
+            n2 = make_optical_port!(ctx, :n2)
+            stamp!(Waveguide(length=100e-6, loss=2.0), ctx, n1..., n2...)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+
+        # transfer_pol[0] = exp(-alpha/2 * length) where alpha = 23.026 * loss
+        alpha = 23.0258509299404568 * 2.0
+        expected_amp = exp(-alpha / 2 * 100e-6)
+        tp0 = findfirst(==(:Waveguide_transfer_pol_0), sol.node_names)
+        @test tp0 !== nothing
+        @test isapprox(sol.x[tp0], expected_amp; atol=1e-4)
+    end
+
+    @testset "Pcw: propagation loss (higher group index)" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            n1 = make_optical_port!(ctx, :n1)
+            n2 = make_optical_port!(ctx, :n2)
+            stamp!(Pcw(length=100e-6, loss=2.0), ctx, n1..., n2...)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+
+        # Same loss formula as Waveguide (Pcw differs only in default groupIndex)
+        alpha = 23.0258509299404568 * 2.0
+        expected_amp = exp(-alpha / 2 * 100e-6)
+        tp0 = findfirst(==(:Pcw_transfer_pol_0), sol.node_names)
+        @test tp0 !== nothing
+        @test isapprox(sol.x[tp0], expected_amp; atol=1e-4)
+    end
+
+    @testset "PhaseModulator: transfer at V=0" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            opt_in = make_optical_port!(ctx, :opt_in)
+            opt_out = make_optical_port!(ctx, :opt_out)
+            ele_in = get_node!(ctx, :ele_in)
+            stamp!(Resistor(1.0), ctx, ele_in, 0)
+            stamp!(PhaseModulator(length=100e-6, loss=2.0), ctx, opt_in..., opt_out..., ele_in)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+
+        # At V=0: alpha = 23.026 * loss, amplitude = exp(-alpha/2 * length)
+        alpha = 23.0258509299404568 * 2.0
+        expected_amp = exp(-alpha / 2 * 100e-6)
+        tp0 = findfirst(==(:PhaseModulator_transfer_pol_0), sol.node_names)
+        @test tp0 !== nothing
+        @test isapprox(sol.x[tp0], expected_amp; atol=1e-4)
+    end
+
+    @testset "PcwPhaseModulator: transfer at V=0" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            opt_in = make_optical_port!(ctx, :opt_in)
+            opt_out = make_optical_port!(ctx, :opt_out)
+            ele_in = get_node!(ctx, :ele_in)
+            stamp!(Resistor(1.0), ctx, ele_in, 0)
+            stamp!(PcwPhaseModulator(length=100e-6, loss=2.0), ctx, opt_in..., opt_out..., ele_in)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+
+        alpha = 23.0258509299404568 * 2.0
+        expected_amp = exp(-alpha / 2 * 100e-6)
+        tp0 = findfirst(==(:PcwPhaseModulator_transfer_pol_0), sol.node_names)
+        @test tp0 !== nothing
+        @test isapprox(sol.x[tp0], expected_amp; atol=1e-4)
+    end
+
+    @testset "ReflectionInterface: no reflection passes through" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            n1 = make_optical_port!(ctx, :n1)
+            n2 = make_optical_port!(ctx, :n2)
+            stamp!(ReflectionInterface(reflection=0.0), ctx, n1..., n2...)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+        @test length(sol.x) > 0
+    end
+
+    @testset "OneTwoSplitter: 50/50 split" begin
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            one = make_optical_port!(ctx, :one)
+            two1 = make_optical_port!(ctx, :two1)
+            two2 = make_optical_port!(ctx, :two2)
+            stamp!(OneTwoSplitter(kappa=0.5), ctx, one..., two1..., two2...)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+        @test length(sol.x) > 0
     end
 
 end # Photonic Integration

@@ -9,11 +9,10 @@ Models use the custom `optical` discipline with `OptE()` access function.
 Coordinate converters, Cartesian arithmetic, passive optical components, couplers/splitters.
 
 # Tier 2 (composite modules - use module instantiation)
-Attenuator, Isolator, PhaseShifter — depend on Polar2Cartesian + CartesianMultiplier.
+Attenuator, Isolator, PhaseShifter, Waveguide, Pcw, PhaseModulator, PcwPhaseModulator.
 
 # Tier 3 (not yet loadable)
-CwLaser, Waveguide, Pcw, PhaseModulator, PcwPhaseModulator, PhotoDetector,
-TunableFilter, NoisyEDFA — require unimplemented features (\$abstime, laplace_nd, etc.)
+CwLaser, NoisyEDFA (need @(initial_step)), PhotoDetector, TunableFilter (need laplace_nd).
 """
 module PhotonicModels
 
@@ -62,9 +61,13 @@ end
 # `using` statements to import child types from their already-loaded baremodules.
 # Load order matters: Tier 1 must be loaded first.
 const TIER2_MODELS = [
-    ("Attenuator",   [:Polar2Cartesian, :CartesianMultiplier]),
-    ("Isolator",     [:Polar2Cartesian, :CartesianMultiplier]),
-    ("PhaseShifter", [:Polar2Cartesian, :CartesianMultiplier]),
+    ("Attenuator",        [:Polar2Cartesian, :CartesianMultiplier]),
+    ("Isolator",          [:Polar2Cartesian, :CartesianMultiplier]),
+    ("PhaseShifter",      [:Polar2Cartesian, :CartesianMultiplier]),
+    ("Waveguide",         [:Polar2Cartesian, :CartesianMultiplier]),
+    ("Pcw",               [:Polar2Cartesian, :CartesianMultiplier]),
+    ("PhaseModulator",    [:Polar2Cartesian, :CartesianMultiplier]),
+    ("PcwPhaseModulator", [:Polar2Cartesian, :CartesianMultiplier]),
 ]
 
 for (name, deps) in TIER2_MODELS
@@ -73,14 +76,11 @@ for (name, deps) in TIER2_MODELS
     Core.eval(@__MODULE__, CedarSim.make_mna_module(va; deps))
 end
 
-# Tier 3: Models requiring unimplemented features (documented for future phases)
-# CwLaser:           $abstime + @(initial_step)
-# Waveguide, Pcw:    absdelay() applied to OptE
-# PhaseModulator:    absdelay() + electrical V()
-# PcwPhaseModulator: absdelay() + electrical V()
-# PhotoDetector:     laplace_nd()
-# TunableFilter:     $abstime + laplace_nd()
-# NoisyEDFA:         @(initial_step) + $rdist_normal()
+# Tier 3: Models requiring unimplemented parser features
+# CwLaser:      @(initial_step) event control
+# NoisyEDFA:    @(initial_step) + $rdist_normal()
+# PhotoDetector: laplace_nd() with {array} literals
+# TunableFilter: laplace_nd() with {array} literals
 
 # Tier 1 exports
 export Polar2Cartesian, Cartesian2Polar, PolToCart, CartToPol
@@ -90,5 +90,6 @@ export DirectionalCoupler, OneTwoCoupler, OneTwoLoopback, OneTwoSplitter, TwoOne
 export NonlinearCapacitor
 # Tier 2 exports
 export Attenuator, Isolator, PhaseShifter
+export Waveguide, Pcw, PhaseModulator, PcwPhaseModulator
 
 end # module
