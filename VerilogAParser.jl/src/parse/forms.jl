@@ -109,11 +109,11 @@ const NetAssignmentListItem = ListItem{EXPR} # XXX
 struct NetDeclaration
     net_type::Maybe{EXPR{Keyword}}
     discipline::Maybe{EXPR{Identifier}}
-    # XXX: More fields
+    range::Maybe{EXPR}
     net_names::Union{EXPRList{NetNameListItem}, EXPRList{NetAssignmentListItem}}
     semi::EXPRErr{Notation}
 end
-allchildren(n::NetDeclaration) = (n.net_type, n.discipline, n.net_names..., n.semi)
+allchildren(n::NetDeclaration) = (n.net_type, n.discipline, n.range, n.net_names..., n.semi)
 
 struct RangeSpec
     lsquare::EXPR{Notation}
@@ -267,7 +267,7 @@ allchildren(di::DisciplineItem) = (di.item, di.semi)
 struct DisciplineDeclaration
     kw::EXPR{Keyword}
     id::EXPR{Identifier}
-    semi::EXPR{Notation}
+    semi::Maybe{EXPR{Notation}}
     items::EXPRList{DisciplineItem}
     endkw::EXPR{Keyword}
 end
@@ -298,7 +298,7 @@ struct NatureDeclaration
     kw::EXPR{Keyword}
     id::EXPR{Identifier}
     parent::Maybe{EXPR{ParentNatureSpec}}
-    semi::EXPR{Notation}
+    semi::Maybe{EXPR{Notation}}
     items::EXPRList{NatureItem}
     endkw::EXPR{Keyword}
 end
