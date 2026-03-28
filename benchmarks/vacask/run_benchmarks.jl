@@ -20,7 +20,7 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: ABDF2, FBDF, Rodas3, ImplicitEuler
+using OrdinaryDiffEq: ABDF2, FBDF, Rodas3, Rodas5P, ImplicitEuler, ESDIRK54I8L2SA, KenCarp4
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
@@ -43,6 +43,13 @@ const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_ABDF2, SOLVER_RODAS3]
 const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
+# OTA (PSP103 MOSFETs): nonlinear analog with PSP103 transistors
+# Note: FBDF/QNDF/ABDF2/Rodas3 get stuck at 3 steps (mass matrix issue)
+# ESDIRK methods are the most robust for this circuit
+const SOLVER_ESDIRK54 = ("ESDIRK54I8L2SA", () -> ESDIRK54I8L2SA(linsolve=KLUFactorization(), autodiff=false))
+const SOLVER_KENCARP4 = ("KenCarp4", () -> KenCarp4(linsolve=KLUFactorization(), autodiff=false))
+const SOLVER_RODAS5P = ("Rodas5P", () -> Rodas5P(linsolve=KLUFactorization()))
+const SOLVERS_OTA = [SOLVER_IDA, SOLVER_ESDIRK54, SOLVER_KENCARP4, SOLVER_RODAS5P]
 
 # Results storage
 struct BenchmarkResult
@@ -234,6 +241,13 @@ function main()
         "Voltage Multiplier",
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"),
         SOLVERS_NONLINEAR
+    ))
+
+    # OTA - analog differential pair (PSP103 MOSFETs)
+    append!(results, run_benchmark_all_solvers(
+        "OTA (PSP103)",
+        joinpath(BENCHMARK_DIR, "opamp", "cedarsim", "runme.jl"),
+        SOLVERS_OTA
     ))
 
     # Ring Oscillator - IDA only (needs tuned settings for oscillation)
