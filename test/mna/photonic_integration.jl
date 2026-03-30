@@ -284,11 +284,7 @@ end
         end
 
         sol = dc!(MNACircuit(circuit))
-        # BUG: nonlinear laplace input (pow(V,2)) causes incorrect DC due to
-        # Newton companion double-counting the input Jacobian in the state equation.
-        # Expected: V(ele_out) ≈ 1.0, actual: -3.0
-        # Linear inputs (V(node)) work correctly — see laplace.jl DC test.
-        @test_broken isapprox(voltage(sol, :ele_out), 1.0; atol=0.01)
+        @test isapprox(voltage(sol, :ele_out), 1.0; atol=0.01)
     end
 
     @testset "Tier 3: TunableFilter compilation" begin

@@ -3040,11 +3040,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Generate post-dual b-stamp code for idt/laplace state equations
     # These run AFTER dual_creation so input expressions have JacobianTag duals.
     #
-    # Stamp Jacobian into G and Newton companion into b, following the same
-    # pattern as regular contribution stamps. The Newton companion model is:
-    #   G[si, k] += ∂f/∂V_k
-    #   b[si] = f(V0) - Σ(∂f/∂V_k * V_k)
-    # where f = B*u(V) is the input coupling.
+    # State equation: E·ẋ = A·x + B·u  →  MNA residual: E·ẋ - A·x - B·u = 0
+    # The pre-dual stamps handle -A (into G) and E (into C).
+    # Here we handle the -B·u(V) coupling via Newton linearization:
+    #   G[si, k] += -∂(B·u)/∂V_k    (Jacobian of -B·u, NEGATED vs contribution convention)
+    #   b[si]     = B·u(V0) - Σ(∂(B·u)/∂V_k · V0_k)   (companion of B·u)
+    #
+    # The negation of the Jacobian is critical: the MNA residual is F = G·V - b,
+    # and we need G·V - b = -B·u_linearized. Stamping +∂(B·u)/∂V_k into G would
+    # double-count the input Jacobian (once in G·V, once in the companion b).
+    # For linear inputs the companion is zero so the sign doesn't matter, but
+    # for nonlinear inputs (e.g., pow(V,2) in PhotoDetector) it causes incorrect DC.
     extra_b_stamp_code = Expr(:block)
     for desc in to_julia.extra_stamps_b
         sn = desc.state_node
@@ -3056,11 +3062,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             $bu_var = $inp_expr
             if $bu_var isa ForwardDiff.Dual
                 $bu_val_var = ForwardDiff.value($bu_var)
-                # Stamp Jacobian into G and compute Newton companion b value
+                # Stamp negated Jacobian into G and compute Newton companion b value
                 $([quote
                     _dbu = ForwardDiff.partials($bu_var, $k)
                     if $(all_node_params[k]) != 0
-                        CedarSim.MNA.stamp_G!(ctx, $sn, $(all_node_params[k]), _dbu)
+                        CedarSim.MNA.stamp_G!(ctx, $sn, $(all_node_params[k]), -_dbu)
                     end
                     $bu_val_var -= _dbu * $(Symbol("V_", k))
                 end for k in 1:n_all_nodes]...)
