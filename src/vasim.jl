@@ -11,7 +11,7 @@ using VerilogAParser.VerilogACSTParser:
     AnalogConditionalBlock, AnalogVariableAssignment, AnalogProceduralAssignment,
     Parens, AnalogIf, AnalogFor, AnalogWhile, AnalogRepeat, UnaryOp, Function,
     AnalogSystemTaskEnable, StringLiteral,
-    CaseStatement, FunctionCall, FunctionCallStatement, TernaryExpr,
+    CaseStatement, FunctionCall, FunctionCallStatement, TernaryExpr, ArrayLiteral,
     FloatLiteral, ChunkTree, virtrange,
     filerange, LineNumbers, compute_line,
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
@@ -198,7 +198,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, VAFunction}(), true, ddx_order,
         Dict{Symbol, Pair{Symbol,Symbol}}(), nothing,
         Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
-        Dict{Symbol, Symbol}(:V => :potential, :I => :flow))
+        Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
+        Expr[], Any[], Symbol[])
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -315,7 +316,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, VAFunction}(), false,
         ddx_order,
         named_branches, nothing,
-        array_nodes, access_map)
+        array_nodes, access_map,
+        Expr[], Any[], Symbol[])
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -422,6 +424,10 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
                 _mna_h_, _mna_h_p_)
         end)
     end
+
+    # Merge dynamically added internal nodes (idt/laplace state nodes) into internal_nodes
+    # These were collected during the to_julia pass via extra_internal_nodes
+    append!(internal_nodes, to_julia_mna.extra_internal_nodes)
 
     # Generate stamp method using unified n-terminal approach
     # (works for any number of terminals, including 2)
@@ -551,6 +557,9 @@ struct MNAScope
     delay_expr::Any  # nothing, or delay expression for absdelay V/I rewriting
     array_nodes::Dict{Symbol, Tuple{Int, Vector{Symbol}}}  # name -> (low_index, [expanded_names...])
     access_map::Dict{Symbol, Symbol}  # access_func -> :potential or :flow (OptE -> :potential, V -> :potential, I -> :flow)
+    extra_stamps::Vector{Expr}  # Mutable buffer for pre-dual stamps (allocation, G/C)
+    extra_stamps_b::Vector{Any}  # Mutable buffer for post-dual b-stamp descriptors (NamedTuples)
+    extra_internal_nodes::Vector{Symbol}  # Mutable buffer for dynamically added internal nodes (idt/laplace state nodes)
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -558,7 +567,7 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.parameters, s.node_order, s.ninternal_nodes, s.branch_order,
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
     s.ddx_order, s.named_branches, delay_jl,
-    s.array_nodes, s.access_map)
+    s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -665,6 +674,75 @@ function (to_julia::MNAScope)(stmt::VANode{Parens})
     return to_julia(stmt.inner)
 end
 
+function (to_julia::MNAScope)(stmt::VANode{ArrayLiteral})
+    # Emit as Julia tuple: {a, b, c} → (a, b, c)
+    elements = [to_julia(item.item) for item in stmt.items]
+    return Expr(:tuple, elements...)
+end
+
+"""
+Generate stamps for a Laplace transfer function (laplace_nd or laplace_zp).
+Allocates internal state nodes and stamps the (A, E, B, C, D) state-space
+matrices into G and C. Returns the output expression.
+"""
+function _emit_laplace_stamps(to_julia::MNAScope, input_expr, order::Int, dss_call_expr)
+    laplace_id = gensym(:laplace)
+    dss_var = Symbol("_laplace_dss_", laplace_id)
+    # State node symbols — used as internal node names (get duals created for them)
+    state_node_syms = [Symbol(:laplace_, laplace_id, :_s, i) for i in 1:order]
+    # Parameter names for node indices (convention: _node_<sym>)
+    state_node_params = [Symbol("_node_", s) for s in state_node_syms]
+
+    # Register state nodes as internal nodes so they get JacobianTag duals
+    append!(to_julia.extra_internal_nodes, state_node_syms)
+
+    # Pre-dual stamps: constant G/C entries
+    # (node allocation handled by internal_node_alloc in generate_mna_stamp_method_nterm)
+    stamp_expr = quote
+        # Convert to prescaled descriptor state-space (constant-foldable)
+        $dss_var = $dss_call_expr
+        _A, _E, _B, _Cout, _D = $dss_var
+    end
+
+    # Stamp state equations: E·dx/dt = A·x + B·u
+    # → MNA: C_matrix[si,sj] += E[i,j], G_matrix[si,sj] += -A[i,j]
+    for i in 1:order, j in 1:order
+        push!(stamp_expr.args, :(CedarSim.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[j]), -_A[$i,$j])))
+        push!(stamp_expr.args, :(CedarSim.MNA.stamp_C!(ctx, $(state_node_params[i]), $(state_node_params[j]), _E[$i,$j])))
+    end
+
+    # GMIN for numerical stability on state nodes
+    for i in 1:order
+        push!(stamp_expr.args, :(CedarSim.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[i]), _mna_spec_.gmin)))
+    end
+
+    push!(to_julia.extra_stamps, stamp_expr)
+
+    # Post-dual b-stamp descriptors: input coupling b[si] = B[i,1] * input_expr
+    # Deferred to generate_mna_stamp_method_nterm for Jacobian extraction
+    for i in 1:order
+        push!(to_julia.extra_stamps_b, (
+            state_node = state_node_params[i],
+            expr = :(_B[$i, 1] * $input_expr),
+        ))
+    end
+
+    # Output: y = C·x + D·u
+    # State node symbols have JacobianTag duals after dual_creation,
+    # so the contribution stamp correctly extracts ∂output/∂V_state into G
+    output_terms = Any[]
+    for i in 1:order
+        push!(output_terms, :(_Cout[1,$i] * $(state_node_syms[i])))
+    end
+    push!(output_terms, :(_D[1,1] * $input_expr))
+
+    if length(output_terms) == 1
+        return output_terms[1]
+    else
+        return Expr(:call, :+, output_terms...)
+    end
+end
+
 function (to_julia::MNAScope)(cs::VANode{TernaryExpr})
     # Convert condition to bool (VA integers are truthy)
     cond_bool = :(!(iszero($(to_julia(cs.condition)))))
@@ -743,6 +821,74 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         # maxdelay (3rd arg) is ignored for now — constant delay only
         delayed = with_delay(to_julia, delay_jl)
         return delayed(stmt.args[1].item)
+    elseif fname == :idt
+        # Time integral: idt(expr, ic) = ic + ∫₀ᵗ expr(τ) dτ
+        # Implemented as internal state node s where: ds/dt = expr, s(0) = ic
+        # In MNA: C[s,s] = 1, b[s] = expr (the integrand)
+        # Returns V(s) — the integrated value
+        @assert length(stmt.args) in (1, 2, 3, 4) "idt requires 1-4 arguments"
+        input_expr = to_julia(stmt.args[1].item)
+        ic_expr = length(stmt.args) >= 2 ? to_julia(stmt.args[2].item) : 0.0
+
+        # Generate unique names for this idt instance
+        idt_id = gensym(:idt)
+        state_node_sym = Symbol(:idt_, idt_id)
+        state_node_param = Symbol("_node_", state_node_sym)
+
+        # Register as internal node so it gets a JacobianTag dual
+        push!(to_julia.extra_internal_nodes, state_node_sym)
+
+        # Pre-dual stamps: constant G/C entries
+        # (node allocation handled by internal_node_alloc in generate_mna_stamp_method_nterm)
+        # Same number of stamp calls regardless of mode (DirectStampContext compatible)
+        push!(to_julia.extra_stamps, quote
+            # DC: G=1 pins node to ic, C=0 no-op. Transient: G=gmin, C=1 enables integration.
+            CedarSim.MNA.stamp_G!(ctx, $state_node_param, $state_node_param,
+                _mna_spec_.mode === :dcop ? 1.0 : _mna_spec_.gmin)
+            CedarSim.MNA.stamp_C!(ctx, $state_node_param, $state_node_param,
+                _mna_spec_.mode === :dcop ? 0.0 : 1.0)
+        end)
+
+        # Post-dual b-stamp descriptor: evaluated with JacobianTag duals for Newton Jacobian
+        # DC: b[s] = ic (constant). Transient: b[s] = input_expr (needs Jacobian).
+        push!(to_julia.extra_stamps_b, (
+            state_node = state_node_param,
+            expr = :(_mna_spec_.mode === :dcop ? $ic_expr : $input_expr),
+        ))
+
+        # Return state node symbol directly — has JacobianTag dual after dual_creation
+        return state_node_sym
+    elseif fname == :laplace_nd
+        # Laplace transfer function: laplace_nd(input, num_coeffs, den_coeffs)
+        # H(s) = N(s)/D(s) with ascending-order polynomial coefficients
+        # Converted to descriptor state-space at runtime, stamped into G/C
+        @assert length(stmt.args) == 3 "laplace_nd requires 3 arguments"
+        input_expr = to_julia(stmt.args[1].item)
+        num_expr = to_julia(stmt.args[2].item)  # tuple from {a, b, ...}
+        den_expr = to_julia(stmt.args[3].item)  # tuple from {c, d, ...}
+
+        # Filter order = length(den) - 1 (known at codegen time from AST)
+        den_ast = stmt.args[3].item
+        @assert formof(den_ast) == ArrayLiteral "laplace_nd denominator must be an array literal"
+        order = length(den_ast.items) - 1
+
+        return _emit_laplace_stamps(to_julia, input_expr, order,
+            :(CedarSim.MNA.va_laplace_nd_dss($num_expr, $den_expr)))
+    elseif fname == :laplace_zp
+        # Laplace transfer function: laplace_zp(input, zeros, poles)
+        # Zeros/poles as {magnitude, phase, ...} pairs
+        @assert length(stmt.args) == 3 "laplace_zp requires 3 arguments"
+        input_expr = to_julia(stmt.args[1].item)
+        zeros_expr = to_julia(stmt.args[2].item)
+        poles_expr = to_julia(stmt.args[3].item)
+
+        # Filter order = number of pole pairs (each pair is {mag, phase})
+        poles_ast = stmt.args[3].item
+        @assert formof(poles_ast) == ArrayLiteral "laplace_zp poles must be an array literal"
+        order = length(poles_ast.items) ÷ 2
+
+        return _emit_laplace_stamps(to_julia, input_expr, order,
+            :(CedarSim.MNA.va_laplace_zp_dss($zeros_expr, $poles_expr, 1.0)))
     elseif fname == :ddx
         # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
         # For n-terminal MNA devices, duals are indexed by node_order (port positions)
@@ -1633,6 +1779,8 @@ function (to_julia::MNAScope)(ip::VANode{SystemIdentifier})
         return :(hasproperty(_mna_spec_, :mfactor) ? _mna_spec_.mfactor : 1.0)
     elseif id == Symbol("\$temperature")
         return :(_mna_spec_.temp + 273.15)
+    elseif id == Symbol("\$abstime")
+        return :(_mna_t_)
     else
         # For other system identifiers, return as function call
         return Expr(:call, id)
@@ -1927,7 +2075,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
         to_julia.named_branches, nothing,
-        to_julia.array_nodes, to_julia.access_map)
+        to_julia.array_nodes, to_julia.access_map,
+        to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2673,12 +2822,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Add GMIN (minimum conductance) to ground for internal nodes
     # This prevents floating nodes that can cause singular matrix issues
     # Especially important for noise-related internal nodes that have no DC path
-    # GMIN value: 1e-12 S (1 pS) - standard SPICE minimum conductance
+    # Uses _mna_spec_.gmin (default 1e-12 S = 1 pS, standard SPICE minimum conductance)
     gmin_stamp = Expr(:block)
     for int_param in internal_node_params
         push!(gmin_stamp.args, quote
             if $int_param != 0
-                CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, 1e-12)
+                CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
             end
         end)
     end
@@ -2890,6 +3039,47 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(twonode_voltage_stamp_code.args, v_stamp)
     end
 
+    # Generate post-dual b-stamp code for idt/laplace state equations
+    # These run AFTER dual_creation so input expressions have JacobianTag duals.
+    #
+    # State equation: E·ẋ = A·x + B·u  →  MNA residual: E·ẋ - A·x - B·u = 0
+    # The pre-dual stamps handle -A (into G) and E (into C).
+    # Here we handle the -B·u(V) coupling via Newton linearization:
+    #   G[si, k] += -∂(B·u)/∂V_k    (Jacobian of -B·u, NEGATED vs contribution convention)
+    #   b[si]     = B·u(V0) - Σ(∂(B·u)/∂V_k · V0_k)   (companion of B·u)
+    #
+    # The negation of the Jacobian is critical: the MNA residual is F = G·V - b,
+    # and we need G·V - b = -B·u_linearized. Stamping +∂(B·u)/∂V_k into G would
+    # double-count the input Jacobian (once in G·V, once in the companion b).
+    # For linear inputs the companion is zero so the sign doesn't matter, but
+    # for nonlinear inputs (e.g., pow(V,2) in PhotoDetector) it causes incorrect DC.
+    extra_b_stamp_code = Expr(:block)
+    for desc in to_julia.extra_stamps_b
+        sn = desc.state_node
+        inp_expr = desc.expr
+        bu_var = gensym(:bu)
+        bu_val_var = gensym(:bu_val)
+
+        b_stamp = quote
+            $bu_var = $inp_expr
+            if $bu_var isa ForwardDiff.Dual
+                $bu_val_var = ForwardDiff.value($bu_var)
+                # Stamp negated Jacobian into G and compute Newton companion b value
+                $([quote
+                    _dbu = ForwardDiff.partials($bu_var, $k)
+                    if $(all_node_params[k]) != 0
+                        CedarSim.MNA.stamp_G!(ctx, $sn, $(all_node_params[k]), -_dbu)
+                    end
+                    $bu_val_var -= _dbu * $(Symbol("V_", k))
+                end for k in 1:n_all_nodes]...)
+                CedarSim.MNA.stamp_b!(ctx, $sn, $bu_val_var)
+            else
+                CedarSim.MNA.stamp_b!(ctx, $sn, $bu_var)
+            end
+        end
+        push!(extra_b_stamp_code.args, b_stamp)
+    end
+
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2932,6 +3122,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # This runs BEFORE dual_creation so detection lambdas capture plain floats
         $float_node_assignment
 
+        # Stamp extra state equations (idt, laplace_nd/zp filter state nodes)
+        # Must run AFTER float_node_assignment (node symbols are Float64)
+        # and BEFORE dual_creation (which overwrites them with JacobianTag duals)
+        $(to_julia.extra_stamps...)
+
         # Run voltage-dependent charge detection (with plain Float64 values)
         # Results are cached in ctx.charge_is_vdep for later use in stamp_code
         $detection_block
@@ -2943,6 +3138,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
         # This overwrites node symbols (p, n, etc.) with JacobianTag duals
         $dual_creation
+
+        # Stamp idt/laplace b values with Jacobian extraction (post-dual)
+        $extra_b_stamp_code
 
         # Evaluate contribution expressions with duals
         $contrib_eval
@@ -3077,7 +3275,7 @@ function make_mna_module(va::VANode; deps::Vector{Symbol}=Symbol[])
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+        using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
         using ..CedarSim.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
@@ -3278,7 +3476,7 @@ function load_mna_va_modules(into::Module, file::String)
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment
-                using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+                using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
                 using ForwardDiff: Dual, value, partials
                 import ForwardDiff
                 export $typename

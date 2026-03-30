@@ -76,11 +76,26 @@ for (name, deps) in TIER2_MODELS
     Core.eval(@__MODULE__, CedarSim.make_mna_module(va; deps))
 end
 
-# Tier 3: Models requiring unimplemented parser features
-# CwLaser:      @(initial_step) event control
-# NoisyEDFA:    @(initial_step) + $rdist_normal()
-# PhotoDetector: laplace_nd() with {array} literals
-# TunableFilter: laplace_nd() with {array} literals
+# Tier 3: Models requiring laplace_nd (now supported)
+const TIER3_LEAF_MODELS = ["PhotoDetector"]
+for name in TIER3_LEAF_MODELS
+    filepath = joinpath(VA_DIR, name * ".va")
+    va = VerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+end
+
+const TIER3_COMPOSITE_MODELS = [
+    ("TunableFilter", [:CartesianMultiplier]),
+]
+for (name, deps) in TIER3_COMPOSITE_MODELS
+    filepath = joinpath(VA_DIR, name * ".va")
+    va = VerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, CedarSim.make_mna_module(va; deps))
+end
+
+# Not yet supported:
+# CwLaser:   @(initial_step) event control
+# NoisyEDFA: @(initial_step) + $rdist_normal()
 
 # Tier 1 exports
 export Polar2Cartesian, Cartesian2Polar, PolToCart, CartToPol
@@ -91,5 +106,7 @@ export NonlinearCapacitor
 # Tier 2 exports
 export Attenuator, Isolator, PhaseShifter
 export Waveguide, Pcw, PhaseModulator, PcwPhaseModulator
+# Tier 3 exports
+export PhotoDetector, TunableFilter
 
 end # module
