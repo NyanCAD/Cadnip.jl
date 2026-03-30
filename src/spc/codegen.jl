@@ -1399,12 +1399,21 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
     # Check if this is a VA module from imported_hdl_modules
     # VA modules can be instantiated like subcircuits: X1 a b vamodule params...
+    # Try both lowercased (SPICE convention) and original case (VA module names are case-sensitive)
     va_module_ref = nothing
     va_hdl_mod = nothing
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
             va_hdl_mod = hdl_mod
+            break
+        end
+        # Try original case (VA modules like Polar2Cartesian use CamelCase)
+        model_orig = Symbol(String(instance.model))
+        if isdefined(hdl_mod, model_orig)
+            va_module_ref = GlobalRef(hdl_mod, model_orig)
+            va_hdl_mod = hdl_mod
+            subckt_name = model_orig
             break
         end
     end

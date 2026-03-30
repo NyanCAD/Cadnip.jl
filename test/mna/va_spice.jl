@@ -212,6 +212,108 @@ end
 end
 
 #==============================================================================#
+# Tests: VA Modules with Array Ports in SPICE/Spectre Netlists
+#
+# Photonic VA models use array ports like [0:1] in, out which expand to
+# individual pins (in_0, in_1, out_0, out_1). These tests verify that
+# the imported_hdl_modules mechanism handles expanded port names correctly.
+#==============================================================================#
+
+using PhotonicModels
+
+@testset "VA Array Ports in Netlists" begin
+
+    # Polar2Cartesian has 4 expanded ports: pol_0, pol_1, cart_0, cart_1
+    # OptE(cart[0]) <+ OptE(pol[0]) * cos(OptE(pol[1]))
+    # OptE(cart[1]) <+ OptE(pol[0]) * sin(OptE(pol[1]))
+    # OptE is a potential (voltage-like), so these are voltage contributions.
+
+    @testset "Array port VA model in Spectre netlist" begin
+        spectre = """
+        // Drive pol_0 = 1.0 (amplitude), pol_1 = 0.0 (phase)
+        // Expected: cart_0 = cos(0)*1 = 1.0, cart_1 = sin(0)*1 = 0.0
+        v_amp (pol_0 0) vsource dc=1.0
+        v_phase (pol_1 0) vsource dc=0.0
+        r_cart0 (cart_0 0) resistor r=1
+        r_cart1 (cart_1 0) resistor r=1
+        p2c (pol_0 pol_1 cart_0 cart_1) Polar2Cartesian
+        """
+
+        ctx, sol = solve_mna_spectre_code(spectre;
+            imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
+
+        @test isapprox(voltage(sol, :pol_0), 1.0; atol=0.01)
+        @test isapprox(voltage(sol, :pol_1), 0.0; atol=0.01)
+        @test isapprox(voltage(sol, :cart_0), 1.0; atol=0.01)
+        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+    end
+
+    @testset "Array port VA model in SPICE netlist" begin
+        spice = """
+        * Polar to Cartesian test in SPICE
+        V_amp pol_0 0 DC 1.0
+        V_phase pol_1 0 DC 0.0
+        R_cart0 cart_0 0 1
+        R_cart1 cart_1 0 1
+        X1 pol_0 pol_1 cart_0 cart_1 Polar2Cartesian
+        """
+
+        ctx, sol = solve_mna_spice_code(spice;
+            imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
+
+        @test isapprox(voltage(sol, :pol_0), 1.0; atol=0.01)
+        @test isapprox(voltage(sol, :pol_1), 0.0; atol=0.01)
+        @test isapprox(voltage(sol, :cart_0), 1.0; atol=0.01)
+        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+    end
+
+    @testset "Array port VA model with nonzero phase" begin
+        spectre = """
+        // Drive amplitude=2.0, phase=pi/4 (45 degrees)
+        // Expected: cart_0 = 2*cos(pi/4) ≈ 1.4142, cart_1 = 2*sin(pi/4) ≈ 1.4142
+        v_amp (pol_0 0) vsource dc=2.0
+        v_phase (pol_1 0) vsource dc=0.7853981633974483
+        r_cart0 (cart_0 0) resistor r=1
+        r_cart1 (cart_1 0) resistor r=1
+        p2c (pol_0 pol_1 cart_0 cart_1) Polar2Cartesian
+        """
+
+        ctx, sol = solve_mna_spectre_code(spectre;
+            imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
+
+        expected = 2.0 * cos(π/4)  # ≈ 1.4142
+        @test isapprox(voltage(sol, :cart_0), expected; atol=0.01)
+        @test isapprox(voltage(sol, :cart_1), expected; atol=0.01)
+    end
+
+    @testset "Mixed electrical and photonic VA devices" begin
+        spectre = """
+        // Electrical: voltage divider
+        v1 (vcc 0) vsource dc=10
+        r1 (vcc mid) resistor r=1k
+        r2 (mid 0) resistor r=1k
+
+        // Photonic: polar to cartesian with voltage-driven amplitude
+        // mid ≈ 5V drives amplitude, phase = 0
+        v_phase (phase 0) vsource dc=0.0
+        r_cart0 (cart_0 0) resistor r=1
+        r_cart1 (cart_1 0) resistor r=1
+        p2c (mid phase cart_0 cart_1) Polar2Cartesian
+        """
+
+        ctx, sol = solve_mna_spectre_code(spectre;
+            imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
+
+        # Electrical divider
+        @test isapprox(voltage(sol, :mid), 5.0; atol=0.01)
+        # Photonic output: amplitude=5V, phase=0 -> cart_0=5, cart_1=0
+        @test isapprox(voltage(sol, :cart_0), 5.0; atol=0.01)
+        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+    end
+
+end
+
+#==============================================================================#
 # Tests: Direct VA stamping (va_str without netlist parsing)
 #
 # These test the foundation that the netlist integration builds on.
