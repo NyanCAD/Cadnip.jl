@@ -55,6 +55,9 @@ include("devices.jl")
 # DDE delay support (absdelay)
 include("delay.jl")
 
+# Laplace transfer function support (laplace_nd, laplace_zp)
+include("laplace.jl")
+
 # VA contribution function support (Phase 5)
 include("contrib.jl")
 

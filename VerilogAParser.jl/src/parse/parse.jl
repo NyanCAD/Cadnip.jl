@@ -336,8 +336,14 @@ function parse_primary(ps, isconst::Bool)
         return EXPR(Parens(lparen, e, rparen))
     end
     if kind(nt(ps)) == LBRACE
-        # constant_concatenation, constant_multiple_concatenation
-        error("TODO: constant_concatenation, constant_multiple_concatenation not supported.")
+        # Array literal: {expr, expr, ...} used in laplace filter functions
+        lbrace = take(ps, LBRACE)
+        items = EXPRList{ListItem{EXPR}}()
+        if kind(nt(ps)) != RBRACE
+            parse_comma_list!(isconst ? parse_constant_mintypmax_expression : parse_analog_expression, ps, items)
+        end
+        rbrace = accept(ps, RBRACE)
+        return EXPR(ArrayLiteral(lbrace, items, rbrace))
     end
     if kind(nt(ps)) in (BASE_SPEC, HEX_BASE_SPEC)
         lit = nothing

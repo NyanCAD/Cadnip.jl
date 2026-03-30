@@ -190,6 +190,8 @@ end
         SLEW, # slew
         LAST_CROSSING, # last_crossing
         LIMEXP, # limexp
+        LAPLACE_ND, # laplace_nd
+        LAPLACE_ZP, # laplace_zp
     end_filter_functions,
 
     begin_small_signal_functions,

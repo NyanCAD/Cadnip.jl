@@ -447,6 +447,14 @@ struct Parens
 end
 allchildren(p::Parens) = (p.lparen, p.inner, p.rparen)
 
+# Array literal: {expr, expr, ...} used in laplace_nd/zp filter functions
+struct ArrayLiteral
+    lbrace::EXPR{Notation}
+    items::EXPRList{ListItem{EXPR}}
+    rbrace::EXPRErr{Notation}
+end
+allchildren(al::ArrayLiteral) = (al.lbrace, al.items..., al.rbrace)
+
 struct BranchIdentifier
     id::EXPR{Identifier}
     rang::Maybe{EXPR}

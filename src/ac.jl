@@ -116,7 +116,7 @@ function ac!(circuit::MNA.MNACircuit; gmin=1e-12)
     circuit.builder(circuit.params, circuit.spec, 0.0; x=dc_x, ctx=ctx)
 
     # Assemble matrices
-    G = Matrix(MNA.assemble_G(ctx; gmin=gmin))
+    G = Matrix(MNA.assemble_G(ctx; gshunt=gmin))
     C = Matrix(MNA.assemble_C(ctx))
     b_ac = MNA.get_rhs_ac(ctx)
 
