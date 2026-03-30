@@ -287,10 +287,49 @@ end
         @test isapprox(voltage(sol, :ele_out), 1.0; atol=0.01)
     end
 
-    @testset "Tier 3: TunableFilter compilation" begin
-        # Just verify TunableFilter compiles and can be instantiated
-        # Full simulation requires time-dependent $abstime sources
-        @test isdefined(PhotonicModels, :TunableFilter)
+    @testset "TunableFilter: DC passthrough (wavelength=1550)" begin
+        # At wavelength=1550nm, center_freq = F_REF, so oscillators are
+        # cos(0)=1, sin(0)=0 → identity multiplication. The laplace_nd
+        # filters have DC gain ≈ 1.0, so signal passes through unchanged.
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            inp = make_optical_port!(ctx, :inp)
+            outp = make_optical_port!(ctx, :outp)
+            stamp!(VoltageSource(1.0; name=:Vopt), ctx, inp[1], 0, t, spec.mode)
+            stamp!(TunableFilter(wavelength=1550.0), ctx, inp..., outp...;
+                   _mna_x_=x, _mna_t_=t, _mna_spec_=spec, _mna_instance_=Symbol(""))
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(circuit))
+        # Forward path: in[0]=1.0 → CartMul1(×1) → laplace(DC≈1) → CartMul2(×1) → out[0]
+        @test isapprox(voltage(sol, :outp_0), 1.0; atol=0.1)
+    end
+
+    @testset "TunableFilter: transient with \$abstime" begin
+        using OrdinaryDiffEq
+
+        # Default wavelength=1551nm gives center_freq - F_REF ≈ 125 GHz.
+        # Drive a constant optical input and run a short transient to verify
+        # the $abstime code path works (oscillators vary with time).
+        function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing; ctx = MNAContext()
+            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            inp = make_optical_port!(ctx, :inp)
+            outp = make_optical_port!(ctx, :outp)
+            stamp!(VoltageSource(1.0; name=:Vopt), ctx, inp[1], 0, t, spec.mode)
+            stamp!(TunableFilter(), ctx, inp..., outp...;
+                   _mna_x_=x, _mna_t_=t, _mna_spec_=spec, _mna_instance_=Symbol(""))
+            return ctx
+        end
+
+        circ = MNACircuit(circuit)
+        # Run for a few oscillation periods (~8ps each)
+        sol = tran!(circ, (0.0, 50e-12))
+        # Verify simulation completed and produced finite values
+        @test sol.retcode == :Success || sol.retcode == SciMLBase.ReturnCode.Success
+        @test all(isfinite, sol.u[end])
     end
 
 end # Photonic Integration

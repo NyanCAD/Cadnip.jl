@@ -1779,6 +1779,8 @@ function (to_julia::MNAScope)(ip::VANode{SystemIdentifier})
         return :(hasproperty(_mna_spec_, :mfactor) ? _mna_spec_.mfactor : 1.0)
     elseif id == Symbol("\$temperature")
         return :(_mna_spec_.temp + 273.15)
+    elseif id == Symbol("\$abstime")
+        return :(_mna_t_)
     else
         # For other system identifiers, return as function call
         return Expr(:call, id)
