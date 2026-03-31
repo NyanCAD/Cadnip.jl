@@ -2,8 +2,6 @@ module Cadnip
 
 using DiffEqBase
 using DelayDiffEq
-using DynamicScope
-using VectorPrisms
 using StaticArrays
 
 # MNA Phase 1: Core MNA engine

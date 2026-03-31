@@ -18,8 +18,11 @@ VT100 = "7774df62-37c0-5c21-b34d-f6d7f98f54bc"
 NyanLexers = {path = "../NyanLexers.jl"}
 
 [compat]
-AbstractTrees = "v0.4.1"
-julia = "1"
+AbstractTrees = "≥ 0.4.1"
+NyanLexers = "≥ 0.3"
+SnoopPrecompile = "≥ 1.0"
+VT100 = "≥ 0.3.4"
+julia = "1.9"
 
 [extras]
 # Phase 0: Disabled CedarEDA-specific test deps
