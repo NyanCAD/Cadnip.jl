@@ -451,7 +451,7 @@ sol.u                        # State vector(s)
 **Files to modify:**
 - `src/mna/solve.jl`: Add `ac()` for MNACircuit
 - `src/sweeps.jl`: Create non-mutating aliases
-- `src/CedarSim.jl`: Export new names
+- `src/Cadnip.jl`: Export new names
 
 #### **Phase 2: Test Migration**
 
@@ -506,7 +506,7 @@ Convert tests to new API one file at a time:
 
 ## Appendix A: Complete API Inventory
 
-### Exported from `CedarSim`
+### Exported from `Cadnip`
 
 **Circuit Definition:**
 - `sp"""..."""` - SPICE string macro
@@ -536,7 +536,7 @@ Convert tests to new API one file at a time:
 - `tran!()` - Transient analysis
 - `alter()` - Modify parameters
 
-### Exported from `CedarSim.MNA`
+### Exported from `Cadnip.MNA`
 
 **Context:**
 - `MNAContext` - Circuit builder context
@@ -605,8 +605,8 @@ Convert tests to new API one file at a time:
 
 All benchmarks use the pattern:
 ```julia
-va = VerilogAParser.parsefile(va_path)
-Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+va = NyanVerilogAParser.parsefile(va_path)
+Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
 circuit_code = parse_spice_to_mna(spice_code;
     circuit_name=:circuit_name,

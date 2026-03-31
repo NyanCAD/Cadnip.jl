@@ -1,7 +1,7 @@
-using VerilogAParser
+using NyanVerilogAParser
 using AbstractTrees
 using AbstractTrees: parent, nodevalue
-using VerilogAParser.VerilogACSTParser:
+using NyanVerilogAParser.VerilogACSTParser:
     ContributionStatement, AnalogSeqBlock, AnalogBlock,
     InOutDeclaration, NetDeclaration, ParameterDeclaration, AliasParameterDeclaration,
     VerilogModule, Literal, BinaryExpression, BPFC,
@@ -17,15 +17,15 @@ using VerilogAParser.VerilogACSTParser:
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
     IdentifierPart, Attributes,
     NatureDeclaration, DisciplineDeclaration, NatureBinding, NatureItem, RangeSpec
-using VerilogAParser.VerilogATokenize:
+using NyanVerilogAParser.VerilogATokenize:
     Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, STRING, is_scale_factor
 using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
 
-const VAT = VerilogAParser.VerilogATokenize
+const VAT = NyanVerilogAParser.VerilogATokenize
 
-const VANode = VerilogAParser.VerilogACSTParser.Node
+const VANode = NyanVerilogAParser.VerilogACSTParser.Node
 
 function eisa(e::VANode{S}, T::Type) where {S}
     S <: T
@@ -249,7 +249,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
                     end
                     # Use simplest possible field - just type annotation, no default
                     # @kwdef will use the type's default constructor
-                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{$pT}))
+                    field_expr = Expr(:(::), paramsym, :(Cadnip.DefaultOr{$pT}))
                     push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                 end
@@ -418,7 +418,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         end)
 
         push!(instance_stamp_calls.args, quote
-            CedarSim.MNA.stamp!($child_mod(), ctx, $(port_node_params...);
+            Cadnip.MNA.stamp!($child_mod(), ctx, $(port_node_params...);
                 _mna_t_, _mna_mode_, _mna_x_, _mna_spec_,
                 _mna_instance_ = $inst_name_expr,
                 _mna_h_, _mna_h_p_)
@@ -447,7 +447,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     struct_body = Expr(:block)
     for paramsym in real_params
         pT = get(param_types, paramsym, Float64)
-        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{$pT})))
+        push!(struct_body.args, Expr(:(::), paramsym, :(Cadnip.DefaultOr{$pT})))
     end
     struct_def = Expr(:struct, false,
         Expr(:<:, symname, :(VerilogAEnvironment.VAModel)),
@@ -468,7 +468,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             pT = get(param_types, paramsym, Float64)
             fallback_default = pT === String ? "" : 0.0
             default_val = get(param_defaults, paramsym, fallback_default)
-            push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault($default_val))))
+            push!(kw_params.args, Expr(:kw, paramsym, :(Cadnip.mkdefault($default_val))))
         end
 
         # Add alias parameters (they default to nothing, meaning "use target's value")
@@ -483,7 +483,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
             if isempty(targeting_aliases)
                 # No aliases, just use the parameter directly
                 push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
-                    :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                    :(Cadnip.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
                     paramsym))
             else
                 # Has aliases - use alias value if provided, otherwise use parameter
@@ -493,7 +493,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
                     alias_expr = :($alias_sym !== nothing ? $alias_sym : $alias_expr)
                 end
                 push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
-                    :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                    :(Cadnip.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
                     alias_expr))
             end
         end
@@ -707,13 +707,13 @@ function _emit_laplace_stamps(to_julia::MNAScope, input_expr, order::Int, dss_ca
     # Stamp state equations: E·dx/dt = A·x + B·u
     # → MNA: C_matrix[si,sj] += E[i,j], G_matrix[si,sj] += -A[i,j]
     for i in 1:order, j in 1:order
-        push!(stamp_expr.args, :(CedarSim.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[j]), -_A[$i,$j])))
-        push!(stamp_expr.args, :(CedarSim.MNA.stamp_C!(ctx, $(state_node_params[i]), $(state_node_params[j]), _E[$i,$j])))
+        push!(stamp_expr.args, :(Cadnip.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[j]), -_A[$i,$j])))
+        push!(stamp_expr.args, :(Cadnip.MNA.stamp_C!(ctx, $(state_node_params[i]), $(state_node_params[j]), _E[$i,$j])))
     end
 
     # GMIN for numerical stability on state nodes
     for i in 1:order
-        push!(stamp_expr.args, :(CedarSim.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[i]), _mna_spec_.gmin)))
+        push!(stamp_expr.args, :(Cadnip.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[i]), _mna_spec_.gmin)))
     end
 
     push!(to_julia.extra_stamps, stamp_expr)
@@ -779,7 +779,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             node1 = id1 == Symbol("0") ? 0 : Symbol("_node_", id1)
             node2 = id2 == Symbol("0") ? 0 : Symbol("_node_", id2)
             delay_jl = to_julia.delay_expr
-            return :(CedarSim.MNA.va_absdelay_V(_mna_h_, _mna_h_p_, $node1, $node2, $delay_jl, $current_val, _mna_t_))
+            return :(Cadnip.MNA.va_absdelay_V(_mna_h_, _mna_h_p_, $node1, $node2, $delay_jl, $current_val, _mna_t_))
         end
         return current_val
     end
@@ -843,9 +843,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         # Same number of stamp calls regardless of mode (DirectStampContext compatible)
         push!(to_julia.extra_stamps, quote
             # DC: G=1 pins node to ic, C=0 no-op. Transient: G=gmin, C=1 enables integration.
-            CedarSim.MNA.stamp_G!(ctx, $state_node_param, $state_node_param,
+            Cadnip.MNA.stamp_G!(ctx, $state_node_param, $state_node_param,
                 _mna_spec_.mode === :dcop ? 1.0 : _mna_spec_.gmin)
-            CedarSim.MNA.stamp_C!(ctx, $state_node_param, $state_node_param,
+            Cadnip.MNA.stamp_C!(ctx, $state_node_param, $state_node_param,
                 _mna_spec_.mode === :dcop ? 0.0 : 1.0)
         end)
 
@@ -873,7 +873,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         order = length(den_ast.items) - 1
 
         return _emit_laplace_stamps(to_julia, input_expr, order,
-            :(CedarSim.MNA.va_laplace_nd_dss($num_expr, $den_expr)))
+            :(Cadnip.MNA.va_laplace_nd_dss($num_expr, $den_expr)))
     elseif fname == :laplace_zp
         # Laplace transfer function: laplace_zp(input, zeros, poles)
         # Zeros/poles as {magnitude, phase, ...} pairs
@@ -888,7 +888,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         order = length(poles_ast.items) ÷ 2
 
         return _emit_laplace_stamps(to_julia, input_expr, order,
-            :(CedarSim.MNA.va_laplace_zp_dss($zeros_expr, $poles_expr, 1.0)))
+            :(Cadnip.MNA.va_laplace_zp_dss($zeros_expr, $poles_expr, 1.0)))
     elseif fname == :ddx
         # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
         # For n-terminal MNA devices, duals are indexed by node_order (port positions)
@@ -923,7 +923,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     elseif fname == Symbol("\$param_given")
         # Check if a parameter was explicitly specified (not using default)
         id = Symbol(stmt.args[1].item)
-        return Expr(:call, :!, Expr(:call, CedarSim.isdefault,
+        return Expr(:call, :!, Expr(:call, Cadnip.isdefault,
             Expr(:., :dev, QuoteNode(id))))
     elseif fname == Symbol("\$simparam")
         # Simulator parameter access - $simparam("name") or $simparam("name", default)
@@ -1142,7 +1142,7 @@ function collect_index_alloc_calls!(allocs::Vector{IndexAllocInfo}, expr)
     end
 
     # Check if this is an assignment with get_*_idx! call
-    # Pattern: _hoist_G_idx_1 = CedarSim.MNA.get_G_idx!(ctx, row, col)
+    # Pattern: _hoist_G_idx_1 = Cadnip.MNA.get_G_idx!(ctx, row, col)
     if expr.head == :(=) && length(expr.args) == 2
         lhs = expr.args[1]
         rhs = expr.args[2]
@@ -1184,7 +1184,7 @@ function collect_alloc_current_calls!(allocs::Vector{AllocInfo}, expr, counter::
     end
 
     # Check if this is a let expression with alloc_current!
-    # Pattern: let I_var = CedarSim.MNA.alloc_current!(ctx, name, instance) ... end
+    # Pattern: let I_var = Cadnip.MNA.alloc_current!(ctx, name, instance) ... end
     if expr.head == :let && length(expr.args) >= 2
         bindings = expr.args[1]
         if bindings isa Expr && bindings.head == :(=) && length(bindings.args) == 2
@@ -1234,7 +1234,7 @@ function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
     if expr.head == :call && length(expr.args) >= 1
         fn = expr.args[1]
         if fn isa Expr && fn.head == :. && length(fn.args) >= 2
-            # Handle CedarSim.MNA.stamp_G!(ctx, i, j, val)
+            # Handle Cadnip.MNA.stamp_G!(ctx, i, j, val)
             mod_chain = fn.args
             if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
                 fn_name = mod_chain[end].value
@@ -1325,10 +1325,10 @@ function replace_let_and_stamps(expr, alloc_replacements::Dict{UInt64, Symbol},
         idx_sym, matrix = stamp_replacements[oid]
         if matrix == :G || matrix == :C
             val_expr = expr.args[5]
-            stamp_fn = matrix == :G ? :(CedarSim.MNA.stamp_G_at_idx!) : :(CedarSim.MNA.stamp_C_at_idx!)
+            stamp_fn = matrix == :G ? :(Cadnip.MNA.stamp_G_at_idx!) : :(Cadnip.MNA.stamp_C_at_idx!)
         else  # :b
             val_expr = expr.args[4]
-            stamp_fn = :(CedarSim.MNA.stamp_b_at_idx!)
+            stamp_fn = :(Cadnip.MNA.stamp_b_at_idx!)
         end
         return :($stamp_fn(ctx, $idx_sym, $val_expr))
     end
@@ -1647,9 +1647,9 @@ function hoist_conditional_stamps(ifex::Expr)
         # If instance_arg is :_, the original call had only one argument (name)
         # and we should generate a single-argument call to avoid creating wrong symbols
         if alloc.instance_arg == :_
-            push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name))))
+            push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name))))
         else
-            push!(hoisted_exprs, :($(alloc.hoisted_sym) = CedarSim.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+            push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
         end
         alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
     end
@@ -1661,11 +1661,11 @@ function hoist_conditional_stamps(ifex::Expr)
     for ia in index_allocs
         # Move the allocation call outside the conditional
         if ia.matrix == :G
-            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_G_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_G_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
         elseif ia.matrix == :C
-            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_C_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_C_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
         elseif ia.matrix == :b
-            push!(hoisted_exprs, :($(ia.assign_var) = CedarSim.MNA.get_b_idx!(ctx, $(ia.row_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_b_idx!(ctx, $(ia.row_expr))))
         end
         # Mark for removal from the conditional body (will be replaced with nothing)
         index_alloc_replacements[objectid(ia.original_expr)] = nothing
@@ -1711,13 +1711,13 @@ function hoist_conditional_stamps(ifex::Expr)
 
             if stamp.matrix == :G
                 idx_sym = Symbol("_hoist_G_idx_", i)
-                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
+                push!(hoisted_exprs, :($idx_sym = Cadnip.MNA.get_G_idx!(ctx, $row_resolved, $col_resolved)))
             elseif stamp.matrix == :C
                 idx_sym = Symbol("_hoist_C_idx_", i)
-                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
+                push!(hoisted_exprs, :($idx_sym = Cadnip.MNA.get_C_idx!(ctx, $row_resolved, $col_resolved)))
             elseif stamp.matrix == :b
                 idx_sym = Symbol("_hoist_b_idx_", i)
-                push!(hoisted_exprs, :($idx_sym = CedarSim.MNA.get_b_idx!(ctx, $row_resolved)))
+                push!(hoisted_exprs, :($idx_sym = Cadnip.MNA.get_b_idx!(ctx, $row_resolved)))
             end
 
             signature_to_idx[sig_key] = idx_sym
@@ -1903,7 +1903,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
             # Skip if nodes are aliased (short circuit optimization)
             if $p_node != $n_node
                 # Allocate branch current (idempotent - returns existing index if already allocated)
-                let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
+                let I_var = Cadnip.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
                     v_contrib_raw = $expr
                     v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
 
@@ -1912,14 +1912,14 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
                     # - KCL at n: current I flows in → G[n, I] = -1
                     # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
                     if $p_node != 0
-                        CedarSim.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
-                        CedarSim.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
+                        Cadnip.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
+                        Cadnip.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
                     end
                     if $n_node != 0
-                        CedarSim.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
-                        CedarSim.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
+                        Cadnip.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
+                        Cadnip.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
                     end
-                    CedarSim.MNA.stamp_b!(ctx, I_var, v_val)
+                    Cadnip.MNA.stamp_b!(ctx, I_var, v_val)
                 end
             end
         end
@@ -1953,10 +1953,10 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         # Stamp Jacobian into G matrix
         push!(jac_stamp_code, quote
             if $p_node != 0 && $k_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, $dI_dVk)
+                Cadnip.MNA.stamp_G!(ctx, $p_node, $k_node, $dI_dVk)
             end
             if $n_node != 0 && $k_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, -$dI_dVk)
+                Cadnip.MNA.stamp_G!(ctx, $n_node, $k_node, -$dI_dVk)
             end
         end)
 
@@ -1974,7 +1974,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
             # Extract value and the resistive Dual (for Jacobian extraction)
             # ContributionTag wraps the JacobianTag Dual - we need to unwrap it
             local I_resist
-            if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+            if I_branch isa ForwardDiff.Dual{Cadnip.MNA.ContributionTag}
                 # Has ddt: ContributionTag outer, JacobianTag inner
                 I_resist = ForwardDiff.value(I_branch)  # Inner Dual{JacobianTag}
                 I_val = ForwardDiff.value(I_resist)
@@ -1997,10 +1997,10 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
             # Stamp RHS using Newton companion model
             let Ieq = $rhs_expr
                 if $p_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $p_node, -Ieq)
+                    Cadnip.MNA.stamp_b!(ctx, $p_node, -Ieq)
                 end
                 if $n_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $n_node, Ieq)
+                    Cadnip.MNA.stamp_b!(ctx, $n_node, Ieq)
                 end
             end
         end
@@ -2546,7 +2546,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Base name is device_type + _I_ + branch_name (compile-time constant)
         alloc_base_name = QuoteNode(Symbol(symname, "_I_", branch_name))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
+            :($I_var = Cadnip.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
         branch_current_vars[branch_name] = I_var
     end
 
@@ -2559,7 +2559,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Base name is device_type + _I_V_ + p_sym + _ + n_sym (compile-time constant)
         alloc_base_name = QuoteNode(Symbol(symname, "_I_V_", p_sym, "_", n_sym))
         push!(branch_current_alloc.args,
-            :($I_var = CedarSim.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
+            :($I_var = Cadnip.MNA.alloc_current!(ctx, $alloc_base_name, _mna_instance_)))
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
@@ -2610,7 +2610,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Evaluate the branch current
             I_branch = $sum_expr
 
-            if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+            if I_branch isa ForwardDiff.Dual{Cadnip.MNA.ContributionTag}
                 # Has ddt: ContributionTag wraps JacobianTag duals
                 I_resist = ForwardDiff.value(I_branch)       # Dual{JacobianTag} for I and ∂I/∂V
                 I_react = ForwardDiff.partials(I_branch, 1)  # Dual{JacobianTag} for q and ∂q/∂V
@@ -2651,10 +2651,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             k_node = all_node_params[k]
             push!(branch_stamp.args, quote
                 if $p_node != 0 && $k_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, $(Symbol("dI_dV", k)))
+                    Cadnip.MNA.stamp_G!(ctx, $p_node, $k_node, $(Symbol("dI_dV", k)))
                 end
                 if $n_node != 0 && $k_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, -$(Symbol("dI_dV", k)))
+                    Cadnip.MNA.stamp_G!(ctx, $n_node, $k_node, -$(Symbol("dI_dV", k)))
                 end
             end)
         end
@@ -2697,32 +2697,32 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Detect voltage-dependence by comparing Q/V ratio across runs
                 # q_val is the charge value, V_branch is the branch voltage
                 _V_branch = $v_branch_expr
-                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_base_name, _mna_instance_, _V_branch, q_val)
+                _is_voltage_dependent = Cadnip.MNA.detect_or_cached!(ctx, $charge_base_name, _mna_instance_, _V_branch, q_val)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
                     # NOTE: Charge state is stored as q_scaled = q * CHARGE_SCALE for conditioning
-                    _q_idx = CedarSim.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
+                    _q_idx = Cadnip.MNA.alloc_charge!(ctx, $charge_base_name, _mna_instance_, $p_node, $n_node)
 
                     # --- Mass matrix (constant entries with CHARGE_SCALE!) ---
                     # KCL coupling: I = dq/dt = (1/CHARGE_SCALE) * d(q_scaled)/dt
                     # The (1/CHARGE_SCALE) factor converts scaled charge derivative to current
                     if $p_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $p_node, _q_idx, 1.0 / CedarSim.MNA.CHARGE_SCALE)
+                        Cadnip.MNA.stamp_C!(ctx, $p_node, _q_idx, 1.0 / Cadnip.MNA.CHARGE_SCALE)
                     end
                     if $n_node != 0
-                        CedarSim.MNA.stamp_C!(ctx, $n_node, _q_idx, -1.0 / CedarSim.MNA.CHARGE_SCALE)
+                        Cadnip.MNA.stamp_C!(ctx, $n_node, _q_idx, -1.0 / Cadnip.MNA.CHARGE_SCALE)
                     end
 
                     # --- Constraint Jacobian (in G matrix, scaled) ---
                     # Scaled constraint: F_scaled = q_scaled - CHARGE_SCALE*Q(V) = 0
                     # ∂F_scaled/∂q_scaled = 1 (keeps diagonal well-conditioned)
-                    CedarSim.MNA.stamp_G!(ctx, _q_idx, _q_idx, 1.0)
+                    Cadnip.MNA.stamp_G!(ctx, _q_idx, _q_idx, 1.0)
 
                     # ∂F_scaled/∂V_k = -CHARGE_SCALE * ∂Q/∂V_k for each node k
                     $([quote
                         if $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -CedarSim.MNA.CHARGE_SCALE * $(Symbol("dq_dV", k)))
+                            Cadnip.MNA.stamp_G!(ctx, _q_idx, $(all_node_params[k]), -Cadnip.MNA.CHARGE_SCALE * $(Symbol("dq_dV", k)))
                         end
                     end for k in 1:n_all_nodes]...)
 
@@ -2733,15 +2733,15 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     $([quote
                         _b_constraint -= $(Symbol("dq_dV", k)) * $(Symbol("V_", k))  # - dQ/dV_k * V_k
                     end for k in 1:n_all_nodes]...)
-                    CedarSim.MNA.stamp_b!(ctx, _q_idx, CedarSim.MNA.CHARGE_SCALE * _b_constraint)
+                    Cadnip.MNA.stamp_b!(ctx, _q_idx, Cadnip.MNA.CHARGE_SCALE * _b_constraint)
                 else
                     # Linear capacitor: use standard C matrix stamping
                     $([quote
                         if $p_node != 0 && $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_C!(ctx, $p_node, $(all_node_params[k]), $(Symbol("dq_dV", k)))
+                            Cadnip.MNA.stamp_C!(ctx, $p_node, $(all_node_params[k]), $(Symbol("dq_dV", k)))
                         end
                         if $n_node != 0 && $(all_node_params[k]) != 0
-                            CedarSim.MNA.stamp_C!(ctx, $n_node, $(all_node_params[k]), -$(Symbol("dq_dV", k)))
+                            Cadnip.MNA.stamp_C!(ctx, $n_node, $(all_node_params[k]), -$(Symbol("dq_dV", k)))
                         end
                     end for k in 1:n_all_nodes]...)
                 end
@@ -2765,10 +2765,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(branch_stamp.args, quote
             let Ieq = $ieq_expr
                 if $p_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $p_node, -Ieq)
+                    Cadnip.MNA.stamp_b!(ctx, $p_node, -Ieq)
                 end
                 if $n_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $n_node, Ieq)
+                    Cadnip.MNA.stamp_b!(ctx, $n_node, Ieq)
                 end
             end
         end)
@@ -2805,17 +2805,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     :($int_param = if !(iszero($condition))
                         $ext_param  # Alias to external node
                     else
-                        CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)
+                        Cadnip.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)
                     end))
             else
                 # External node not found in ports, fall back to regular allocation
                 push!(internal_node_alloc.args,
-                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
+                    :($int_param = Cadnip.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
             end
         else
             # Regular allocation (no short circuit detected)
             push!(internal_node_alloc.args,
-                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
+                :($int_param = Cadnip.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
         end
     end
 
@@ -2827,7 +2827,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     for int_param in internal_node_params
         push!(gmin_stamp.args, quote
             if $int_param != 0
-                CedarSim.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
+                Cadnip.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
             end
         end)
     end
@@ -2873,7 +2873,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Create JacobianTag dual with identity partials for ddx() support
         partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
         push!(dual_creation.args,
-            :($node_sym = Dual{CedarSim.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
+            :($node_sym = Dual{Cadnip.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
     end
 
     # Generate branch current extraction for named branches
@@ -2885,7 +2885,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         I_sym = Symbol("_I_branch_", branch_name)
         push!(branch_current_extraction.args,
             :(begin
-                _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
+                _i_idx = Cadnip.MNA.resolve_index(ctx, $I_var)
                 $I_sym = _mna_x_[_i_idx]
             end))
     end
@@ -2932,18 +2932,18 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
             # Stamp KCL: current I flows from p to n
             if $p_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
+                Cadnip.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
             end
             if $n_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
+                Cadnip.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
             end
 
             # Voltage constraint: V_p - V_n = V_contrib
-            CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
-            CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
+            Cadnip.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+            Cadnip.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
 
             # Handle reactive (ddt) contributions
-            if V_contrib isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+            if V_contrib isa ForwardDiff.Dual{Cadnip.MNA.ContributionTag}
                 # Contains ddt() terms
                 V_resist = ForwardDiff.value(V_contrib)
                 V_react = ForwardDiff.partials(V_contrib, 1)
@@ -2954,17 +2954,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 V_react_val = V_react isa ForwardDiff.Dual ? ForwardDiff.value(V_react) : Float64(V_react)
 
                 # Stamp RHS with resistive voltage
-                CedarSim.MNA.stamp_b!(ctx, $I_var, V_resist_val)
+                Cadnip.MNA.stamp_b!(ctx, $I_var, V_resist_val)
 
                 # Stamp C matrix for reactive part: V = L*dI/dt
                 # Voltage equation: V_p - V_n - L*dI/dt = 0
                 # This stamps -L into C[I_var, I_var]
                 # Always stamp - we're inside ContributionTag branch so device has ddt()
-                CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
+                Cadnip.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
             else
                 # Pure resistive voltage
                 V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
-                CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
+                Cadnip.MNA.stamp_b!(ctx, $I_var, V_val)
             end
         end
 
@@ -3010,29 +3010,29 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
                 # Stamp KCL: current I flows from p to n
                 if $p_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
+                    Cadnip.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
                 end
                 if $n_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
+                    Cadnip.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
                 end
 
                 # Voltage constraint with Jacobian
                 if $p_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+                    Cadnip.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
                 end
                 if $n_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
+                    Cadnip.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
                 end
                 $([quote
                     if $(all_node_params[k]) != 0
-                        CedarSim.MNA.stamp_G!(ctx, $I_var, $(all_node_params[k]), -$(Symbol("dV_dV", k)))
+                        Cadnip.MNA.stamp_G!(ctx, $I_var, $(all_node_params[k]), -$(Symbol("dV_dV", k)))
                     end
                 end for k in 1:n_all_nodes]...)
                 _b_voltage = V_val
                 $([quote
                     _b_voltage -= $(Symbol("dV_dV", k)) * $(Symbol("V_", k))
                 end for k in 1:n_all_nodes]...)
-                CedarSim.MNA.stamp_b!(ctx, $I_var, _b_voltage)
+                Cadnip.MNA.stamp_b!(ctx, $I_var, _b_voltage)
             end
         end
 
@@ -3068,13 +3068,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 $([quote
                     _dbu = ForwardDiff.partials($bu_var, $k)
                     if $(all_node_params[k]) != 0
-                        CedarSim.MNA.stamp_G!(ctx, $sn, $(all_node_params[k]), -_dbu)
+                        Cadnip.MNA.stamp_G!(ctx, $sn, $(all_node_params[k]), -_dbu)
                     end
                     $bu_val_var -= _dbu * $(Symbol("V_", k))
                 end for k in 1:n_all_nodes]...)
-                CedarSim.MNA.stamp_b!(ctx, $sn, $bu_val_var)
+                Cadnip.MNA.stamp_b!(ctx, $sn, $bu_val_var)
             else
-                CedarSim.MNA.stamp_b!(ctx, $sn, $bu_var)
+                Cadnip.MNA.stamp_b!(ctx, $sn, $bu_var)
             end
         end
         push!(extra_b_stamp_code.args, b_stamp)
@@ -3092,7 +3092,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Build the function body
     stamp_body = quote
         # Convert empty vectors to ZERO_VECTOR for safe indexing
-        _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
+        _mna_x_ = isempty(_mna_x_) ? Cadnip.MNA.ZERO_VECTOR : _mna_x_
         $(params_to_locals...)
         $(function_defs...)
 
@@ -3132,7 +3132,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         $detection_block
 
         # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
-        CedarSim.MNA.reset_detection_counter!(ctx)
+        Cadnip.MNA.reset_detection_counter!(ctx)
 
         # Create duals with partials for each node voltage (terminals + internal)
         # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
@@ -3158,10 +3158,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end
 
     # Build function signature
-    func_sig = :(function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
+    func_sig = :(function Cadnip.MNA.stamp!(dev::$symname, ctx::Cadnip.MNA.AnyMNAContext,
                                  $([:($np::Int) for np in node_params]...);
-                                 _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
-                                 _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                                 _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Cadnip.MNA.ZERO_VECTOR,
+                                 _mna_spec_::Cadnip.MNA.MNASpec=Cadnip.MNA.MNASpec(),
                                  _mna_instance_::Symbol=Symbol(""),
                                  _mna_h_=nothing, _mna_h_p_=nothing)
         $stamp_body
@@ -3260,7 +3260,7 @@ function make_mna_module(va::VANode; deps::Vector{Symbol}=Symbol[])
     all_device_exprs = Any[]
     all_exports = Any[typename]
     for vamod in all_modules
-        device_expr = CedarSim.make_mna_device(vamod; access_map)
+        device_expr = Cadnip.make_mna_device(vamod; access_map)
         append!(all_device_exprs, device_expr.args)
         # Export child module types too (needed for stamp! dispatch)
         child_name = Symbol(vamod.id)
@@ -3273,10 +3273,10 @@ function make_mna_module(va::VANode; deps::Vector{Symbol}=Symbol[])
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
         using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
         import Base  # For getproperty override in aliasparam
-        import ..CedarSim
-        using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
-        using ..CedarSim.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
+        import ..Cadnip
+        using ..Cadnip.VerilogAEnvironment
+        using ..Cadnip.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
+        using ..Cadnip.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         $(dep_usings...)
@@ -3298,7 +3298,7 @@ Base.normpath(file::VAFile) = VAFile(Base.normpath(file.file))
 export VAFile, @va_str
 
 function parse_and_eval_vafile(mod::Module, file::VAFile)
-    va = VerilogAParser.parsefile(file.file)
+    va = NyanVerilogAParser.parsefile(file.file)
     if va.ps.errored
         cedarthrow(LoadError(file.file, 0, VAParseError(va)))
     else
@@ -3313,7 +3313,7 @@ function Base.include(mod::Module, file::VAFile)
 end
 
 macro va_str(str)
-    va = VerilogAParser.parse(IOBuffer(str))
+    va = NyanVerilogAParser.parse(IOBuffer(str))
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
@@ -3328,7 +3328,7 @@ struct VAParseError
     va
 end
 
-Base.show(io::IO, vap::VAParseError) = VerilogAParser.VerilogACSTParser.visit_errors(vap.va; io)
+Base.show(io::IO, vap::VAParseError) = NyanVerilogAParser.VerilogACSTParser.visit_errors(vap.va; io)
 
 #==============================================================================#
 # VA Device Package Loading for Precompilation
@@ -3365,8 +3365,8 @@ returns the created module for convenience.
 # Example (Device package usage - enables precompilation)
 ```julia
 module BSIM4
-    using CedarSim
-    const bsim4_module = CedarSim.load_mna_va_module(@__MODULE__,
+    using Cadnip
+    const bsim4_module = Cadnip.load_mna_va_module(@__MODULE__,
         joinpath(@__DIR__, "bsim4.va"))
     using .bsim4_module: bsim4
     export bsim4
@@ -3375,7 +3375,7 @@ end
 
 # Example (manual eval)
 ```julia
-expr = CedarSim.load_mna_va_module("bsim4.va")
+expr = Cadnip.load_mna_va_module("bsim4.va")
 eval(expr)
 using .bsim4_module: bsim4
 ```
@@ -3392,7 +3392,7 @@ function load_mna_va_module end
 # Version that evals into target module (preferred for precompilation)
 function load_mna_va_module(into::Module, file::String)
     # Parse the VA file
-    va = VerilogAParser.parsefile(file)
+    va = NyanVerilogAParser.parsefile(file)
     if va.ps.errored
         throw(LoadError(file, 0, VAParseError(va)))
     end
@@ -3423,7 +3423,7 @@ end
 # Version that returns expression for manual eval
 function load_mna_va_module(file::String)
     # Parse the VA file
-    va = VerilogAParser.parsefile(file)
+    va = NyanVerilogAParser.parsefile(file)
     if va.ps.errored
         throw(LoadError(file, 0, VAParseError(va)))
     end
@@ -3443,8 +3443,8 @@ returning a NamedTuple mapping module names to the created Julia modules.
 # Example
 ```julia
 module MyDevices
-    using CedarSim
-    const devices = CedarSim.load_mna_va_modules(@__MODULE__,
+    using Cadnip
+    const devices = Cadnip.load_mna_va_modules(@__MODULE__,
         joinpath(@__DIR__, "devices.va"))
     # devices.resistor_module, devices.capacitor_module, etc.
 end
@@ -3452,7 +3452,7 @@ end
 """
 function load_mna_va_modules(into::Module, file::String)
     # Parse the VA file
-    va = VerilogAParser.parsefile(file)
+    va = NyanVerilogAParser.parsefile(file)
     if va.ps.errored
         throw(LoadError(file, 0, VAParseError(va)))
     end
@@ -3474,9 +3474,9 @@ function load_mna_va_modules(into::Module, file::String)
                 using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
                 using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
                 import Base
-                import ..CedarSim
-                using ..CedarSim.VerilogAEnvironment
-                using ..CedarSim.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
+                import ..Cadnip
+                using ..Cadnip.VerilogAEnvironment
+                using ..Cadnip.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
                 using ForwardDiff: Dual, value, partials
                 import ForwardDiff
                 export $typename

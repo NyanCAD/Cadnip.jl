@@ -17,7 +17,7 @@
 using StaticArrays: SVector
 
 #==============================================================================#
-# PWL Interpolation (from CedarSim.spectre_env.jl)
+# PWL Interpolation (from Cadnip.spectre_env.jl)
 # Included here because MNA is loaded before spectre_env.jl
 #==============================================================================#
 

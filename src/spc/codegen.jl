@@ -213,7 +213,7 @@ function cg_expr!(state::CodegenState, stmt::Union{SNode{SC.FunctionCall}, SNode
         elseif length(stmt.args) == 2
             :($(ckt_nodes[1]).V - $(ckt_nodes[2]).V)
         end
-    elseif isdefined(CedarSim.SpectreEnvironment, Symbol(id))
+    elseif isdefined(Cadnip.SpectreEnvironment, Symbol(id))
         args = map(x->cg_expr!(state, x.item), stmt.args)
         Expr(:call, GlobalRef(SpectreEnvironment, Symbol(id)), args...)
     else
@@ -286,7 +286,7 @@ function cg_expr_with_parent_params!(state::CodegenState, node, exposed_params::
     elseif node isa SNode{SP.FunctionCall} || node isa SNode{SC.FunctionCall}
         fname = LSymbol(node.id)
         id = lowercase(String(node.id))
-        if isdefined(CedarSim.SpectreEnvironment, Symbol(id))
+        if isdefined(Cadnip.SpectreEnvironment, Symbol(id))
             args = map(x -> _cg_with_parent(x.item), node.args)
             return Expr(:call, GlobalRef(SpectreEnvironment, Symbol(id)), args...)
         else
@@ -449,13 +449,13 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
             continue
         end
         val = cg_expr!(state, p.val)
-        push!(params, Expr(:kw, name, Expr(:call, CedarSim.mknondefault, val)))
+        push!(params, Expr(:kw, name, Expr(:call, Cadnip.mknondefault, val)))
     end
 
     # some devices have a version parameter
     # while others have distinct models
     if version !== nothing && modelref.name in (:bsim4,)
-        push!(params, Expr(:kw, :version, Expr(:call, CedarSim.mknondefault, version)))
+        push!(params, Expr(:kw, :version, Expr(:call, Cadnip.mknondefault, version)))
     end
 
     # Query the model registry for type parameters (polarity, etc.)
@@ -463,9 +463,9 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
     device_type = mosfet_type !== nothing ? mosfet_type : typ
     level_int = level === nothing ? nothing : Int(level)
     version_str = version === nothing ? nothing : string(Int(version))
-    type_params = CedarSim.getparams(device_type, level_int, version_str)
+    type_params = Cadnip.getparams(device_type, level_int, version_str)
     for (param_name, param_val) in pairs(type_params)
-        push!(params, Expr(:kw, param_name, Expr(:call, CedarSim.mknondefault, param_val)))
+        push!(params, Expr(:kw, param_name, Expr(:call, Cadnip.mknondefault, param_val)))
     end
 
     m = match(binning_rx, LString(model.name))
@@ -512,20 +512,20 @@ function codegen!(state::CodegenState)
         block = Expr(:block)
         scale_expr = :(old_options.scale)
         if haskey(state.sema.options, :scale)
-            scale_expr = :($(CedarSim.isdefault)(old_options.scale) ? $(cg_expr!(state, state.sema.options[:scale][end][2].val)) : $scale_expr)
+            scale_expr = :($(Cadnip.isdefault)(old_options.scale) ? $(cg_expr!(state, state.sema.options[:scale][end][2].val)) : $scale_expr)
         end
         gmin_expr  = :(old_options.gmin)
         if haskey(state.sema.options, :gmin)
-            gmin_expr = :($(CedarSim.isdefault)(old_options.gmin) ? $(cg_expr!(state, state.sema.options[:gmin][end][2].val)) : $gmin_expr)
+            gmin_expr = :($(Cadnip.isdefault)(old_options.gmin) ? $(cg_expr!(state, state.sema.options[:gmin][end][2].val)) : $gmin_expr)
         end
         temp_expr  = :(old_options.temp)
         if haskey(state.sema.options, :temp)
-            temp_expr = :($(CedarSim.isdefault)(old_options.temp) ? $(cg_expr!(state, state.sema.options[:temp][end][2].val)) : $temp_expr)
+            temp_expr = :($(Cadnip.isdefault)(old_options.temp) ? $(cg_expr!(state, state.sema.options[:temp][end][2].val)) : $temp_expr)
         end
         push!(ret.args, quote
-            old_options = $(CedarSim.options)[]
-            new_options = $(CedarSim.SimOptions)(; temp = $temp_expr, gmin = $gmin_expr, scale = $scale_expr)
-            @Base.ScopedValues.with $(CedarSim.options)=>new_options $block
+            old_options = $(Cadnip.options)[]
+            new_options = $(Cadnip.SimOptions)(; temp = $temp_expr, gmin = $gmin_expr, scale = $scale_expr)
+            @Base.ScopedValues.with $(Cadnip.options)=>new_options $block
         end)
     end
     # Codegen nets
@@ -595,7 +595,7 @@ function codegen!(state::CodegenState)
     # Binned model aggregation
     for (name, this_bins) in bins
         name = cg_model_name!(state, name)
-        push!(block.args, :($name = $(CedarSim.BinnedModel)($(GlobalRef(SpectreEnvironment, :var"$scale"))(), ($(this_bins...),))))
+        push!(block.args, :($name = $(Cadnip.BinnedModel)($(GlobalRef(SpectreEnvironment, :var"$scale"))(), ($(this_bins...),))))
     end
     for (name, instances) in state.sema.instances
         if length(instances) == 1 && only(instances)[2].cond == 0
@@ -667,7 +667,7 @@ function is_large_va_model(state::CodegenState, model_sym::Symbol)
         if model_globalref isa GlobalRef
             T = getglobal(model_globalref.mod, model_globalref.name)
             # Handle ParsedModel{InnerT} - extract the inner type
-            if T isa DataType && T <: CedarSim.ParsedModel
+            if T isa DataType && T <: Cadnip.ParsedModel
                 InnerT = T.parameters[1]
                 return fieldcount(InnerT) >= 200
             end
@@ -682,7 +682,7 @@ function is_large_va_model(state::CodegenState, model_sym::Symbol)
                 val = getfield(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT} - extract the inner type
-                if T <: CedarSim.ParsedModel
+                if T <: Cadnip.ParsedModel
                     InnerT = T.parameters[1]
                     return fieldcount(InnerT) >= 200
                 end
@@ -1426,7 +1426,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
 
         explicit_kwargs = Expr[]
-        for child in SpectreNetlistParser.RedTree.children(instance)
+        for child in NyanSpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 name = LSymbol(child.name)
                 # Adjust case to match VA device fieldnames
@@ -1494,7 +1494,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     explicit_kwargs = Expr[]
 
     # Find Parameter children in the AST (SubcktCall exposes params as children)
-    for child in SpectreNetlistParser.RedTree.children(instance)
+    for child in NyanSpectreNetlistParser.RedTree.children(instance)
         if child !== nothing && isa(child, SNode{SP.Parameter})
             name = LSymbol(child.name)
             def = cg_expr!(state, child.val)  # Use caller's state, not callee's
@@ -1561,7 +1561,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         # This is a VA module instance
         # Preserve original parameter name case since VA modules may be case-sensitive
         explicit_kwargs = Expr[]
-        for child in SpectreNetlistParser.RedTree.children(instance)
+        for child in NyanSpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 # Use original case for VA modules (they may be case-sensitive)
                 name = Symbol(String(child.name))
@@ -1634,7 +1634,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     # Build kwargs from explicit parameters passed to the subcircuit call
     # Use the caller's state for cg_expr! since that's where the values are defined
     explicit_kwargs = Expr[]
-    for child in SpectreNetlistParser.RedTree.children(instance)
+    for child in NyanSpectreNetlistParser.RedTree.children(instance)
         if child !== nothing && isa(child, SNode{SP.Parameter})
             name = LSymbol(child.name)
             def = cg_expr!(state, child.val)  # Use caller's state, not callee's
@@ -2130,7 +2130,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
                 val = getfield(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT}
-                if T <: CedarSim.ParsedModel
+                if T <: Cadnip.ParsedModel
                     InnerT = T.parameters[1]
                     case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(InnerT))
                 else
@@ -2518,7 +2518,7 @@ function codegen_toplevel_models!(state::CodegenState)
                 end
                 model_var = cg_model_name!(state, model_name)
                 push!(model_defs, :($model_var = ($(model_params...),)))
-            elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+            elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
                 # VA model from imported HDL module or external package
                 # Get the model type to build case-insensitive parameter lookup
                 T = getglobal(model_ref.mod, model_ref.name)
@@ -2551,7 +2551,7 @@ function codegen_toplevel_models!(state::CodegenState)
                 device_type = mosfet_type !== nothing ? mosfet_type : typ
                 level_int = level === nothing ? nothing : Int(level)
                 version_str = version === nothing ? nothing : string(Int(version))
-                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                type_params = Cadnip.getparams(device_type, level_int, version_str)
                 has_type_from_registry = false
                 for (param_name, param_val) in pairs(type_params)
                     push!(model_params, Expr(:(=), param_name, param_val))
@@ -2563,7 +2563,7 @@ function codegen_toplevel_models!(state::CodegenState)
                     push!(model_params, Expr(:(=), :TYPE, type_val))
                 end
                 model_var = cg_model_name!(state, model_name)
-                # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                # Use Cadnip pattern: pass params as NamedTuple to spicecall
                 # This avoids embedding 200 kwargs in the generated code
                 push!(model_defs, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
             end
@@ -2748,7 +2748,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                     end
                     model_var = cg_model_name!(state, model_name)
                     push!(block.args, :($model_var = ($(model_params...),)))
-                elseif model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+                elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
                     # VA model from imported HDL module or external package
                     # Get the model type to build case-insensitive parameter lookup
                     T = getglobal(model_ref.mod, model_ref.name)
@@ -2786,7 +2786,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                     device_type = mosfet_type !== nothing ? mosfet_type : typ
                     level_int = level === nothing ? nothing : Int(level)
                     version_str = version === nothing ? nothing : string(Int(version))
-                    type_params = CedarSim.getparams(device_type, level_int, version_str)
+                    type_params = Cadnip.getparams(device_type, level_int, version_str)
                     has_type_from_registry = false
                     for (param_name, param_val) in pairs(type_params)
                         push!(model_params, Expr(:(=), param_name, param_val))
@@ -2800,7 +2800,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                         push!(model_params, Expr(:(=), :TYPE, type_val))
                     end
                     model_var = cg_model_name!(state, model_name)
-                    # Use CedarSim pattern: pass params as NamedTuple to spicecall
+                    # Use Cadnip pattern: pass params as NamedTuple to spicecall
                     # This avoids embedding 200 kwargs in the generated code
                     push!(block.args, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
                 end
@@ -2914,7 +2914,7 @@ function extract_subcircuit_ports(sema::SemaResult)
         end
     else
         # SPICE: ports are HierarchialNode children
-        for child in SpectreNetlistParser.RedTree.children(subckt_ast)
+        for child in NyanSpectreNetlistParser.RedTree.children(subckt_ast)
             if child !== nothing && isa(child, SNode{SP.HierarchialNode})
                 port_name = LSymbol(child)
                 push!(ports, port_name)
@@ -3019,7 +3019,7 @@ The generated function has signature:
 
 # Example
 ```julia
-ast = SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
+ast = NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
 code = make_mna_circuit(ast)
 circuit_fn = eval(code)
 ctx = circuit_fn((R1=1000.0,), MNASpec())
@@ -3090,13 +3090,13 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     # These imports are needed when the generated code is eval'd directly in Main
     return quote
         # Import MNA device types needed for stamping
-        using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-        using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
-        using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
-        using CedarSim.MNA: get_current_idx  # For CCVS/CCCS current sensing
-        using CedarSim.MNA: pwl_at_time  # For PWL transient functions
-        using CedarSim: ParamLens, IdentityLens, StaticArrays
-        using CedarSim.SpectreEnvironment
+        using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+        using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
+        using Cadnip.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
+        using Cadnip.MNA: get_current_idx  # For CCVS/CCCS current sensing
+        using Cadnip.MNA: pwl_at_time  # For PWL transient functions
+        using Cadnip: ParamLens, IdentityLens, StaticArrays
+        using Cadnip.SpectreEnvironment
 
         # Top-level model factory functions (accessible by subcircuit builders and main circuit)
         $(model_defs...)
@@ -3158,7 +3158,7 @@ Returns a module expression that contains:
 
 # Example
 ```julia
-ast = SpectreNetlistParser.parsefile("pdk.spice")
+ast = NyanSpectreNetlistParser.parsefile("pdk.spice")
 mod_expr = make_mna_pdk_module(ast; name=:typical)
 eval(mod_expr)  # Defines the module
 using .typical: nfet_mna_builder, pfet_mna_builder
@@ -3187,7 +3187,7 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
             (_, def) = last(defs)  # Use most recent definition
             model_ast = def.val[1]  # The model SNode
             model_ref = def.val[2]  # The GlobalRef
-            if model_ref isa GlobalRef && model_ref.mod !== CedarSim && model_ref.mod !== CedarSim.SpectreEnvironment
+            if model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
                 # VA model from imported HDL module or external package
                 # Build case-insensitive parameter lookup
                 T = Base.getglobal(model_ref.mod, model_ref.name)
@@ -3229,7 +3229,7 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
                 device_type = mosfet_type !== nothing ? mosfet_type : typ
                 level_int = level === nothing ? nothing : Int(level)
                 version_str = version === nothing ? nothing : string(Int(version))
-                type_params = CedarSim.getparams(device_type, level_int, version_str)
+                type_params = Cadnip.getparams(device_type, level_int, version_str)
                 has_type_from_registry = false
                 for (param_name, param_val) in pairs(type_params)
                     push!(model_params, Expr(:(=), param_name, param_val))
@@ -3290,11 +3290,11 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
             :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
             :(import Base),  # Needed for explicit Base.X references in generated code
             # Import MNA context and stamping functions
-            :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
+            :(using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
             # Import device types needed for stamping
-            :(using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
-            :(using CedarSim: ParamLens, IdentityLens, spicecall, ParsedModel),
-            :(using CedarSim.SpectreEnvironment),
+            :(using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
+            :(using Cadnip: ParamLens, IdentityLens, spicecall, ParsedModel),
+            :(using Cadnip.SpectreEnvironment),
             # Model definitions (e.g., psp103n = spicecall(ParsedModel, PSP103VA, params))
             model_bindings...,
             builders...,
@@ -3325,8 +3325,8 @@ When called without `into`, returns a `:toplevel` expression for manual evaluati
 # Example (PDK package usage - enables precompilation)
 ```julia
 module MyPDK
-    using CedarSim
-    const corners = CedarSim.load_mna_modules(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
+    using Cadnip
+    const corners = Cadnip.load_mna_modules(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
     # corners.typical, corners.fast, corners.slow are now available
 end
 ```
@@ -3415,7 +3415,7 @@ function load_mna_modules(into::Module, file::String; names=nothing,
                           preload::Vector{Module}=Module[],
                           imported_hdl_modules::Vector{Module}=Module[])
     # Parse the file
-    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    sa = NyanSpectreNetlistParser.parsefile(file; implicit_title=false)
     if sa.ps.errored
         throw(LoadError(file, 0, SpectreParseError(sa)))
     end
@@ -3440,7 +3440,7 @@ function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector
                           preload::Vector{Module}=Module[],
                           imported_hdl_modules::Vector{Module}=Module[])
     # Parse the file
-    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    sa = NyanSpectreNetlistParser.parsefile(file; implicit_title=false)
     if sa.ps.errored
         throw(LoadError(file, 0, SpectreParseError(sa)))
     end
@@ -3469,8 +3469,8 @@ When called without `into`, returns the module expression for manual evaluation.
 # Example (PDK package usage - enables precompilation)
 ```julia
 module MyPDK
-    using CedarSim
-    const typical = CedarSim.load_mna_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"); section="typical")
+    using Cadnip
+    const typical = Cadnip.load_mna_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"); section="typical")
 end
 ```
 
@@ -3514,7 +3514,7 @@ Returns a vector of Symbol => value pairs for all top-level parameters.
 
 # Example
 ```julia
-ast = SpectreNetlistParser.parse(IOBuffer("* test\\n.param foo=1.0 bar=2.0"))
+ast = NyanSpectreNetlistParser.parse(IOBuffer("* test\\n.param foo=1.0 bar=2.0"))
 params = get_default_parameterization(ast)
 # Returns [(:foo => 1.0), (:bar => 2.0)]
 ```

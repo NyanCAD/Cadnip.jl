@@ -9,8 +9,8 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using Printf
 
 # Import pre-parsed models from VADistillerModels package

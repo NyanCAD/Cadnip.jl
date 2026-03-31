@@ -1,14 +1,14 @@
 module test_sweep
 
 # Include all our testing packages, helper routines, etc...
-using CedarSim
-include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
+using Cadnip
+include(joinpath(Base.pkgdir(Cadnip), "test", "common.jl"))
 
 # MNA imports for sweep tests
-using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restamping!
-using CedarSim.MNA: Resistor, VoltageSource
-using CedarSim.MNA: voltage, current, DCSolution
-using CedarSim: ParamLens
+using Cadnip.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restamping!
+using Cadnip.MNA: Resistor, VoltageSource
+using Cadnip.MNA: voltage, current, DCSolution
+using Cadnip: ParamLens
 
 # Simple two-resistor circuit (MNA builder function):
 #
@@ -314,7 +314,7 @@ end
 
 # Phase 4: MNA-based SPICE codegen tests
 @testset "MNA SPICE codegen: basic resistor circuit" begin
-    using CedarSim.MNA: voltage, current
+    using Cadnip.MNA: voltage, current
 
     spice_code = """
         * Simple voltage divider
@@ -324,21 +324,21 @@ end
     """
 
     # Parse and generate MNA builder
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    circuit_code = CedarSim.make_mna_circuit(ast)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = Cadnip.make_mna_circuit(ast)
 
     # Create a module to evaluate the code
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
     # Build and solve using MNACircuit + dc!
-    spec = CedarSim.MNA.MNASpec()
+    spec = Cadnip.MNA.MNASpec()
     wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
-    sol = CedarSim.dc!(circuit)
+    circuit = Cadnip.MNA.MNACircuit(wrapped, (;), spec)
+    sol = Cadnip.dc!(circuit)
 
     # Verify voltage divider: out = 5 * 1k/(1k+1k) = 2.5V
     @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
@@ -346,7 +346,7 @@ end
 end
 
 @testset "MNA SPICE codegen: RLC circuit" begin
-    using CedarSim.MNA: voltage
+    using Cadnip.MNA: voltage
 
     spice_code = """
         * RLC circuit
@@ -356,19 +356,19 @@ end
         C1 n2 0 1u
     """
 
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    circuit_code = CedarSim.make_mna_circuit(ast)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = Cadnip.make_mna_circuit(ast)
 
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    spec = CedarSim.MNA.MNASpec()
+    spec = Cadnip.MNA.MNASpec()
     wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
-    sol = CedarSim.dc!(circuit)
+    circuit = Cadnip.MNA.MNACircuit(wrapped, (;), spec)
+    sol = Cadnip.dc!(circuit)
 
     # At DC, inductor is short, capacitor is open
     # So n1 = 10V (after R, but L is short)
@@ -381,7 +381,7 @@ end
 end
 
 @testset "MNA SPICE codegen: current source" begin
-    using CedarSim.MNA: voltage
+    using Cadnip.MNA: voltage
 
     spice_code = """
         * Current source into resistor
@@ -389,26 +389,26 @@ end
         R1 out 0 1k
     """
 
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    circuit_code = CedarSim.make_mna_circuit(ast)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = Cadnip.make_mna_circuit(ast)
 
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    spec = CedarSim.MNA.MNASpec()
+    spec = Cadnip.MNA.MNASpec()
     wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
-    sol = CedarSim.dc!(circuit)
+    circuit = Cadnip.MNA.MNACircuit(wrapped, (;), spec)
+    sol = Cadnip.dc!(circuit)
 
     # V = I * R = 1mA * 1kΩ = 1V
     @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
 end
 
 @testset "dc! sweep on SPICE-generated circuit with subcircuit params" begin
-    using CedarSim.MNA: voltage
+    using Cadnip.MNA: voltage
 
     # Subcircuit with parameterized resistors
     spice_code = """
@@ -422,19 +422,19 @@ end
         V1 vin 0 DC 3.0
     """
 
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    circuit_code = CedarSim.make_mna_circuit(ast)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = Cadnip.make_mna_circuit(ast)
 
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    spec = CedarSim.MNA.MNASpec()
+    spec = Cadnip.MNA.MNASpec()
     wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
-    sol = CedarSim.dc!(circuit)
+    circuit = Cadnip.MNA.MNACircuit(wrapped, (;), spec)
+    sol = Cadnip.dc!(circuit)
 
     # With r1val=2k and r2val=1k, vout = 3.0 * 1k/(2k+1k) = 1.0V
     @test isapprox(voltage(sol, :vin), 3.0; atol=deftol)
@@ -463,7 +463,7 @@ end
             )
         ),
     )
-    ranges = CedarSim.find_param_ranges(params)
+    ranges = Cadnip.find_param_ranges(params)
     @test ranges[:a] == (1, 20, 20)
     @test ranges[:b] == (1, 5, 3)
     @test ranges[:c] == (1, 15, 15)

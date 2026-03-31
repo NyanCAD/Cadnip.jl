@@ -7,8 +7,8 @@ include("common.jl")
     # DAECompiler is unable to prove it will not change mid-simulation,
     # and this breaks our static assumptions.  Assert this, so that
     # if things change, we know to update documentation/coding style guides.
-    global my_R = CedarSim.SimpleResistor
-    my_V(v) = CedarSim.VoltageSource(dc=v)
+    global my_R = Cadnip.SimpleResistor
+    my_V(v) = Cadnip.VoltageSource(dc=v)
     function VRcircuit()
         vcc = Named(net, "vcc")()
         gnd = Named(net, "gnd")()
@@ -69,11 +69,11 @@ end
     x1 0 d 0 inner
     """
 
-    ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
-    code = CedarSim.make_spectre_circuit(ast)
+    ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
+    code = Cadnip.make_spectre_circuit(ast)
     circuit = eval(code)
 
-    sim = CedarSim.ParamSim(circuit; x1=(x1=(foo=2.0,),))
+    sim = Cadnip.ParamSim(circuit; x1=(x1=(foo=2.0,),))
     sys, sol = solve_circuit(sim);
     @test isapprox_deftol(sol[sys.i1.I][end], 1.0)
 end

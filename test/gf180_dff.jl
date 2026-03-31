@@ -1,20 +1,20 @@
 module gf180
-using CedarSim
+using Cadnip
 using BSIM4
 using GF180MCUPDK
-using CedarSim.SpectreEnvironment
+using Cadnip.SpectreEnvironment
 using Sundials
 using LinearAlgebra
 using Test
 
-include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
+include(joinpath(Base.pkgdir(Cadnip), "test", "common.jl"))
 const bsim4 = load_VA_model(BSIM4.bsim4_va)
 
-using CedarSim.SpectreNetlistParser: SPICENetlistParser
-repo_dir = dirname(dirname(Base.pathof(CedarSim)))
+using Cadnip.NyanSpectreNetlistParser: SPICENetlistParser
+repo_dir = dirname(dirname(Base.pathof(Cadnip)))
 dffdir = joinpath(repo_dir, "test", "DFF")
 sa1 = SPICENetlistParser.parsefile(joinpath(dffdir, "DFF_cap_all.cir"));
-code = CedarSim.make_spectre_circuit(sa1, [dffdir]);
+code = Cadnip.make_spectre_circuit(sa1, [dffdir]);
 circuit = eval(code)
 
 sys = CircuitIRODESystem(circuit; debug_config=(;store_ir_levels=true, verify_ir_levels=true))
@@ -35,7 +35,7 @@ end
 
 using PlotlyLight, Cobweb
 # Save out an .html page of the solution, for later analysis
-plots_dir = joinpath(Base.pkgdir(CedarSim), "test", "plots")
+plots_dir = joinpath(Base.pkgdir(Cadnip), "test", "plots")
 mkpath(plots_dir)
 Cobweb.save(sol, joinpath(plots_dir, "gf180_dff.html"); title="gf180_dff")
 

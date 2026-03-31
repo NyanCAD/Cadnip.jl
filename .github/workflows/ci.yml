@@ -39,17 +39,17 @@ jobs:
             Pkg.instantiate()
           '
 
-      - name: Run SpectreNetlistParser tests
+      - name: Run NyanSpectreNetlistParser tests
         run: |
-          julia --project=SpectreNetlistParser.jl -e '
+          julia --project=NyanSpectreNetlistParser.jl -e '
             using Pkg
             Pkg.instantiate()
             Pkg.test()
           '
 
-      - name: Run VerilogAParser tests
+      - name: Run NyanVerilogAParser tests
         run: |
-          julia --project=VerilogAParser.jl -e '
+          julia --project=NyanVerilogAParser.jl -e '
             using Pkg
             Pkg.instantiate()
             Pkg.test()
@@ -74,15 +74,15 @@ jobs:
             using Pkg
             Pkg.develop([
               PackageSpec(path="."),
-              PackageSpec(path="SpectreNetlistParser.jl"),
-              PackageSpec(path="VerilogAParser.jl"),
-              PackageSpec(path="Lexers.jl")
+              PackageSpec(path="NyanSpectreNetlistParser.jl"),
+              PackageSpec(path="NyanVerilogAParser.jl"),
+              PackageSpec(path="NyanLexers.jl")
             ])
             Pkg.instantiate()
             Pkg.precompile()
           '
 
-      - name: Run CedarSim core tests
+      - name: Run Cadnip core tests
         run: julia --project=test test/runtests.jl
 
   # Integration tests - heavy VA model parsing, run separately to avoid OOM
@@ -118,13 +118,13 @@ jobs:
             using Pkg
             Pkg.develop([
               PackageSpec(path="."),
-              PackageSpec(path="SpectreNetlistParser.jl"),
-              PackageSpec(path="VerilogAParser.jl"),
-              PackageSpec(path="Lexers.jl")
+              PackageSpec(path="NyanSpectreNetlistParser.jl"),
+              PackageSpec(path="NyanVerilogAParser.jl"),
+              PackageSpec(path="NyanLexers.jl")
             ])
             Pkg.instantiate()
             Pkg.precompile()
           '
 
-      - name: Run CedarSim integration tests
+      - name: Run Cadnip integration tests
         run: julia --project=test test/runtests.jl integration

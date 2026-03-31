@@ -7,15 +7,15 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current
-using CedarSim.MNA: VoltageSource, Resistor, Capacitor
-using CedarSim.MNA: MNACircuit, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!, CedarUICOp
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: voltage, current
+using Cadnip.MNA: VoltageSource, Resistor, Capacitor
+using Cadnip.MNA: MNACircuit, MNASolutionAccessor
+using Cadnip.MNA: reset_for_restamping!, CedarUICOp
 using SciMLBase
-using CedarSim: tran!
+using Cadnip: tran!
 using OrdinaryDiffEq: Rodas5P
 using LinearSolve: KLUFactorization
 

@@ -1,13 +1,13 @@
 module bsimcmg_inverter
 using Test
-using VerilogAParser
+using NyanVerilogAParser
 include("../common.jl")
 
 import ASAP7PDK
 
 path = joinpath(@__DIR__, "inverter_cmg_cedar.cir")
-ast = CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parsefile(path);
-circuit_code = CedarSim.make_spectre_circuit(
+ast = Cadnip.NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parsefile(path);
+circuit_code = Cadnip.make_spectre_circuit(
     ast,
     # Automatically allow including things in the same directory
     String[dirname(path)],

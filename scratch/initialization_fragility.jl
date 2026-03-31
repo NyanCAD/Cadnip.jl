@@ -1,6 +1,6 @@
-using CedarSim, OrdinaryDiffEq, NonlinearSolve, SciMLNLSolve, LinearAlgebra, DataFrames
+using Cadnip, OrdinaryDiffEq, NonlinearSolve, SciMLNLSolve, LinearAlgebra, DataFrames
 
-include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
+include(joinpath(Base.pkgdir(Cadnip), "test", "common.jl"))
 
 # This file is intended to be used once you already have a `DAEProblem` or `ODEProblem`.
 # Example:

@@ -2,15 +2,15 @@ module basic_tests
 
 include("common.jl")
 
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using Cadnip.MNA: voltage, current, make_ode_problem
 
 #=
 NOTE: Tests that require DAECompiler are skipped:
 - Unimplemented Device (requires CircuitIRODESystem)
 - MC VR Circuit (requires solve_circuit with Monte Carlo)
-- ParallelInstances (requires CedarSim.ParallelInstances)
+- ParallelInstances (requires Cadnip.ParallelInstances)
 =#
 
 #=
@@ -21,14 +21,14 @@ NOTE: Tests that require DAECompiler are skipped:
     function ERRcircuit()
         vcc = Named(net, "vcc")()
         gnd = Named(net, "gnd")()
-        Named(CedarSim.UnimplementedDevice(), "U")(vcc, gnd)
+        Named(Cadnip.UnimplementedDevice(), "U")(vcc, gnd)
     end
     # Trying to directly run `ERRcircuit()` throws an error
     # due to the `error()` in the implementation of `UnimplementedDevice()`
-    @test_throws CedarSim.CedarError ERRcircuit()
+    @test_throws Cadnip.CedarError ERRcircuit()
 
     # DAECompiler sees the `error()` and complains that it is unsupported IR:
-    @test_throws CedarSim.DAECompiler.UnsupportedIRException CircuitIRODESystem(ERRcircuit)
+    @test_throws Cadnip.DAECompiler.UnsupportedIRException CircuitIRODESystem(ERRcircuit)
 end
 =#
 
@@ -140,8 +140,8 @@ end
 
 #=
 @testset "ParallelInstances" begin
-    # TODO: This test requires CedarSim.ParallelInstances and DAECompiler
-    using CedarSim: ParallelInstances
+    # TODO: This test requires Cadnip.ParallelInstances and DAECompiler
+    using Cadnip: ParallelInstances
     function MultiVRCcircuit()
         vcc = Named(net, "vcc")()
         vrc = Named(net, "vrc")()
@@ -324,16 +324,16 @@ end
     B1 1 0 i=V(1)**2
     """
     # Use the builder-based solver for Newton iteration
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast)
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
-    spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
-    sol = CedarSim.MNA.solve_dc(circuit_fn, (;), spec)
+    spec = Cadnip.MNA.MNASpec(temp=27.0, mode=:dcop)
+    sol = Cadnip.MNA.solve_dc(circuit_fn, (;), spec)
 
     # Node 1 should be 1V (the positive solution to V^2 + V - 2 = 0)
     @test isapprox(voltage(sol, Symbol("1")), 1.0; atol=1e-6)
@@ -400,18 +400,18 @@ end
         end
 
         # Parse and solve using MNA
-        ast = SpectreNetlistParser.parsefile(spice_file; start_lang=:spice)
-        code = CedarSim.make_mna_circuit(ast)
+        ast = NyanSpectreNetlistParser.parsefile(spice_file; start_lang=:spice)
+        code = Cadnip.make_mna_circuit(ast)
         m = Module()
-        Base.eval(m, :(using CedarSim.MNA))
-        Base.eval(m, :(using CedarSim: ParamLens))
-        Base.eval(m, :(using CedarSim.SpectreEnvironment))
+        Base.eval(m, :(using Cadnip.MNA))
+        Base.eval(m, :(using Cadnip: ParamLens))
+        Base.eval(m, :(using Cadnip.SpectreEnvironment))
         circuit_fn = Base.eval(m, code)
 
         # Wrap in MNACircuit for proper dc! solve
-        spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
+        spec = Cadnip.MNA.MNASpec(temp=27.0, mode=:dcop)
         wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-        circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+        circuit = Cadnip.MNA.MNACircuit(wrapped, (;), spec)
         sol = dc!(circuit)
 
         # I = V / R = 1V / 1337Ω
@@ -429,7 +429,7 @@ end
     x1 (vcc 0) BasicVAResistor R=2k
     v1 (vcc 0) vsource dc=1
     """
-    inc = joinpath(dirname(pathof(CedarSim.VerilogAParser)), "../test/inputs")
+    inc = joinpath(dirname(pathof(Cadnip.NyanVerilogAParser)), "../test/inputs")
     sys, sol = solve_spectre_code(ckt; include_dirs=[inc]);
     @test all(isapprox.(sol[sys.v1.I], -1/2e3))
 
@@ -571,8 +571,8 @@ end
     \"\"\"
     # This requires DAECompiler for proper transient simulation with initialization
     # Tests various initializers: CedarDCOp, ShampineCollocationInit, CedarTranOp
-    sa = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
-    code = CedarSim.make_spectre_circuit(sa)
+    sa = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
+    code = Cadnip.make_spectre_circuit(sa)
     circuit = eval(code)
 
     sys = CircuitIRODESystem(circuit);
@@ -723,16 +723,16 @@ end
     V1 vcc 0 'a'
     R1 vcc 0 1
     """
-    ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_code)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_code)
+    code = Cadnip.make_mna_circuit(ast)
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
     # Use ParamObserver to check if a === b (exact equality, no floating point error)
-    observer = CedarSim.ParamObserver(:top, nothing)
+    observer = Cadnip.ParamObserver(:top, nothing)
     spec = MNASpec(temp=27.0, mode=:dcop)
     Base.invokelatest(circuit_fn, observer, spec)
     p = getfield(observer, :params)[:params]
@@ -746,8 +746,8 @@ end
     * .option
     .option temp=10 filemode=ascii noinit
     """
-    ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
+    code = Cadnip.make_mna_circuit(ast)
     # Original just tested that f() returns nothing
     # For MNA, we test that code generation succeeds
     @test code !== nothing
@@ -797,15 +797,15 @@ end
     V1 vcc 0 1
     R1 vcc 0 1
     """
-    ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
+    code = Cadnip.make_mna_circuit(ast)
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
-    observer = CedarSim.ParamObserver(:top, nothing)
+    observer = Cadnip.ParamObserver(:top, nothing)
     spec = MNASpec(temp=27.0, mode=:dcop)
     Base.invokelatest(circuit_fn, observer, spec)
     p = getfield(observer, :params)[:params]
@@ -826,7 +826,7 @@ end
 @testset "device == param (ParamObserver)" begin
     # Test ParamObserver integration with MNA codegen
     # ParamObserver records which parameters are used and their values
-    using CedarSim: ParamObserver, @param
+    using Cadnip: ParamObserver, @param
 
     # Use explicit parameter passing (factor is a formal parameter of subcircuit)
     spice_code = """
@@ -840,14 +840,14 @@ end
     """
 
     # Parse and generate MNA circuit
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast)
 
     # Evaluate in temp module
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens, AbstractParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens, AbstractParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
     # Use ParamObserver to record parameters
@@ -884,7 +884,7 @@ end
 # TODO: Extended device == param tests
 @testset "device == param (canonicalize_params)" begin
     # Test canonicalize_params function
-    @test CedarSim.canonicalize_params((; params=(;boo=4), foo=2, bar=(; baz=3))) == (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
+    @test Cadnip.canonicalize_params((; params=(;boo=4), foo=2, bar=(; baz=3))) == (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
 end
 
 #=
@@ -900,10 +900,10 @@ end
     i1 vcc 0 DC -1
     x1 vcc 0 myres
     \"\"\"
-    mast = SpectreNetlistParser.SPICENetlistParser.parse(spice)
-    mcode = CedarSim.make_spectre_circuit(mast)
+    mast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice)
+    mcode = Cadnip.make_spectre_circuit(mast)
     f = eval(mcode)
-    👀 = CedarSim.ParamObserver(x1=2.0)
+    👀 = Cadnip.ParamObserver(x1=2.0)
     f(👀)
     @test @param(👀.x1.rload)*@param(👀.x1) == @param(👀.x1.rload.r)
     @test convert(NamedTuple, 👀) == (

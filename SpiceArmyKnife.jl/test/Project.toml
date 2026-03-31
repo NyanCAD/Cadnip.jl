@@ -1,5 +1,5 @@
 [deps]
-SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
+NyanSpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
 SpiceArmyKnife = "9bd5f295-a833-4c5a-8e17-8bae7b000705"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 

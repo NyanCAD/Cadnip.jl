@@ -1,17 +1,17 @@
 module inverter_noise_tests
 
-using CedarSim
+using Cadnip
 using GF180MCUPDK
 using BSIM4
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 using OrdinaryDiffEq
 using OrdinaryDiffEq.LineSearches
 using SciMLBase
 using Test
 using BenchmarkTools
 
-include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
+include(joinpath(Base.pkgdir(Cadnip), "test", "common.jl"))
 
 spice_code = """
 * Inverter test
@@ -39,11 +39,11 @@ VD D 0 PWL(
 """
 
 mod = Module()
-Core.eval(mod, :(using CedarSim))
-Core.eval(mod, :(using CedarSim.SpectreEnvironment))
-circuit_code = CedarSim.make_spectre_circuit(
-    CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
-    [Base.pkgdir(CedarSim)],
+Core.eval(mod, :(using Cadnip))
+Core.eval(mod, :(using Cadnip.SpectreEnvironment))
+circuit_code = Cadnip.make_spectre_circuit(
+    Cadnip.NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
+    [Base.pkgdir(Cadnip)],
 );
 circuit = Core.eval(mod, circuit_code);
 
@@ -120,6 +120,6 @@ ngspice = [
 ]
 
 ωs = 2π .* acdec(5, 1e3, 1e15)
-psd = CedarSim.PSD(nsol, sys.node_q, ωs)
+psd = Cadnip.PSD(nsol, sys.node_q, ωs)
 @test isapprox(sqrt.(abs.(psd)), ngspice[:,2], rtol=1e-6)
 end # module

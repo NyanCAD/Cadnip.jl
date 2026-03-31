@@ -12,7 +12,7 @@ The vadistiller integration tests cause OOM errors due to **cumulative JIT compi
 
 ### Baseline Memory
 - Julia startup: ~464 MB RSS
-- After loading CedarSim: **~1,110 MB RSS** (baseline)
+- After loading Cadnip: **~1,110 MB RSS** (baseline)
 
 ### Model Loading Memory (sequential, all 16 models)
 | Model Group | RSS After | Delta |
@@ -78,7 +78,7 @@ Based on profiling, the vadistiller integration tests require approximately:
 
 | Phase | Memory Required |
 |-------|-----------------|
-| CedarSim baseline | 1,110 MB |
+| Cadnip baseline | 1,110 MB |
 | All 16 models loaded | +414 MB |
 | First RC transient (Rodas5P+QNDF) | +85 MB |
 | First MOSFET transient (Rodas5P) | +1,600 MB |

@@ -181,7 +181,7 @@ QNDF uses backward differences with κ-correction which avoids these allocations
 ### Example: Adaptive Timestep (Zero Allocation)
 
 ```julia
-using CedarSim, CedarSim.MNA, OrdinaryDiffEq
+using Cadnip, Cadnip.MNA, OrdinaryDiffEq
 
 circuit = MNACircuit(builder; params...)
 prob = ODEProblem(circuit, (0.0, 1e-3); dense=true)

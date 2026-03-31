@@ -106,9 +106,9 @@ function extract_definitions_from_file(filepath::String; lib_sections=String[], 
     # Read file with specified encoding
     content = read(filepath, String, encoding)
     spice_dialect = symbol_from_simulator(simulator)
-    ast = SpectreNetlistParser.parse(IOBuffer(content); fname=filepath, implicit_title=false, spice_dialect, strict)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(content); fname=filepath, implicit_title=false, spice_dialect, strict)
     if ast.ps.errored
-        #SpectreNetlistParser.visit_errors(ast)
+        #NyanSpectreNetlistParser.visit_errors(ast)
     end
 
     config = ExtractionConfig(
@@ -186,7 +186,7 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
             str = strip(String(stmt.path), ['"', '\''])
             try
                 path = resolve_includepath(str, config.includepaths)
-                sa = get!(() -> SpectreNetlistParser.parsefile(path; implicit_title=false), config.parsed_files, path)
+                sa = get!(() -> NyanSpectreNetlistParser.parsefile(path; implicit_title=false), config.parsed_files, path)
                 new_includepaths = [dirname(path), config.includepaths...]
                 extract_definitions(sa, deeper(config; new_includepaths, new_file=path), models, subcircuits, error_stats, failed_files)
             catch e
@@ -206,7 +206,7 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
                 lib_key = (path, section)
                 if lib_key ∉ config.libraries
                     push!(config.libraries, lib_key)
-                    p = get!(() -> SpectreNetlistParser.parsefile(path; implicit_title=false), config.parsed_files, path)
+                    p = get!(() -> NyanSpectreNetlistParser.parsefile(path; implicit_title=false), config.parsed_files, path)
                     sa = extract_section_from_lib(p; section)
                     if sa !== nothing
                         new_includepaths = [dirname(path), config.includepaths...]
@@ -380,7 +380,7 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
                 for sim in target_simulators
                     try
                         # Parse the code and convert to target simulator
-                        ast = SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
+                        ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
                         converted_code = generate_code(ast, sim)
 
                         push!(spice_templates, Dict(
@@ -450,7 +450,7 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
                 for sim in target_simulators
                     try
                         # Parse the code and convert to target simulator
-                        ast = SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
+                        ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
                         converted_code = generate_code(ast, sim)
 
                         push!(spice_templates, Dict(

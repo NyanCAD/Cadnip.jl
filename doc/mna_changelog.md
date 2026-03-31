@@ -39,7 +39,7 @@ Clean baseline on Julia 1.12 with minimal dependencies. Simulation won't work ye
 
 #### Modified Files
 
-**CedarSim.jl**
+**Cadnip.jl**
 - Added `USE_DAECOMPILER = false` flag for conditional loading
 - Include stubs module when DAECompiler disabled
 - Skip `dcop.jl` and `ac.jl` when disabled (simulation code)
@@ -47,10 +47,10 @@ Clean baseline on Julia 1.12 with minimal dependencies. Simulation won't work ye
 **Project.toml**
 - Commented out DAECompiler dependency
 - Removed test/docs/benchmarks from workspace (CedarEDA-specific deps)
-- Added local source paths for: SpectreNetlistParser, VerilogAParser, Lexers
+- Added local source paths for: NyanSpectreNetlistParser, NyanVerilogAParser, NyanLexers
 - Removed CedarEDA fork references from sources
 
-**VerilogAParser.jl/Project.toml**
+**NyanVerilogAParser.jl/Project.toml**
 - Commented out CMC, SciMLBase fork, SciMLSensitivity fork
 - Removed workspace with CedarEDA test deps
 
@@ -114,7 +114,7 @@ Clean baseline on Julia 1.12 with minimal dependencies. Simulation won't work ye
 - Minimal deps for parsing tests only
 
 **.github/workflows/ci.yml**
-- Updated to run `Pkg.test("CedarSim")` instead of smoke tests
+- Updated to run `Pkg.test("Cadnip")` instead of smoke tests
 - Develops local packages in test environment
 
 ### Notes
@@ -292,14 +292,14 @@ Comprehensive test suite covering:
 
 ### Modified Files
 
-**CedarSim.jl**
+**Cadnip.jl**
 - Added MNA module include and export
 - `include("mna/MNA.jl")` after stubs
 - `export MNA`
 
 **test/runtests.jl**
 - Added MNA tests to Phase 0/1 test section
-- `using CedarSim` for MNA access
+- `using Cadnip` for MNA access
 - `include("mna/core.jl")` in Phase 1 testset
 
 ### Exit Criteria
@@ -319,7 +319,7 @@ Comprehensive test suite covering:
 ### Usage Example
 
 ```julia
-using CedarSim.MNA
+using Cadnip.MNA
 
 # Create voltage divider
 ctx = MNAContext()
@@ -370,8 +370,8 @@ After initial implementation, testing with Julia 1.12 revealed several issues:
    - When I = gm * V(in) flows into out_p, it contributes -gm to G[out_p, :]
 
 4. **Test Import Conflicts**
-   - Changed from `using CedarSim` to explicit imports from `CedarSim.MNA`
-   - Avoids conflicts between CedarSim.VoltageSource and MNA.VoltageSource
+   - Changed from `using Cadnip` to explicit imports from `Cadnip.MNA`
+   - Avoids conflicts between Cadnip.VoltageSource and MNA.VoltageSource
 
 5. **RL High-Pass Filter Test**
    - Fixed test circuit topology (R in series, L to ground)
@@ -456,7 +456,7 @@ The typical SPICE initialization flow is now supported:
 
 ### Architecture Refactor (2024-12-22)
 
-Major refactor based on analysis of CedarSim patterns, OpenVAF/VACASK interfaces, and GPU requirements.
+Major refactor based on analysis of Cadnip patterns, OpenVAF/VACASK interfaces, and GPU requirements.
 
 #### Design Decisions (see `doc/mna_architecture.md`)
 
@@ -661,7 +661,7 @@ Added high-level MNA functions:
    - Subcircuit builders have signature: `name_mna_builder(params, spec, ctx, ports...)`
    - Main `make_mna_circuit` generates all subcircuit builders before main circuit
 
-**`src/CedarSim.jl`**
+**`src/Cadnip.jl`**
 
 - Added includes for spc/*.jl files (Phase 4 integration)
 - Exported: `make_mna_circuit`, `parse_spice_to_mna`, `solve_spice_mna`
@@ -920,8 +920,8 @@ Key feature: Control current index lookup via `sys.current_names` to find the vo
 ### Usage Example
 
 ```julia
-using CedarSim
-using CedarSim.MNA: voltage
+using Cadnip
+using Cadnip.MNA: voltage
 
 spice_code = """
 V1 vcc 0 DC 5
@@ -930,7 +930,7 @@ R2 out 0 1k
 """
 
 # Parse and generate builder
-ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
 code = make_mna_circuit(ast)
 
 # Evaluate and solve
@@ -1136,7 +1136,7 @@ Added MNA device generation alongside existing DAECompiler codegen:
 Updated `@va_str` macro:
 ```julia
 macro va_str(str)
-    @static if CedarSim.USE_DAECOMPILER
+    @static if Cadnip.USE_DAECOMPILER
         esc(make_module(va))
     else
         esc(make_mna_module(va))
@@ -1189,7 +1189,7 @@ Completed full VA→MNA integration via the `va_str` macro:
 1. **Removed DAECompiler conditional path:**
    ```julia
    macro va_str(str)
-       va = VerilogAParser.parse(IOBuffer(str))
+       va = NyanVerilogAParser.parse(IOBuffer(str))
        if va.ps.errored
            cedarthrow(LoadError("va_str", 0, VAParseError(va)))
        else
@@ -1209,9 +1209,9 @@ Completed full VA→MNA integration via the `va_str` macro:
    ```julia
    baremodule VAResistor_module
        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros
-       import ..CedarSim
-       using ..CedarSim.VerilogAEnvironment
-       using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+       import ..Cadnip
+       using ..Cadnip.VerilogAEnvironment
+       using ..Cadnip.MNA: va_ddt, stamp_current_contribution!, MNAContext
        using ForwardDiff: Dual
        # ...
    end
@@ -1224,7 +1224,7 @@ Completed full VA→MNA integration via the `va_str` macro:
 #### Key Discovery: Disciplines Are Implicit
 
 The `include "disciplines.vams"` directive is NOT needed - disciplines (electrical,
-V(), I(), etc.) are implicit in VerilogAParser. Using the include causes a parser
+V(), I(), etc.) are implicit in NyanVerilogAParser. Using the include causes a parser
 bug when parsing from IOBuffer sources (`InexactError: trunc(UInt32, -1)`).
 
 Working pattern:
@@ -1253,8 +1253,8 @@ endmodule
 ### Usage Example
 
 ```julia
-using CedarSim.MNA
-using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
+using Cadnip.MNA
+using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 
 # Define a parallel RC contribution function
 R, C = 1000.0, 1e-6

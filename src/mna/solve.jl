@@ -48,7 +48,7 @@ spec_at_1ms = MNASpec(temp=27.0, mode=:tran, time=1e-3)
 ```
 
 # Design Rationale
-Unlike CedarSim's ScopedValue-based SimSpec, MNASpec is passed explicitly.
+Unlike Cadnip's ScopedValue-based SimSpec, MNASpec is passed explicitly.
 This enables full JIT optimization since Julia's closure boxing issue
 prevents optimization of captured ScopedValue accesses.
 """
@@ -1104,7 +1104,7 @@ function condition_number(sys::MNAData)
 end
 
 # Note: dc! and tran! for MNACircuit are defined in sweeps.jl to integrate
-# with CedarSim's existing sweep API (CircuitSweep, ProductSweep, etc.)
+# with Cadnip's existing sweep API (CircuitSweep, ProductSweep, etc.)
 
 #==============================================================================#
 # Symbolic Solution Access

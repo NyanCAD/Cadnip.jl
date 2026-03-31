@@ -8,8 +8,8 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", "..", "..", ".."))
 
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using Sundials: IDA
 using SciMLBase
 using Printf

@@ -1,10 +1,10 @@
 module ddx_tests
 
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current
-using CedarSim.MNA: VoltageSource
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using Cadnip.MNA: voltage, current
+using Cadnip.MNA: VoltageSource
 using Test
 
 # NLVCR model using va"" string macro
@@ -42,7 +42,7 @@ endmodule
         if ctx === nothing
             ctx = MNAContext()
         else
-            CedarSim.MNA.reset_for_restamping!(ctx)
+            Cadnip.MNA.reset_for_restamping!(ctx)
         end
         vcc = get_node!(ctx, :vcc)
         vg = get_node!(ctx, :vg)

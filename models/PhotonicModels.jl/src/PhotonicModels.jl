@@ -16,10 +16,10 @@ CwLaser, NoisyEDFA (need @(initial_step)), PhotoDetector, TunableFilter (need la
 """
 module PhotonicModels
 
-using CedarSim
-using CedarSim: VAFile
-using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!
-using VerilogAParser
+using Cadnip
+using Cadnip: VAFile
+using Cadnip.MNA: MNAContext, MNASpec, stamp!, get_node!
+using NyanVerilogAParser
 
 const VA_DIR = joinpath(@__DIR__, "..", "va")
 
@@ -52,8 +52,8 @@ const TIER1_MODELS = [
 
 for name in TIER1_MODELS
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 end
 
 # Tier 2: Composite modules (use module instantiation)
@@ -72,16 +72,16 @@ const TIER2_MODELS = [
 
 for (name, deps) in TIER2_MODELS
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va; deps))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va; deps))
 end
 
 # Tier 3: Models requiring laplace_nd (now supported)
 const TIER3_LEAF_MODELS = ["PhotoDetector"]
 for name in TIER3_LEAF_MODELS
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 end
 
 const TIER3_COMPOSITE_MODELS = [
@@ -89,8 +89,8 @@ const TIER3_COMPOSITE_MODELS = [
 ]
 for (name, deps) in TIER3_COMPOSITE_MODELS
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va; deps))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va; deps))
 end
 
 # Not yet supported:

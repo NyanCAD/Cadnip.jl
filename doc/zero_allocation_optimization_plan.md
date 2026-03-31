@@ -47,7 +47,7 @@ The 24 bytes per iteration is very close to the goal of true zero-allocation.
 3. **Type Instability in Source Evaluation**
    - `get_source_value(V, t, mode)` may have type instability for different source types
 
-## Architecture Comparison: OpenVAF vs CedarSim
+## Architecture Comparison: OpenVAF vs Cadnip
 
 ### OpenVAF's Zero-Allocation Approach
 
@@ -68,7 +68,7 @@ The 24 bytes per iteration is very close to the goal of true zero-allocation.
    - Resistive (G) and Reactive (C) components in separate arrays
    - Direct accumulation without intermediate structures
 
-### CedarSim's Current Approach
+### Cadnip's Current Approach
 
 1. **COO-to-CSC Mapping**
    - Pre-computed mapping from COO indices to sparse matrix positions

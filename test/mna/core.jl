@@ -16,30 +16,30 @@ using LinearAlgebra
 using SparseArrays
 using SciMLBase: ReturnCode
 
-# Import MNA module - use explicit imports to avoid conflicts with CedarSim types
-using CedarSim.MNA: MNAContext, MNAData, get_node!, alloc_current!, resolve_index
-using CedarSim.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
-using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
-using CedarSim.MNA: stamp!, system_size
-using CedarSim.MNA: MNAIndex, NodeIndex, CurrentIndex, ChargeIndex
-using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: get_source_value, pwl_at_time
-using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS
-using CedarSim.MNA: assemble!, assemble_G, assemble_C, get_rhs
-using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
-using CedarSim.MNA: voltage, current, magnitude_db, phase_deg
-using CedarSim.MNA: make_ode_problem, make_ode_function
-using CedarSim.MNA: make_dae_problem, make_dae_function
-using CedarSim.MNA: reset_for_restamping!
+# Import MNA module - use explicit imports to avoid conflicts with Cadnip types
+using Cadnip.MNA: MNAContext, MNAData, get_node!, alloc_current!, resolve_index
+using Cadnip.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
+using Cadnip.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
+using Cadnip.MNA: stamp!, system_size
+using Cadnip.MNA: MNAIndex, NodeIndex, CurrentIndex, ChargeIndex
+using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using Cadnip.MNA: get_source_value, pwl_at_time
+using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS
+using Cadnip.MNA: assemble!, assemble_G, assemble_C, get_rhs
+using Cadnip.MNA: DCSolution, ACSolution, solve_dc, solve_ac
+using Cadnip.MNA: voltage, current, magnitude_db, phase_deg
+using Cadnip.MNA: make_ode_problem, make_ode_function
+using Cadnip.MNA: make_dae_problem, make_dae_function
+using Cadnip.MNA: reset_for_restamping!
 
-# Import CedarSim for macros and dc!/tran!
-using CedarSim
-using CedarSim: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
-using CedarSim.MNA: MNACircuit, MNASpec, CedarUICOp
+# Import Cadnip for macros and dc!/tran!
+using Cadnip
+using Cadnip: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
+using Cadnip.MNA: MNACircuit, MNASpec, CedarUICOp
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
 using LinearSolve: KLUFactorization
 import Sundials
-using VerilogAParser
+using NyanVerilogAParser
 
 @testset "MNA Core Tests" begin
 
@@ -1133,8 +1133,8 @@ using VerilogAParser
     #==========================================================================#
 
     # Import MNACircuit and related exports
-    using CedarSim.MNA: MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
-    using CedarSim.MNA: MNACircuit
+    using Cadnip.MNA: MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
+    using Cadnip.MNA: MNACircuit
     using SciMLBase: ODEProblem as SciMLODEProblem
 
     @testset "MNACircuit basics" begin
@@ -1503,8 +1503,8 @@ using VerilogAParser
     end
 
     @testset "ParamLens with unmodified parameters" begin
-        # Import CedarSim's actual ParamLens infrastructure
-        using CedarSim: ParamLens, IdentityLens
+        # Import Cadnip's actual ParamLens infrastructure
+        using Cadnip: ParamLens, IdentityLens
 
         # Test 1: IdentityLens returns defaults unchanged
         ident = IdentityLens()
@@ -1653,11 +1653,11 @@ using VerilogAParser
     end
 
     #==========================================================================#
-    # High-Level dc!/tran! API (integration with CedarSim sweep API)
+    # High-Level dc!/tran! API (integration with Cadnip sweep API)
     #==========================================================================#
 
-    # dc!/tran! are already imported at the top of this file from CedarSim
-    using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
+    # dc!/tran! are already imported at the top of this file from Cadnip
+    using Cadnip.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
 
     @testset "dc! and tran! API with MNACircuit" begin
         # Define a simple RC circuit
@@ -1680,7 +1680,7 @@ using VerilogAParser
         circuit = MNACircuit(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
         τ = 1000.0 * 1e-6  # 1ms
 
-        # Test dc!(circuit) - matches CedarSim API
+        # Test dc!(circuit) - matches Cadnip API
         dc_sol = dc!(circuit)
         @test dc_sol isa DCSolution
         @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
@@ -1834,7 +1834,7 @@ using VerilogAParser
     end
 
     @testset "PWL/SIN stamp! methods" begin
-        using CedarSim.MNA: MNASpec
+        using Cadnip.MNA: MNASpec
 
         # Test PWL voltage source stamping via builder pattern
         # The builder stamps a PWL at t=0.5ms where the value is 2.5V

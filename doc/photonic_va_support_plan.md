@@ -22,7 +22,7 @@ The optical discipline has **only a potential nature** (no flow), making `OptE()
 
 ### Changes Made
 
-**Parser (VerilogAParser.jl):**
+**Parser (NyanVerilogAParser.jl):**
 - `forms.jl`: Added `range` field to `NetDeclaration` struct
 - `parse.jl`: Fixed `parse_range` to handle single-element subscripts `[0]` (was unconditionally parsing colon+max)
 - `parse.jl`: Fixed `parse_lvalue` to call `parse_function_call` directly instead of `parse_analog_expression` (prevented `V(a[0]) <+ expr` from being parsed as `V(a[0]) < (+expr)`)
@@ -44,7 +44,7 @@ The optical discipline has **only a potential nature** (no flow), making `OptE()
 
 ### Changes Made
 
-**Parser (VerilogAParser.jl):**
+**Parser (NyanVerilogAParser.jl):**
 - `forms.jl`: Added `ModuleInstantiation` struct (module_name, instance_name, ports)
 - `parse.jl`: 3-token lookahead in `parse_module_items` IDENTIFIER case: `IDENTIFIER IDENTIFIER LPAREN` → `parse_module_instantiation()`; uses `parse_comma_list!` for port arguments
 

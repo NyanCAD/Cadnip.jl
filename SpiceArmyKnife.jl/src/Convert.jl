@@ -20,7 +20,7 @@ Examples:
 module Convert
 
 using ..SpiceArmyKnife
-using SpectreNetlistParser
+using NyanSpectreNetlistParser
 using ArgParse
 
 function parse_commandline(args)
@@ -100,9 +100,9 @@ function (@main)(ARGS)
         # Parse input file
         println("Parsing input file...")
         ast = if input_lang == :spice
-            SpectreNetlistParser.parsefile(input_file; start_lang=:spice, spice_dialect=input_simulator_sym, implicit_title=true)
+            NyanSpectreNetlistParser.parsefile(input_file; start_lang=:spice, spice_dialect=input_simulator_sym, implicit_title=true)
         else
-            SpectreNetlistParser.parsefile(input_file; start_lang=:spectre)
+            NyanSpectreNetlistParser.parsefile(input_file; start_lang=:spectre)
         end
 
         if ast.ps.errored

@@ -121,7 +121,7 @@ end
 2. The issue is that `SubcktCall` doesn't have a `.params` field - parameters are AST children:
    ```julia
    # Fix: iterate through children to find Parameter nodes
-   for child in SpectreNetlistParser.RedTree.children(instance)
+   for child in NyanSpectreNetlistParser.RedTree.children(instance)
        if child isa SNode{SP.Parameter}
            # Extract name and value
        end
@@ -227,7 +227,7 @@ export int, nint, floor, ceil, pow, ln, log, exp, sqrt, ...
 
 The `cg_expr!` function (line 154-171) correctly generates `GlobalRef(SpectreEnvironment, :int)` for function calls:
 ```julia
-elseif isdefined(CedarSim.SpectreEnvironment, Symbol(id))
+elseif isdefined(Cadnip.SpectreEnvironment, Symbol(id))
     args = map(x->cg_expr!(state, x.item), stmt.args)
     Expr(:call, GlobalRef(SpectreEnvironment, Symbol(id)), args...)
 ```
@@ -239,17 +239,17 @@ elseif isdefined(CedarSim.SpectreEnvironment, Symbol(id))
 **Current code** (`test/common.jl:162-166`):
 ```julia
 m = Module()
-Base.eval(m, :(using CedarSim.MNA))
-Base.eval(m, :(using CedarSim: ParamLens))
+Base.eval(m, :(using Cadnip.MNA))
+Base.eval(m, :(using Cadnip: ParamLens))
 # MISSING: SpectreEnvironment import!
 ```
 
 **Fix** - add one line:
 ```julia
 m = Module()
-Base.eval(m, :(using CedarSim.MNA))
-Base.eval(m, :(using CedarSim: ParamLens))
-Base.eval(m, :(using CedarSim.SpectreEnvironment))  # ADD THIS
+Base.eval(m, :(using Cadnip.MNA))
+Base.eval(m, :(using Cadnip: ParamLens))
+Base.eval(m, :(using Cadnip.SpectreEnvironment))  # ADD THIS
 ```
 
 Same fix needed in `src/spc/interface.jl:225-228`.
@@ -340,8 +340,8 @@ end
         .LIB "selfinclude.cir" my_lib
         """)
 
-        ast = SpectreNetlistParser.parse(spice_file; start_lang=:spice)
-        code = CedarSim.make_mna_circuit(ast)
+        ast = NyanSpectreNetlistParser.parse(spice_file; start_lang=:spice)
+        code = Cadnip.make_mna_circuit(ast)
         # ... evaluate and check r1 exists with R=1337
     end
 end

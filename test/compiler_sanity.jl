@@ -1,11 +1,11 @@
 module compiler_sanity
 
-using CedarSim, DAECompiler, BSIM4, Test
+using Cadnip, DAECompiler, BSIM4, Test
 
 const bsim4 = load_VA_model(BSIM4.bsim4_va)
 
-let f = CedarSim.find_bin, args = Tuple{
-    CedarSim.BinnedModel{Tuple{CedarSim.ParsedModel{bsim4}, CedarSim.ParsedModel{bsim4}}},
+let f = Cadnip.find_bin, args = Tuple{
+    Cadnip.BinnedModel{Tuple{Cadnip.ParsedModel{bsim4}, Cadnip.ParsedModel{bsim4}}},
     Float64, Float64}
 
     # find_bin must be concrete-eval eligible or we don't get any constant propagation

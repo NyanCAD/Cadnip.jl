@@ -9,7 +9,7 @@ including standard, self-heating, and non-quasi-static (NQS) variants.
 # Usage
 ```julia
 using PSPModels
-using CedarSim.MNA: MNAContext, stamp!, get_node!
+using Cadnip.MNA: MNAContext, stamp!, get_node!
 
 ctx = MNAContext()
 d = get_node!(ctx, :d)
@@ -25,11 +25,11 @@ stamp!(PSP103VA(), ctx, d, g, 0, 0; _mna_spec_=spec, _mna_x_=Float64[])
 """
 module PSPModels
 
-using CedarSim
-using CedarSim: VAFile
-using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
+using Cadnip
+using Cadnip: VAFile
+using Cadnip.MNA: MNAContext, MNASpec, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
-using VerilogAParser
+using NyanVerilogAParser
 using PrecompileTools: @compile_workload
 
 # Model directory
@@ -55,8 +55,8 @@ export juncap200_va, psp103_va, psp103t_va, psp103_nqs_va
 # Parse and evaluate all models at module load time
 for name in MODEL_NAMES
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 end
 
 # Export device types (names match VA module declarations)
@@ -67,11 +67,11 @@ export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
 
 # Register models with ModelRegistry for automatic resolution in SPICE
 # This allows .model statements to use these types without imported_hdl_modules
-import CedarSim.ModelRegistry: getmodel
-getmodel(::Val{:juncap200}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = JUNCAP200
-getmodel(::Val{:psp103va}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSP103VA
-getmodel(::Val{:psp103tva}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSP103TVA
-getmodel(::Val{:pspnqs103va}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegistry.AbstractSimulator}) = PSPNQS103VA
+import Cadnip.ModelRegistry: getmodel
+getmodel(::Val{:juncap200}, ::Nothing, ::Nothing, ::Type{<:Cadnip.ModelRegistry.AbstractSimulator}) = JUNCAP200
+getmodel(::Val{:psp103va}, ::Nothing, ::Nothing, ::Type{<:Cadnip.ModelRegistry.AbstractSimulator}) = PSP103VA
+getmodel(::Val{:psp103tva}, ::Nothing, ::Nothing, ::Type{<:Cadnip.ModelRegistry.AbstractSimulator}) = PSP103TVA
+getmodel(::Val{:pspnqs103va}, ::Nothing, ::Nothing, ::Type{<:Cadnip.ModelRegistry.AbstractSimulator}) = PSPNQS103VA
 
 # Precompile stamp! methods for all three method variants:
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
@@ -80,7 +80,7 @@ getmodel(::Val{:pspnqs103va}, ::Nothing, ::Nothing, ::Type{<:CedarSim.ModelRegis
 # Note: PSPNQS103VA skipped - requires idt() function not yet supported
 # Note: PSP103TVA skipped - requires ln_1p_d() function not yet supported
 @compile_workload begin
-    using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
+    using Cadnip.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
     # Helper to precompile all three method variants for a device

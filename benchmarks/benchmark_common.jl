@@ -1,9 +1,9 @@
 using BenchmarkTools
 using DAECompiler: get_sys
-using CedarSim
+using Cadnip
 using BSIM4
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser: SPICENetlistParser
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser: SPICENetlistParser
 using TimerOutputs
 using OrdinaryDiffEq
 using GF180MCUPDK
@@ -49,7 +49,7 @@ function compile_circuit(circuit, to, compute_jacobian, name)
 end
 
 function load_gf180(;to = TimerOutput(), compute_jacobian::Bool = true)
-    repo_root = Base.pkgdir(CedarSim)
+    repo_root = Base.pkgdir(Cadnip)
     dffdir = joinpath(repo_root, "test", "DFF")
     @timeit to "Parsing" begin
         @timeit to "include(BSIM4.bsim4_va)" begin
@@ -60,8 +60,8 @@ function load_gf180(;to = TimerOutput(), compute_jacobian::Bool = true)
         @timeit to "SPICENetlistParser.parsefile" begin
             sa1 = SPICENetlistParser.parsefile(joinpath(dffdir, "DFF_cap_all.cir"))
         end
-        @timeit to "CedarSim.make_spectre_circuit" begin
-            code = CedarSim.make_spectre_circuit(sa1, String[repo_root, dffdir]);
+        @timeit to "Cadnip.make_spectre_circuit" begin
+            code = Cadnip.make_spectre_circuit(sa1, String[repo_root, dffdir]);
         end
         @timeit to "eval(code)" begin
             circuit = eval(code)
@@ -71,7 +71,7 @@ function load_gf180(;to = TimerOutput(), compute_jacobian::Bool = true)
 end
 
 function load_inverter(;to = TimerOutput(), compute_jacobian::Bool = true)
-    repo_root = Base.pkgdir(CedarSim)
+    repo_root = Base.pkgdir(Cadnip)
     @timeit to "Parsing" begin
         @timeit to "include(BSIM4.bsim4_va)" begin
             if !isdefined(@__MODULE__, :bsim4)
@@ -105,10 +105,10 @@ function load_inverter(;to = TimerOutput(), compute_jacobian::Bool = true)
         .END
         """
         @timeit to "SPICENetlistCSTParser.parse" begin
-            sa1 = CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
+            sa1 = Cadnip.NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
         end
-        @timeit to "CedarSim.make_spectre_circuit" begin
-            code = CedarSim.make_spectre_circuit(sa1, String[repo_root]);
+        @timeit to "Cadnip.make_spectre_circuit" begin
+            code = Cadnip.make_spectre_circuit(sa1, String[repo_root]);
         end
         @timeit to "eval(code)" begin
             circuit = eval(code)

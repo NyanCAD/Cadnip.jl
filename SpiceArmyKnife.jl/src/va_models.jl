@@ -6,10 +6,10 @@
 # parameters from Verilog-A source files. It supports case-insensitive lookup
 # while preserving original case and parameter order.
 
-using VerilogAParser
-using VerilogAParser.VerilogACSTParser: VerilogModule, ParameterDeclaration, Node
+using NyanVerilogAParser
+using NyanVerilogAParser.VerilogACSTParser: VerilogModule, ParameterDeclaration, Node
 
-const VANode = VerilogAParser.VerilogACSTParser.Node
+const VANode = NyanVerilogAParser.VerilogACSTParser.Node
 
 # =============================================================================
 # Data Structures
@@ -148,11 +148,11 @@ println(model.parameters[1].name)  # Original case: "R"
 """
 function extract_model_definitions(filepath::String)
     # Parse the Verilog-A file
-    va = VerilogAParser.parsefile(filepath)
+    va = NyanVerilogAParser.parsefile(filepath)
 
     if va.ps.errored
         println(stderr, "Parse errors in Verilog-A file: $filepath")
-        VerilogAParser.VerilogACSTParser.visit_errors(va; io=stderr)
+        NyanVerilogAParser.VerilogACSTParser.visit_errors(va; io=stderr)
     end
 
     models = ModelDefinition[]

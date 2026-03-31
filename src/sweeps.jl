@@ -570,13 +570,13 @@ function tran!(cs::CircuitSweep, tspan::Tuple{<:Real,<:Real}; kwargs...)
 end
 
 # Base case; a single parameter mapped on certain values:
-function find_param_ranges(it::CedarSim.Sweep, param_ranges)
+function find_param_ranges(it::Cadnip.Sweep, param_ranges)
     if !haskey(param_ranges, it.selector)
         param_ranges[it.selector] = Tuple[]
     end
     push!(param_ranges[it.selector], (minimum(it.values), maximum(it.values), length(it.values)))
 end
-find_param_ranges(sf::CedarSim.SweepFlattener, param_ranges) = find_param_ranges(sf.iterator, param_ranges)
+find_param_ranges(sf::Cadnip.SweepFlattener, param_ranges) = find_param_ranges(sf.iterator, param_ranges)
 function find_param_ranges(it, param_ranges)
     children(it::Base.Iterators.Zip) = it.is
     children(it::Base.Iterators.ProductIterator) = it.iterators

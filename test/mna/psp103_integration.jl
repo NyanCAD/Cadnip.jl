@@ -16,9 +16,9 @@
 #    - Fix: Use hierarchical instance names (prefix_localname) for internal nodes
 #==============================================================================#
 
-using CedarSim
-using CedarSim.SpectreNetlistParser
-using CedarSim.MNA: MNAContext, MNASpec, solve_dc, voltage, current, n_internal_nodes
+using Cadnip
+using Cadnip.NyanSpectreNetlistParser
+using Cadnip.MNA: MNAContext, MNASpec, solve_dc, voltage, current, n_internal_nodes
 using PSPModels
 using Test
 
@@ -33,8 +33,8 @@ M1 d g 0 0 nch W=10u L=1u
 Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
-        ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
+        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
@@ -92,8 +92,8 @@ M1 d g 0 0 nch W=10u L=1u
 Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
-        ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
+        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
@@ -137,8 +137,8 @@ Vin1 in1 0 DC 0.6
 Vin2 in2 0 DC 0.3
 Vdd vdd 0 DC 1.2
 """
-        ast = SpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = CedarSim.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
+        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
         circuit_fn = eval(code)
 
         # Build structure and check internal nodes

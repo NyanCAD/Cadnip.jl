@@ -1,12 +1,12 @@
 module bsimcmg_spectre
 
-using CedarSim
-using CedarSim.VerilogAParser
+using Cadnip
+using Cadnip.NyanVerilogAParser
 using OrdinaryDiffEq
 using UnicodePlots
 using Sundials
-using SpectreNetlistParser
-using CedarSim.SpectreEnvironment
+using NyanSpectreNetlistParser
+using Cadnip.SpectreEnvironment
 using Test
 using SciMLBase
 
@@ -14,11 +14,11 @@ using SciMLBase
 # The exported type is `bsimcmg` (matches VA module name)
 using CMCModels: bsimcmg
 
-sa = SpectreNetlistParser.parsefile(joinpath(dirname(pathof(SpectreNetlistParser)), "../test/examples/7nm_TT.scs"));
-eval(CedarSim.make_spectre_netlist(sa))
+sa = NyanSpectreNetlistParser.parsefile(joinpath(dirname(pathof(NyanSpectreNetlistParser)), "../test/examples/7nm_TT.scs"));
+eval(Cadnip.make_spectre_netlist(sa))
 
-sa2 = SpectreNetlistParser.parsefile(joinpath(@__DIR__, "asap7_inv.scs"));
-code = CedarSim.make_spectre_circuit(sa2)
+sa2 = NyanSpectreNetlistParser.parsefile(joinpath(@__DIR__, "asap7_inv.scs"));
+code = Cadnip.make_spectre_circuit(sa2)
 circuit = eval(code)
 # circuit()
 

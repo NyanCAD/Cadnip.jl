@@ -10,7 +10,7 @@
 #   device = model(; params..., W=1e-6)   # Instantiate with merged params
 #
 # Registration (by VA model packages):
-#   import CedarSim.ModelRegistry: getmodel, getparams
+#   import Cadnip.ModelRegistry: getmodel, getparams
 #   getmodel(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = bsim4
 #   getparams(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
 #

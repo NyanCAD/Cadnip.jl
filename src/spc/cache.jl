@@ -10,7 +10,7 @@ function parse_and_cache_spc!(cache::CedarParseCache, path::String)
         return cache.spc_cache[path]
     end
     abspath = isabspath(path) ? path : joinpath(dirname(pathof(cache.thismod)), "..", path)
-    sa = SpectreNetlistParser.parsefile(abspath; implicit_title=false)
+    sa = NyanSpectreNetlistParser.parsefile(abspath; implicit_title=false)
     cache_spc!(cache.thismod, path, sa; abspath)
     return sa
 end
@@ -21,7 +21,7 @@ function parse_and_cache_va!(cache::CedarParseCache, path::String)
         return cache.va_cache[path]
     end
     abspath = isabspath(path) ? path : joinpath(dirname(pathof(cache.thismod)), "..", path)
-    va = VerilogAParser.parsefile(abspath)
+    va = NyanVerilogAParser.parsefile(abspath)
     if va.ps.errored
         cedarthrow(LoadError(abspath, 0, VAParseError(va)))
     end

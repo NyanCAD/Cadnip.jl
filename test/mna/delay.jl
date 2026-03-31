@@ -5,12 +5,12 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: MNACircuit, reset_for_restamping!
-using CedarSim.MNA: VoltageSource, Resistor
-using CedarSim: tran!
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: MNACircuit, reset_for_restamping!
+using Cadnip.MNA: VoltageSource, Resistor
+using Cadnip: tran!
 using DelayDiffEq: MethodOfSteps
 using OrdinaryDiffEq: Rodas5P
 

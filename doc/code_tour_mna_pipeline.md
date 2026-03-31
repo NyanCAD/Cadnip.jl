@@ -60,8 +60,8 @@ SPICE Netlist + VA Models
 
 ```julia
 # 1. Load Verilog-A diode model → generates sp_diode type + stamp! method
-va = VerilogAParser.parsefile(diode_va_path)
-Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+va = NyanVerilogAParser.parsefile(diode_va_path)
+Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
 # 2. Parse SPICE netlist → generates builder function
 circuit_code = parse_spice_to_mna(spice_code; circuit_name=:graetz_circuit,

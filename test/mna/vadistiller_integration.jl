@@ -12,19 +12,19 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
-using CedarSim.MNA: MNACircuit, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
+using Cadnip.MNA: MNACircuit, MNASolutionAccessor
+using Cadnip.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
 using LinearSolve: KLUFactorization
 using SciMLBase
-using CedarSim: tran!, dc!, parse_spice_to_mna
+using Cadnip: tran!, dc!, parse_spice_to_mna
 
 # Import pre-parsed models from VADistillerModels package
 using VADistillerModels
@@ -94,7 +94,7 @@ Q2 q2_coll q2_base 0 npn1
                     if ctx === nothing
                         ctx = MNAContext()
                     else
-                        CedarSim.MNA.reset_for_restamping!(ctx)
+                        Cadnip.MNA.reset_for_restamping!(ctx)
                     end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
@@ -118,7 +118,7 @@ Q2 q2_coll q2_base 0 npn1
                     if ctx === nothing
                         ctx = MNAContext()
                     else
-                        CedarSim.MNA.reset_for_restamping!(ctx)
+                        Cadnip.MNA.reset_for_restamping!(ctx)
                     end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
@@ -142,7 +142,7 @@ Q2 q2_coll q2_base 0 npn1
                     if ctx === nothing
                         ctx = MNAContext()
                     else
-                        CedarSim.MNA.reset_for_restamping!(ctx)
+                        Cadnip.MNA.reset_for_restamping!(ctx)
                     end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
@@ -568,7 +568,7 @@ Q2 q2_coll q2_base 0 npn1
         # Group 8: BSIM4v8 (largest model - 10K lines)
         @testset "VADistiller sp_bsim4v8" begin
             @testset "sp_bsim4v8 string parameters" begin
-                @test fieldtype(sp_bsim4v8, :version) == CedarSim.DefaultOr{String}
+                @test fieldtype(sp_bsim4v8, :version) == Cadnip.DefaultOr{String}
 
                 dev = sp_bsim4v8()
                 @test dev.version.val == "4.8.3" && dev.version.is_default

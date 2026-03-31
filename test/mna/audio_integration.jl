@@ -18,11 +18,11 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNACircuit, MNASolutionAccessor
-using CedarSim.MNA: voltage, current, assemble!
-using CedarSim: tran!, parse_spice_to_mna, CircuitSweep, Sweep
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNACircuit, MNASolutionAccessor
+using Cadnip.MNA: voltage, current, assemble!
+using Cadnip: tran!, parse_spice_to_mna, CircuitSweep, Sweep
 using OrdinaryDiffEq
 using SciMLBase
 using LinearSolve: KLUFactorization
@@ -334,7 +334,7 @@ eval(ce_amplifier_code)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vin = MNA.get_node!(ctx, :vin)
             vcc = MNA.get_node!(ctx, :vcc)
@@ -386,7 +386,7 @@ eval(ce_amplifier_code)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vin = MNA.get_node!(ctx, :vin)
             vcc = MNA.get_node!(ctx, :vcc)

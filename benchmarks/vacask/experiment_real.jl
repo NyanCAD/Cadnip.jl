@@ -19,8 +19,8 @@ using Sundials: IDA
 using OrdinaryDiffEq: FBDF, ImplicitEuler
 using LinearSolve: KLUFactorization, LUFactorization
 
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using VADistillerModels
 
 const BENCHMARK_DIR = joinpath(@__DIR__)

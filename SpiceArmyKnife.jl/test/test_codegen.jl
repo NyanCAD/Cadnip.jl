@@ -2,7 +2,7 @@
 
 using Test
 using SpiceArmyKnife
-using SpectreNetlistParser
+using NyanSpectreNetlistParser
 
 """
     check_roundtrip(code, simulator)
@@ -15,17 +15,17 @@ function check_roundtrip(code, simulator)
     # Note: Use implicit_title=false since test cases don't have SPICE title lines
     lang = language(simulator)
     ast1 = if lang == :spice
-        SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
+        NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
     else
-        SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spectre)
+        NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spectre)
     end
     gen1 = generate_code(ast1, simulator)
 
     # Second round: parse generated output
     ast2 = if lang == :spice
-        SpectreNetlistParser.parse(IOBuffer(gen1); start_lang=:spice, implicit_title=false)
+        NyanSpectreNetlistParser.parse(IOBuffer(gen1); start_lang=:spice, implicit_title=false)
     else
-        SpectreNetlistParser.parse(IOBuffer(gen1); start_lang=:spectre)
+        NyanSpectreNetlistParser.parse(IOBuffer(gen1); start_lang=:spectre)
     end
     gen2 = generate_code(ast2, simulator)
 
@@ -75,14 +75,14 @@ I1 (n1 n2 vdd gnd) inv
     @testset "SPICE Models" begin
         @testset "Simple model" begin
             spice = ".model nmos nmos level=14\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test output == ".model nmos nmos level=14\n"
         end
 
         @testset "Model with parameters" begin
             spice = ".model nmos nmos level=14 vto=0.7 kp=100u\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test output == ".model nmos nmos level=14 vto=0.7 kp=100u\n"
         end
@@ -91,7 +91,7 @@ I1 (n1 n2 vdd gnd) inv
             # Model with documentation-only parameters (similar to Cordell models)
             # Changed values to avoid copyright - only parameter names matter
             spice = ".model testdiode D(Is=1n Rs=2.0 N=1.5 Cjo=3p M=.5 tt=10n Iave=100m Vpk=50 mfg=TEST001)\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
 
             # Should contain standard parameters
@@ -111,7 +111,7 @@ I1 (n1 n2 vdd gnd) inv
         @testset "ngspice filters type and rating parameters" begin
             # BJT model with additional documentation parameters
             spice = ".model testbjt npn(Is=1e-15 BF=100 VAF=200 Vceo=100 Icrating=5 type=npn)\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
 
             # Should contain standard parameters
@@ -129,7 +129,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "ngspice converts PSPICE temperature parameters" begin
                 # Model with PSPICE-specific temperature parameters (from MicroCap library)
                 spice = ".model DBDMOD D IS=1E-015 N=0.5 T_MEASURED=25 T_ABS=25\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Ngspice())
 
                 # Should contain standard parameters unchanged
@@ -148,7 +148,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "pspice preserves PSPICE temperature parameters" begin
                 # Model with PSPICE-specific temperature parameters
                 spice = ".model DBDMOD D IS=1E-015 N=0.5 T_MEASURED=25 T_ABS=25\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Pspice())
 
                 # Should preserve PSPICE temperature parameter names
@@ -163,7 +163,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "T_REL_GLOBAL conversion" begin
                 # Test T_REL_GLOBAL → dtemp conversion
                 spice = ".model TESTMOD D IS=1E-12 T_REL_GLOBAL=5\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Ngspice())
 
                 @test occursin("DTEMP=5", output)
@@ -173,7 +173,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "Mixed temperature and other parameters" begin
                 # Real-world example from MicroCap vishaydiode.lib
                 spice = ".MODEL RBVCMOD RES TC1=0.00107 T_MEASURED=25\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Ngspice())
 
                 # Should preserve TC1 unchanged
@@ -186,7 +186,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "Case insensitive conversion" begin
                 # Temperature parameter names should be case-insensitive
                 spice = ".model TEST D t_abs=25 T_MEASURED=30 T_Rel_Global=5\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Ngspice())
 
                 @test occursin("TEMP=25", output)
@@ -200,7 +200,7 @@ I1 (n1 n2 vdd gnd) inv
                 # VACASK Verilog-A models use tnom as the primary parameter
                 # ngspice models may use tref as a compatibility alias
                 spice = ".model DMOD D IS=1E-12 TREF=27\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, VACASK())
 
                 # Should convert TREF → tnom
@@ -211,7 +211,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "VACASK converts TREF (uppercase) to tnom" begin
                 # Test case insensitive conversion
                 spice = ".model DMOD D IS=1E-12 TREF=25\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, VACASK())
 
                 @test occursin("tnom=25", output)
@@ -221,7 +221,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "VACASK preserves tnom unchanged" begin
                 # If the model already uses tnom, keep it as-is
                 spice = ".model DMOD D IS=1E-12 TNOM=30\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, VACASK())
 
                 @test occursin("tnom=30", output)
@@ -230,7 +230,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "VACASK converts tref in instances" begin
                 # Test instance parameter conversion
                 spice = "D1 1 0 DMOD TREF=27\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, VACASK())
 
                 @test occursin("tnom=27", output)
@@ -240,7 +240,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "VACASK mixed parameters with tref" begin
                 # Test that other parameters are preserved while tref is converted
                 spice = ".model RMOD R RSH=10 TREF=25 TC1=0.001\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, VACASK())
 
                 @test occursin("rsh=10", lowercase(output))
@@ -254,7 +254,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "gnucap converts ** to pow()" begin
                 # Gnucap does not support ** operator, requires pow() function
                 spice = ".param x={2**3}\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Gnucap())
 
                 # Should convert ** to pow()
@@ -265,7 +265,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "ngspice preserves ** operator" begin
                 # Ngspice supports ** operator natively
                 spice = ".param x={2**3}\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Ngspice())
 
                 # Should preserve ** operator
@@ -276,7 +276,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "gnucap converts ** in complex expressions" begin
                 # Test ** conversion in nested expressions
                 spice = ".param y={(a+b)**2}\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Gnucap())
 
                 # Should convert ** to pow()
@@ -288,7 +288,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "gnucap preserves other operators" begin
                 # Test that other operators are not affected
                 spice = ".param z={a+b*c/d}\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Gnucap())
 
                 # Should preserve all operators
@@ -300,7 +300,7 @@ I1 (n1 n2 vdd gnd) inv
             @testset "gnucap converts multiple ** operators" begin
                 # Test expression with multiple power operations
                 spice = ".param w={2**3 + 4**5}\n"
-                ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
                 output = generate_code(ast, Gnucap())
 
                 # Both ** should be converted to pow()
@@ -314,7 +314,7 @@ I1 (n1 n2 vdd gnd) inv
     @testset "SPICE Subcircuits" begin
         @testset "Empty subcircuit" begin
             spice = ".subckt test a b\n.ends test\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             # Reconstructed code may have slightly different spacing
             @test occursin(".subckt test", output)
@@ -323,7 +323,7 @@ I1 (n1 n2 vdd gnd) inv
 
         @testset "Subcircuit with body" begin
             spice = ".subckt inv in out vdd gnd\nM1 out in vdd vdd pmos w=2u\n.ends inv\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             # Output will have reconstructed spacing
             @test occursin(".subckt inv", output)
@@ -333,7 +333,7 @@ I1 (n1 n2 vdd gnd) inv
 
         @testset "Subcircuit with parameters" begin
             spice = ".subckt res2 a b r=1k\nR1 a b r\n.ends\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("r=1k", output)
         end
@@ -342,14 +342,14 @@ I1 (n1 n2 vdd gnd) inv
     @testset "SPICE Device Instances" begin
         @testset "Resistor" begin
             spice = "R1 in out 1k\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test output == "R1 in out 1k\n"
         end
 
         @testset "Capacitor" begin
             spice = "C1 n1 gnd 1p\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("C1", output)
             @test occursin("1p", output)
@@ -357,7 +357,7 @@ I1 (n1 n2 vdd gnd) inv
 
         @testset "MOSFET" begin
             spice = "M1 d g s b nmos w=1u l=100n\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("M1", output)
             @test occursin("nmos", output)
@@ -367,7 +367,7 @@ I1 (n1 n2 vdd gnd) inv
 
         @testset "Subcircuit call" begin
             spice = "X1 a b c d inverter\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("X1", output)
             @test occursin("inverter", output)
@@ -377,7 +377,7 @@ I1 (n1 n2 vdd gnd) inv
     @testset "Spectre Models" begin
         @testset "Simple model" begin
             spectre = "model nmos_mod bsim4 version=4.7\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
             output = generate_code(ast, SpectreADE())
             @test output == "model nmos_mod bsim4 version=4.7\n"
         end
@@ -386,7 +386,7 @@ I1 (n1 n2 vdd gnd) inv
     @testset "Spectre Subcircuits" begin
         @testset "Subcircuit with nodes" begin
             spectre = "subckt inv (in out vdd gnd)\nends inv\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
             output = generate_code(ast, SpectreADE())
             @test occursin("subckt inv", output)
             # Spacing may vary in reconstruction
@@ -398,7 +398,7 @@ I1 (n1 n2 vdd gnd) inv
     @testset "Spectre Instances" begin
         @testset "Instance with parameters" begin
             spectre = "I1 (n1 n2 vdd gnd) inverter w=1u\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spectre); start_lang=:spectre)
             output = generate_code(ast, SpectreADE())
             @test occursin("I1", output)
             @test occursin("inverter", output)
@@ -409,14 +409,14 @@ I1 (n1 n2 vdd gnd) inv
     @testset "Expressions" begin
         @testset "Binary expressions" begin
             spice = "R1 a b {2*rval}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("2 * rval", output) || occursin("2*rval", output)
         end
 
         @testset "Parameters with expressions" begin
             spice = "M1 d g s b nmos w={wval*2}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("wval", output)
         end
@@ -426,14 +426,14 @@ I1 (n1 n2 vdd gnd) inv
         @testset "Comments preserved" begin
             spice = "* This is a comment\nR1 a b 1k\n"
             # This test has a comment as first line, so it should use implicit_title=true
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
             output = generate_code(ast, Ngspice())
             @test occursin("* This is a comment", output)
         end
 
         @testset "Blank lines handled" begin
             spice = "R1 a b 1k\n\nC1 c d 1p\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             @test occursin("R1", output)
             @test occursin("C1", output)
@@ -454,7 +454,7 @@ M1 d g s b nmos w=1u
 X1 a b gnd rc_filter
 """
             # This test has a title comment as first line, so use implicit_title=true
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
             output = generate_code(ast, Ngspice())
 
             # Check all major components present
@@ -469,7 +469,7 @@ X1 a b gnd rc_filter
 
     @testset "IOBuffer output" begin
         spice = "R1 a b 1k\n"
-        ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+        ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
 
         io = IOBuffer()
         generate_code(ast, io, Ngspice())
@@ -481,7 +481,7 @@ X1 a b gnd rc_filter
     @testset "Title and Brace handling" begin
         @testset "Title line preserved" begin
             spice = "* Test Circuit Title\nR1 a b 1k\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
             output = generate_code(ast, Ngspice())
             @test occursin("Test Circuit Title", output)
         end
@@ -489,7 +489,7 @@ X1 a b gnd rc_filter
         @testset "Braced expressions" begin
             # SPICE allows braced expressions in parameter values
             spice = ".param test_val={2*3.14}\nR1 a b {test_val}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Ngspice())
             # Check for braced expression (may have spaces from expression handler)
             @test occursin(r"\{2\s*\*\s*3\.14\}", output)
@@ -506,7 +506,7 @@ X1 a b gnd rc_filter
 R1 in out res
 .ends test_random
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap(), options=Dict{Symbol,Any}(:spice_dialect => :ngspice))
 
             # Should contain _rdist_seed parameter
@@ -525,7 +525,7 @@ R1 in out res
 C1 in out cap
 .ends test_random2
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap(), options=Dict{Symbol,Any}(:spice_dialect => :ngspice))
 
             # Should contain _rdist_seed parameter
@@ -544,7 +544,7 @@ C1 in out cap
 R1 in out rsh
 .ends test_xyce
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap(), options=Dict{Symbol,Any}(:spice_dialect => :xyce))
 
             # Should use Xyce semantics with n default of 1
@@ -560,7 +560,7 @@ R1 in out rsh
 R1 in out r
 .ends test_xyce_gauss
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap(), options=Dict{Symbol,Any}(:spice_dialect => :xyce))
 
             # Xyce semantics: stddev = (α * μ) / n
@@ -577,7 +577,7 @@ R1 in out r
 R1 in out 1k
 .ends test_divzero
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap(), options=Dict{Symbol,Any}(:spice_dialect => :ngspice))
 
             # Should have protection: when sigma=0, returns nominal
@@ -591,7 +591,7 @@ R1 in out 1k
 R1 in out 1k
 .ends simple_res
 """
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, Gnucap())
 
             # Should contain _rdist_seed parameter
@@ -791,7 +791,7 @@ R1 in out 1k
         @testset "gauss() maps to nominal value" begin
             # VACASK doesn't support gauss() - should return nominal value only
             spice = ".param r1={gauss(100, 5, 3)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have just the nominal value (100), not the full function
@@ -802,7 +802,7 @@ R1 in out 1k
         @testset "agauss() maps to nominal value" begin
             # VACASK doesn't support agauss() - should return nominal value only
             spice = ".param cap={agauss(10p, 0.5p, 3)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have just the nominal value (10p), not the full function
@@ -813,7 +813,7 @@ R1 in out 1k
         @testset "aunif() maps to nominal value" begin
             # VACASK doesn't support aunif() - should return nominal value only
             spice = ".param tol={aunif(50, 5)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have just the nominal value (50), not the full function
@@ -824,7 +824,7 @@ R1 in out 1k
         @testset "unif() maps to nominal value" begin
             # VACASK doesn't support unif() - should return nominal value only
             spice = ".param width={unif(2u, 0.1)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have just the nominal value (2u), not the full function
@@ -835,7 +835,7 @@ R1 in out 1k
         @testset "limit() maps to nominal value" begin
             # VACASK doesn't support limit() - should return nominal value only
             spice = ".param vth={limit(0.7, 0.05)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have just the nominal value (0.7), not the full function
@@ -846,7 +846,7 @@ R1 in out 1k
         @testset "ngspice gauss with 1 arg defaults to 1.0" begin
             # Special case: ngspice gauss(sigma) defaults nominal=1.0
             spice = ".param factor={gauss(3)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false, spice_dialect=:ngspice)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false, spice_dialect=:ngspice)
             output = generate_code(ast, VACASK(); options=Dict{Symbol, Any}(:spice_dialect => :ngspice))
 
             # Should use default nominal value 1.0
@@ -857,7 +857,7 @@ R1 in out 1k
         @testset "Gaussian functions in model parameters" begin
             # Real-world example: model with statistical variation
             spice = ".model NMOS NMOS vto={gauss(0.7, 0.05, 3)} kp={agauss(100u, 10u, 3)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should have nominal values only
@@ -870,7 +870,7 @@ R1 in out 1k
         @testset "Other functions preserved" begin
             # Non-statistical functions should be preserved
             spice = ".param result={sqrt(100) + sin(3.14)}\n"
-            ast = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
+            ast = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=false)
             output = generate_code(ast, VACASK())
 
             # Should preserve regular function calls

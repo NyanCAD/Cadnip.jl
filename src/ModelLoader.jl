@@ -1,9 +1,9 @@
 module ModelLoader
 
-using ..CedarSim
-using CedarSim: VANode, VAFile
+using ..Cadnip
+using Cadnip: VANode, VAFile
 
-using ..VerilogAParser
+using ..NyanVerilogAParser
 using Scratch
 
 const model_cache_dir = Ref{String}()
@@ -34,8 +34,8 @@ function load_VA_model(model_path::AbstractString)
 
     module_content = sprint() do io
         println(io, "module ", module_name)
-        println(io, "using CedarSim: ModelLoader, CedarSim, VerilogAEnvironment, VAFile")
-        println(io, "const srcfiles = CedarSim.parse_and_eval_vafile(@__MODULE__, VAFile(abspath($(repr(model_path)))))")
+        println(io, "using Cadnip: ModelLoader, Cadnip, VerilogAEnvironment, VAFile")
+        println(io, "const srcfiles = Cadnip.parse_and_eval_vafile(@__MODULE__, VAFile(abspath($(repr(model_path)))))")
         println(io, "foreach(f -> Base.include_dependency(f.path), srcfiles)")
         println(io, "end # module")
     end

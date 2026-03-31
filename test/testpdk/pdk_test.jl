@@ -8,10 +8,10 @@ This tests:
 """
 
 using Test
-using CedarSim
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit
-using CedarSim: dc!
-using CedarSim: ParamLens
+using Cadnip
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit
+using Cadnip: dc!
+using Cadnip: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
 const test_va_path = joinpath(@__DIR__, "test_resistor.va")
@@ -19,10 +19,10 @@ const circuit_with_va_path = joinpath(@__DIR__, "circuit_with_va.spice")
 
 # Load PDK modules directly into this module (like a real PDK package would do)
 # This is the preferred API for precompilation - evals internally and returns modules
-const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
+const corners = Cadnip.load_mna_modules(@__MODULE__, testpdk_path)
 
 # Load VA device module (like a device package would do)
-const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
+const va_device_mod = Cadnip.load_mna_va_module(@__MODULE__, test_va_path)
 
 @testset "PDK MNA Module Generation" begin
 
@@ -40,19 +40,19 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
 
     @testset "load_mna_modules expression form" begin
         # Test backward compatible expression-returning form
-        expr = CedarSim.load_mna_modules(testpdk_path)
+        expr = Cadnip.load_mna_modules(testpdk_path)
         @test expr.head == :toplevel
         @test length(expr.args) == 3
     end
 
     @testset "load_mna_modules with names filter" begin
         # Load only typical section (expression form)
-        expr = CedarSim.load_mna_modules(testpdk_path; names=["typical"])
+        expr = Cadnip.load_mna_modules(testpdk_path; names=["typical"])
         @test length(expr.args) == 1
     end
 
     @testset "load_mna_pdk single section expression" begin
-        expr = CedarSim.load_mna_pdk(testpdk_path; section="typical")
+        expr = Cadnip.load_mna_pdk(testpdk_path; section="typical")
         @test expr.head == :module  # Direct module expression
     end
 
@@ -70,7 +70,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             lens = ParamLens(params)
 
@@ -117,7 +117,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 lens = ParamLens(params)
 
@@ -167,7 +167,7 @@ end
 
     @testset "load_mna_va_module expression form" begin
         # Test expression-returning form
-        expr = CedarSim.load_mna_va_module(test_va_path)
+        expr = Cadnip.load_mna_va_module(test_va_path)
         @test expr.head == :toplevel
         @test length(expr.args) == 2  # module def + using statement
     end
@@ -178,7 +178,7 @@ end
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
 
             # Nodes
@@ -193,7 +193,7 @@ end
             stamp!(VoltageSource(1.0), ctx, vin, 0)
 
             # Load resistor to ground (using built-in Resistor)
-            stamp!(CedarSim.MNA.Resistor(500.0), ctx, out, 0)
+            stamp!(Cadnip.MNA.Resistor(500.0), ctx, out, 0)
 
             return ctx
         end
@@ -215,7 +215,7 @@ end
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
 
                 vin = get_node!(ctx, :vin)
@@ -229,7 +229,7 @@ end
                 stamp!(VoltageSource(1.0), ctx, vin, 0)
 
                 # Fixed load
-                stamp!(CedarSim.MNA.Resistor(1000.0), ctx, out, 0)
+                stamp!(Cadnip.MNA.Resistor(1000.0), ctx, out, 0)
 
                 return ctx
             end
@@ -266,13 +266,13 @@ end
 
     @testset "Build circuit from SPICE with VA device" begin
         # Parse the SPICE circuit
-        using SpectreNetlistParser
-        ast = SpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
+        using NyanSpectreNetlistParser
+        ast = NyanSpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
         @test !ast.ps.errored
 
         # Build the MNA circuit, passing the VA device module
         # This is equivalent to what happens when SPICE uses .hdl "jlpkg://..."
-        builder_code = CedarSim.make_mna_circuit(ast;
+        builder_code = Cadnip.make_mna_circuit(ast;
             circuit_name=:va_circuit,
             imported_hdl_modules=[test_resistor_module])
 
@@ -295,7 +295,7 @@ end
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
 
             vin = get_node!(ctx, :vin)
@@ -306,7 +306,7 @@ end
             stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
             # Regular resistor
-            stamp!(CedarSim.MNA.Resistor(500.0), ctx, out, 0)
+            stamp!(Cadnip.MNA.Resistor(500.0), ctx, out, 0)
 
             # Voltage source
             stamp!(VoltageSource(1.0), ctx, vin, 0)
@@ -320,9 +320,9 @@ end
         ctx_julia = build_julia_circuit((;), MNASpec())
 
         # Solve SPICE-defined circuit
-        using SpectreNetlistParser
-        ast = SpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
-        builder_code = CedarSim.make_mna_circuit(ast;
+        using NyanSpectreNetlistParser
+        ast = NyanSpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
+        builder_code = Cadnip.make_mna_circuit(ast;
             circuit_name=:va_circuit2,
             imported_hdl_modules=[test_resistor_module])
         builder = @eval $builder_code

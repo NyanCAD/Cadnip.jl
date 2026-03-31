@@ -1,6 +1,6 @@
-using CedarSim
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 using GF180MCUPDK
 
 include("../common.jl")
@@ -9,15 +9,15 @@ import BSIM4
 const bsim4 = load_VA_model(BSIM4.bsim4_va)
 
 path = joinpath(@__DIR__, "gf180ref.spice")
-sa2 = SpectreNetlistParser.parsefile(path);
-code2 = CedarSim.make_spectre_circuit(sa2, [], []);
+sa2 = NyanSpectreNetlistParser.parsefile(path);
+code2 = Cadnip.make_spectre_circuit(sa2, [], []);
 fn2 = eval(code2)
 # fn()
 
-p2 = CedarSim.ParamObserver()
+p2 = Cadnip.ParamObserver()
 fn2(p2)
 m2 = p2.x0.m0
-param2 = CedarSim.modelparams(m2)
+param2 = Cadnip.modelparams(m2)
 
 debug_gf = DAECompiler.DebugConfig(
     ir_levels = DAECompiler.IRCodeRecords(),
@@ -25,7 +25,7 @@ debug_gf = DAECompiler.DebugConfig(
     verify_ir_levels=true,
     ir_log = joinpath(@__DIR__, "..", "ir", "sky130", "gf180"))
 
-circuit = CedarSim.DefaultSim(fn2)
+circuit = Cadnip.DefaultSim(fn2)
 time_bounds = (0.0, 2e-3)
 sys = CircuitIRODESystem(circuit; debug_config=debug_gf)
 prob = DAEProblem(sys, nothing, nothing, time_bounds, circuit)
@@ -43,7 +43,7 @@ if @isdefined param
     end
 
     @eval function fn3()
-        $fn2(CedarSim.ParamLens((;x0=(;m0=$param))))
+        $fn2(Cadnip.ParamLens((;x0=(;m0=$param))))
     end
 
     debug_gf_sky = DAECompiler.DebugConfig(
@@ -52,7 +52,7 @@ if @isdefined param
         # verify_ir_levels=true,
         ir_log = joinpath(@__DIR__, "..", "ir", "sky130", "gf180_sky"))
 
-    circuit = CedarSim.DefaultSim(fn3)
+    circuit = Cadnip.DefaultSim(fn3)
     time_bounds = (0.0, 2e-3)
     sys = CircuitIRODESystem(circuit; debug_config=debug_gf_sky)
     prob = DAEProblem(sys, nothing, nothing, time_bounds, circuit)

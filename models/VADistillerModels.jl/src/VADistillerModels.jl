@@ -9,7 +9,7 @@ BJT, JFETs, MOSFETs) as well as advanced models (BSIM3v3, BSIM4v8, VDMOS).
 # Usage
 ```julia
 using VADistillerModels
-using CedarSim.MNA: MNAContext, stamp!, get_node!
+using Cadnip.MNA: MNAContext, stamp!, get_node!
 
 ctx = MNAContext()
 vcc = get_node!(ctx, :vcc)
@@ -17,7 +17,7 @@ stamp!(sp_resistor(resistance=1000.0), ctx, vcc, 0; _mna_spec_=spec, _mna_x_=Flo
 ```
 
 # Model Registration
-This package registers models with CedarSim.ModelRegistry for automatic
+This package registers models with Cadnip.ModelRegistry for automatic
 device type resolution. SPICE netlists can use standard model cards:
 
 ```spice
@@ -40,12 +40,12 @@ M1 d g s b mymos w=10u l=1u
 """
 module VADistillerModels
 
-using CedarSim
-using CedarSim: VAFile
-using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
+using Cadnip
+using Cadnip: VAFile
+using Cadnip.MNA: MNAContext, MNASpec, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
-using CedarSim.ModelRegistry: getmodel, getparams, AbstractSimulator
-using VerilogAParser
+using Cadnip.ModelRegistry: getmodel, getparams, AbstractSimulator
+using NyanVerilogAParser
 using PrecompileTools: @compile_workload
 # Model directory
 const VA_DIR = joinpath(@__DIR__, "..", "va")
@@ -80,8 +80,8 @@ end
 # Parse and evaluate all models at module load time
 for name in MODEL_NAMES
     filepath = joinpath(VA_DIR, name * ".va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 end
 
 # Export all sp_ types
@@ -106,85 +106,85 @@ export sp_vdmos_module, sp_bsim3v3_module, sp_bsim4v8_module
 #==============================================================================#
 
 # MOSFET level 1 (Shichman-Hodges)
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos1
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # MOSFET level 2
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos2
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # MOSFET level 3
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos3
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{3}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # MOSFET level 6
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos6
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{6}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # MOSFET level 9
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_mos9
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{9}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # BSIM3v3 (levels 8, 49 in ngspice)
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim3v3
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{8}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{49}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
 
 # BSIM4v8 (levels 14, 54 in ngspice)
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
-CedarSim.ModelRegistry.getmodel(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
-CedarSim.ModelRegistry.getmodel(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
-CedarSim.ModelRegistry.getparams(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+Cadnip.ModelRegistry.getmodel(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+Cadnip.ModelRegistry.getmodel(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bsim4v8
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{14}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
+Cadnip.ModelRegistry.getparams(::Val{:nmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pmos}, ::Val{54}, ::Nothing, ::Type{<:AbstractSimulator}) = (TYPE=-1,)
 
 # BJT (Gummel-Poon) - default level (1 or no level)
-CedarSim.ModelRegistry.getmodel(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
-CedarSim.ModelRegistry.getmodel(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
-CedarSim.ModelRegistry.getmodel(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
-CedarSim.ModelRegistry.getmodel(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
-CedarSim.ModelRegistry.getparams(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
-CedarSim.ModelRegistry.getparams(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+Cadnip.ModelRegistry.getmodel(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+Cadnip.ModelRegistry.getmodel(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+Cadnip.ModelRegistry.getmodel(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_bjt
+Cadnip.ModelRegistry.getparams(::Val{:npn}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pnp}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getparams(::Val{:npn}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pnp}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # JFET (levels 1, 2)
-CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
-CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
-CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
-CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
-CedarSim.ModelRegistry.getmodel(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
-CedarSim.ModelRegistry.getmodel(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
-CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
-CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
-CedarSim.ModelRegistry.getparams(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
-CedarSim.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getmodel(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+Cadnip.ModelRegistry.getmodel(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+Cadnip.ModelRegistry.getmodel(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+Cadnip.ModelRegistry.getmodel(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet1
+Cadnip.ModelRegistry.getmodel(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
+Cadnip.ModelRegistry.getmodel(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = sp_jfet2
+Cadnip.ModelRegistry.getparams(::Val{:njf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getparams(::Val{:njf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
+Cadnip.ModelRegistry.getparams(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
+Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
 # Precompile stamp! methods for all three method variants:
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
 # 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
 # 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
 @compile_workload begin
-    using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
+    using Cadnip.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
     # Helper to precompile all three method variants for a device

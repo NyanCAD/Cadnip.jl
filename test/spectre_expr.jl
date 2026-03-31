@@ -1,10 +1,10 @@
 module test_spectre
 
-using CedarSim
-using SpectreNetlistParser
-using SpectreNetlistParser.SPICENetlistParser: SPICENetlistCSTParser
+using Cadnip
+using NyanSpectreNetlistParser
+using NyanSpectreNetlistParser.SPICENetlistParser: SPICENetlistCSTParser
 using Test
-using CedarSim.SpectreEnvironment
+using Cadnip.SpectreEnvironment
 
 # MNA is always available - DAECompiler simulation was removed
 
@@ -20,11 +20,11 @@ r6 (1 0) resistor r=((p1<1) ? p4+1 : p3)  // the ternary operator
 
 @testset "spectre parameters" begin
     # Test parsing
-    ast = SpectreNetlistParser.parse(code)
+    ast = NyanSpectreNetlistParser.parse(code)
     @test ast !== nothing
 
     # Test code generation (produces valid Julia AST) using new MNA API
-    fn = CedarSim.make_mna_circuit(ast)
+    fn = Cadnip.make_mna_circuit(ast)
     @test fn isa Expr
 end
 
@@ -45,12 +45,12 @@ end
     r2 (Y VDD) resistor R=10k
     v1 (VDD 0) vsource type=dc dc=0.7
     """
-    ast = SpectreNetlistParser.parse(spectre_code)
+    ast = NyanSpectreNetlistParser.parse(spectre_code)
     @test ast !== nothing
     @test length(ast.stmts) >= 3
 
     # Use new MNA API
-    code = CedarSim.make_mna_circuit(ast)
+    code = Cadnip.make_mna_circuit(ast)
     @test code isa Expr
 end
 
@@ -61,11 +61,11 @@ end
     R1 vcc out 1k
     C1 out 0 1u
     """
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
     @test ast !== nothing
 
     # Use new MNA API
-    code = CedarSim.make_mna_circuit(ast)
+    code = Cadnip.make_mna_circuit(ast)
     @test code isa Expr
 end
 

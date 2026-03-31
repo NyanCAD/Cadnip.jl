@@ -1,6 +1,6 @@
 using PackageCompiler, Pkg, TOML, Base.BinaryPlatforms
 
-# Look up current CedarSim version
+# Look up current Cadnip version
 cedar_dir = dirname(dirname(@__DIR__))
 cedar_version = TOML.parsefile(joinpath(cedar_dir, "Project.toml"))["version"]
 
@@ -17,10 +17,10 @@ cpu_target = cpu_targets[arch(HostPlatform())]
 
 # Activate the main `Cedar` project, as that's what `create_sysimage` expects
 Pkg.activate(cedar_dir)
-sysimage_path = joinpath(@__DIR__, "build", "CedarSim-v$(cedar_version).$(platform_dlext(HostPlatform()))")
+sysimage_path = joinpath(@__DIR__, "build", "Cadnip-v$(cedar_version).$(platform_dlext(HostPlatform()))")
 mkpath(dirname(sysimage_path))
 create_sysimage(
-    ["CedarSim"];
+    ["Cadnip"];
     sysimage_path,
     cpu_target,
 )

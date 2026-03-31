@@ -3,12 +3,12 @@ module params_tests
 include("common.jl")
 
 # MNA imports for parameter tests
-using CedarSim.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: Resistor, VoltageSource
-using CedarSim.MNA: voltage, current
-using CedarSim.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
-using CedarSim: ParamLens, IdentityLens
-using CedarSim: dc!
+using Cadnip.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using Cadnip.MNA: Resistor, VoltageSource
+using Cadnip.MNA: voltage, current
+using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
+using Cadnip: ParamLens, IdentityLens
+using Cadnip: dc!
 
 #==============================================================================#
 # Test 1: Simple parameterized circuit (replaces ParCir struct)
@@ -118,15 +118,15 @@ sol = dc!(circuit)
 #==============================================================================#
 # Test 4: CairoMakie exploration (skip for MNA - requires different API)
 #
-# The original test used CedarSim.explore(sol) which expects DAECompiler solution.
+# The original test used Cadnip.explore(sol) which expects DAECompiler solution.
 # MNA solutions use a different format. Skip or adapt as needed.
 #==============================================================================#
 
 # Note: MNA solution exploration would use different API
 # Keeping as placeholder for future MNA visualization support
 # import CairoMakie
-# fig = CedarSim.explore(sol)
-# plots_dir = joinpath(Base.pkgdir(CedarSim), "test", "plots")
+# fig = Cadnip.explore(sol)
+# plots_dir = joinpath(Base.pkgdir(Cadnip), "test", "plots")
 # mkpath(plots_dir)
 # CairoMakie.save(joinpath(plots_dir, "explore.png"), fig)
 
@@ -154,20 +154,20 @@ l1 vcc out 1m
 x1 out 0 outer
 """
 
-ast = SpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
+ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
 
 # Test MNA circuit building with parameters
 # Generate MNA builder from SPICE
-mna_code = CedarSim.make_mna_circuit(ast)
+mna_code = Cadnip.make_mna_circuit(ast)
 m = Module()
-Base.eval(m, :(using CedarSim.MNA))
-Base.eval(m, :(using CedarSim: ParamLens, AbstractParamLens, ParamObserver, @param))
-Base.eval(m, :(using CedarSim.SpectreEnvironment))
+Base.eval(m, :(using Cadnip.MNA))
+Base.eval(m, :(using Cadnip: ParamLens, AbstractParamLens, ParamObserver, @param))
+Base.eval(m, :(using Cadnip.SpectreEnvironment))
 mna_builder = Base.eval(m, mna_code)
 
 # Test ParamObserver with MNA circuits
 # ParamObserver collects parameter hierarchy when circuit is called
-observer = CedarSim.ParamObserver(foo=200)
+observer = Cadnip.ParamObserver(foo=200)
 spec = MNASpec(temp=27.0, mode=:dcop)
 ctx = Base.invokelatest(mna_builder, observer, spec)
 
@@ -218,7 +218,7 @@ sol = dc!(circuit)
 @test isapprox_deftol(voltage(sol, :out), -100)
 
 # Test that our 'default parameterization' helper sees `foo` and `inner`
-default_params = CedarSim.get_default_parameterization(ast)
+default_params = Cadnip.get_default_parameterization(ast)
 @test (:inner => 1.0) ∈ default_params
 @test (:foo => 1.0) ∈ default_params
 
@@ -230,19 +230,19 @@ default_params = CedarSim.get_default_parameterization(ast)
 #==============================================================================#
 
 io = IOBuffer()
-CedarSim.alter(io, ast, foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))
+Cadnip.alter(io, ast, foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))
 modified = String(take!(io))
 replaced = replace(spice_ckt,
     "foo =  1" => "foo =  2.0",
     "foo=foo+2000" => "foo=3.0",
     "r= 'foo'" => "r= 4.0")
 @test modified == replaced
-new_ast = SpectreNetlistParser.SPICENetlistParser.parse(modified)
-default_params = CedarSim.get_default_parameterization(new_ast)
+new_ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(modified)
+default_params = Cadnip.get_default_parameterization(new_ast)
 @test (:foo => 2) ∈ default_params
 
 # Test that AST alter works with ParamLens
-CedarSim.alter(io, ast, CedarSim.ParamLens((foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))))
+Cadnip.alter(io, ast, Cadnip.ParamLens((foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))))
 modified = String(take!(io))
 @test modified == replaced
 

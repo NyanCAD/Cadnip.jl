@@ -18,7 +18,7 @@
 #
 # Usage Example:
 # ```julia
-# using CedarSim.MNA
+# using Cadnip.MNA
 #
 # # Create context and stamp circuit
 # ctx = MNAContext()

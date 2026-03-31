@@ -11,8 +11,8 @@
 #   solver: IDA (default), FBDF, or Rodas5P
 #==============================================================================#
 
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools

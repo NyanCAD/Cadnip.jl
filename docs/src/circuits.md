@@ -1,35 +1,35 @@
 # Circuit representation
 
-## CedarSim as a compiler
+## Cadnip as a compiler
 
-The core functionality provided by CedarSim is to compile various circuit-specfific
+The core functionality provided by Cadnip is to compile various circuit-specfific
 input formats into an executable representation that is then passed on to
 the backend for further processing. For simulation, this backend is generally
 [DAECompiler](https://help.juliahub.com/daecompiler/stable/), but other backends
-are possible for other analysis tasks. CedarSim is designed to,
+are possible for other analysis tasks. Cadnip is designed to,
 as much as is feasible, re-use and integrate with the capabilities of the Julia
-compiler. As such, CedarSim uses Julia code as its executable representation.
-As a result, you may, and it is occasionally helpful, to think about CedarSim
+compiler. As such, Cadnip uses Julia code as its executable representation.
+As a result, you may, and it is occasionally helpful, to think about Cadnip
 as a custom frontend for the Julia language that parses Julia code that happens
 to be written in languages that are not Julia.
 
 # Basic circuits
 
-CedarSim is ordinarily driven by Spectre or SPICE netlists. However, it is
+Cadnip is ordinarily driven by Spectre or SPICE netlists. However, it is
 possible to construct the executable representation manually. It is perhaps
 easiest to see this with an example:
 
 ```@example basic-circuit
-using CedarSim
+using Cadnip
 
 # Create a 1kΩ resistor device template
-const R1k = CedarSim.SimpleResistor(1000.)
+const R1k = Cadnip.SimpleResistor(1000.)
 
 # Cretae a 1μF capacitor device template
-const C1μ = CedarSim.SimpleCapacitor(1e-6)
+const C1μ = Cadnip.SimpleCapacitor(1e-6)
 
 # Create a Gnd device template
-const G = CedarSim.Gnd()
+const G = Cadnip.Gnd()
 
 function my_rc_circuit()
     # Create two nets
@@ -127,7 +127,7 @@ There are some addditional convenience available.
 
 ### Gnd special case
 
-CedarSim exports the function:
+Cadnip exports the function:
 
 ```@example basic-circuit
 gnd() = (g = net(); Gnd()(g); g)
@@ -136,7 +136,7 @@ gnd() = (g = net(); Gnd()(g); g)
 which can be used as a covenient shorthand to obtain ground for situations where
 it's more convenient to think of ground as a net rather than a device.
 
-### `CedarSim.DeviceShorthands`
+### `Cadnip.DeviceShorthands`
 
 The `DeviceShorthands` submodule exports short aliases for the basic SPICE devices
 using function names that (in general) match their SPICE prefix. These can
@@ -153,7 +153,7 @@ respectively.
 For example, our running RC circuit example, could have been simply written as:
 
 ```@broken-example basic-circuit
-using CedarSim.DeviceShorthands
+using Cadnip.DeviceShorthands
 
 using CedarEDA.SIFactors: k, μ
 
@@ -170,7 +170,7 @@ RC2() = (RC(); RC())
 ```
 
 described a circuit with four top level devices (`sys.R1`, `sys.R2`, `sys.C1`, `sys.C2`). To instead create a hierachichal
-circuit, `CedarSim` provides the `SubCircuit` device.
+circuit, `Cadnip` provides the `SubCircuit` device.
 
 ``` @broken-example basic-circuit
 RC2_sub() = (SubCircuit(RC)(); SubCircuit(RC)();)

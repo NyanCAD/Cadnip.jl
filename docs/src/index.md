@@ -1,3 +1,3 @@
-# CedarSim.jl
+# Cadnip.jl
 
-Documentation for CedarSim.jl.
+Documentation for Cadnip.jl.

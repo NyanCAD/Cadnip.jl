@@ -1,6 +1,6 @@
 using OrderedCollections
 using Graphs
-using VerilogAParser
+using NyanVerilogAParser
 
 const JLPATH_PREFIX = "jlpkg://"
 
@@ -285,11 +285,11 @@ Uses the ModelRegistry dispatch system to find registered models. Falls back to
 searching imported HDL modules (Verilog-A `.hdl` includes) if no registered model
 is found.
 
-Returns a GlobalRef to the model type, or GlobalRef(CedarSim, :UnimplementedDevice)
+Returns a GlobalRef to the model type, or GlobalRef(Cadnip, :UnimplementedDevice)
 if no suitable model is found.
 
 Note: For VA models to be resolved, they must either:
-1. Be registered with CedarSim.ModelRegistry (preferred for standard device types)
+1. Be registered with Cadnip.ModelRegistry (preferred for standard device types)
 2. Be included via `.hdl` directive in the SPICE netlist
 """
 function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, stmt; dialect=:ngspice)
@@ -298,7 +298,7 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
     level_int = level === nothing ? nothing : Int(level)
 
     # Try the model registry first (preferred path)
-    model_type = CedarSim.getmodel(devkind, level_int, version_str)
+    model_type = Cadnip.getmodel(devkind, level_int, version_str)
 
     if model_type !== nothing
         # Found in registry - convert type to GlobalRef
@@ -318,9 +318,9 @@ function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, 
 
     # No model found - warn and return UnimplementedDevice
     file = stmt.ps.srcfile.path
-    line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
+    line = NyanSpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
     @warn "Device $devkind at level $level not implemented. Register with ModelRegistry or include via .hdl" _file=file _line=line
-    return GlobalRef(CedarSim, :UnimplementedDevice)
+    return GlobalRef(Cadnip, :UnimplementedDevice)
 end
 
 function sema_visit_model!(scope::SemaResult, stmt::SNode{SP.Model})
@@ -510,7 +510,7 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                     if parse_cache !== nothing
                         includee = parse_and_cache_spc!(parse_cache, path)
                     else
-                        includee = SpectreNetlistParser.parsefile(path; implicit_title=false)
+                        includee = NyanSpectreNetlistParser.parsefile(path; implicit_title=false)
                     end
                     if !isa(includee, SemaResult)
                         includee = sema_file_or_section(includee; imps=imps, parse_cache=parse_cache, imported_hdl_modules)
@@ -806,7 +806,7 @@ end
 function sema_codegen_hdl(r::SemaResult)
     ret = Expr(:toplevel)
     for (_, (_, va)) in r.hdl_includes
-        push!(ret.args, CedarSim.make_mna_module(va))
+        push!(ret.args, Cadnip.make_mna_module(va))
     end
     return ret
 end

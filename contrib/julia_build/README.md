@@ -1,7 +1,7 @@
-# CedarSim julia build
+# Cadnip julia build
 
-This makefile contains the steps required to build an `x86_64-linux-gnu` build of Julia required for CedarSim.
-It is intended to be run periodically once a new version of Julia known to be compatible with the latest versions of CedarSim, DAECompiler, etc.. is identified.
+This makefile contains the steps required to build an `x86_64-linux-gnu` build of Julia required for Cadnip.
+It is intended to be run periodically once a new version of Julia known to be compatible with the latest versions of Cadnip, DAECompiler, etc.. is identified.
 It uploads to an S3 bucket which is then downloaded from in the CI builds.
 For interactive use, we suggest running `juliaup_cedar.sh` to setup various juliaup links to a locally-downloaded version of the same build.
 While there is preliminary support for maintaining multiple separate 'flavors' of a julia build here, most developers should just stick to the defaults.

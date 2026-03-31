@@ -20,12 +20,12 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNACircuit, MNASolutionAccessor, MNASpec
-using CedarSim.MNA: voltage, assemble!, CedarDCOp, CedarUICOp, solve_dc
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNACircuit, MNASolutionAccessor, MNASpec
+using Cadnip.MNA: voltage, assemble!, CedarDCOp, CedarUICOp, solve_dc
 using SciMLBase
-using CedarSim: tran!, parse_spice_to_mna
+using Cadnip: tran!, parse_spice_to_mna
 using OrdinaryDiffEq: Rodas5P
 using LinearSolve: KLUFactorization
 

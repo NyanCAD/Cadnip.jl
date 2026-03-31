@@ -1,5 +1,5 @@
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using Test
 
 @testset "Laplace and IDT operators" begin

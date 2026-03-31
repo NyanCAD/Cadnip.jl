@@ -1,8 +1,8 @@
-using CedarSim
-using CedarSim.MNA
+using Cadnip
+using Cadnip.MNA
 using Test
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 using DescriptorSystems
 using ControlSystemsBase
 using RobustAndOptimalControl  # provides ss(::DescriptorStateSpace) for bode plots
@@ -28,8 +28,8 @@ R5 vout 0 '2*res'
 """
 
 # Parse SPICE and create MNA circuit
-ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-circuit_code = CedarSim.make_mna_circuit(ast)
+ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+circuit_code = Cadnip.make_mna_circuit(ast)
 circuit_fn = eval(circuit_code)
 
 # Create MNACircuit with parameters
@@ -37,7 +37,7 @@ circ = MNACircuit(circuit_fn; res=R4_val)
 ac = ac!(circ)
 
 ωs = 2π .* acdec(20, 0.01, 10) # equivalent to spice .ac dec 10 0.01 10
-resp_sim = CedarSim.freqresp(ac, :vout, ωs) # compute frequency response
+resp_sim = Cadnip.freqresp(ac, :vout, ωs) # compute frequency response
 
 # analytic
 s = tf("s")
@@ -46,7 +46,7 @@ resp_an = ControlSystemsBase.freqrespv(H, ωs)
 
 @test resp_sim ≈ resp_an
 
-@test all(CedarSim.freqresp(ac, :vin, ωs) .≈ 1.0) # check directly-observed source
+@test all(Cadnip.freqresp(ac, :vin, ωs) .≈ 1.0) # check directly-observed source
 
 # Convert to ControlSystems state space, compute bode
 # RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion
@@ -61,8 +61,8 @@ mag_an, phase_an, w_an = bode(H, ωs)
 # L3 connects n1 to vout, so V_L3 = V(n1) - V(vout)
 # For an inductor: V = L * dI/dt, and I = H(s) * I_in
 # So V_L3 = s * L3 * H(s) in the frequency domain
-resp_n1 = CedarSim.freqresp(ac, :n1, ωs)
-resp_vout = CedarSim.freqresp(ac, :vout, ωs)
+resp_n1 = Cadnip.freqresp(ac, :n1, ωs)
+resp_vout = Cadnip.freqresp(ac, :vout, ωs)
 V_L3 = resp_n1 .- resp_vout
 
 G = s * L3_val * H
@@ -95,7 +95,7 @@ an_L3 = ControlSystemsBase.freqrespv(G, ωs)
 # Nonlinear Circuit AC Test - CMOS Inverter with sp_mos1 vs ngspice
 #==============================================================================#
 
-# CMOS inverter - compare CedarSim AC analysis with ngspice reference
+# CMOS inverter - compare Cadnip AC analysis with ngspice reference
 # Using MOS1 model with gate capacitances for frequency-dependent behavior
 
 # ngspice reference data (generated with ngspice-43):
@@ -131,9 +131,9 @@ const ngspice_inverter = [
     1.000000e+08  -4.32594e+00   3.011701e+01
 ]
 
-# CedarSim AC analysis with equivalent circuit (using model cards)
+# Cadnip AC analysis with equivalent circuit (using model cards)
 const cmos_inverter = sp"""
-* CMOS Inverter for AC analysis (CedarSim)
+* CMOS Inverter for AC analysis (Cadnip)
 .model pmos1 pmos level=1 vto=-0.7 kp=50e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15
 .model nmos1 nmos level=1 vto=0.7 kp=100e-6 lambda=0.01 cgso=1e-15 cgdo=1e-15
 Vdd vdd 0 DC 3.3
@@ -147,9 +147,9 @@ Cload vout 0 10f
 inverter_circ = MNACircuit(cmos_inverter)
 inverter_ac = ac!(inverter_circ)
 
-# Compute CedarSim response at ngspice frequencies
+# Compute Cadnip response at ngspice frequencies
 ωs_inv = 2π .* ngspice_inverter[:, 1]
-resp_cedar = CedarSim.freqresp(inverter_ac, :vout, ωs_inv)
+resp_cedar = Cadnip.freqresp(inverter_ac, :vout, ωs_inv)
 
 # ngspice reference as complex numbers
 resp_ngspice = Complex.(ngspice_inverter[:, 2], ngspice_inverter[:, 3])
