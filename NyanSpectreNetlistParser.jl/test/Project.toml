@@ -1,8 +1,8 @@
 [deps]
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
 DeepDiffs = "ab62b9b5-e342-54a8-a765-a90f495de1a6"
-NyanLexers = "8fc43420-9e17-4e89-a998-f4e9593a1dfc"
-NyanSpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
+NyanLexers = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
+NyanSpectreNetlistParser = "f050a39a-f089-4c65-a86a-958b8b907b9b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]

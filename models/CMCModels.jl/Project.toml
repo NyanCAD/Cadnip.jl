@@ -4,9 +4,9 @@ authors = ["JuliaHub, Inc. and other contributors"]
 version = "0.1.0"
 
 [deps]
-Cadnip = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
+Cadnip = "28ce5535-9df1-4533-abc1-da0fb7327efb"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-NyanVerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
+NyanVerilogAParser = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"
 
 [sources]
 Cadnip = {path = "../.."}
