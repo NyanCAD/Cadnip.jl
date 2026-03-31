@@ -1,15 +1,15 @@
 module sensitivity
 using Test
-using CedarSim, OrdinaryDiffEq, SciMLSensitivity, DAECompiler
+using Cadnip, OrdinaryDiffEq, SciMLSensitivity, DAECompiler
 using LinearSolve: KLUFactorization
-using CedarSim.VectorPrisms: AbstractRecordVector
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip.VectorPrisms: AbstractRecordVector
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 
-const R = CedarSim.SimpleResistor
-const C = CedarSim.SimpleCapacitor
-const L = CedarSim.SimpleInductor
-const V(v) = CedarSim.VoltageSource(dc=v)
+const R = Cadnip.SimpleResistor
+const C = Cadnip.SimpleCapacitor
+const L = Cadnip.SimpleInductor
+const V(v) = Cadnip.VoltageSource(dc=v)
 
 @testset "DefaultSim" begin
     @kwdef struct TwoResistorCircuit <: AbstractRecordVector{Float64}
@@ -26,7 +26,7 @@ const V(v) = CedarSim.VoltageSource(dc=v)
         Named(R(self.R2), "R2")(out, gnd)
         Named(Gnd(), "G")(gnd)
     end
-    circuit = CedarSim.DefaultSim(TwoResistorCircuit(1.0, 1.0))
+    circuit = Cadnip.DefaultSim(TwoResistorCircuit(1.0, 1.0))
     sys = CircuitIRODESystem(circuit);
 
     sprob = ODEForwardSensitivityProblem(sys, nothing, (0.0, 1e-5), circuit)
@@ -77,8 +77,8 @@ end
     R1 (VDD VPD) resistor r=r_val
     C1 (VPD 0) capacitor c=c_val
     """
-    circuit_code = CedarSim.make_spectre_circuit(
-        CedarSim.SpectreNetlistParser.parse(spectre_code),
+    circuit_code = Cadnip.make_spectre_circuit(
+        Cadnip.NyanSpectreNetlistParser.parse(spectre_code),
         String[],
     );
     circuit = ParamSim(eval(circuit_code), var"i_val" = 20e-12)

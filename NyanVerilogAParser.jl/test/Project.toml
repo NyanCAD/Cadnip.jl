@@ -1,0 +1,5 @@
+[deps]
+AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
+NyanLexers = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+NyanVerilogAParser = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"

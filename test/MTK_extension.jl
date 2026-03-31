@@ -1,6 +1,6 @@
 module MTK_extension_tests
 using Test
-using CedarSim, ModelingToolkit, ModelingToolkitStandardLibrary.Electrical
+using Cadnip, ModelingToolkit, ModelingToolkitStandardLibrary.Electrical
 using OrdinaryDiffEq
 using LinearSolve: KLUFactorization
 

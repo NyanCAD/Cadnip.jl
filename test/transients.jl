@@ -2,10 +2,10 @@ module transient_tests
 
 include("common.jl")
 
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
-using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: pwl_at_time
-using CedarSim.MNA: voltage, current, MNACircuit
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
+using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using Cadnip.MNA: pwl_at_time
+using Cadnip.MNA: voltage, current, MNACircuit
 using SciMLBase: ODEProblem
 
 # We'll create a piecewise linear current source that goes through a resistor
@@ -44,12 +44,12 @@ const r_val_pwl = 2
     """
 
     # Parse and generate MNA builder
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast)
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     builder = Base.eval(m, code)
 
     # Solve for 10ms using MNACircuit API
@@ -62,7 +62,7 @@ const r_val_pwl = 2
     # Get node index for vout
     dc_spec = MNASpec(temp=27.0, mode=:dcop, time=0.0)
     ctx = Base.invokelatest(builder, (;), dc_spec)
-    sys = CedarSim.MNA.assemble!(ctx)
+    sys = Cadnip.MNA.assemble!(ctx)
     vout_idx = findfirst(n -> n == :vout, sys.node_names)
 
     # Check that solution matches analytic
@@ -157,12 +157,12 @@ const ω_val = 1
     """
 
     # Parse and generate MNA builder
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast)
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     builder = Base.eval(m, code)
 
     # This is a very low-frequency circuit; simulate for a long enough time
@@ -170,13 +170,13 @@ const ω_val = 1
     tspan = (0.0, 100.0)
 
     # Get initial conditions (all zeros for inductors/capacitors)
-    spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0)
+    spec = Cadnip.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0)
     ctx = Base.invokelatest(builder, (;), spec)
-    sys = CedarSim.MNA.assemble!(ctx)
+    sys = Cadnip.MNA.assemble!(ctx)
 
     # Use MNACircuit API with zero initial conditions (capacitor/inductor start uncharged)
     circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0))
-    n = CedarSim.MNA.system_size(circuit)
+    n = Cadnip.MNA.system_size(circuit)
     u0 = zeros(n)
     prob = Base.invokelatest(ODEProblem, circuit, tspan; u0=u0)
     sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=100000)
@@ -215,14 +215,14 @@ const ω_val = 1
     end
 
     circuit2 = MNACircuit(butterworth_circuit, (;), MNASpec(temp=27.0))
-    n2 = CedarSim.MNA.system_size(circuit2)
+    n2 = Cadnip.MNA.system_size(circuit2)
     u0_2 = zeros(n2)
     prob2 = ODEProblem(circuit2, tspan; u0=u0_2)
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get vout index from direct API circuit
-    ctx2 = butterworth_circuit((;), CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0), 0.0)
-    sys2 = CedarSim.MNA.assemble!(ctx2)
+    ctx2 = butterworth_circuit((;), Cadnip.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0), 0.0)
+    sys2 = Cadnip.MNA.assemble!(ctx2)
     vout_idx2 = findfirst(n -> n == :vout, sys2.node_names)
 
     # Check direct API also matches

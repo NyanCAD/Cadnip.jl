@@ -42,7 +42,7 @@ end
 
 function pwl_at_time(ts, ys, t)
     if length(ts) != length(ys)
-        throw(CedarSim.PWLConstructError(ts, ys))
+        throw(Cadnip.PWLConstructError(ts, ys))
     end
     i = find_t_in_ts(ts, t)
     type_stable_time = 0. * t
@@ -78,7 +78,7 @@ end
 baremodule SpectreEnvironment
 
 import ..Base
-import ..CedarSim
+import ..Cadnip
 import ForwardDiff
 import Compat
 import Distributions
@@ -112,7 +112,7 @@ export !, +, *, -, ==, !=, /, ^, >, <,  <=, >=,
 
 # Scale parameter accessor
 function var"$scale"()
-    return CedarSim.undefault(CedarSim.spec[].scale)
+    return Cadnip.undefault(Cadnip.spec[].scale)
 end
 
 const M_1_PI = 1/Base.pi
@@ -137,7 +137,7 @@ function pulse(v1, v2, td, tr, tf, pw=Base.Inf, period=Base.Inf, count=-1)
     time_periodic_singularities!(ts, period, count)
 
     # Calculate value modulo our period
-    t = rem_right_semi(CedarSim.spec[].time, period)
+    t = rem_right_semi(Cadnip.spec[].time, period)
     return pwl_at_time(ts, ys, t)
 end
 
@@ -152,7 +152,7 @@ function spsin(vo, va, freq, td=0, theta=0, phase=0, ncyles=Base.Inf)
 end
 
 function agauss(nom, avar, sigma)
-    rng = CedarSim.spec[].rng
+    rng = Cadnip.spec[].rng
     if rng === nothing
         nom
     else
@@ -164,14 +164,14 @@ end
 
 # Gets replaced by simulator time in the compiler override
 function var"$time"()
-    if CedarSim.sim_mode[] === :dcop || CedarSim.sim_mode[] === :tranop
+    if Cadnip.sim_mode[] === :dcop || Cadnip.sim_mode[] === :tranop
         return 0.0
     else
-        return CedarSim.spec[].time
+        return Cadnip.spec[].time
     end
 end
 
-temper() = CedarSim.undefault(CedarSim.spec[].temp) # Celsius
+temper() = Cadnip.undefault(Cadnip.spec[].temp) # Celsius
 
 const dc = :dc
 const ac = :ac

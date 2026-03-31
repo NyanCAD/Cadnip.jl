@@ -10,12 +10,12 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
-using CedarSim.MNA: VoltageSource, CurrentSource, Resistor
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
+using Cadnip.MNA: VoltageSource, CurrentSource, Resistor
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
 using LinearSolve: KLUFactorization
@@ -50,7 +50,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -117,7 +117,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -147,7 +147,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -174,7 +174,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -236,7 +236,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -271,7 +271,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
@@ -385,7 +385,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vdd = get_node!(ctx, :vdd)
             out = get_node!(ctx, :out)
@@ -423,7 +423,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vdd = get_node!(ctx, :vdd)
             out = get_node!(ctx, :out)
@@ -485,7 +485,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             p = get_node!(ctx, :p)
 

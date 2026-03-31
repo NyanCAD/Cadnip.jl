@@ -2,7 +2,7 @@
 
 **C**ircuit **A**nalysis & **D**ifferentiable **N**umerical **I**ntegration **P**rogram
 
-Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of CedarSim that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
+Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of Cadnip that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
 
 ## Features
 
@@ -19,9 +19,9 @@ Install from GitHub by first adding the subpackages, then the main package:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="Lexers.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="SpectreNetlistParser.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="VerilogAParser.jl")
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanLexers.jl")
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanSpectreNetlistParser.jl")
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanVerilogAParser.jl")
 Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl")
 ```
 
@@ -36,8 +36,8 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ## Quick Start
 
 ```julia
-using CedarSim
-using CedarSim.MNA: MNACircuit, MNASpec, voltage
+using Cadnip
+using Cadnip.MNA: MNACircuit, MNASpec, voltage
 
 # Define a circuit using SPICE syntax
 # Note: SPICE requires a title line as the first line
@@ -79,5 +79,5 @@ Contributions are welcome! Please open an issue or pull request on GitHub.
 ## Related Projects
 
 - [SpiceArmyKnife.jl](SpiceArmyKnife.jl/) - Tool for parsing and converting between netlist languages
-- [VerilogAParser.jl](VerilogAParser.jl/) - Verilog-A parser
-- [SpectreNetlistParser.jl](SpectreNetlistParser.jl/) - Spectre netlist parser
+- [NyanVerilogAParser.jl](NyanVerilogAParser.jl/) - Verilog-A parser
+- [NyanSpectreNetlistParser.jl](NyanSpectreNetlistParser.jl/) - Spectre netlist parser

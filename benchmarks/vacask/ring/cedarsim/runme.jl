@@ -9,9 +9,9 @@
 # Usage: julia runme.jl
 #==============================================================================#
 
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: CedarTranOp
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: CedarTranOp
 using OrdinaryDiffEq: FBDF
 using SciMLBase
 using BenchmarkTools

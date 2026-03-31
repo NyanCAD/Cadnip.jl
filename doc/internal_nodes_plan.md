@@ -244,7 +244,7 @@ internal_alloc = Expr(:block)
 for (i, inode) in enumerate(internal_nodes)
     inode_var = Symbol("_inode_", inode)
     push!(internal_alloc.args,
-        :($inode_var = CedarSim.MNA.alloc_internal_node!(ctx,
+        :($inode_var = Cadnip.MNA.alloc_internal_node!(ctx,
             Symbol(string(typeof(dev).name), ".", $(QuoteNode(inode)))))
     )
 end
@@ -565,17 +565,17 @@ Pre-compute Jacobian sparsity pattern including internal nodes for faster Newton
 For a diode with series resistance, the generated stamp! method would look like:
 
 ```julia
-function CedarSim.MNA.stamp!(dev::VADiodeRs, ctx::CedarSim.MNA.MNAContext,
+function Cadnip.MNA.stamp!(dev::VADiodeRs, ctx::Cadnip.MNA.MNAContext,
                              _node_a::Int, _node_c::Int;
                              t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[],
-                             spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
+                             spec::Cadnip.MNA.MNASpec=Cadnip.MNA.MNASpec(),
                              instance_name::Symbol=:unnamed)
     # Extract parameters
     Is = undefault(dev.Is)
     Rs = undefault(dev.Rs)
 
     # Allocate internal node
-    _inode_a_int = CedarSim.MNA.alloc_internal_node!(ctx,
+    _inode_a_int = Cadnip.MNA.alloc_internal_node!(ctx,
         Symbol(string(instance_name), ".a_int"))
 
     # Get operating point voltages

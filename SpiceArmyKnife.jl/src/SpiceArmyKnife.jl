@@ -3,13 +3,13 @@ module SpiceArmyKnife
 using UUIDs
 using Downloads
 using p7zip_jll
-using SpectreNetlistParser
-using SpectreNetlistParser: SpectreNetlistCSTParser, SPICENetlistParser
+using NyanSpectreNetlistParser
+using NyanSpectreNetlistParser: SpectreNetlistCSTParser, SPICENetlistParser
 using .SPICENetlistParser: SPICENetlistCSTParser
 using .SpectreNetlistCSTParser: SpectreNetlistSource
 using .SPICENetlistCSTParser: SPICENetlistSource
-using SpectreNetlistParser.RedTree: fullcontents
-using VerilogAParser
+using NyanSpectreNetlistParser.RedTree: fullcontents
+using NyanVerilogAParser
 using StringEncodings
 
 const SNode = SpectreNetlistCSTParser.Node

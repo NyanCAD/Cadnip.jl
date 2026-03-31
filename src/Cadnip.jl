@@ -1,0 +1,199 @@
+module Cadnip
+
+using DiffEqBase
+using DelayDiffEq
+using StaticArrays
+
+# MNA Phase 1: Core MNA engine
+include("mna/MNA.jl")
+using .MNA
+export MNA
+
+# re-exports
+export DAEProblem
+export @dyn, @requires, @provides, @isckt_or
+export solve
+
+# Phase 4: MNA SPICE codegen exports
+export make_mna_circuit, parse_spice_to_mna, parse_spice_file_to_mna, solve_spice_mna
+export @sp_str
+
+# PDK/VA precompilation exports
+export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
+
+
+include("util.jl")
+include("model_registry.jl")
+using .ModelRegistry
+export ModelRegistry, getmodel, getparams, AbstractSimulator
+include("vasim.jl")
+
+# Minimal simulation environment (previously in simulate_ir.jl)
+using Base.ScopedValues
+
+Base.@kwdef struct SimSpec
+    time::Float64=0.0
+    ϵω::Float64=0.0
+    temp::DefaultOr{Float64}=mkdefault(27.0)
+    gmin::DefaultOr{Float64}=mkdefault(1e-12)
+    scale::DefaultOr{Float64}=mkdefault(1.0)
+    rng::Union{Nothing}=nothing
+end
+
+const spec = ScopedValue{SimSpec}(SimSpec())
+const sim_mode = ScopedValue{Symbol}(:dcop)
+
+# Minimal types previously in simulate_ir.jl (used by spectre.jl)
+# These are stubs for backward compatibility - MNA uses different types
+
+# ParallelInstances for device multiplicity
+struct ParallelInstances
+    device
+    multiplier::Float64
+
+    function ParallelInstances(device, multiplier::Float64)
+        if multiplier < 0.0
+            cedarthrow(ArgumentError("Cannot construct a ParallelInstances with non-positive multiplier '$(multiplier)'"))
+        end
+        return new(device, multiplier)
+    end
+end
+ParallelInstances(device, multiplier::Number) = ParallelInstances(device, Float64(multiplier))
+ParallelInstances(device, multiplier::DefaultOr) = ParallelInstances(device, undefault(multiplier))
+
+# Base types for circuit elements and simulation (stubs)
+abstract type CircuitElement end
+abstract type AbstractSim{C} end
+
+struct UnimplementedDevice <: CircuitElement
+    name::String
+end
+UnimplementedDevice() = UnimplementedDevice("unknown")
+
+# ParamSim stub - used by spectre.jl for parameter handling
+struct ParamSim{T,S,P} <: AbstractSim{T}
+    circuit::T
+    mode::S
+    spec::SimSpec
+    params::P
+end
+ParamSim(circuit, mode, spec, params) = ParamSim{typeof(circuit), typeof(mode), typeof(params)}(circuit, mode, spec, params)
+
+include("spectre_env.jl")
+include("spectre.jl")
+
+#==============================================================================#
+# Model Registry: Base Device Registrations
+#
+# Register MNA device types for SPICE device mapping. External packages
+# (e.g., BSIM4.jl, VADistillerModels.jl) register their own models by
+# defining additional getmodel/getparams methods.
+#==============================================================================#
+
+# Simple passive devices (no level required)
+ModelRegistry.getmodel(::Val{:r}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Resistor
+ModelRegistry.getmodel(::Val{:c}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Capacitor
+ModelRegistry.getmodel(::Val{:l}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Inductor
+ModelRegistry.getmodel(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Diode
+
+# Phase 4: New SPC SPICE codegen (used by MNA backend)
+include("spc/cache.jl")  # Must be before sema.jl (CedarParseCache)
+include("spc/sema.jl")
+include("spc/codegen.jl")
+include("spc/interface.jl")
+include("spc/query.jl")
+include("spc/generated.jl")
+include("va_env.jl")
+include("sweeps.jl")
+include("ac.jl")
+include("ModelLoader.jl")
+# aliasextract.jl requires old DAECompiler types - not needed for MNA
+# include("aliasextract.jl")
+include("netlist_utils.jl")
+include("circsummary.jl")
+
+import .ModelLoader: load_VA_model
+export load_VA_model
+
+using PrecompileTools
+@setup_workload let
+    spice = """
+    * my circuit
+    v1 vcc 0 DC 5
+    r1 vcc n1 1k
+    l1 n1 n2 1m
+    c1 n2 0 1u
+    """
+    spectre = """
+    c1 (Y 0) capacitor c=100f
+    r2 (Y VDD) resistor r=10k
+    v1 (VDD 0) vsource type=dc dc=0.7
+    """
+    @compile_workload @time begin
+        sa1 = NyanVerilogAParser.parsefile(joinpath(@__DIR__, "../NyanVerilogAParser.jl/test/inputs/resistor.va"))
+        code1 = Cadnip.make_mna_module(sa1)
+        sa2 = NyanSpectreNetlistParser.parse(IOBuffer(spectre))
+        code2 = Cadnip.make_mna_circuit(sa2)
+        sa3 = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+        code3 = Cadnip.make_mna_circuit(sa3)
+    end
+end
+
+"
+    @declare_MSLConnector(mtk_model, pin_ports...)
+
+!!! note \"For this to be used ModelingToolkit must be loaded\"
+    Cadnip itself only provides a stub-defination of this type.
+    The full implementation is in the Cadnip-ModelingToolkit extension module.
+    Which is automatically loaded if Cadnip and ModelingToolkit are both loaded.
+
+Defined the functions needed to connect a MTK based model (defined using MSL `Pin`s) to Cedar.
+As input provide the model (an `ODESystem`), and a list of pins defined using `ModelingToolkitStandardLibary.Electrical.Pin`s.
+These pins can be as direct components of the model or subcomponents other components.
+When you use this component as a subcircuit (as shown in the example) they be connected to Cadnip `AbstractNets`
+corresponding to the SPICE nodes, in the order you list them.
+
+
+Note that the model does not have to be (and usually won't be) solvable in MTK -- it can be incomplete and unablanced.
+The remaining variables coming from the rest of the circuit, e.g. as defined using SPICE.
+The usual way to develop this would be to initially write the model in MTK using MSL,
+then delete all the voltage/current sources and declare that the places they were connected are port pins usng this macro.
+
+
+
+This is a higher level version of the `DAECompiler.@declare_MTKConnector`
+and does, in the end, return a subtype of `MTKConnector`.
+
+This means it is struct with a constructor that you can override the parameters to by keyword argument.
+You can check what parameters are available by using `parameternames` on an instance of the type.
+The struct will have call overriden (i.e. it will be a functor) to allow the connections Cadnip exposes to all be hooked up.
+
+It is used for example as:
+```julia
+@mtkmodel Foo begin
+    @parameters begin
+        param=0.0
+        ...
+    end
+    @components begin
+        Pos = Pin()
+        Neg = Pin()
+        ...
+    end
+    ...
+end
+
+foo = foo(name=:foo1)
+const FooConn = @declare_MSLConnector(foo, foo.Pos, foo.Neg)
+circuit = sp\"\"\" ...
+Xfoo 1 0 \$(FooConn(param = 42.0))
+...
+\"\"\"e
+```
+"
+macro declare_MSLConnector(args...)
+    error("ModelingToolkit must be loaded for this macro to be used")
+end
+export @declare_MSLConnector
+
+end # module

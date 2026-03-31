@@ -11,17 +11,17 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit
-using CedarSim: dc!
-using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
-using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: voltage, current, make_ode_problem, MNACircuit
+using Cadnip: dc!
+using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
+using Cadnip.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
 using LinearSolve: KLUFactorization
-using VerilogAParser
+using NyanVerilogAParser
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -51,7 +51,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
@@ -91,7 +91,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
                 cap = get_node!(ctx, :cap)
@@ -154,7 +154,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 anode = get_node!(ctx, :anode)
 
@@ -196,7 +196,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 anode = get_node!(ctx, :anode)
 
@@ -244,7 +244,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -289,7 +289,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -337,7 +337,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -392,7 +392,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -422,7 +422,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -491,7 +491,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -545,7 +545,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -568,7 +568,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
@@ -615,7 +615,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vdd = get_node!(ctx, :vdd)
                 vin = get_node!(ctx, :vin)
@@ -670,15 +670,15 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
             endmodule
             """
-            va = VerilogAParser.parse(IOBuffer(va_code))
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+            va = NyanVerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
             # Test at default temp (27C = 300.15K)
             function temp_resistor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
 
@@ -715,14 +715,14 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
             endmodule
             """
-            va = VerilogAParser.parse(IOBuffer(va_code))
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+            va = NyanVerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
             function gmin_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
 
@@ -759,15 +759,15 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
             endmodule
             """
-            va = VerilogAParser.parse(IOBuffer(va_code))
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+            va = NyanVerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
             # With explicit R=2000 (R is "given")
             sol_explicit = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -783,7 +783,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -814,15 +814,15 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
         endmodule
         """
-        va = VerilogAParser.parse(IOBuffer(va_code))
-        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+        va = NyanVerilogAParser.parse(IOBuffer(va_code))
+        Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 
         # Test 1: Using the real parameter name (tnom)
         sol_tnom = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -838,7 +838,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -879,7 +879,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
@@ -917,7 +917,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
 
@@ -958,7 +958,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
 
@@ -993,7 +993,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 if ctx === nothing
                     ctx = MNAContext()
                 else
-                    CedarSim.MNA.reset_for_restamping!(ctx)
+                    Cadnip.MNA.reset_for_restamping!(ctx)
                 end
                 vcc = get_node!(ctx, :vcc)
 

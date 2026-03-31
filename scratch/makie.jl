@@ -1,6 +1,6 @@
 using GLMakie
-using CedarSim
-using CedarSim.SpectreEnvironment
+using Cadnip
+using Cadnip.SpectreEnvironment
 using OrdinaryDiffEq
 using StructArrays
 
@@ -20,8 +20,8 @@ L3 n1 vout 'L3_val'
 R4 vout 0 'R4_val'
 """
 
-circuit_code = CedarSim.make_spectre_circuit(
-    CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code);
+circuit_code = Cadnip.make_spectre_circuit(
+    Cadnip.NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code);
 );
 circuit = eval(circuit_code)
 
@@ -30,4 +30,4 @@ sys = CircuitIRODESystem(sim)
 prob = ODEProblem(sys, nothing, (0.0, 100.0), sim)
 sol = solve(prob, FBDF(autodiff=false); initializealg=CedarDCOp())
 
-CedarSim.explore(sol)
+Cadnip.explore(sol)

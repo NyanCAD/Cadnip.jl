@@ -1,26 +1,26 @@
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, voltage, current
-using CedarSim.MNA: VoltageSource, Resistor, MNACircuit
-using CedarSim: dc!
-using VerilogAParser
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, voltage, current
+using Cadnip.MNA: VoltageSource, Resistor, MNACircuit
+using Cadnip: dc!
+using NyanVerilogAParser
 
 const PHOTONIC_DIR = joinpath(@__DIR__, "..", "..", "models", "PhotonicModels.jl", "va")
 
 @testset "Photonic Models" begin
 
 @testset "Parser: nature/discipline declarations" begin
-    va = VerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
-    types = [CedarSim.formof(s) for s in va.stmts]
-    @test VerilogAParser.VerilogACSTParser.VerilogModule in types
-    @test VerilogAParser.VerilogACSTParser.NatureDeclaration in types
-    @test VerilogAParser.VerilogACSTParser.DisciplineDeclaration in types
+    va = NyanVerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
+    types = [Cadnip.formof(s) for s in va.stmts]
+    @test NyanVerilogAParser.VerilogACSTParser.VerilogModule in types
+    @test NyanVerilogAParser.VerilogACSTParser.NatureDeclaration in types
+    @test NyanVerilogAParser.VerilogACSTParser.DisciplineDeclaration in types
 end
 
 @testset "Access map from disciplines" begin
-    va = VerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
-    access_map = CedarSim.build_access_map(va)
+    va = NyanVerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
+    access_map = Cadnip.build_access_map(va)
 
     # V and I should come from parsed electrical discipline, not hardcoded
     @test access_map[:V] == :potential
@@ -36,9 +36,9 @@ end
 end
 
 @testset "Array port expansion" begin
-    va = VerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
+    va = NyanVerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
     vamod = va.stmts[end]
-    (ps, array_nodes) = CedarSim.pins(vamod)
+    (ps, array_nodes) = Cadnip.pins(vamod)
 
     @test length(ps) == 4
     @test :pol_0 in ps
@@ -108,10 +108,10 @@ end
 end
 
 @testset "Code generation: Polar2Cartesian from file" begin
-    va = VerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
-    access_map = CedarSim.build_access_map(va)
+    va = NyanVerilogAParser.parsefile(joinpath(PHOTONIC_DIR, "Polar2Cartesian.va"))
+    access_map = Cadnip.build_access_map(va)
     vamod = va.stmts[end]
-    expr = CedarSim.make_mna_device(vamod; access_map)
+    expr = Cadnip.make_mna_device(vamod; access_map)
     @test expr isa Expr
 end
 
@@ -145,7 +145,7 @@ const deftol = 1e-6
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
@@ -187,7 +187,7 @@ const deftol = 1e-6
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             a0 = get_node!(ctx, :a0)
             a1 = get_node!(ctx, :a1)
@@ -255,7 +255,7 @@ const deftol = 1e-6
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             inp0 = get_node!(ctx, :inp0)
             inp1 = get_node!(ctx, :inp1)

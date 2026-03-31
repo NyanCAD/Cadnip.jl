@@ -93,8 +93,8 @@ See `doc/` for design documents. Check `git log --oneline -20 --name-only` for r
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/run_benchmarks.jl
 
 # Parser tests
-~/.juliaup/bin/julia --project=SpectreNetlistParser.jl -e 'using Pkg; Pkg.test()'
-~/.juliaup/bin/julia --project=VerilogAParser.jl -e 'using Pkg; Pkg.test()'
+~/.juliaup/bin/julia --project=NyanSpectreNetlistParser.jl -e 'using Pkg; Pkg.test()'
+~/.juliaup/bin/julia --project=NyanVerilogAParser.jl -e 'using Pkg; Pkg.test()'
 ```
 
 ### Test Files
@@ -127,7 +127,7 @@ function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
 Parse and eval SPICE circuits at top level to avoid world age issues:
 ```julia
 # Top-level - no invokelatest needed
-const circuit_code = CedarSim.make_mna_circuit(ast; circuit_name=:my_circuit)
+const circuit_code = Cadnip.make_mna_circuit(ast; circuit_name=:my_circuit)
 eval(circuit_code)
 
 # Now use directly in functions
@@ -157,7 +157,7 @@ conflict with Julia builtins. Generated code uses explicit `Base.hasfield`,
 `Base.getproperty` for any Base functions needed.
 
 ### Verilog-A Gotcha
-Disciplines (electrical, V(), I()) are IMPLICIT in VerilogAParser.
+Disciplines (electrical, V(), I()) are IMPLICIT in NyanVerilogAParser.
 Do NOT use `include "disciplines.vams"` - causes parser bugs.
 
 ```julia

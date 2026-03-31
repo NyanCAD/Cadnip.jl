@@ -1,7 +1,7 @@
 # MNA Architecture Design Document
 
 This document captures the design decisions for the MNA (Modified Nodal Analysis)
-engine, based on analysis of CedarSim's existing patterns, OpenVAF/VACASK interfaces,
+engine, based on analysis of Cadnip's existing patterns, OpenVAF/VACASK interfaces,
 and GPU computing requirements.
 
 ## Design Principles
@@ -498,8 +498,8 @@ Key insight from OSDI:
 
 ## References
 
-- CedarSim ParamLens: `src/spectre.jl:140-180`
-- CedarSim SimSpec: `src/simulate_ir.jl:20-32`
+- Cadnip ParamLens: `src/spectre.jl:140-180`
+- Cadnip SimSpec: `src/simulate_ir.jl:20-32`
 - OpenVAF OSDI: `refs/OpenVAF/melange/core/src/veriloga/osdi_0_4.rs`
 - VACASK device eval: `refs/VACASK/lib/osdiinstance.cpp`
 - DiffEqGPU: https://docs.sciml.ai/DiffEqGPU/stable/getting_started/

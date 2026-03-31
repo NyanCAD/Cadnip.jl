@@ -12,9 +12,9 @@ MNA builder functions. Precompiles stamp! methods for fast runtime.
 """
 module VACASKModels
 
-using CedarSim
-using CedarSim.SpectreNetlistParser
-using CedarSim.MNA: MNAContext, MNASpec, stamp!, get_node!,
+using Cadnip
+using Cadnip.NyanSpectreNetlistParser
+using Cadnip.MNA: MNAContext, MNASpec, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
 using PSPModels  # Registers PSP103VA etc with ModelRegistry
 using PrecompileTools: @compile_workload
@@ -24,8 +24,8 @@ const MODELS_INC = joinpath(@__DIR__, "..", "spice", "models.inc")
 
 # Parse and generate MNA module at package load time
 # No imported_hdl_modules needed since PSPModels registers with ModelRegistry
-const _ast = SpectreNetlistParser.parsefile(MODELS_INC; implicit_title=false)
-const _mod_expr = CedarSim.make_mna_pdk_module(_ast; name=:vacask_models)
+const _ast = NyanSpectreNetlistParser.parsefile(MODELS_INC; implicit_title=false)
+const _mod_expr = Cadnip.make_mna_pdk_module(_ast; name=:vacask_models)
 eval(_mod_expr)
 
 # Re-export the builders from generated module
@@ -34,8 +34,8 @@ export nmos_mna_builder, pmos_mna_builder
 
 # Precompile stamp! methods for VACASK-sized devices
 @compile_workload begin
-    using CedarSim: ParamLens
-    using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
+    using Cadnip: ParamLens
+    using Cadnip.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
     function precompile_builder(builder_fn, sizing_params)

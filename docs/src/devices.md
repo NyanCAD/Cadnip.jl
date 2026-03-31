@@ -2,7 +2,7 @@
 
 !!! warning
 
-    This documentation describes CedarSim internals. At the moment, this is not supported as
+    This documentation describes Cadnip internals. At the moment, this is not supported as
     a stable API, but is intended to help users understand how Cedar works and to aid in
     experimentation. For end-users needing custom devices, Verilog-A is the recommended model
     representation.
@@ -36,12 +36,12 @@ end
 (R::MyResistor)(A, B) = branch!((V, I)->V - I*R.resistance, A, B)
 ```
 
-Here, we use the CedarSim `branch!` helper, which is used to introduce a branch between two nodes
+Here, we use the Cadnip `branch!` helper, which is used to introduce a branch between two nodes
 and is very helpful for implementing two terminal devices. `branch!` provides the voltage
 difference across, as well as the current through the branch to the provided callback. This callback
 in turn, should implement (and return) the relation that must hold between voltage and current
 for this device. In the case of a resistor, this is simply `V = I*R` or as expressed here `0 = V - I*R`.
-This is a fully functional implementation of a resitor. CedarSim and DAECompiler will figure out
+This is a fully functional implementation of a resitor. Cadnip and DAECompiler will figure out
 everything else.
 
 # Using custom devices from a SPICE circuit
@@ -50,7 +50,7 @@ Now that we have a custom device, how do we use it? The first option is to simpl
 a julia-defined circuit as we saw in the previous chapter:
 
 ```
-using CedarSim.DeviceShorthands
+using Cadnip.DeviceShorthands
 using CedarEDA.SIFactors: k, μ
 
 circuit() = (MyResistor(1k) ∥ C(1μ))(net(), gnd())
@@ -64,7 +64,7 @@ device definition to subtype `CircuitElement` (which provides the string overloa
 the debug scope (which is used to give the branch a symbolic name):
 
 ```
-using CedarSim.DeviceUtils
+using Cadnip.DeviceUtils
 struct MyResistor <: CircuitElement
     resistance::Float64
 end
@@ -82,7 +82,7 @@ With this set, we are now also ready to use this device from SPICE. The simplest
 the string interpolation syntax:
 
 ```julia
-using CedarSim.DeviceShorthands
+using Cadnip.DeviceShorthands
 function circuit()
     sp"""
     * A simple RC circuit with a custom resistor device
@@ -97,7 +97,7 @@ the SPICE instantiation line, as parameters are provided directly to the julia c
 
 # Using DAECompiler intrinsics
 
-So far, we've seen how to use the `branch!` abstraction provided by CedarSim. This is sufficient for many linear
+So far, we've seen how to use the `branch!` abstraction provided by Cadnip. This is sufficient for many linear
 and non-linear devices whose constituent equations are simply a function of the branch voltage and current.
 However, if the device has additional internal state, you may need to introduce additional variables directly
 using the DAECompiler API. In this example, we shall consider a resistor with self-heating thermal effects.
@@ -138,8 +138,8 @@ function (this::ThermalResistor)(A, B, dscope=defaultscope(:TR))
 end
 ```
 
-A couple of aspects here deserve explanation. First, we used `CedarSim.defaultscope` to
-create a scope for our variables. The higher-level CedarSim `branch!` can take either
+A couple of aspects here deserve explanation. First, we used `Cadnip.defaultscope` to
+create a scope for our variables. The higher-level Cadnip `branch!` can take either
 a scope or a raw symbol (in which case it will call `defaultscope` internally).
 However, for raw DAECompiler APIs, we need a reference to the scope that `branch!`
 would have otherwise created implicitly, so we explicitly call `defaultscope` here.
@@ -147,11 +147,11 @@ would have otherwise created implicitly, so we explicitly call `defaultscope` he
 With this in hand, we used the `variables` helper from DAECompiler to introduce a variable
 for our resistor temperature. We could have also used a lower level `variable(dscope(:T))`
 call here, but `variables` conveniently allows us to avoid writing the variable name twice
-(as `nets` would in CedarSim).
+(as `nets` would in Cadnip).
 
 Next we used DAECompiler's `ddt` to write the equation for the derivative of our temperature.
 
-Lastly, we used CedarSim's `var"$temperature"` to access the declared ambient temperature of
+Lastly, we used Cadnip's `var"$temperature"` to access the declared ambient temperature of
 the simulation.
 
 Note that we could have also used `V*I` for the power disscipation and calculated the resistance
@@ -178,7 +178,7 @@ function branch!(scope::AbstractScope, net₊::AbstractNet, net₋::AbstractNet)
 end
 ```
 
-Here we used another CedarSim abstraction, `kcl!` to add the current contributions into
+Here we used another Cadnip abstraction, `kcl!` to add the current contributions into
 the KCL for each for the two nets. Using the abstraction is recommended in case of
 any future changes to the implementation of `Net`. However, for completeness, here is
 (a slightly simplified version of) the current implementation:
@@ -201,7 +201,7 @@ to an equation across multiple invocations to that equation (in particular, this
 was motivating for that feature).
 
 # Using ModelingToolkit
-You can implement also devices using [ModelingToolkit.jl](https://github.com/SciML/ModelingToolkit.jl) and the [ModelingToolkitStandardLibary.jl](https://docs.sciml.ai/ModelingToolkitStandardLibrary/stable/), and then connect them to CedarSim circuits.
+You can implement also devices using [ModelingToolkit.jl](https://github.com/SciML/ModelingToolkit.jl) and the [ModelingToolkitStandardLibary.jl](https://docs.sciml.ai/ModelingToolkitStandardLibrary/stable/), and then connect them to Cadnip circuits.
 For many users this will be the best way to implement custom devices, as you can fully use the MTK ecosystem to develop and debug them in isolation then hook them up to a greater circuit in Cedar.
 
 ```@docs; canonical=false

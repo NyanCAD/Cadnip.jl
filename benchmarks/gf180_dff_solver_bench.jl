@@ -76,7 +76,7 @@ for (prob, (solver_name, solver)) in solver_configurations
         # For setup, randomize initial conditions, then run `init()` to get better benchmark
         # statistics, in the event that there are multiple possible initialization points
         # for the circuit.  But this is disabled for now, as this can take a lot of time.
-        #prob = CedarSim.reinitialize($(prob))
+        #prob = Cadnip.reinitialize($(prob))
         prob = $(prob)
     end seconds=30 evals=1 samples=10
 

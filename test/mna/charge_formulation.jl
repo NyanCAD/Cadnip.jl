@@ -5,10 +5,10 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: va_ddt, is_voltage_dependent_charge, CHARGE_SCALE
-using CedarSim.MNA: ContributionTag, JacobianTag
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: va_ddt, is_voltage_dependent_charge, CHARGE_SCALE
+using Cadnip.MNA: ContributionTag, JacobianTag
 using ForwardDiff: Dual, value, partials
 using LinearAlgebra: cond
 
@@ -119,8 +119,8 @@ using LinearAlgebra: cond
 end
 
 @testset "Charge State Variable Allocation" begin
-    using CedarSim.MNA: MNAContext, get_node!, alloc_charge!, has_charge, get_charge_idx
-    using CedarSim.MNA: system_size, n_charges, resolve_index, ChargeIndex
+    using Cadnip.MNA: MNAContext, get_node!, alloc_charge!, has_charge, get_charge_idx
+    using Cadnip.MNA: system_size, n_charges, resolve_index, ChargeIndex
 
     ctx = MNAContext()
     a = get_node!(ctx, :a)
@@ -149,8 +149,8 @@ end
 end
 
 @testset "stamp_charge_state! basic" begin
-    using CedarSim.MNA: MNAContext, MNASystem, get_node!, stamp!, assemble!
-    using CedarSim.MNA: stamp_charge_state!, VoltageSource, resolve_index
+    using Cadnip.MNA: MNAContext, MNASystem, get_node!, stamp!, assemble!
+    using Cadnip.MNA: stamp_charge_state!, VoltageSource, resolve_index
 
     # Test: voltage source + nonlinear capacitor to ground
     ctx = MNAContext()
@@ -191,8 +191,8 @@ end
 end
 
 @testset "stamp_charge_state! with both nodes" begin
-    using CedarSim.MNA: MNAContext, get_node!, assemble!
-    using CedarSim.MNA: stamp_charge_state!, resolve_index
+    using Cadnip.MNA: MNAContext, get_node!, assemble!
+    using Cadnip.MNA: stamp_charge_state!, resolve_index
 
     ctx = MNAContext()
     p = get_node!(ctx, :p)
@@ -220,8 +220,8 @@ end
 end
 
 @testset "stamp_reactive_with_detection!" begin
-    using CedarSim.MNA: MNAContext, get_node!, assemble!
-    using CedarSim.MNA: stamp_reactive_with_detection!, va_ddt, n_charges
+    using Cadnip.MNA: MNAContext, get_node!, assemble!
+    using Cadnip.MNA: stamp_reactive_with_detection!, va_ddt, n_charges
 
     @testset "Linear capacitor -> C matrix stamping" begin
         ctx = MNAContext()
@@ -247,7 +247,7 @@ end
     end
 
     @testset "Nonlinear capacitor -> charge formulation" begin
-        using CedarSim.MNA: resolve_index, get_charge_idx
+        using Cadnip.MNA: resolve_index, get_charge_idx
 
         ctx = MNAContext()
         p = get_node!(ctx, :p)
@@ -296,8 +296,8 @@ end
 end
 
 @testset "Charge formulation solver integration" begin
-    using CedarSim.MNA: MNAContext, get_node!, stamp!, VoltageSource, assemble!
-    using CedarSim.MNA: stamp_charge_state!, detect_differential_vars, resolve_index
+    using Cadnip.MNA: MNAContext, get_node!, stamp!, VoltageSource, assemble!
+    using Cadnip.MNA: stamp_charge_state!, detect_differential_vars, resolve_index
 
     @testset "Charge constraint is algebraic" begin
         # Create a simple circuit with a nonlinear capacitor
@@ -360,8 +360,8 @@ end
 end
 
 @testset "Charge scaling improves conditioning" begin
-    using CedarSim.MNA: MNAContext, get_node!, stamp!, assemble!
-    using CedarSim.MNA: stamp_charge_state!, VoltageSource, Resistor, resolve_index
+    using Cadnip.MNA: MNAContext, get_node!, stamp!, assemble!
+    using Cadnip.MNA: stamp_charge_state!, VoltageSource, Resistor, resolve_index
 
     # ==========================================================================
     # Test: Verify that charge scaling keeps G matrix well-conditioned
@@ -445,10 +445,10 @@ end
 end
 
 @testset "Transient simulation with charge scaling" begin
-    using CedarSim: dc!, tran!, MNACircuit, MNASpec
-    using CedarSim.MNA: MNAContext, get_node!, stamp!, assemble!, reset_for_restamping!
-    using CedarSim.MNA: stamp_charge_state!, VoltageSource, Resistor, Capacitor, resolve_index
-    using CedarSim.MNA: MNASolutionAccessor, voltage
+    using Cadnip: dc!, tran!, MNACircuit, MNASpec
+    using Cadnip.MNA: MNAContext, get_node!, stamp!, assemble!, reset_for_restamping!
+    using Cadnip.MNA: stamp_charge_state!, VoltageSource, Resistor, Capacitor, resolve_index
+    using Cadnip.MNA: MNASolutionAccessor, voltage
     using OrdinaryDiffEq: Rodas5P
     using LinearSolve: KLUFactorization
     using SciMLBase: ReturnCode

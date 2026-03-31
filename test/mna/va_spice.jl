@@ -17,12 +17,12 @@
 #==============================================================================#
 
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, MNACircuit
-using CedarSim: dc!
-using CedarSim.MNA: VoltageSource, Resistor
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: voltage, current, MNACircuit
+using Cadnip: dc!
+using Cadnip.MNA: VoltageSource, Resistor
 
 include(joinpath(@__DIR__, "..", "common.jl"))
 
@@ -336,7 +336,7 @@ end
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
             mid = get_node!(ctx, :mid)
@@ -368,7 +368,7 @@ end
             if ctx === nothing
                 ctx = MNAContext()
             else
-                CedarSim.MNA.reset_for_restamping!(ctx)
+                Cadnip.MNA.reset_for_restamping!(ctx)
             end
             vcc = get_node!(ctx, :vcc)
             n1 = get_node!(ctx, :n1)

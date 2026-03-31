@@ -1,5 +1,5 @@
-using SpectreNetlistParser
-using SpectreNetlistParser: SpectreNetlistCSTParser, SPICENetlistParser
+using NyanSpectreNetlistParser
+using NyanSpectreNetlistParser: SpectreNetlistCSTParser, SPICENetlistParser
 using .SPICENetlistParser: SPICENetlistCSTParser
 using .SpectreNetlistCSTParser:
     SpectreNetlistSource
@@ -22,7 +22,7 @@ LString(s::AbstractString) = lowercase(s)
 LString(s::Symbol) = lowercase(String(s))
 LSymbol(s) = Symbol(LString(s))
 
-# Phase 0: LineNumberNode is already defined in SpectreNetlistParser/src/parse/errors.jl
+# Phase 0: LineNumberNode is already defined in NyanSpectreNetlistParser/src/parse/errors.jl
 # Removed duplicate definition to avoid method overwriting error
 
 
@@ -243,7 +243,7 @@ export @param
 function fieldvalues(x::T) where {T}
      !isstructtype(T) && throw(ArgumentError("$(T) is not a struct type"))
 
-     return ((CedarSim.undefault(getfield(x, name)) for name in fieldnames(T))...,)
+     return ((Cadnip.undefault(getfield(x, name)) for name in fieldnames(T))...,)
 end
 
 function ntfromstruct(x::T) where {T}
@@ -252,7 +252,7 @@ function ntfromstruct(x::T) where {T}
      values = fieldvalues(x)
      return NamedTuple{names}(values)
 end
-ntfromstruct(x::CedarSim.ParallelInstances) = (; m=x.multiplier, ntfromstruct(x.device)...)
+ntfromstruct(x::Cadnip.ParallelInstances) = (; m=x.multiplier, ntfromstruct(x.device)...)
 
 function modelparams(m)
     args = m.params
@@ -307,13 +307,13 @@ function spice_select_device(devkind, level, version, stmt; dialect=:ngspice)
                     return :bsimcmg107
                 else
                     file = stmt.ps.srcfile.path
-                    line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
+                    line = NyanSpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
                     @warn "Version $version of mosfet $devkind at level $level not implemented" _file=file _line=line
                     return :UnimplementedDevice
                 end
             else
                 file = stmt.ps.srcfile.path
-                line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
+                line = NyanSpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
                 @warn "Mosfet $devkind at level $level not implemented" _file=file _line=line
                 return :UnimplementedDevice
             end
@@ -322,7 +322,7 @@ function spice_select_device(devkind, level, version, stmt; dialect=:ngspice)
         end
     end
     file = stmt.ps.srcfile.path
-    line = SpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
+    line = NyanSpectreNetlistParser.LineNumbers.compute_line(stmt.ps.srcfile.lineinfo, stmt.startof)
     @warn "Device $devkind at level $level not implemented" _file=file _line=line
     return :UnimplementedDevice
 end
@@ -496,7 +496,7 @@ function modify_spice(io::IO, node::SNode, nt::NamedTuple, startof)
             val = getproperty(params, LSymbol(childnode.name))
             e = childnode.val
             endoff = e.startof+e.expr.off-1
-            SpectreNetlistParser.RedTree.print_contents(io, node.ps, startof, endoff)
+            NyanSpectreNetlistParser.RedTree.print_contents(io, node.ps, startof, endoff)
             print(io, val)
             startof = e.startof+e.expr.off+e.expr.width
         elseif isa(childnode, SNode{<:SP.Subckt}) ||
@@ -525,7 +525,7 @@ function alter(io::IO, node::SNode, nt::NamedTuple)
     startof=node.startof+node.expr.off
     startof = modify_spice(io, node, canonicalize_params(nt), startof)
     endoff = node.startof+node.expr.off+node.expr.width-1
-    SpectreNetlistParser.RedTree.print_contents(io, node.ps, startof, endoff)
+    NyanSpectreNetlistParser.RedTree.print_contents(io, node.ps, startof, endoff)
 end
 
 """

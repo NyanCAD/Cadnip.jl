@@ -1,5 +1,5 @@
-using CedarSim
-using CedarSim.SpectreEnvironment
+using Cadnip
+using Cadnip.SpectreEnvironment
 using Test
 
 ckt = """
@@ -12,16 +12,16 @@ x1 (vcc 0) myres r=2k
 v1 (vcc 0) vsource dc=1
 """
 
-circuit_code = CedarSim.make_spectre_circuit(
-    CedarSim.SpectreNetlistParser.parse(ckt),
+circuit_code = Cadnip.make_spectre_circuit(
+    Cadnip.NyanSpectreNetlistParser.parse(ckt),
 );
 fn = eval(circuit_code);
 
 # test aliasmap
-map = CedarSim.aliasmap(fn)
-ref = Dict{CedarSim.DScope, CedarSim.DScope}(
-    CedarSim.DScope(CedarSim.DScope(CedarSim.DScope(), :x1), :node_pos) => CedarSim.DScope(CedarSim.DScope(), :node_vcc),
-    CedarSim.DScope(CedarSim.DScope(CedarSim.DScope(), :x1), :node_neg) => CedarSim.DScope(CedarSim.DScope(), :node_0),
+map = Cadnip.aliasmap(fn)
+ref = Dict{Cadnip.DScope, Cadnip.DScope}(
+    Cadnip.DScope(Cadnip.DScope(Cadnip.DScope(), :x1), :node_pos) => Cadnip.DScope(Cadnip.DScope(), :node_vcc),
+    Cadnip.DScope(Cadnip.DScope(Cadnip.DScope(), :x1), :node_neg) => Cadnip.DScope(Cadnip.DScope(), :node_0),
 )
 @test map == ref
 

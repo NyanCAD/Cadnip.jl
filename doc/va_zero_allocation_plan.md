@@ -149,7 +149,7 @@ heap-allocated arrays.
 
 Use StaticArrays `SVector` for PWL times/values. SVector is stack-allocated and works
 with `searchsortedfirst` for O(log n) lookup. The `pwl_at_time` function (from
-CedarSim.spectre_env.jl) handles interpolation with proper edge cases.
+Cadnip.spectre_env.jl) handles interpolation with proper edge cases.
 
 **Before (heap allocated every call):**
 ```julia
@@ -402,7 +402,7 @@ only accept `MNAContext`**, not `ValueOnlyContext`.
 
 **Location:** `src/vasim.jl:1891`
 ```julia
-function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+function Cadnip.MNA.stamp!(dev::$symname, ctx::Cadnip.MNA.MNAContext, ...)
 ```
 
 When `supports_value_only_ctx()` tests passing a `ValueOnlyContext`, the call fails
@@ -413,10 +413,10 @@ with `MethodError` and the code falls back to `MNAContext` reuse.
 **Change 1:** VA stamp! method signature
 ```julia
 # Before:
-function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext, ...)
+function Cadnip.MNA.stamp!(dev::$symname, ctx::Cadnip.MNA.MNAContext, ...)
 
 # After:
-function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext, ...)
+function Cadnip.MNA.stamp!(dev::$symname, ctx::Cadnip.MNA.AnyMNAContext, ...)
 ```
 
 **Change 2:** Add `AnyMNAContext` import to generated module.
@@ -515,7 +515,7 @@ we use the index as compiled rather than the reference."
 2. **Internal node indices are allocated at runtime:**
    ```julia
    # vasim.jl:1677
-   $int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
+   $int_param = Cadnip.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
    ```
    The index returned depends on allocation ORDER. Different execution orders would
    yield different indices.

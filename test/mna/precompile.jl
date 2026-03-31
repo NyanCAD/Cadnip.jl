@@ -6,14 +6,14 @@ using Test
 using SparseArrays
 using LinearAlgebra
 
-# Import MNA module - use CedarSim.MNA
-using CedarSim.MNA: MNAContext, get_node!, resolve_index, get_rhs, reset_for_restamping!
-using CedarSim.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
-using CedarSim.MNA: MNASpec, DCSolution, solve_dc, voltage, current
-using CedarSim.MNA: compile_structure, create_workspace, EvalWorkspace, CompiledStructure
-using CedarSim.MNA: fast_residual!, fast_rebuild!, system_size
-using CedarSim.MNA: MNACircuit, compile
-import CedarSim.MNA as MNA
+# Import MNA module - use Cadnip.MNA
+using Cadnip.MNA: MNAContext, get_node!, resolve_index, get_rhs, reset_for_restamping!
+using Cadnip.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
+using Cadnip.MNA: MNASpec, DCSolution, solve_dc, voltage, current
+using Cadnip.MNA: compile_structure, create_workspace, EvalWorkspace, CompiledStructure
+using Cadnip.MNA: fast_residual!, fast_rebuild!, system_size
+using Cadnip.MNA: MNACircuit, compile
+import Cadnip.MNA as MNA
 
 @testset "COO to CSC Mapping" begin
     # Simple 3x3 sparse matrix

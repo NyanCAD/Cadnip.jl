@@ -1,11 +1,11 @@
 module varegress
 
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: VoltageSource, Capacitor, MNACircuit
-using CedarSim: dc!
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: VoltageSource, Capacitor, MNACircuit
+using Cadnip: dc!
 using OrdinaryDiffEq
 using LinearSolve: KLUFactorization
 using Test
@@ -27,7 +27,7 @@ endmodule
         if ctx === nothing
             ctx = MNAContext()
         else
-            CedarSim.MNA.reset_for_restamping!(ctx)
+            Cadnip.MNA.reset_for_restamping!(ctx)
         end
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)
@@ -99,7 +99,7 @@ endmodule
         if ctx === nothing
             ctx = MNAContext()
         else
-            CedarSim.MNA.reset_for_restamping!(ctx)
+            Cadnip.MNA.reset_for_restamping!(ctx)
         end
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)

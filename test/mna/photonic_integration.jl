@@ -1,9 +1,9 @@
 using Test
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: MNAContext, get_node!, stamp!, MNACircuit, voltage, assemble!
-using CedarSim.MNA: VoltageSource, Resistor
-using CedarSim: dc!
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: MNAContext, get_node!, stamp!, MNACircuit, voltage, assemble!
+using Cadnip.MNA: VoltageSource, Resistor
+using Cadnip: dc!
 using PhotonicModels
 
 # Helper: create 4 optical port nodes and ground them with 1Ω resistors
@@ -50,7 +50,7 @@ end
     @testset "Attenuator: 6dB transfer function" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             outp = make_optical_port!(ctx, :outp)
             stamp!(Attenuator(attenuation=6.0), ctx, inp..., outp...)
@@ -73,7 +73,7 @@ end
     @testset "Isolator: forward pass-through + backward attenuation" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             outp = make_optical_port!(ctx, :outp)
             stamp!(Isolator(isolation=20.0), ctx, inp..., outp...)
@@ -94,7 +94,7 @@ end
     @testset "PhaseShifter: 90deg transfer" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             outp = make_optical_port!(ctx, :outp)
             stamp!(PhaseShifter(phase=90.0), ctx, inp..., outp...)
@@ -119,7 +119,7 @@ end
     @testset "DirectionalCoupler: kappa=0.5" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             in1 = make_optical_port!(ctx, :in1)
             in2 = make_optical_port!(ctx, :in2)
             out1 = make_optical_port!(ctx, :out1)
@@ -135,7 +135,7 @@ end
     @testset "Terminator: stamp and solve" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             stamp!(Terminator(), ctx, inp...)
             return ctx
@@ -157,7 +157,7 @@ end
     @testset "Waveguide: propagation loss" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             n1 = make_optical_port!(ctx, :n1)
             n2 = make_optical_port!(ctx, :n2)
             stamp!(Waveguide(length=100e-6, loss=2.0), ctx, n1..., n2...)
@@ -177,7 +177,7 @@ end
     @testset "Pcw: propagation loss (higher group index)" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             n1 = make_optical_port!(ctx, :n1)
             n2 = make_optical_port!(ctx, :n2)
             stamp!(Pcw(length=100e-6, loss=2.0), ctx, n1..., n2...)
@@ -197,7 +197,7 @@ end
     @testset "PhaseModulator: transfer at V=0" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             opt_in = make_optical_port!(ctx, :opt_in)
             opt_out = make_optical_port!(ctx, :opt_out)
             ele_in = get_node!(ctx, :ele_in)
@@ -219,7 +219,7 @@ end
     @testset "PcwPhaseModulator: transfer at V=0" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             opt_in = make_optical_port!(ctx, :opt_in)
             opt_out = make_optical_port!(ctx, :opt_out)
             ele_in = get_node!(ctx, :ele_in)
@@ -240,7 +240,7 @@ end
     @testset "ReflectionInterface: no reflection passes through" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             n1 = make_optical_port!(ctx, :n1)
             n2 = make_optical_port!(ctx, :n2)
             stamp!(ReflectionInterface(reflection=0.0), ctx, n1..., n2...)
@@ -254,7 +254,7 @@ end
     @testset "OneTwoSplitter: 50/50 split" begin
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             one = make_optical_port!(ctx, :one)
             two1 = make_optical_port!(ctx, :two1)
             two2 = make_optical_port!(ctx, :two2)
@@ -273,7 +273,7 @@ end
         # KCL: I_contribution(-1A) + I_resistor(V/1Ω) = 0 → V(ele_out) = 1.0V
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             opt_in = make_optical_port!(ctx, :opt_in)
             ele_out = get_node!(ctx, :ele_out)
             stamp!(Resistor(1.0), ctx, ele_out, 0)
@@ -293,7 +293,7 @@ end
         # filters have DC gain ≈ 1.0, so signal passes through unchanged.
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             outp = make_optical_port!(ctx, :outp)
             stamp!(VoltageSource(1.0; name=:Vopt), ctx, inp[1], 0, t, spec.mode)
@@ -315,7 +315,7 @@ end
         # the $abstime code path works (oscillators vary with time).
         function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing; ctx = MNAContext()
-            else CedarSim.MNA.reset_for_restamping!(ctx) end
+            else Cadnip.MNA.reset_for_restamping!(ctx) end
             inp = make_optical_port!(ctx, :inp)
             outp = make_optical_port!(ctx, :outp)
             stamp!(VoltageSource(1.0; name=:Vopt), ctx, inp[1], 0, t, spec.mode)

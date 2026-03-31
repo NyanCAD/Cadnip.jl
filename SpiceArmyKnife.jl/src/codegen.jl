@@ -13,10 +13,10 @@
 # This file is included in SpiceArmyKnife module, so SNode, SC, SP are already in scope
 
 # Import RedTree utilities
-using SpectreNetlistParser.RedTree: fullcontents
+using NyanSpectreNetlistParser.RedTree: fullcontents
 
 # Import error checking
-using SpectreNetlistParser: visit_errors
+using NyanSpectreNetlistParser: visit_errors
 
 # Include simulator traits (defines types and trait functions)
 include("simulator_traits.jl")
@@ -536,7 +536,7 @@ Write the leading trivia (whitespace and comments) for a node.
 function write_leading_trivia(scope::CodeGenScope, n::SNode)
     # Leading trivia is from n.startof to n.startof + n.expr.off
     if n.expr.off > 0
-        SpectreNetlistParser.RedTree.print_contents(scope.io, n.ps, n.startof, n.startof + n.expr.off - 1)
+        NyanSpectreNetlistParser.RedTree.print_contents(scope.io, n.ps, n.startof, n.startof + n.expr.off - 1)
     end
 end
 
@@ -591,7 +591,7 @@ end
 Generate SPICE/Spectre code from parsed AST for a specific simulator.
 
 Arguments:
-- `ast`: Parsed netlist AST (from SpectreNetlistParser)
+- `ast`: Parsed netlist AST (from NyanSpectreNetlistParser)
 - `simulator`: Target simulator instance (Ngspice(), Hspice(), Pspice(), Xyce(), SpectreADE())
 - `options`: Optional simulator-specific options
 - `includepaths`: Directories to search for include files (required for Verilog-A conversion with includes)
@@ -605,7 +605,7 @@ be preserved as-is without reformatting.
 Example:
 ```julia
 # Parse SPICE file
-ast = SpectreNetlistParser.parsefile("input.sp")
+ast = NyanSpectreNetlistParser.parsefile("input.sp")
 
 # Generate for different simulators
 ngspice_code = generate_code(ast, Ngspice())

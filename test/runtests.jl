@@ -17,7 +17,7 @@ const RUN_CORE = !("integration" in ARGS) || "all" in ARGS
 if RUN_INTEGRATION && !RUN_CORE
     # Integration-only mode
     @info "Running integration tests only (large VA models)"
-    using CedarSim
+    using Cadnip
     @testset "VADistiller Integration" begin
         @testset "mna/vadistiller_integration.jl" include("mna/vadistiller_integration.jl")
     end
@@ -33,7 +33,7 @@ if RUN_INTEGRATION && !RUN_CORE
 elseif RUN_CORE
     @info "Running core tests"
 
-    using CedarSim
+    using Cadnip
 
     # Tests that work with parsing only (no simulation required)
     @testset "Phase 0: Parsing Tests" begin

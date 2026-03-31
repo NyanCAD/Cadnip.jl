@@ -9,7 +9,7 @@ BSIM-CMG for multi-gate (FinFET) transistors.
 # Usage
 ```julia
 using CMCModels
-using CedarSim.MNA: MNAContext, stamp!, get_node!
+using Cadnip.MNA: MNAContext, stamp!, get_node!
 
 ctx = MNAContext()
 d = get_node!(ctx, :d)
@@ -31,9 +31,9 @@ Version: 107.0.0
 """
 module CMCModels
 
-using CedarSim
-using CedarSim: VAFile
-using VerilogAParser
+using Cadnip
+using Cadnip: VAFile
+using NyanVerilogAParser
 
 # Model directory
 const VA_DIR = joinpath(@__DIR__, "..", "va")
@@ -45,8 +45,8 @@ export bsimcmg_va
 # Parse and evaluate the BSIM-CMG model at module load time
 let
     filepath = joinpath(VA_DIR, "bsimcmg.va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+    va = NyanVerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, Cadnip.make_mna_module(va))
 end
 
 # Export device type (name matches VA module declaration)

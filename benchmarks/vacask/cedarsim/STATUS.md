@@ -1,10 +1,10 @@
-# VACASK Benchmarks - CedarSim Integration Status
+# VACASK Benchmarks - Cadnip Integration Status
 
-This document tracks the progress of adapting VACASK benchmarks to run with CedarSim.
+This document tracks the progress of adapting VACASK benchmarks to run with Cadnip.
 
 ## Overview
 
-The VACASK benchmark suite (from https://codeberg.org/arpadbuermen/VACASK) tests circuit simulator performance with various circuit types. We've created `cedarsim/` folders alongside the original `ngspice/` folders to run these benchmarks with CedarSim's MNA backend.
+The VACASK benchmark suite (from https://codeberg.org/arpadbuermen/VACASK) tests circuit simulator performance with various circuit types. We've created `cedarsim/` folders alongside the original `ngspice/` folders to run these benchmarks with Cadnip's MNA backend.
 
 All benchmarks use vadistiller-ported SPICE models equivalent to ngspice's built-in models.
 
@@ -57,7 +57,7 @@ PSP103 uses Verilog-A named blocks (`begin : evaluateblock`) with local variable
 
 ## Code Changes Made
 
-1. **Export `@sp_str` macro** (`src/CedarSim.jl`)
+1. **Export `@sp_str` macro** (`src/Cadnip.jl`)
 2. **Add `imported_hdl_modules` to `parse_spice_to_mna`** (`src/spc/interface.jl`)
 3. **Fix `srcline` keyword** (`src/spc/interface.jl`)
 4. **Fix stamp! keyword argument mismatch** (`src/spc/codegen.jl`, `src/mna/devices.jl`) - Changed `mode` to `_sim_mode_`

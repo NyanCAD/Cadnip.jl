@@ -1,7 +1,7 @@
-# CedarSim system image build recipe
+# Cadnip system image build recipe
 
-This builds a system image of the CedarSim.jl package for quicker startups and loading times.
-We will build upon this to create a container for use with JuliaHub for shipping CedarSim to clients.
+This builds a system image of the Cadnip.jl package for quicker startups and loading times.
+We will build upon this to create a container for use with JuliaHub for shipping Cadnip to clients.
 In the future, we may want to generate a large number of precompile statements to really juice up the amount of code we're caching here.
 Note that for the time being, I believe that we can only cache `NativeInterpreter` code, not `DAEInterpreter` code, so first circuit solves will still take a long time.
 

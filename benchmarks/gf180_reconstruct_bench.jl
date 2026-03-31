@@ -1,7 +1,7 @@
 println("--- gf180_dff reconstruction benchmark")
 
 include("benchmark_common.jl")
-using CedarSim: DAECompiler
+using Cadnip: DAECompiler
 to = TimerOutput()
 daeprob, _, odeprob, _ = load_gf180(;to, compute_jacobian = false)
 

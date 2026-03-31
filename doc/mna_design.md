@@ -34,7 +34,7 @@ Replace the current simulation backend with direct MNA (Modified Nodal Analysis)
 ```
 Netlist (SPICE/Spectre/Verilog-A)
     ↓
-Parser (SpectreNetlistParser.jl, VerilogAParser.jl)
+Parser (NyanSpectreNetlistParser.jl, NyanVerilogAParser.jl)
     ↓
 Codegen → emits stamp!() calls or contribution functions
     ↓

@@ -12,10 +12,10 @@ The MNA backend provides full PDK precompilation support through `load_mna_modul
 
 ```julia
 module MyPDK
-    using CedarSim
+    using Cadnip
 
     # Load PDK at module definition time - enables precompilation
-    const corners = CedarSim.load_mna_modules(@__MODULE__,
+    const corners = Cadnip.load_mna_modules(@__MODULE__,
         joinpath(@__DIR__, "pdk.spice"))
 
     # corners is a NamedTuple: (typical=Module, fast=Module, slow=Module, ...)
@@ -121,8 +121,8 @@ Each section becomes a separate Julia module with its own builder functions.
 
 ```julia
 module sm141064
-    using CedarSim, BSIM4
-    eval(CedarSim.load_spice_modules(path; names=["typical"]))
+    using Cadnip, BSIM4
+    eval(Cadnip.load_spice_modules(path; names=["typical"]))
     # Exports @ckt_nfet_03v3, @ckt_pfet_03v3 macros
 end
 ```
@@ -131,8 +131,8 @@ end
 
 ```julia
 module sm141064
-    using CedarSim, BSIM4
-    const corners = CedarSim.load_mna_modules(@__MODULE__, path;
+    using Cadnip, BSIM4
+    const corners = Cadnip.load_mna_modules(@__MODULE__, path;
         names=["typical", "statistical"])
     using .typical: nfet_03v3_mna_builder, pfet_03v3_mna_builder
     export nfet_03v3_mna_builder, pfet_03v3_mna_builder
@@ -148,7 +148,7 @@ A test PDK is provided in `test/testpdk/`:
 
 Example from test:
 ```julia
-const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
+const corners = Cadnip.load_mna_modules(@__MODULE__, testpdk_path)
 
 # Use in circuit
 typical.inv_x1_mna_builder(lens, spec, ctx, inp, out, vdd, vss, (;);
@@ -176,7 +176,7 @@ This is what BSIM4.jl currently uses:
 ```julia
 module BSIM4
     using RelocatableFolders
-    using CedarSim
+    using Cadnip
 
     const bsim4_va = @path joinpath(@__DIR__, "bsim4.va")
     Base.include(@__MODULE__, VAFile(bsim4_va))
@@ -191,9 +191,9 @@ The new convenience function returns the created module:
 
 ```julia
 module BSIM4
-    using CedarSim
+    using Cadnip
 
-    const bsim4_mod = CedarSim.load_mna_va_module(@__MODULE__,
+    const bsim4_mod = Cadnip.load_mna_va_module(@__MODULE__,
         joinpath(@__DIR__, "bsim4.va"))
     using .bsim4_mod: bsim4
 

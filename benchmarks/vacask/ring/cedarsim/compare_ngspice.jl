@@ -1,8 +1,8 @@
 #!/usr/bin/env julia
 #==============================================================================#
-# Compare CedarSim vs ngspice ring oscillator waveforms
+# Compare Cadnip vs ngspice ring oscillator waveforms
 #
-# Runs CedarSim on the same circuit as ngspice (no load caps, 10uA pulse),
+# Runs Cadnip on the same circuit as ngspice (no load caps, 10uA pulse),
 # loads ngspice reference data, and generates a comparison plot.
 #
 # Setup (extra deps not in benchmarks/Project.toml):
@@ -17,9 +17,9 @@
 # Output: benchmarks/vacask/ring/cedarsim/ring_oscillator_waveforms.png
 #==============================================================================#
 
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: CedarTranOp, MNASolutionAccessor, voltage
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: CedarTranOp, MNASolutionAccessor, voltage
 using OrdinaryDiffEq: FBDF
 using SciMLBase
 using Printf
@@ -46,15 +46,15 @@ sol = tran!(circuit, (0.0, 1e-6);
     unstable_check=(dt,u,p,t)->false)
 elapsed = time() - t0
 
-@printf("CedarSim: %s, %d pts, %.1f s, %d NR iters\n",
+@printf("Cadnip: %s, %d pts, %.1f s, %d NR iters\n",
     sol.retcode, length(sol.t), elapsed,
     sol.stats !== nothing ? sol.stats.nnonliniter : 0)
 
-# Extract CedarSim waveforms
+# Extract Cadnip waveforms
 acc = MNASolutionAccessor(sol, sys)
 n_samples = 10000
 times_cs = range(0.0, 1e-6; length=n_samples)
-println("Extracting CedarSim waveforms...")
+println("Extracting Cadnip waveforms...")
 
 V_cs = Dict{Int, Vector{Float64}}()
 for node_num in 1:9
@@ -82,9 +82,9 @@ fig = Figure(size=(1400, 1000))
 
 # Panel 1: Full 1μs comparison of node 1
 ax1 = Axis(fig[1, 1]; xlabel="Time (ns)", ylabel="Voltage (V)",
-           title="Node 1: CedarSim vs ngspice (Full 1μs)")
+           title="Node 1: Cadnip vs ngspice (Full 1μs)")
 lines!(ax1, t_ng_ns, V_ng[1]; color=:blue, linewidth=1.5, label="ngspice")
-lines!(ax1, t_cs_ns, V_cs[1]; color=:red, linewidth=1.0, label="CedarSim")
+lines!(ax1, t_cs_ns, V_cs[1]; color=:red, linewidth=1.0, label="Cadnip")
 axislegend(ax1; position=:rt)
 ylims!(ax1, -0.2, 1.4)
 
@@ -94,7 +94,7 @@ ax2 = Axis(fig[2, 1]; xlabel="Time (ns)", ylabel="Voltage (V)",
 mask_ng = t_ng_ns .<= 50
 mask_cs = t_cs_ns .<= 50
 lines!(ax2, t_ng_ns[mask_ng], V_ng[1][mask_ng]; color=:blue, linewidth=1.5, label="ngspice")
-lines!(ax2, t_cs_ns[mask_cs], V_cs[1][mask_cs]; color=:red, linewidth=1.0, label="CedarSim")
+lines!(ax2, t_cs_ns[mask_cs], V_cs[1][mask_cs]; color=:red, linewidth=1.0, label="Cadnip")
 axislegend(ax2; position=:rt)
 ylims!(ax2, -0.2, 1.4)
 
@@ -104,13 +104,13 @@ ax3 = Axis(fig[3, 1]; xlabel="Time (ns)", ylabel="Voltage (V)",
 mask_ng3 = t_ng_ns .>= 900 .&& t_ng_ns .<= 1000
 mask_cs3 = t_cs_ns .>= 900 .&& t_cs_ns .<= 1000
 lines!(ax3, t_ng_ns[mask_ng3], V_ng[1][mask_ng3]; color=:blue, linewidth=1.5, label="ngspice")
-lines!(ax3, t_cs_ns[mask_cs3], V_cs[1][mask_cs3]; color=:red, linewidth=1.0, label="CedarSim")
+lines!(ax3, t_cs_ns[mask_cs3], V_cs[1][mask_cs3]; color=:red, linewidth=1.0, label="Cadnip")
 axislegend(ax3; position=:rt)
 ylims!(ax3, -0.2, 1.4)
 
 # Panel 4: All nodes at steady state
 ax4 = Axis(fig[4, 1]; xlabel="Time (ns)", ylabel="Voltage (V)",
-           title="All 9 Nodes — CedarSim (900–1000 ns)")
+           title="All 9 Nodes — Cadnip (900–1000 ns)")
 colors = [:blue, :red, :green, :orange, :purple, :cyan, :magenta, :brown, :gray]
 for i in 1:9
     lines!(ax4, t_cs_ns[mask_cs3], V_cs[i][mask_cs3]; color=colors[i], linewidth=1.0, label="Node $i")
@@ -125,7 +125,7 @@ println("Saved: $outfile")
 # Print comparison stats
 println("\n=== Comparison Summary ===")
 @printf("ngspice:  1μs in 1.5s, %d pts, 80580 NR iters, trap method\n", length(t_ng))
-@printf("CedarSim: 1μs in %.1fs, %d pts, %d NR iters, FBDF\n",
+@printf("Cadnip: 1μs in %.1fs, %d pts, %d NR iters, FBDF\n",
     elapsed, length(sol.t),
     sol.stats !== nothing ? sol.stats.nnonliniter : 0)
 

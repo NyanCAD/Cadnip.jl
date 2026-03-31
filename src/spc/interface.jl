@@ -157,9 +157,9 @@ function codegen_hdl_import!(mod::Module, cache::CedarParseCache, imp::String)
     vamod = va.stmts[end]
     s = gensym(String(vamod.id))
     sm = Core.eval(mod, :(baremodule $s
-        const VerilogAEnvironment = $(CedarSim.VerilogAEnvironment)
+        const VerilogAEnvironment = $(Cadnip.VerilogAEnvironment)
         using .VerilogAEnvironment
-        $(CedarSim.make_spice_device(vamod))
+        $(Cadnip.make_spice_device(vamod))
         const $(Symbol(lowercase(String(vamod.id)))) = $(Symbol(vamod.id))
     end))
 
@@ -197,7 +197,7 @@ voltage(sol, :out)  # Returns 2.5
 """
 function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit,
                             imported_hdl_modules::Vector{Module}=Module[])
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
     return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
 end
 
@@ -215,7 +215,7 @@ eval(circuit_code)
 """
 function parse_spice_file_to_mna(filepath::AbstractString; circuit_name::Symbol=:circuit,
                                   imported_hdl_modules::Vector{Module}=Module[])
-    ast = SpectreNetlistParser.parsefile(filepath; start_lang=:spice, implicit_title=true)
+    ast = NyanSpectreNetlistParser.parsefile(filepath; start_lang=:spice, implicit_title=true)
     return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
 end
 
@@ -237,13 +237,13 @@ voltage(sol, :out)  # Returns 2.5
 ```
 """
 function solve_spice_mna(spice_code::String; temp::Real=27.0)
-    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
     code = make_mna_circuit(ast)
     # We need to evaluate the code in a temporary module
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
     spec = MNA.MNASpec(temp=Float64(temp), mode=:dcop)
@@ -293,7 +293,7 @@ R2 out 0 1k
 macro sp_str(str, flag="")
     enable_julia_escape = 'e' in flag
     inline = 'i' in flag
-    sa = SpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
+    sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
         implicit_title = !inline, fname=String(__source__.file), srcline=__source__.line)
 
     # Generate MNA builder function

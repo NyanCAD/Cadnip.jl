@@ -9,11 +9,11 @@
 using Pkg
 Pkg.activate(".")
 
-using CedarSim
-using CedarSim.MNA
-using CedarSim.MNA: fast_residual!, fast_rebuild!, compile_structure, create_workspace
-using CedarSim.MNA: EvalWorkspace, CompiledStructure, MNAContext, get_node!, alloc_current!
-using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, MNASpec, MNACircuit, compile
+using Cadnip
+using Cadnip.MNA
+using Cadnip.MNA: fast_residual!, fast_rebuild!, compile_structure, create_workspace
+using Cadnip.MNA: EvalWorkspace, CompiledStructure, MNAContext, get_node!, alloc_current!
+using Cadnip.MNA: stamp_G!, stamp_C!, stamp_b!, MNASpec, MNACircuit, compile
 using InteractiveUtils
 
 println("=" ^ 60)
@@ -32,7 +32,7 @@ function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
     if ctx === nothing
         ctx = MNAContext()
     else
-        CedarSim.MNA.reset_for_restamping!(ctx)
+        Cadnip.MNA.reset_for_restamping!(ctx)
     end
     vcc = get_node!(ctx, :vcc)
     out = get_node!(ctx, :out)
@@ -73,7 +73,7 @@ ws = compile(circuit)
 cs = ws.structure
 
 # Create test vectors
-n = CedarSim.MNA.system_size(ws)
+n = Cadnip.MNA.system_size(ws)
 u = zeros(n)
 du = zeros(n)
 resid = zeros(n)

@@ -7,7 +7,7 @@ steps:
       - github_commit_status:
           context: "Downstream"
     steps:
-      - label: ":runner: SpectreNetlistParser"
+      - label: ":runner: NyanSpectreNetlistParser"
         env:
           GITHUB_SSH_KEY: ${GITHUB_SSH_KEY?}
         plugins:
@@ -19,7 +19,7 @@ steps:
                 use_ssh: true
                 coverage: false
                 extra_registries: ssh://git@github.com/CedarEDA/PublicRegistry.git
-                package: SpectreNetlistParser
+                package: NyanSpectreNetlistParser
           - staticfloat/metahook:
               # TODO: Pkg.test doesn't instantiate, requires
               # https://github.com/JuliaLang/Pkg.jl/pull/3883/commits/8ab562f72806af458c816dd2f319014f8e05e5cc
@@ -30,7 +30,7 @@ steps:
           os: "linux"
           arch: "x86_64"
 
-      - label: ":runner: VerilogAParser"
+      - label: ":runner: NyanVerilogAParser"
         env:
           GITHUB_SSH_KEY: ${GITHUB_SSH_KEY?}
         plugins:
@@ -42,7 +42,7 @@ steps:
                 use_ssh: true
                 coverage: false
                 extra_registries: ssh://git@github.com/CedarEDA/PublicRegistry.git
-                package: VerilogAParser
+                package: NyanVerilogAParser
           - staticfloat/metahook:
               # TODO: Pkg.test doesn't instantiate, requires
               # https://github.com/JuliaLang/Pkg.jl/pull/3883/commits/8ab562f72806af458c816dd2f319014f8e05e5cc
@@ -74,9 +74,9 @@ steps:
                 JULIA_PKG_PRECOMPILE_AUTO=0 \
                 julia --project=BSIM4/test -e 'import Pkg; Pkg.instantiate(); \
                                                            Pkg.develop(path="."); \
-                                                           Pkg.develop(path="./Lexers.jl"); \
-                                                           Pkg.develop(path="./SpectreNetlistParser.jl"); \
-                                                           Pkg.develop(path="./VerilogAParser.jl"); \
+                                                           Pkg.develop(path="./NyanLexers.jl"); \
+                                                           Pkg.develop(path="./NyanSpectreNetlistParser.jl"); \
+                                                           Pkg.develop(path="./NyanVerilogAParser.jl"); \
                                                            Pkg.precompile();'
         # Until https://github.com/JuliaLang/Pkg.jl/pull/3276 is fixed, run test script manually
         # - JuliaCI/julia-test#v1:

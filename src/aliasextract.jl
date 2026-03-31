@@ -34,7 +34,7 @@ function (self::AliasInterp)(::typeof(with), f, pairs...)
 end
 
 function aliasmap(circ)
-    interp = CedarSim.AliasInterp()
+    interp = Cadnip.AliasInterp()
     interp(circ)
     interp.aliases
 end

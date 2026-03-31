@@ -2,42 +2,44 @@
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CMCModels = "8a844b39-05e3-4819-8383-f5fae2d66f33"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
-CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Cadnip = "28ce5535-9df1-4533-abc1-da0fb7327efb"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
 ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
-DescriptorSystems = "a81e2ce2-54d1-11eb-2c75-db236b00f339"
 DelayDiffEq = "bcd4f6db-9728-5f36-b5f7-82caef46ccdb"
+DescriptorSystems = "a81e2ce2-54d1-11eb-2c75-db236b00f339"
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-Lexers = "8fc43420-9e17-4e89-a998-f4e9593a1dfc"
+NyanLexers = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 PSPModels = "abf2981e-f194-4833-b9e6-388029af7f41"
-VACASKModels = "a2b3c4d5-6789-4abc-def0-123456789abc"
+PhotonicModels = "b332cf46-470c-43e0-97f7-46dbfe290ae1"
 Preferences = "21216c6a-2e73-6563-6e65-726566657250"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 RobustAndOptimalControl = "21fd56a4-db03-40ee-82ee-a87907bee541"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
-SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
+NyanSpectreNetlistParser = "f050a39a-f089-4c65-a86a-958b8b907b9b"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Sundials = "c3572dad-4567-51f8-b174-8c6c989267f4"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-PhotonicModels = "b332cf46-470c-43e0-97f7-46dbfe290ae1"
+UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
+VACASKModels = "a2b3c4d5-6789-4abc-def0-123456789abc"
 VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
-VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
+NyanVerilogAParser = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"
 
 [sources]
 CMCModels = {path = "../models/CMCModels.jl"}
-CedarSim = {path = ".."}
-Lexers = {path = "../Lexers.jl"}
+Cadnip = {path = ".."}
+NyanLexers = {path = "../NyanLexers.jl"}
 PSPModels = {path = "../models/PSPModels.jl"}
-VACASKModels = {path = "../models/VACASKModels.jl"}
-SpectreNetlistParser = {path = "../SpectreNetlistParser.jl"}
 PhotonicModels = {path = "../models/PhotonicModels.jl"}
+NyanSpectreNetlistParser = {path = "../NyanSpectreNetlistParser.jl"}
+VACASKModels = {path = "../models/VACASKModels.jl"}
 VADistillerModels = {path = "../models/VADistillerModels.jl"}
-VerilogAParser = {path = "../VerilogAParser.jl"}
+NyanVerilogAParser = {path = "../NyanVerilogAParser.jl"}
 
 [compat]
 julia = "1.10"

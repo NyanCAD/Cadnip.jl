@@ -1,6 +1,6 @@
-using CedarSim
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 using Test
 using Random
 
@@ -22,10 +22,10 @@ allapprox_deftol(itr) = isempty(itr) ? true : all(isapprox_deftol(first(itr)), i
 # MNA-based solve functions (Phase 4+, no DAECompiler required)
 #==============================================================================#
 
-using CedarSim.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
-using CedarSim.MNA: voltage, current, get_node!, stamp!
-using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: make_ode_problem, ZERO_VECTOR
+using Cadnip.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
+using Cadnip.MNA: voltage, current, get_node!, stamp!
+using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using Cadnip.MNA: make_ode_problem, ZERO_VECTOR
 
 """
     solve_mna_spice_code(spice_code::String; temp=27.0) -> (ctx, sol)
@@ -45,14 +45,14 @@ voltage(sol, :out)  # Returns 2.5
 ```
 """
 function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
 
     # Evaluate in temporary module
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     # Import VA device types
     for hdl_mod in imported_hdl_modules
         for name in names(hdl_mod; all=true, imported=false)
@@ -93,14 +93,14 @@ voltage(sol, :out)  # Returns 2.5
 ```
 """
 function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
-    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
+    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
 
     # Evaluate in temporary module
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     # Import VA device types
     for hdl_mod in imported_hdl_modules
         for name in names(hdl_mod; all=true, imported=false)
@@ -184,7 +184,7 @@ function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, so
     return ctx, sol
 end
 
-using CedarSim.MNA: MNACircuit
+using Cadnip.MNA: MNACircuit
 
 """
     make_mna_spice_circuit(spice_code::String; temp=27.0, imported_hdl_modules=Module[]) -> MNACircuit
@@ -198,7 +198,7 @@ For production code loading SPICE from files, use the top-level eval pattern:
 
 ```julia
 # At module/file load time (top level)
-using CedarSim: parse_spice_to_mna
+using Cadnip: parse_spice_to_mna
 const circuit_code = parse_spice_to_mna(read("circuit.sp", String);
                                         imported_hdl_modules=[MyVA_module])
 eval(circuit_code)  # Defines `circuit` function, advances world
@@ -223,14 +223,14 @@ sol = tran!(circuit, (0.0, 1e-3))
 ```
 """
 function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
-    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
 
     # Evaluate in temporary module
     m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
     # Import VA device types
     for hdl_mod in imported_hdl_modules
         for name in names(hdl_mod; all=true, imported=false)

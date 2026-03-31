@@ -1,12 +1,12 @@
-using CedarSim
+using Cadnip
 using Documenter
 using OrdinaryDiffEq
 using UnicodePlots
 
 makedocs(
-    sitename = "CedarSim",
+    sitename = "Cadnip",
     format = Documenter.HTML(),
-    modules = [CedarSim],
+    modules = [Cadnip],
     pages = Any[
         "Home" => "index.md",
         "circuits.md",
@@ -33,6 +33,6 @@ catch e
 end
 
 deploydocs(
-    repo = "github.com/JuliaComputing/CedarSim.jl.git",
+    repo = "github.com/JuliaComputing/Cadnip.jl.git",
     branch = "docs",
 )

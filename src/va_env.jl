@@ -4,7 +4,7 @@
 baremodule VerilogAEnvironment
 
 import ..Base
-import ..CedarSim
+import ..Cadnip
 import ForwardDiff
 import Compat
 import NaNMath
@@ -109,8 +109,8 @@ function flicker_noise(dscope, pwr, exp, name)
     0.0
 end
 
-vaconvert(T::Type{<:Number}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
-vaconvert(T::Type{<:Number}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
+vaconvert(T::Type{<:Number}, x::Cadnip.Default) = Cadnip.Default(vaconvert(T, x.val))
+vaconvert(T::Type{<:Number}, x::Cadnip.DefaultOr) = Cadnip.DefaultOr(vaconvert(T, x.val), x.is_default)
 vaconvert(T::Type{<:Number}, x::Integer) = Base.convert(T, x)
 vaconvert(::Type{<:Number}, x::Number) = x
 
@@ -126,26 +126,26 @@ VA-LRM 4.2.1.1 Real to integer conversion:
 """
 vaconvert(::Type{Int}, x::Real) = Base.round(Int, x, Base.RoundNearestTiesAway)
 vaconvert(::Type{Int}, x::Integer) = x
-vaconvert(T::Type{Int}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
-vaconvert(T::Type{Int}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
+vaconvert(T::Type{Int}, x::Cadnip.Default) = Cadnip.Default(vaconvert(T, x.val))
+vaconvert(T::Type{Int}, x::Cadnip.DefaultOr) = Cadnip.DefaultOr(vaconvert(T, x.val), x.is_default)
 
 # String parameter support
 vaconvert(::Type{Base.String}, x::Base.String) = x
-vaconvert(T::Type{Base.String}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
-vaconvert(T::Type{Base.String}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
+vaconvert(T::Type{Base.String}, x::Cadnip.Default) = Cadnip.Default(vaconvert(T, x.val))
+vaconvert(T::Type{Base.String}, x::Cadnip.DefaultOr) = Cadnip.DefaultOr(vaconvert(T, x.val), x.is_default)
 
 export var"$simparam"
 
-var"$simparam"(param) = CedarSim.undefault(Base.getproperty(CedarSim.spec[], Symbol(param)))
+var"$simparam"(param) = Cadnip.undefault(Base.getproperty(Cadnip.spec[], Symbol(param)))
 function var"$simparam"(param, default)
-    if Base.hasproperty(CedarSim.spec[], Symbol(param))
-        return CedarSim.undefault(Base.getproperty(CedarSim.spec[], Symbol(param)))
+    if Base.hasproperty(Cadnip.spec[], Symbol(param))
+        return Cadnip.undefault(Base.getproperty(Cadnip.spec[], Symbol(param)))
     else
         return default
     end
 end
 
-var"$temperature"() = CedarSim.undefault(CedarSim.spec[].temp)+273.15 # Kelvin
+var"$temperature"() = Cadnip.undefault(Cadnip.spec[].temp)+273.15 # Kelvin
 
 # $port_connected(port) - returns 1 if the port is connected, 0 if floating
 # In MNA simulation, we assume all ports are connected
@@ -154,6 +154,6 @@ var"$port_connected"(port) = 1
 port_connected(port) = 1
 
 # Base type for VA-generated models
-abstract type VAModel <: CedarSim.CircuitElement; end
+abstract type VAModel <: Cadnip.CircuitElement; end
 
 end

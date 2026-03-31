@@ -1,7 +1,7 @@
 module unified
-using CedarSim
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser
+using Cadnip
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser
 
 include("../common.jl")
 
@@ -10,15 +10,15 @@ import Sky130PDK
 
 sky_dir = joinpath(pkgdir(Sky130PDK), "sky130A/libs.tech/ngspice")
 path = joinpath(@__DIR__, "scale.spice")
-sa2 = SpectreNetlistParser.parsefile(path);
-code2 = CedarSim.make_spectre_circuit(sa2, [], [sky_dir]);
+sa2 = NyanSpectreNetlistParser.parsefile(path);
+code2 = Cadnip.make_spectre_circuit(sa2, [], [sky_dir]);
 fn = eval(code2)
 fn()
 
-p = CedarSim.ParamObserver()
+p = Cadnip.ParamObserver()
 fn(p)
 m = p.x0.msky130_fd_pr__nfet_01v8
-param = CedarSim.modelparams(m)
+param = Cadnip.modelparams(m)
 
 debug_sky = DAECompiler.DebugConfig(
     ir_levels = DAECompiler.IRCodeRecords(),
@@ -26,7 +26,7 @@ debug_sky = DAECompiler.DebugConfig(
     verify_ir_levels=true,
     ir_log = joinpath(@__DIR__, "..", "ir", "sky130", "sk130"))
 
-circuit = CedarSim.DefaultSim(fn)
+circuit = Cadnip.DefaultSim(fn)
 time_bounds = (0.0, 2e-3)
 sys = CircuitIRODESystem(circuit; debug_config=debug_sky)
 prob = DAEProblem(sys, nothing, nothing, time_bounds, circuit)
@@ -36,7 +36,7 @@ sol = solve(prob, IDA(); reltol=1e-12, abstol=1e-12, initializealg=CedarDCOp())
 # useful for ruling out parsing or model errors
 if @isdefined param2
     @eval function fn4()
-        $fn(CedarSim.ParamLens((;x0=(;msky130_fd_pr__nfet_01v8=$param2))))
+        $fn(Cadnip.ParamLens((;x0=(;msky130_fd_pr__nfet_01v8=$param2))))
     end
 
     debug_sky_gf = DAECompiler.DebugConfig(
@@ -45,7 +45,7 @@ if @isdefined param2
         # verify_ir_levels=true,
         ir_log = joinpath(@__DIR__, "..", "ir", "sky130", "sk130_gf"))
 
-    circuit = CedarSim.DefaultSim(fn4)
+    circuit = Cadnip.DefaultSim(fn4)
     time_bounds = (0.0, 2e-3)
     sys = CircuitIRODESystem(circuit; debug_config=debug_sky_gf)
     prob = DAEProblem(sys, nothing, nothing, time_bounds, circuit)

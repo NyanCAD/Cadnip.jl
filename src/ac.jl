@@ -25,7 +25,7 @@
 #
 # 2. AC source phase: Only magnitude is supported (`V1 in 0 AC 1`). Phase
 #    specification (`V1 in 0 AC 1 45`) is parsed but ignored because
-#    SpectreNetlistParser's ACSource node doesn't expose the acphase field.
+#    NyanSpectreNetlistParser's ACSource node doesn't expose the acphase field.
 #
 # 3. Noise analysis: The `noise!()` function is not implemented. Requires:
 #    - Per-device noise source modeling (thermal, shot, flicker)

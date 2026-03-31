@@ -1,7 +1,7 @@
 module demo_bsimcmg
 
-using CedarSim
-using CedarSim.VerilogAParser
+using Cadnip
+using Cadnip.NyanVerilogAParser
 using Sundials
 using OrdinaryDiffEq
 using DAECompiler
@@ -11,10 +11,10 @@ using Test
 
 using ASAP7PDK.asap7_tt
 
-const R = CedarSim.SimpleResistor
-const C = CedarSim.SimpleCapacitor
-const t = CedarSim.SpectreEnvironment.var"$time"
-const V(v) = CedarSim.VoltageSource(dc=v)
+const R = Cadnip.SimpleResistor
+const C = Cadnip.SimpleCapacitor
+const t = Cadnip.SpectreEnvironment.var"$time"
+const V(v) = Cadnip.VoltageSource(dc=v)
 
 function circuit()
     vcc = Named(net, "vcc")()

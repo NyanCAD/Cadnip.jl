@@ -318,7 +318,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     stamp_method = generate_stamp_method(vm, contrib_fn)
 
     Expr(:toplevel,
-        :(VerilogAEnvironment.CedarSim.@kwdef struct $symname <: VerilogAEnvironment.VAModel
+        :(VerilogAEnvironment.Cadnip.@kwdef struct $symname <: VerilogAEnvironment.VAModel
             $(struct_fields...)
         end),
         stamp_method,
@@ -352,11 +352,11 @@ Update `va_str` macro and `include(mod, VAFile)` to use MNA codegen when `USE_DA
 
 ```julia
 macro va_str(str)
-    va = VerilogAParser.parse(IOBuffer(str))
+    va = NyanVerilogAParser.parse(IOBuffer(str))
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
-        if CedarSim.USE_DAECOMPILER
+        if Cadnip.USE_DAECOMPILER
             esc(make_module(va))  # Existing DAECompiler path
         else
             esc(make_mna_module(va))  # New MNA path
@@ -481,7 +481,7 @@ branch_value_p_n += Ic
 | New `src/mna/contrib.jl` | Contribution stamping primitives | ~100 |
 | `src/mna/MNA.jl` | Include contrib.jl | ~5 |
 | `src/vasim.jl` | Add `make_mna_device()` function | ~200 |
-| `src/CedarSim.jl` | Conditional VA codegen path | ~10 |
+| `src/Cadnip.jl` | Conditional VA codegen path | ~10 |
 | New `test/mna/va.jl` | VA MNA integration tests | ~100 |
 
 **Total: ~415 LOC**

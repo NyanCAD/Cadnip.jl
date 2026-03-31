@@ -2,7 +2,7 @@
 
 A tool for parsing and converting netlist languages.
 
-SpiceArmyKnife.jl builds on the advanced CedarSim parsers for Spice, Spectre, and Verilog-A for various parsing and conversion needs.
+SpiceArmyKnife.jl builds on the advanced Cadnip parsers for Spice, Spectre, and Verilog-A for various parsing and conversion needs.
 
 ## Parsing
 

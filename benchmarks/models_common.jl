@@ -1,13 +1,13 @@
 using BenchmarkTools
-using CedarSim
+using Cadnip
 using BSIM4
-using CedarSim.SpectreEnvironment
-using SpectreNetlistParser: SPICENetlistParser
+using Cadnip.SpectreEnvironment
+using NyanSpectreNetlistParser: SPICENetlistParser
 using TimerOutputs
 using OrdinaryDiffEq
 
 function load_gf180(;to = TimerOutput(), compute_jacobian::Bool = true)
-    repo_root = Base.pkgdir(CedarSim)
+    repo_root = Base.pkgdir(Cadnip)
     @timeit to "Parsing" begin
         @timeit to "include(BSIM4.bsim4_va)" begin
             if !isdefined(@__MODULE__, :bsim4)
@@ -22,8 +22,8 @@ function load_gf180(;to = TimerOutput(), compute_jacobian::Bool = true)
                 "DFF_cap_all.cir",
             ))
         end
-        @timeit to "CedarSim.make_spectre_circuit" begin
-            code = CedarSim.make_spectre_circuit(sa1, String[repo_root]);
+        @timeit to "Cadnip.make_spectre_circuit" begin
+            code = Cadnip.make_spectre_circuit(sa1, String[repo_root]);
         end
         @timeit to "eval(code)" begin
             circuit = eval(code)
