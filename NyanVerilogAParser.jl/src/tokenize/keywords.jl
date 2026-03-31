@@ -81,7 +81,7 @@ const reserved_words = Dict{String, Kind}(
     "include" => RESERVED,
     "inf" => INF,
     "initial" => INITIAL,
-    "initial_step" => RESERVED,
+    # "initial_step" is used in @(initial_step) event control, parsed as identifier
     "inout" => INOUT,
     "input" => INPUT,
     "instance" => RESERVED,
@@ -95,7 +95,8 @@ const reserved_words = Dict{String, Kind}(
     "last_crossing" => RESERVED,
     "liblist" => RESERVED,
     "library" => RESERVED,
-    "limexp" => RESERVED,
+    # "limexp" is a built-in math function, not a reserved keyword
+    # Kept as regular identifier so it parses as a function call
     "localparam" => RESERVED,
     "macromodule" => MACROMODULE,
     "medium" => RESERVED,

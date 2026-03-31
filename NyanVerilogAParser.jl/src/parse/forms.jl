@@ -368,6 +368,16 @@ struct AnalogSeqBlock
 end
 allchildren(asb::AnalogSeqBlock) = (asb.kwbegin, asb.decl, asb.stmts..., asb.kwend)
 
+# @(initial_step) stmt  or  @(initial_model) stmt
+struct AnalogEventControl
+    at::EXPR{Notation}
+    lparen::EXPRErr{Notation}
+    event::EXPR{Identifier}
+    rparen::EXPRErr{Notation}
+    stmt::EXPR
+end
+allchildren(aec::AnalogEventControl) = (aec.at, aec.lparen, aec.event, aec.rparen, aec.stmt)
+
 struct AnalogIf
     kw::EXPR{Keyword}
     lparen::EXPRErr{Notation}

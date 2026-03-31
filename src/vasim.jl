@@ -8,7 +8,7 @@ using NyanVerilogAParser.VerilogACSTParser:
     IdentifierPrimary, @case, BranchDeclaration,
     AnalogFunctionDeclaration, ModuleInstantiation,
     IntRealDeclaration, IntRealVarDecl, AnalogStatement,
-    AnalogConditionalBlock, AnalogVariableAssignment, AnalogProceduralAssignment,
+    AnalogConditionalBlock, AnalogEventControl, AnalogVariableAssignment, AnalogProceduralAssignment,
     Parens, AnalogIf, AnalogFor, AnalogWhile, AnalogRepeat, UnaryOp, Function,
     AnalogSystemTaskEnable, StringLiteral,
     CaseStatement, FunctionCall, FunctionCallStatement, TernaryExpr, ArrayLiteral,
@@ -199,7 +199,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Pair{Symbol,Symbol}}(), nothing,
         Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
         Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
-        Expr[], Any[], Symbol[])
+        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}())
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -317,7 +317,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         ddx_order,
         named_branches, nothing,
         array_nodes, access_map,
-        Expr[], Any[], Symbol[])
+        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}())
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -560,6 +560,7 @@ struct MNAScope
     extra_stamps::Vector{Expr}  # Mutable buffer for pre-dual stamps (allocation, G/C)
     extra_stamps_b::Vector{Any}  # Mutable buffer for post-dual b-stamp descriptors (NamedTuples)
     extra_internal_nodes::Vector{Symbol}  # Mutable buffer for dynamically added internal nodes (idt/laplace state nodes)
+    current_probes::Set{Pair{Symbol,Symbol}}  # I(a,b) probes encountered in contribution RHS
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -567,7 +568,7 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.parameters, s.node_order, s.ninternal_nodes, s.branch_order,
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
     s.ddx_order, s.named_branches, delay_jl,
-    s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes)
+    s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -805,8 +806,13 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
                 return :(error("I() with single argument requires a named branch"))
             end
         else
-            # I(a, b) - not directly supported in contribution-based stamping
-            return :(error("I(a,b) probe not supported in MNA contribution"))
+            # I(a, b) - current probe through node pair
+            # Record the probe; the code generator will allocate a branch current variable
+            id1 = resolve_array_ref(to_julia, stmt.args[1].item)
+            id2 = resolve_array_ref(to_julia, stmt.args[2].item)
+            push!(to_julia.current_probes, id1 => id2)
+            push!(to_julia.used_branches, id1 => id2)
+            return Symbol("_I_probe_", id1, "_", id2)
         end
     end
 
@@ -1071,6 +1077,10 @@ end
 
 (to_julia::MNAScope)(stmt::VANode{AnalogStatement}) = to_julia(stmt.stmt)
 
+# @(initial_step) body — emit body unconditionally.
+# The values are pure functions of parameters; recomputing every iteration is correct.
+(to_julia::MNAScope)(stmt::VANode{AnalogEventControl}) = to_julia(stmt.stmt)
+
 #==============================================================================#
 # Hoisted Stamping for Voltage-Dependent Conditionals
 #
@@ -1113,6 +1123,7 @@ struct StampInfo
     col_expr::Any       # Second index expression (column, nothing for vector)
     val_expr::Any       # Value expression
     original_expr::Expr # Original stamp call expression
+    scope::Dict{Symbol, Symbol}  # Snapshot of let_var -> hoisted_sym bindings at this stamp
 end
 
 """
@@ -1225,9 +1236,34 @@ end
 
 Walk an Expr tree and collect all stamp_G!, stamp_C!, stamp_b! calls.
 """
-function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
+function collect_stamp_calls!(stamps::Vector{StampInfo}, expr,
+                              allocs::Vector{AllocInfo}=AllocInfo[],
+                              scope::Dict{Symbol, Symbol}=Dict{Symbol, Symbol}())
     if !isa(expr, Expr)
         return
+    end
+
+    # Check if this is a let expression with alloc_current! — track which
+    # hoisted_sym the let_var maps to so stamps inside this scope resolve correctly.
+    if expr.head == :let && length(expr.args) >= 2
+        bindings = expr.args[1]
+        if bindings isa Expr && bindings.head == :(=) && length(bindings.args) == 2
+            let_var = bindings.args[1]
+            rhs = bindings.args[2]
+            if let_var isa Symbol && rhs isa Expr && rhs.head == :call
+                # Check if this let binds an alloc_current! call — find corresponding AllocInfo
+                for alloc in allocs
+                    if alloc.original_expr === expr
+                        new_scope = copy(scope)
+                        new_scope[let_var] = alloc.hoisted_sym
+                        for i in 2:length(expr.args)
+                            collect_stamp_calls!(stamps, expr.args[i], allocs, new_scope)
+                        end
+                        return
+                    end
+                end
+            end
+        end
     end
 
     # Check if this is a stamp call
@@ -1239,13 +1275,13 @@ function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
             if length(mod_chain) >= 2 && mod_chain[end] isa QuoteNode
                 fn_name = mod_chain[end].value
                 if fn_name == :stamp_G! && length(expr.args) == 5
-                    push!(stamps, StampInfo(:G, expr.args[3], expr.args[4], expr.args[5], expr))
+                    push!(stamps, StampInfo(:G, expr.args[3], expr.args[4], expr.args[5], expr, copy(scope)))
                     return
                 elseif fn_name == :stamp_C! && length(expr.args) == 5
-                    push!(stamps, StampInfo(:C, expr.args[3], expr.args[4], expr.args[5], expr))
+                    push!(stamps, StampInfo(:C, expr.args[3], expr.args[4], expr.args[5], expr, copy(scope)))
                     return
                 elseif fn_name == :stamp_b! && length(expr.args) == 4
-                    push!(stamps, StampInfo(:b, expr.args[3], nothing, expr.args[4], expr))
+                    push!(stamps, StampInfo(:b, expr.args[3], nothing, expr.args[4], expr, copy(scope)))
                     return
                 end
             end
@@ -1254,7 +1290,7 @@ function collect_stamp_calls!(stamps::Vector{StampInfo}, expr)
 
     # Recurse into subexpressions
     for arg in expr.args
-        collect_stamp_calls!(stamps, arg)
+        collect_stamp_calls!(stamps, arg, allocs, scope)
     end
 end
 
@@ -1615,15 +1651,9 @@ function hoist_conditional_stamps(ifex::Expr)
     counter = Ref(0)
     collect_alloc_current_calls!(allocs, ifex, counter)
 
-    # Build mapping from let-bound variables to hoisted symbols
-    let_var_map = Dict{Symbol, Symbol}()
-    for alloc in allocs
-        let_var_map[alloc.let_var] = alloc.hoisted_sym
-    end
-
-    # Step 2: Collect all stamp calls
+    # Step 2: Collect all stamp calls (with scope-aware let_var resolution)
     stamps = StampInfo[]
-    collect_stamp_calls!(stamps, ifex)
+    collect_stamp_calls!(stamps, ifex, allocs)
 
     # Step 2b: Collect all index allocation calls from inner hoisting
     # These are get_G_idx!/get_C_idx!/get_b_idx! calls that need to be hoisted
@@ -1683,11 +1713,11 @@ function hoist_conditional_stamps(ifex::Expr)
     idx_counter = Ref(0)
 
     for stamp in stamps
-        row_resolved, row_ok = resolve_index_expr(stamp.row_expr, let_var_map)
+        row_resolved, row_ok = resolve_index_expr(stamp.row_expr, stamp.scope)
         if stamp.matrix == :b
             col_resolved, col_ok = nothing, true
         else
-            col_resolved, col_ok = resolve_index_expr(stamp.col_expr, let_var_map)
+            col_resolved, col_ok = resolve_index_expr(stamp.col_expr, stamp.scope)
         end
 
         if !row_ok || !col_ok
@@ -1744,7 +1774,6 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
 
     # Convert VA condition to boolean - in VA, integers are truthy (non-zero = true)
     function va_condition_to_bool(cond_expr)
-        # Wrap in !iszero() to convert any numeric type to Bool
         :(!(iszero($(to_julia(cond_expr)))))
     end
 
@@ -2076,7 +2105,7 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
         to_julia.named_branches, nothing,
         to_julia.array_nodes, to_julia.access_map,
-        to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes)
+        to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2122,6 +2151,9 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
     elseif stmt isa VANode{AnalogProceduralAssignment}
         # Procedural assignments in analog block (e.g., cdrain = R*V(g,s)**2;)
         push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
+    elseif stmt isa VANode{AnalogEventControl}
+        # @(initial_step) body — treat as unconditional (recurse into body)
+        mna_collect_contributions!(contributions, to_julia, stmt.stmt)
     end
 end
 
@@ -2900,6 +2932,22 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
     end
 
+    # Extract I(a,b) probe values from the twonode voltage contribution branch currents
+    # When V(A,B) <+ I(A,B) * R, the probe reads the same branch current variable
+    # that the voltage contribution created
+    for (p_sym, n_sym) in to_julia.current_probes
+        pair = (p_sym, n_sym)
+        if haskey(twonode_voltage_vars, pair)
+            I_var = twonode_voltage_vars[pair]
+            I_sym = Symbol("_I_probe_", p_sym, "_", n_sym)
+            push!(branch_current_extraction.args,
+                :(begin
+                    _i_idx = Cadnip.MNA.resolve_index(ctx, $I_var)
+                    $I_sym = _mna_x_[_i_idx]
+                end))
+        end
+    end
+
     # Generate voltage contribution stamping for named branches
     voltage_stamp_code = Expr(:block)
     for (branch_name, vc) in voltage_branch_contribs
@@ -3214,17 +3262,20 @@ function build_access_map(va::VANode)
             nature_name = Symbol(item.id)
             access_func = get(nature_access, nature_name, nothing)
             if access_func !== nothing && !haskey(access_map, access_func)
-                # First mapping wins: e.g., electrical's I=>:flow takes precedence
-                # over signal-flow discipline current's I=>:potential
                 access_map[access_func] = role
             end
         end
     end
 
-    # If no disciplines were found (e.g., inline va"" without includes),
-    # the electrical discipline is implicit in Verilog-A
-    if isempty(access_map)
+    # V/I are always available (implicit electrical discipline in Verilog-A).
+    # Custom access functions (e.g., OptE from optical discipline) are added
+    # from declarations above. If declarations come from `include`d files,
+    # they may fail to parse due to preprocessor VirtPos limitations — the
+    # V/I defaults ensure basic functionality always works.
+    if !haskey(access_map, :V)
         access_map[:V] = :potential
+    end
+    if !haskey(access_map, :I)
         access_map[:I] = :flow
     end
 

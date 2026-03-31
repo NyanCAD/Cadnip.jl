@@ -195,6 +195,8 @@ function virtrange(node::ChunkTreeNode)
         fileend = next_ei.file_pos_start-1
     end
 
+    # Empty text chunk between two adjacent expansions (fileend < filestart)
+    fileend < filestart && return virtstart:(virtstart - 1)
     virtstart:(virtstart + fileend - filestart)
 end
 
