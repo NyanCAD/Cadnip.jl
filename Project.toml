@@ -102,7 +102,7 @@ Scratch = "1"
 StateSelection = "1"
 StaticArrays = "1"
 StructArrays = "0.7"
-Sundials = "4"
+Sundials = "4, 5"
 SymbolicIndexingInterface = "0.3"
 julia = "1.11"
 
