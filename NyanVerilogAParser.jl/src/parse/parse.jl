@@ -596,6 +596,16 @@ function parse_seq_block(parse_statement, ps)
     return EXPR(AnalogSeqBlock(kw, block_decl, stmts, accept_kw(ps, END)))
 end
 
+# Parse @(event_name) statement — e.g., @(initial_step) begin ... end
+function parse_analog_event_control(parse_statement, ps)
+    at = take(ps, AT_SIGN)
+    lparen = accept(ps, LPAREN)
+    event = accept_identifier(ps)
+    rparen = accept(ps, RPAREN)
+    stmt = parse_statement(ps)
+    return EXPR(AnalogEventControl(at, lparen, event, rparen, stmt))
+end
+
 function parse_reference(ps)
     # branch_reference or analog_net_reference
     return accept_identifier(ps)
@@ -812,6 +822,7 @@ function parse_statement(parse_assignment, parse_statement, ps)
         (REPEAT | WHILE | FOR) => parse_analog_loop_statement(parse_statement, ps)
         BEGIN => parse_seq_block(parse_statement, ps)
         INITIAL => parse_intial_block(parse_statement, ps)
+        AT_SIGN => parse_analog_event_control(parse_statement, ps)
         SYSTEM_IDENTIFIER => begin
             task = take_system_identifier(ps)
             if kind(nt(ps)) == LPAREN

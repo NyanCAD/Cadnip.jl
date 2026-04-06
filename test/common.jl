@@ -44,7 +44,7 @@ ctx, sol = solve_mna_spice_code(code)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
+function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[], maxiters::Int=100)
     ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
     code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
 
@@ -67,7 +67,7 @@ function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_
     # Use solve_dc(builder, params, spec) which properly handles Newton iteration
     # for nonlinear devices (VA BJTs, diodes, etc.)
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec)
+    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec; maxiters)
 
     # Build context for returning (at the solved operating point)
     ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
@@ -92,7 +92,7 @@ ctx, sol = solve_mna_spectre_code(code)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
+function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[], maxiters::Int=100)
     ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
     code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
 
@@ -115,7 +115,7 @@ function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_
     # Use solve_dc(builder, params, spec) which properly handles Newton iteration
     # for nonlinear devices (VA BJTs, diodes, etc.)
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec)
+    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec; maxiters)
 
     # Build context for returning (at the solved operating point)
     ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)

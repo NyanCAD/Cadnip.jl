@@ -26,13 +26,14 @@ export !, +, *, -, ==, !=, /, ^, var"**", >, <,  <=, >=,
 
 using Base: @inbounds, @inline, @noinline
 using Base.Experimental: @overlay
-export @inbounds, @inline, @overlay, var"$temperature"
+export @inbounds, @inline, @overlay, var"$temperature", var"$vt"
 
-export pow, ln, ddt, absdelay, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
+export pow, ln, limexp, ddt, absdelay, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
 
 @noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total ln(x) = NaNMath.log(x)
+@noinline Base.@assume_effects :total limexp(x) = exp(clamp(x, -80.0, 80.0))
 log(x) = cedarerror("log not supported, use $log10 or $ln instead")
 !(a) = Base.:!(a)
 !(a::Int64) = a == zero(a)
@@ -146,6 +147,7 @@ function var"$simparam"(param, default)
 end
 
 var"$temperature"() = Cadnip.undefault(Cadnip.spec[].temp)+273.15 # Kelvin
+var"$vt"() = 1.3806488e-23 * var"$temperature"() / 1.6021766208e-19  # kT/q thermal voltage
 
 # $port_connected(port) - returns 1 if the port is connected, 0 if floating
 # In MNA simulation, we assume all ports are connected
