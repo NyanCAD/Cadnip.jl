@@ -25,6 +25,7 @@ jobs:
           Pkg.add("CompatHelper")
           using CompatHelper
           CompatHelper.main(; subdirs=["",
+            "NyanLexers.jl",
             "NyanSpectreNetlistParser.jl",
             "NyanVerilogAParser.jl"])
         shell: julia --color=yes {0}
