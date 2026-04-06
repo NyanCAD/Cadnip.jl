@@ -26,10 +26,5 @@ jobs:
           using CompatHelper
           CompatHelper.main(; subdirs=["",
             "NyanSpectreNetlistParser.jl",
-            "NyanVerilogAParser.jl",
-            "models/VADistillerModels.jl",
-            "models/PSPModels.jl",
-            "models/CMCModels.jl",
-            "models/PhotonicModels.jl",
-            "models/VACASKModels.jl"])
+            "NyanVerilogAParser.jl"])
         shell: julia --color=yes {0}
