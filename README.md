@@ -2,7 +2,7 @@
 
 **C**ircuit **A**nalysis & **D**ifferentiable **N**umerical **I**ntegration **P**rogram
 
-Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of Cadnip that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
+Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of CedarSim that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
 
 ## Features
 
