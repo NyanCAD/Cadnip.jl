@@ -27,7 +27,7 @@ NyanVerilogAParser = {subdir = "NyanVerilogAParser.jl", url = "https://github.co
 ArgParse = "1.2.0"
 Downloads = "1.6.0"
 HTTP = "1.10.17"
-JSON = "0.21.4"
+JSON = "0.21.4, 1.5"
 NyanSpectreNetlistParser = "0.6.1"
 NyanVerilogAParser = "0.3.1"
 StringEncodings = "0.3.7"
