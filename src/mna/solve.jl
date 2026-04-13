@@ -624,7 +624,7 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     # The Newton solver handles the nonlinearity more carefully from zeros.
     u0 = zeros(n)
 
-    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
+    return _dc_solve_with_fallbacks(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
 # Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
