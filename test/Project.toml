@@ -1,4 +1,5 @@
 [deps]
+AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CMCModels = "8a844b39-05e3-4819-8383-f5fae2d66f33"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
@@ -6,6 +7,7 @@ CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 Cadnip = "28ce5535-9df1-4533-abc1-da0fb7327efb"
 ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
 ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
+DeepDiffs = "ab62b9b5-e342-54a8-a765-a90f495de1a6"
 DelayDiffEq = "bcd4f6db-9728-5f36-b5f7-82caef46ccdb"
 DescriptorSystems = "a81e2ce2-54d1-11eb-2c75-db236b00f339"
 DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"

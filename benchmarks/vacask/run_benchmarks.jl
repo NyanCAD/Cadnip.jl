@@ -12,9 +12,6 @@
 # Otherwise, it's written to stdout.
 #==============================================================================#
 
-using Pkg
-Pkg.instantiate()
-
 using Printf
 using Statistics
 using BenchmarkTools

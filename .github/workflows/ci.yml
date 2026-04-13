@@ -6,15 +6,16 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Core tests - run quickly without heavy VA model parsing
-  test-core:
-    name: Core Tests - Julia ${{ matrix.version }}
+  # Shared precompile job - builds Julia depot once per version
+  precompile:
+    name: Precompile - Julia ${{ matrix.version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -30,45 +31,15 @@ jobs:
         with:
           version: ${{ matrix.version }}
 
-      - uses: julia-actions/cache@v3
+      # Restore depot from previous runs
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}
+          restore-keys: |
+            julia-depot-${{ matrix.version }}-
 
-      - name: Install dependencies
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
-
-      - name: Run NyanSpectreNetlistParser tests
-        run: |
-          julia --project=NyanSpectreNetlistParser.jl -e '
-            using Pkg
-            Pkg.instantiate()
-            Pkg.test()
-          '
-
-      - name: Run NyanVerilogAParser tests
-        run: |
-          julia --project=NyanVerilogAParser.jl -e '
-            using Pkg
-            Pkg.instantiate()
-            Pkg.test()
-          '
-
-      - name: Disable heavy precompile workloads
-        run: |
-          cat > test/LocalPreferences.toml << 'EOF'
-          [PSPModels]
-          precompile_workload = false
-
-          [VADistillerModels]
-          precompile_workload = false
-
-          [VACASKModels]
-          precompile_workload = false
-          EOF
-
-      - name: Install and precompile test dependencies
+      - name: Precompile test environment
         run: |
           julia --project=test -e '
             using Pkg
@@ -80,14 +51,62 @@ jobs:
             ])
             Pkg.instantiate()
             Pkg.precompile()
+          '
+
+      # Save depot for downstream jobs and future runs
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}-${{ github.sha }}
+
+  # Core tests
+  test-core:
+    name: Core Tests - Julia ${{ matrix.version }}
+    needs: precompile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}-${{ github.sha }}
+          restore-keys: |
+            julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}
+            julia-depot-${{ matrix.version }}-
+
+      - name: Resolve test environment
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="NyanSpectreNetlistParser.jl"),
+              PackageSpec(path="NyanVerilogAParser.jl"),
+              PackageSpec(path="NyanLexers.jl")
+            ])
+            Pkg.instantiate()
           '
 
       - name: Run Cadnip core tests
         run: julia --project=test test/runtests.jl
 
-  # Integration tests - heavy VA model parsing, run separately to avoid OOM
+  # Integration tests - heavy VA model parsing, separate to avoid OOM
   test-integration:
     name: Integration Tests - Julia ${{ matrix.version }}
+    needs: precompile
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -103,16 +122,15 @@ jobs:
         with:
           version: ${{ matrix.version }}
 
-      - uses: julia-actions/cache@v3
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}-${{ github.sha }}
+          restore-keys: |
+            julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}
+            julia-depot-${{ matrix.version }}-
 
-      - name: Install dependencies
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
-
-      - name: Install and precompile test dependencies
+      - name: Resolve test environment
         run: |
           julia --project=test -e '
             using Pkg
@@ -123,8 +141,61 @@ jobs:
               PackageSpec(path="NyanLexers.jl")
             ])
             Pkg.instantiate()
-            Pkg.precompile()
           '
 
       - name: Run Cadnip integration tests
         run: julia --project=test test/runtests.jl integration
+
+  # Benchmarks - uses the same test environment
+  benchmark:
+    name: Benchmarks - Julia ${{ matrix.version }}
+    needs: precompile
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}-${{ github.sha }}
+          restore-keys: |
+            julia-depot-${{ matrix.version }}-${{ hashFiles('**/Project.toml') }}
+            julia-depot-${{ matrix.version }}-
+
+      - name: Resolve test environment
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="NyanSpectreNetlistParser.jl"),
+              PackageSpec(path="NyanVerilogAParser.jl"),
+              PackageSpec(path="NyanLexers.jl")
+            ])
+            Pkg.instantiate()
+          '
+
+      - name: Run VACASK benchmarks
+        run: julia --project=test benchmarks/vacask/run_benchmarks.jl benchmark_results.md
+
+      - name: Publish benchmark results
+        run: cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-results-julia-${{ matrix.version }}
+          path: benchmark_results.md
+          retention-days: 30
