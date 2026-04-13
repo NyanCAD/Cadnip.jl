@@ -1,11 +1,7 @@
 name = "NyanVerilogAParser"
 uuid = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"
-authors = ["JuliaHub, Inc. and other contributors"]
 version = "0.3.1"
-
-# Phase 0: Exclude test/docs with CedarEDA deps
-# [workspace]
-# projects = ["docs", "test"]
+authors = ["JuliaHub, Inc. and other contributors"]
 
 [deps]
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
@@ -14,27 +10,19 @@ NyanLexers = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
 SnoopPrecompile = "66db9d55-30c0-4569-8b51-7e840670fc0c"
 VT100 = "7774df62-37c0-5c21-b34d-f6d7f98f54bc"
 
-[sources]
-NyanLexers = {path = "../NyanLexers.jl"}
+[sources.NyanLexers]
+path = "../NyanLexers.jl"
 
 [compat]
 AbstractTrees = "0.4"
+Artifacts = "1"
 NyanLexers = "0.3, 0.4"
 SnoopPrecompile = "1"
 VT100 = "0.3"
 julia = "1.9"
 
 [extras]
-# Phase 0: Disabled CedarEDA-specific test deps
-# CMC = "db13d295-e716-48aa-bdca-f6cce3d4ecc6"
-# SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
-# SciMLSensitivity = "1ed8b502-d754-442c-8d5d-10ac956f44a1"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
 test = ["Test"]
-
-# Phase 0: Removed CedarEDA fork sources
-# [sources]
-# SciMLBase = {url = "https://github.com/CedarEDA/SciMLBase.jl", rev = "os/dae-get-du"}
-# SciMLSensitivity = {url = "https://github.com/Keno/SciMLSensitivity.jl", rev = "kf/mindep"}
