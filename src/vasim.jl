@@ -699,17 +699,24 @@ function _emit_laplace_stamps(to_julia::MNAScope, input_expr, order::Int, dss_ca
 
     # Pre-dual stamps: constant G/C entries
     # (node allocation handled by internal_node_alloc in generate_mna_stamp_method_nterm)
+    # Use unique variable names per laplace_nd call to avoid clobbering when
+    # multiple laplace_nd expressions contribute to the same branch.
+    _A_var = Symbol("_A_", laplace_id)
+    _E_var = Symbol("_E_", laplace_id)
+    _B_var = Symbol("_B_", laplace_id)
+    _Cout_var = Symbol("_Cout_", laplace_id)
+    _D_var = Symbol("_D_", laplace_id)
     stamp_expr = quote
         # Convert to prescaled descriptor state-space (constant-foldable)
         $dss_var = $dss_call_expr
-        _A, _E, _B, _Cout, _D = $dss_var
+        $_A_var, $_E_var, $_B_var, $_Cout_var, $_D_var = $dss_var
     end
 
     # Stamp state equations: E·dx/dt = A·x + B·u
     # → MNA: C_matrix[si,sj] += E[i,j], G_matrix[si,sj] += -A[i,j]
     for i in 1:order, j in 1:order
-        push!(stamp_expr.args, :(Cadnip.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[j]), -_A[$i,$j])))
-        push!(stamp_expr.args, :(Cadnip.MNA.stamp_C!(ctx, $(state_node_params[i]), $(state_node_params[j]), _E[$i,$j])))
+        push!(stamp_expr.args, :(Cadnip.MNA.stamp_G!(ctx, $(state_node_params[i]), $(state_node_params[j]), -$_A_var[$i,$j])))
+        push!(stamp_expr.args, :(Cadnip.MNA.stamp_C!(ctx, $(state_node_params[i]), $(state_node_params[j]), $_E_var[$i,$j])))
     end
 
     # GMIN for numerical stability on state nodes
@@ -724,7 +731,7 @@ function _emit_laplace_stamps(to_julia::MNAScope, input_expr, order::Int, dss_ca
     for i in 1:order
         push!(to_julia.extra_stamps_b, (
             state_node = state_node_params[i],
-            expr = :(_B[$i, 1] * $input_expr),
+            expr = :($_B_var[$i, 1] * $input_expr),
         ))
     end
 
@@ -733,9 +740,9 @@ function _emit_laplace_stamps(to_julia::MNAScope, input_expr, order::Int, dss_ca
     # so the contribution stamp correctly extracts ∂output/∂V_state into G
     output_terms = Any[]
     for i in 1:order
-        push!(output_terms, :(_Cout[1,$i] * $(state_node_syms[i])))
+        push!(output_terms, :($_Cout_var[1,$i] * $(state_node_syms[i])))
     end
-    push!(output_terms, :(_D[1,1] * $input_expr))
+    push!(output_terms, :($_D_var[1,1] * $input_expr))
 
     if length(output_terms) == 1
         return output_terms[1]
@@ -1671,17 +1678,29 @@ function hoist_conditional_stamps(ifex::Expr)
     alloc_replacements = Dict{UInt64, Symbol}()
     stamp_replacements = Dict{UInt64, Tuple{Symbol, Symbol}}()
 
-    # Hoist alloc_current! calls
+    # Hoist alloc_current! calls, deduplicating by base_name.
+    # Both branches of an if/else may allocate the same port pair (e.g.,
+    # OptE(opt_out[0]) <+ ... in both branches). These should share ONE
+    # allocation, not get separate indices which would create a singular matrix.
+    seen_alloc_names = Dict{Tuple{Any,Any}, Symbol}()  # (base_name, instance_arg) -> hoisted_sym
+    alloc_sym_remap = Dict{Symbol, Symbol}()  # old hoisted_sym -> canonical hoisted_sym
     for alloc in allocs
-        # Generate appropriate call based on whether instance_arg was present
-        # If instance_arg is :_, the original call had only one argument (name)
-        # and we should generate a single-argument call to avoid creating wrong symbols
-        if alloc.instance_arg == :_
-            push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name))))
+        dedup_key = (alloc.base_name, alloc.instance_arg)
+        if haskey(seen_alloc_names, dedup_key)
+            # Reuse existing allocation — remap this alloc's symbol to the canonical one
+            canonical = seen_alloc_names[dedup_key]
+            alloc_replacements[objectid(alloc.original_expr)] = canonical
+            alloc_sym_remap[alloc.hoisted_sym] = canonical
         else
-            push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+            # First occurrence — generate the allocation
+            if alloc.instance_arg == :_
+                push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name))))
+            else
+                push!(hoisted_exprs, :($(alloc.hoisted_sym) = Cadnip.MNA.alloc_current!(ctx, $(alloc.base_name), $(alloc.instance_arg))))
+            end
+            seen_alloc_names[dedup_key] = alloc.hoisted_sym
+            alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
         end
-        alloc_replacements[objectid(alloc.original_expr)] = alloc.hoisted_sym
     end
 
     # Hoist index allocation calls from inner hoisting (get_G_idx!, etc.)
@@ -1689,13 +1708,16 @@ function hoist_conditional_stamps(ifex::Expr)
     # We keep the same variable name since stamp_G_at_idx! calls reference it
     index_alloc_replacements = Dict{UInt64, Nothing}()
     for ia in index_allocs
+        # Remap deduplicated alloc symbols in index allocation expressions
+        row_expr = ia.row_expr isa Symbol && haskey(alloc_sym_remap, ia.row_expr) ? alloc_sym_remap[ia.row_expr] : ia.row_expr
+        col_expr = ia.col_expr isa Symbol && haskey(alloc_sym_remap, ia.col_expr) ? alloc_sym_remap[ia.col_expr] : ia.col_expr
         # Move the allocation call outside the conditional
         if ia.matrix == :G
-            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_G_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_G_idx!(ctx, $row_expr, $col_expr)))
         elseif ia.matrix == :C
-            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_C_idx!(ctx, $(ia.row_expr), $(ia.col_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_C_idx!(ctx, $row_expr, $col_expr)))
         elseif ia.matrix == :b
-            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_b_idx!(ctx, $(ia.row_expr))))
+            push!(hoisted_exprs, :($(ia.assign_var) = Cadnip.MNA.get_b_idx!(ctx, $row_expr)))
         end
         # Mark for removal from the conditional body (will be replaced with nothing)
         index_alloc_replacements[objectid(ia.original_expr)] = nothing
@@ -1718,6 +1740,14 @@ function hoist_conditional_stamps(ifex::Expr)
             col_resolved, col_ok = nothing, true
         else
             col_resolved, col_ok = resolve_index_expr(stamp.col_expr, stamp.scope)
+        end
+
+        # Remap deduplicated alloc symbols in resolved expressions
+        if row_resolved isa Symbol && haskey(alloc_sym_remap, row_resolved)
+            row_resolved = alloc_sym_remap[row_resolved]
+        end
+        if col_resolved isa Symbol && haskey(alloc_sym_remap, col_resolved)
+            col_resolved = alloc_sym_remap[col_resolved]
         end
 
         if !row_ok || !col_ok
@@ -1919,36 +1949,76 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     # For voltage contributions (V(a,b) <+ expr), we need proper MNA stamping
     # with a branch current variable to carry DC current (essential for short circuits)
     if kind == :voltage
-        # Voltage contribution: V(p,n) <+ value means we enforce V_p - V_n = value
-        # This requires a branch current variable for proper DC current flow
+        # Voltage contribution: V(p,n) <+ expr means we enforce V_p - V_n = expr
+        # This requires a branch current variable for proper DC current flow.
+        # The Jacobian ∂expr/∂V_k is extracted and stamped into the voltage
+        # constraint row (G[I, k]) — same Newton linearization as the
+        # unconditional path in generate_mna_stamp_method_nterm.
         expr = to_julia(cs.assign_expr)
-        # Create a unique name for this voltage contribution's current variable
-        # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
-        # For DirectStampContext, both names are ignored (counter-based access)
-        # For MNAContext, the full name is built from components
         I_alloc_base_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
+
+        # All non-ground nodes for Jacobian extraction
+        all_node_syms = to_julia.node_order
+        n_nonground = length(all_node_syms) - 1
+
+        # Build Jacobian extraction code
+        jac_extract = Any[]
+        for k in 1:n_nonground
+            dV_k = Symbol("dV_dV", k)
+            push!(jac_extract, :($dV_k = V_contrib isa ForwardDiff.Dual ? ForwardDiff.partials(V_contrib, $k) : 0.0))
+        end
+
+        # Build Jacobian stamping into voltage constraint row: G[I, k] -= ∂expr/∂V_k
+        jac_stamp = Any[]
+        for k in 1:n_nonground
+            k_sym = all_node_syms[k]
+            k_node = Symbol("_node_", k_sym)
+            dV_k = Symbol("dV_dV", k)
+            push!(jac_stamp, quote
+                if $k_node != 0
+                    Cadnip.MNA.stamp_G!(ctx, I_var, $k_node, -$dV_k)
+                end
+            end)
+        end
+
+        # Build Newton companion RHS: b[I] = expr_val - Σ(∂expr/∂V_k * V_k)
+        rhs_terms = Any[:V_val]
+        for k in 1:n_nonground
+            dV_k = Symbol("dV_dV", k)
+            V_k = Symbol("V_", k)
+            push!(rhs_terms, :(- $dV_k * $V_k))
+        end
+        rhs_expr = Expr(:call, :+, rhs_terms...)
+
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
-            # Skip if nodes are aliased (short circuit optimization)
             if $p_node != $n_node
-                # Allocate branch current (idempotent - returns existing index if already allocated)
                 let I_var = Cadnip.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
-                    v_contrib_raw = $expr
-                    v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
+                    V_contrib = $expr
+                    V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
 
-                    # Stamp proper MNA voltage source:
-                    # - KCL at p: current I flows out → G[p, I] = 1
-                    # - KCL at n: current I flows in → G[n, I] = -1
-                    # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
+                    # Extract Jacobian partials
+                    $(jac_extract...)
+
+                    # KCL: current I flows from p to n
                     if $p_node != 0
                         Cadnip.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
-                        Cadnip.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
                     end
                     if $n_node != 0
                         Cadnip.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
+                    end
+
+                    # Voltage constraint: V_p - V_n = expr (with Jacobian)
+                    if $p_node != 0
+                        Cadnip.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
+                    end
+                    if $n_node != 0
                         Cadnip.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
                     end
-                    Cadnip.MNA.stamp_b!(ctx, I_var, v_val)
+                    $(jac_stamp...)
+
+                    # Newton companion RHS
+                    Cadnip.MNA.stamp_b!(ctx, I_var, $rhs_expr)
                 end
             end
         end
