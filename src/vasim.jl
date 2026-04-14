@@ -1949,36 +1949,76 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     # For voltage contributions (V(a,b) <+ expr), we need proper MNA stamping
     # with a branch current variable to carry DC current (essential for short circuits)
     if kind == :voltage
-        # Voltage contribution: V(p,n) <+ value means we enforce V_p - V_n = value
-        # This requires a branch current variable for proper DC current flow
+        # Voltage contribution: V(p,n) <+ expr means we enforce V_p - V_n = expr
+        # This requires a branch current variable for proper DC current flow.
+        # The Jacobian ∂expr/∂V_k is extracted and stamped into the voltage
+        # constraint row (G[I, k]) — same Newton linearization as the
+        # unconditional path in generate_mna_stamp_method_nterm.
         expr = to_julia(cs.assign_expr)
-        # Create a unique name for this voltage contribution's current variable
-        # OPTIMIZATION: Use component-based API to avoid Symbol interpolation at call site
-        # For DirectStampContext, both names are ignored (counter-based access)
-        # For MNAContext, the full name is built from components
         I_alloc_base_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
+
+        # All non-ground nodes for Jacobian extraction
+        all_node_syms = to_julia.node_order
+        n_nonground = length(all_node_syms) - 1
+
+        # Build Jacobian extraction code
+        jac_extract = Any[]
+        for k in 1:n_nonground
+            dV_k = Symbol("dV_dV", k)
+            push!(jac_extract, :($dV_k = V_contrib isa ForwardDiff.Dual ? ForwardDiff.partials(V_contrib, $k) : 0.0))
+        end
+
+        # Build Jacobian stamping into voltage constraint row: G[I, k] -= ∂expr/∂V_k
+        jac_stamp = Any[]
+        for k in 1:n_nonground
+            k_sym = all_node_syms[k]
+            k_node = Symbol("_node_", k_sym)
+            dV_k = Symbol("dV_dV", k)
+            push!(jac_stamp, quote
+                if $k_node != 0
+                    Cadnip.MNA.stamp_G!(ctx, I_var, $k_node, -$dV_k)
+                end
+            end)
+        end
+
+        # Build Newton companion RHS: b[I] = expr_val - Σ(∂expr/∂V_k * V_k)
+        rhs_terms = Any[:V_val]
+        for k in 1:n_nonground
+            dV_k = Symbol("dV_dV", k)
+            V_k = Symbol("V_", k)
+            push!(rhs_terms, :(- $dV_k * $V_k))
+        end
+        rhs_expr = Expr(:call, :+, rhs_terms...)
+
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
-            # Skip if nodes are aliased (short circuit optimization)
             if $p_node != $n_node
-                # Allocate branch current (idempotent - returns existing index if already allocated)
                 let I_var = Cadnip.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
-                    v_contrib_raw = $expr
-                    v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
+                    V_contrib = $expr
+                    V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
 
-                    # Stamp proper MNA voltage source:
-                    # - KCL at p: current I flows out → G[p, I] = 1
-                    # - KCL at n: current I flows in → G[n, I] = -1
-                    # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
+                    # Extract Jacobian partials
+                    $(jac_extract...)
+
+                    # KCL: current I flows from p to n
                     if $p_node != 0
                         Cadnip.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
-                        Cadnip.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
                     end
                     if $n_node != 0
                         Cadnip.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
+                    end
+
+                    # Voltage constraint: V_p - V_n = expr (with Jacobian)
+                    if $p_node != 0
+                        Cadnip.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
+                    end
+                    if $n_node != 0
                         Cadnip.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
                     end
-                    Cadnip.MNA.stamp_b!(ctx, I_var, v_val)
+                    $(jac_stamp...)
+
+                    # Newton companion RHS
+                    Cadnip.MNA.stamp_b!(ctx, I_var, $rhs_expr)
                 end
             end
         end
