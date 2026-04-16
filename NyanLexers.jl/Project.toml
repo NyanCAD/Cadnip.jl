@@ -1,7 +1,7 @@
 name = "NyanLexers"
 uuid = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
 authors = ["JuliaHub, Inc. and other contributors"]
-version = "0.4.0"
+version = "0.4.1"
 
 [compat]
 julia = "1.9"
