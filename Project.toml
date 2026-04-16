@@ -1,6 +1,6 @@
 name = "Cadnip"
 uuid = "28ce5535-9df1-4533-abc1-da0fb7327efb"
-version = "0.12.0"
+version = "0.12.1"
 authors = ["JuliaHub, Inc. and other contributors"]
 
 [workspace]

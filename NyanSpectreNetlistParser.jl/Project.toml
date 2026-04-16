@@ -1,7 +1,7 @@
 name = "NyanSpectreNetlistParser"
 uuid = "f050a39a-f089-4c65-a86a-958b8b907b9b"
 authors = ["JuliaHub, Inc. and other contributors"]
-version = "0.6.1"
+version = "0.6.2"
 
 [workspace]
 projects = ["docs", "test"]
