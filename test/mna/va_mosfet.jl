@@ -13,7 +13,7 @@ using Test
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: make_ode_problem
 using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using Cadnip.MNA: VoltageSource, CurrentSource, Resistor
 using ForwardDiff: Dual, value, partials
@@ -65,12 +65,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         sol = solve_dc(vccs_test_circuit, (;), MNASpec())
 
         # Check voltages
-        @test isapprox(voltage(sol, :g), 1.0; atol=1e-6)
-        @test isapprox(voltage(sol, :d), 5.0; atol=1e-6)
+        @test isapprox(sol[:g], 1.0; atol=1e-6)
+        @test isapprox(sol[:d], 5.0; atol=1e-6)
 
         # Check current: I_Vdd should supply the VCCS current
         # Id = gm * Vgs = 0.002 * 1.0 = 2mA
-        I_Vdd = current(sol, :I_Vdd)
+        I_Vdd = sol[:I_Vdd]
         @test isapprox(I_Vdd, -0.002; atol=1e-5)  # Negative because sourcing
     end
 
@@ -131,11 +131,11 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         sol = solve_dc(simple_mos_circuit, (;), MNASpec())
 
-        @test isapprox(voltage(sol, :g), 1.5; atol=1e-6)
-        @test isapprox(voltage(sol, :d), 2.0; atol=1e-6)
+        @test isapprox(sol[:g], 1.5; atol=1e-6)
+        @test isapprox(sol[:d], 2.0; atol=1e-6)
 
         # Drain current: Ids = K/2 * (1.5 - 0.5)^2 = 0.5mA
-        I_Vd = current(sol, :I_Vd)
+        I_Vd = sol[:I_Vd]
         @test isapprox(I_Vd, -0.0005; atol=1e-5)  # Negative = sourcing
     end
 
@@ -161,10 +161,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         sol = solve_dc(simple_mos_linear_circuit, (;), MNASpec())
 
-        @test isapprox(voltage(sol, :d), 0.3; atol=1e-6)
+        @test isapprox(sol[:d], 0.3; atol=1e-6)
 
         # Ids = K * (Vov * Vds - Vds^2/2) = 0.001 * (1.0 * 0.3 - 0.09/2) = 0.000255
-        I_Vd = current(sol, :I_Vd)
+        I_Vd = sol[:I_Vd]
         @test isapprox(I_Vd, -0.000255; atol=1e-6)
     end
 
@@ -189,7 +189,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         sol = solve_dc(simple_mos_cutoff_circuit, (;), MNASpec())
 
         # No current in cutoff
-        I_Vd = current(sol, :I_Vd)
+        I_Vd = sol[:I_Vd]
         @test isapprox(I_Vd, 0.0; atol=1e-8)
     end
 
@@ -251,7 +251,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         sol = solve_dc(cap_mos_dc_circuit, (;), MNASpec())
 
         # Same as SimpleMOS in saturation
-        I_Vd = current(sol, :I_Vd)
+        I_Vd = sol[:I_Vd]
         @test isapprox(I_Vd, -0.0005; atol=1e-5)
 
         # Check that capacitances are stamped into C matrix
@@ -412,7 +412,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # - PMOS on (Vsg = Vdd - 0 = 3V > Vth)
         # - NMOS off (Vgs = 0 < Vth)
         # - Output pulled to Vdd
-        @test isapprox(voltage(sol, :out), Vdd; atol=0.01)
+        @test isapprox(sol[:out], Vdd; atol=0.01)
     end
 
     @testset "CMOS Inverter HIGH input" begin
@@ -450,7 +450,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # - PMOS off (Vsg = 0 < Vth)
         # - NMOS on (Vgs = Vdd > Vth)
         # - Output pulled to 0V
-        @test isapprox(voltage(sol, :out), 0.0; atol=0.01)
+        @test isapprox(sol[:out], 0.0; atol=0.01)
     end
 
     #==========================================================================#

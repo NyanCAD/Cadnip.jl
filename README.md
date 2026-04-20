@@ -37,24 +37,87 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 ```julia
 using Cadnip
-using Cadnip.MNA: MNACircuit, MNASpec, voltage
+using Cadnip.MNA: MNACircuit
 
-# Define a circuit using SPICE syntax
-# Note: SPICE requires a title line as the first line
-builder = sp"""
-* Voltage divider circuit
+# --- File-first (production): load a netlist from disk ---
+circuit = MNACircuit("amp.sp")                 # extension → .scs Spectre, else SPICE
+sol = dc!(circuit)
+println("Output voltage: ", sol[:out])
+
+# --- Inline (tests, small samples): string macros ---
+circuit = MNACircuit(sp"""
+* Voltage divider
 V1 vcc 0 DC 5
 R1 vcc out 1k
 R2 out 0 1k
-"""
-
-# Create circuit and run DC analysis
-circuit = MNACircuit(builder)
+""")
 sol = dc!(circuit)
+println("Vout = ", sol[:out], " V")            # 2.5
 
-# Access results
-println("Output voltage: ", voltage(sol, :out))  # 2.5V (voltage divider)
+# --- Spectre syntax via spc"..." ---
+circuit = MNACircuit(spc"""
+v1 (vcc 0) vsource type=dc dc=5
+r1 (vcc out) resistor r=1k
+r2 (out 0) resistor r=1k
+""")
 ```
+
+### Loading options
+
+| Input                        | Loader                                            |
+| ---------------------------- | ------------------------------------------------- |
+| SPICE file                   | `MNACircuit("amp.sp")`                            |
+| Spectre file                 | `MNACircuit("amp.scs")`                           |
+| Top-level include in module  | `Base.include(@__MODULE__, SpiceFile("amp.sp"))`  |
+| SPICE string                 | `sp"""..."""` or `MNACircuit(code; lang=:spice)`  |
+| Spectre string               | `spc"""..."""` or `MNACircuit(code; lang=:spectre)` |
+| Verilog-A string             | `va"""..."""`                                     |
+| Already-compiled builder     | `MNACircuit(my_builder_fn; R=1e3)`                |
+| PDK package                  | `.lib "jlpkg://MyPDK/..." typical` in the netlist |
+
+**Top-level only for runtime parsing.** `MNACircuit("path")` and
+`MNACircuit(code; lang=...)` call `Base.eval` internally and must be used at
+the REPL or module top level. Inside a function body, Julia freezes the
+caller's world age at entry and the freshly-defined builder can't be
+dispatched. For that case, bring the circuit into scope at top level first:
+
+```julia
+Base.include(@__MODULE__, SpiceFile("amp.sp"))   # top level: defines `amp`
+
+function run_sim()
+    c = MNACircuit(amp; R1=1e3)                  # no eval, no world-age tax
+    dc!(c)
+end
+```
+
+The string macros (`sp"..."`, `spc"..."`, `va"..."`) expand at the call site
+and work transparently in both top-level and function-body contexts.
+
+### Analyses
+
+```julia
+sol = dc!(circuit)                             # DC operating point
+sol = tran!(circuit, (0.0, 1e-3))              # Transient
+sol = ac!(circuit, freqs)                      # AC small-signal
+result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
+```
+
+`dc!(cs::CircuitSweep)` returns a `SweepResult` that iterates `(params, sol)`
+pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`.
+
+### Two-tier model resolution
+
+Device names resolve via two tiers:
+
+- **Tier 1 (builtins).** R, C, L, D, level-dispatched MOSFETs/BJTs. Just
+  `using VADistillerModels` / `using BSIM4` and `.model nmosfet nmos level=1`
+  resolves automatically.
+- **Tier 2 (netlist scope).** PDKs and custom VA devices via netlist directives:
+  `.hdl "file.va"`, `.include "lib.sp"`, `.lib "lib.sp" section`, and
+  `jlpkg://Package/path`. Most-recent include wins.
+
+PDK authors expose content via `Cadnip.precompile_pdk(@__MODULE__, "pdk.spice")`
+and `Cadnip.precompile_va(@__MODULE__, "device.va")` at package build time.
 
 ## Testing
 

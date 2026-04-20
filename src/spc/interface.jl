@@ -173,88 +173,19 @@ function codegen_hdl_imports!(mod::Module, hdl_imports)
     end
 end
 
-# MNA-based parsing: returns MNA builder function instead of DAECompiler code
-"""
-    parse_spice_to_mna(spice_code::String; circuit_name=:circuit)
-
-Parse SPICE code and return an MNA builder function.
-
-The returned function has signature:
-    function circuit_name(params, spec::MNASpec) -> MNAContext
-
-# Example
-```julia
-code = \"\"\"
-V1 vcc 0 5
-R1 vcc out 1k
-R2 out 0 1k
-\"\"\"
-build_fn = parse_spice_to_mna(code)
-ctx = build_fn((;), MNASpec())
-sol = MNA.solve_dc(ctx)
-voltage(sol, :out)  # Returns 2.5
-```
-"""
-function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit,
-                            imported_hdl_modules::Vector{Module}=Module[])
-    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
-end
-
-"""
-    parse_spice_file_to_mna(filepath::AbstractString; circuit_name=:circuit, imported_hdl_modules=Module[])
-
-Parse a SPICE netlist file and generate an MNA builder function.
-This variant preserves the file path context for resolving relative includes.
-
-# Example
-```julia
-circuit_code = parse_spice_file_to_mna("circuit.sp"; circuit_name=:my_circuit)
-eval(circuit_code)
-```
-"""
-function parse_spice_file_to_mna(filepath::AbstractString; circuit_name::Symbol=:circuit,
-                                  imported_hdl_modules::Vector{Module}=Module[])
-    ast = NyanSpectreNetlistParser.parsefile(filepath; start_lang=:spice, implicit_title=true)
-    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
-end
-
-"""
-    solve_spice_mna(spice_code::String; temp=27.0)
-
-Parse SPICE code, build MNA circuit, and solve DC operating point.
-Returns (MNAData, DCSolution).
-
-# Example
-```julia
-code = \"\"\"
-V1 vcc 0 5
-R1 vcc out 1k
-R2 out 0 1k
-\"\"\"
-sys, sol = solve_spice_mna(code)
-voltage(sol, :out)  # Returns 2.5
-```
-"""
-function solve_spice_mna(spice_code::String; temp::Real=27.0)
-    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = make_mna_circuit(ast)
-    # We need to evaluate the code in a temporary module
-    m = Module()
-    Base.eval(m, :(using Cadnip.MNA))
-    Base.eval(m, :(using Cadnip: ParamLens))
-    Base.eval(m, :(using Cadnip.SpectreEnvironment))
-    circuit_fn = Base.eval(m, code)
-
-    spec = MNA.MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = Base.invokelatest(circuit_fn, (;), spec)
-    sol = MNA.solve_dc(ctx)
-
-    # Also return assembled system for inspection
-    ctx2 = Base.invokelatest(circuit_fn, (;), spec)
-    sys = MNA.assemble!(ctx2)
-
-    return sys, sol
+#==============================================================================#
+# Internal helper: eval a builder expression into a module
+#
+# Shared by Base.include(mod, SpiceFile/SpectreFile), MNACircuit(path), and
+# MNACircuit(code; lang). Returns the builder function bare (no invokelatest
+# wrapper) — MNACircuit{F,...} specializes on F, and dc!/tran!/ac! cross the
+# function-barrier boundary in the current world. See docs on Invokelatest policy.
+#==============================================================================#
+function _eval_builder_into_module(mod::Module, code::Expr, circuit_name::Symbol)
+    # After codegen hygiene pass, `mod` does not need any Cadnip `using` statements —
+    # generated code emits fully-qualified references.
+    Base.eval(mod, code)
+    return getfield(mod, circuit_name)
 end
 
 """
@@ -280,7 +211,7 @@ R2 out 0 1k
 \"\"\"
 ctx = circuit((;), MNASpec())
 sol = solve_dc(ctx)
-voltage(sol, :out)  # Returns 2.5
+sol[:out]  # Returns 2.5
 
 # Inline mode (i flag) - no title line needed
 circuit2 = sp\"\"\"
@@ -305,4 +236,205 @@ macro sp_str(str, flag="")
         $code
         $circuit_name
     end)
+end
+
+"""
+    spc"..."
+
+Parse Spectre code and generate an MNA builder function. Symmetric with `sp"..."`.
+
+# Example
+```julia
+circuit = spc\"\"\"
+v1 (vcc 0) vsource type=dc dc=5
+r1 (vcc out) resistor r=1k
+r2 (out 0) resistor r=1k
+\"\"\"
+sol = dc!(MNACircuit(circuit))
+```
+"""
+macro spc_str(str, flag="")
+    enable_julia_escape = 'e' in flag
+    sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spectre, enable_julia_escape,
+        fname=String(__source__.file), srcline=__source__.line)
+
+    circuit_name = gensym(:circuit)
+    code = make_mna_circuit(sa; circuit_name)
+
+    return esc(quote
+        $code
+        $circuit_name
+    end)
+end
+
+#==============================================================================#
+# SpiceFile / SpectreFile + Base.include — file-first loading API
+#
+# Mirrors the existing VAFile pattern (src/vasim.jl:3431). Preserves file path
+# for relative .hdl / .include resolution.
+#==============================================================================#
+
+"""
+    SpiceFile(path; name=<stem>)
+
+File-loading wrapper for SPICE netlists. Used with `Base.include(mod, SpiceFile(path))`
+to define a builder function named `name` in `mod`.
+
+Default `name` is the filename stem (e.g. `SpiceFile("amp.sp").name === :amp`).
+
+See also: `SpectreFile`, `MNACircuit(path)`.
+"""
+struct SpiceFile
+    path::String
+    name::Symbol
+end
+SpiceFile(path::AbstractString; name=Symbol(first(splitext(basename(String(path)))))) =
+    SpiceFile(String(path), Symbol(name))
+
+"""
+    SpectreFile(path; name=<stem>)
+
+File-loading wrapper for Spectre netlists. Symmetric with `SpiceFile`.
+"""
+struct SpectreFile
+    path::String
+    name::Symbol
+end
+SpectreFile(path::AbstractString; name=Symbol(first(splitext(basename(String(path)))))) =
+    SpectreFile(String(path), Symbol(name))
+
+export SpiceFile, SpectreFile
+
+function _parse_netlist_file(path::String, lang::Symbol)
+    if lang === :spice
+        sa = NyanSpectreNetlistParser.parsefile(path; start_lang=:spice, implicit_title=true)
+    elseif lang === :spectre
+        sa = NyanSpectreNetlistParser.parsefile(path; start_lang=:spectre)
+    else
+        error("Unknown netlist language: $lang (expected :spice or :spectre)")
+    end
+    if sa.ps.errored
+        throw(LoadError(path, 0, SpectreParseError(sa)))
+    end
+    return sa
+end
+
+function _parse_netlist_string(code::AbstractString, lang::Symbol; source_dir=nothing)
+    fname = source_dir === nothing ? "<string>" : joinpath(source_dir, "<string>")
+    if lang === :spice
+        sa = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice,
+            implicit_title=true, fname=String(fname))
+    elseif lang === :spectre
+        sa = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spectre,
+            fname=String(fname))
+    else
+        error("Unknown netlist language: $lang (expected :spice or :spectre)")
+    end
+    if sa.ps.errored
+        throw(LoadError(fname, 0, SpectreParseError(sa)))
+    end
+    return sa
+end
+
+function Base.include(mod::Module, f::SpiceFile)
+    sa = _parse_netlist_file(f.path, :spice)
+    code = make_mna_circuit(sa; circuit_name=f.name)
+    Base.eval(mod, code)
+    return nothing
+end
+
+function Base.include(mod::Module, f::SpectreFile)
+    sa = _parse_netlist_file(f.path, :spectre)
+    code = make_mna_circuit(sa; circuit_name=f.name)
+    Base.eval(mod, code)
+    return nothing
+end
+
+"""
+    infer_lang_from_ext(path) -> Symbol
+
+Infer netlist language from file extension. `.scs` → `:spectre`, else `:spice`.
+"""
+function infer_lang_from_ext(path::AbstractString)
+    _, ext = splitext(String(path))
+    return lowercase(ext) == ".scs" ? :spectre : :spice
+end
+
+#==============================================================================#
+# MNACircuit(path) and MNACircuit(code; lang) — file-first entry points
+#
+# One AbstractString method: if the argument names an existing file, treat it as
+# a path (extension-inferred language); otherwise treat it as inline netlist code
+# (language defaults to :spice, override with lang=).
+#==============================================================================#
+
+"""
+    MNACircuit(path_or_code::AbstractString; lang=nothing, source_dir=nothing,
+               name=<stem>, kwargs...) -> MNACircuit
+
+If `path_or_code` names an existing file, loads the netlist from disk and infers
+language from the extension (`.scs` → Spectre, else SPICE). Otherwise treats the
+string as an inline netlist (default `:spice`, override with `lang=`).
+
+`source_dir` is used to resolve relative `.hdl` / `.include` paths for inline
+netlists; absent, relative paths fail.
+
+!!! note "Top-level use only"
+    This constructor calls `Base.eval` internally to install the generated
+    builder. Julia captures the caller's world age at function entry, so when
+    called *inside a function body* the subsequent `dc!`/`tran!`/`ac!` will
+    error with _"method too new"_. Use this form at the REPL or module top
+    level.
+
+    For loads inside a function body, bring the circuit into scope at top
+    level first:
+    ```julia
+    Base.include(@__MODULE__, SpiceFile("amp.sp"))  # top level — defines `amp`
+
+    function run_sim()
+        c = MNACircuit(amp; R1=1e3)                 # no eval, no world-age
+        dc!(c)
+    end
+    ```
+
+```julia
+# Top level:
+circuit = MNACircuit("amp.sp")              # file
+circuit = MNACircuit("V1 vcc 0 5\\nR1 vcc 0 1k"; lang=:spice)  # inline
+sol = dc!(circuit)
+```
+"""
+function MNA.MNACircuit(path_or_code::AbstractString;
+                        lang::Union{Symbol,Nothing}=nothing,
+                        source_dir=nothing,
+                        name::Union{Symbol,Nothing}=nothing,
+                        spec::MNA.MNASpec=MNA.MNASpec(), kwargs...)
+    is_file = lang === nothing && source_dir === nothing && isfile(path_or_code)
+    if is_file
+        path = String(path_or_code)
+        eff_lang = infer_lang_from_ext(path)
+        eff_name = name === nothing ?
+            Symbol(first(splitext(basename(path)))) : name
+        mod = Module(gensym(eff_name))
+        if eff_lang === :spice
+            Base.include(mod, SpiceFile(path; name=eff_name))
+        else
+            Base.include(mod, SpectreFile(path; name=eff_name))
+        end
+        builder = getfield(mod, eff_name)
+    else
+        eff_lang = something(lang, :spice)
+        sa = _parse_netlist_string(path_or_code, eff_lang; source_dir=source_dir)
+        eff_name = name === nothing ? gensym(:circuit) : name
+        builder_code = make_mna_circuit(sa; circuit_name=eff_name)
+        mod = Module(gensym(:netlist))
+        Base.eval(mod, builder_code)
+        builder = getfield(mod, eff_name)
+    end
+    # Return the bare builder. This constructor is documented as top-level-only;
+    # the call to `Base.eval` has advanced the world so a following top-level
+    # `dc!(circuit)` sees the fresh methods. Inside a function body it errors,
+    # which is a clear signal to move the load to top level.
+    params = NamedTuple(kwargs)
+    return MNA.MNACircuit(builder, params, spec)
 end

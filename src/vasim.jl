@@ -824,8 +824,8 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     end
 
     if fname == :ddt
-        # Time derivative - use va_ddt
-        return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
+        # Time derivative - use va_ddt (fully-qualified to avoid target-module scope pollution)
+        return Expr(:call, GlobalRef(Cadnip.MNA, :va_ddt), to_julia(stmt.args[1].item))
     elseif fname == :absdelay
         # Transport delay - absdelay(expr, tdelay [, maxdelay])
         # Create a delayed scope so V/I calls generate h-based lookups
@@ -913,7 +913,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # Use node_order for partial index (duals indexed by port position)
             id_idx = findfirst(==(probe), to_julia.node_order)
             return :(let x = $(to_julia(stmt.args[1].item))
-                isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
+                isa(x, ForwardDiff.Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
             end)
         else
             probe1 = Symbol(item.args[1].item)
@@ -924,8 +924,8 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # This works because V(a,b) = V_a - V_b, so:
             # ∂expr/∂V_a = ∂expr/∂V(a,b) and ∂expr/∂V_b = -∂expr/∂V(a,b)
             return :(let x = $(to_julia(stmt.args[1].item)),
-                        dx1 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
-                        dx2 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
+                        dx1 = isa(x, ForwardDiff.Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
+                        dx2 = isa(x, ForwardDiff.Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
                 (dx1 - dx2) / 2
             end)
         end
@@ -1858,7 +1858,8 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogSystemTaskEnable})
         elseif fname == Symbol("\$strobe")
             return nothing
         elseif fname == Symbol("\$error")
-            return Expr(:call, :error, args...)
+            # Fully qualified to avoid collision with a user parameter named `error`.
+            return Expr(:call, GlobalRef(Base, :error), args...)
         elseif fname == Symbol("\$discontinuity")
             # Discontinuity markers are no-ops in MNA
             return nothing
@@ -2975,7 +2976,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Create JacobianTag dual with identity partials for ddx() support
         partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
         push!(dual_creation.args,
-            :($node_sym = Dual{Cadnip.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
+            :($node_sym = ForwardDiff.Dual{Cadnip.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
     end
 
     # Generate branch current extraction for named branches
@@ -3392,13 +3393,18 @@ function make_mna_module(va::VANode; deps::Vector{Symbol}=Symbol[])
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
+        # Drop `error` — emitted as `Base.error` to avoid collision with user params
+        using Base: hasproperty, getproperty, getfield, !==, iszero, abs
         import Base  # For getproperty override in aliasparam
         import ..Cadnip
         using ..Cadnip.VerilogAEnvironment
-        using ..Cadnip.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
-        using ..Cadnip.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For DirectStampContext support
-        using ForwardDiff: Dual, value, partials
+        # Type-A VA operators (language-level) — keep in scope
+        using ..Cadnip.MNA: va_absdelay_V, va_laplace_nd_dss, va_laplace_zp_dss
+        # Type-B runtime plumbing (va_ddt, MNAContext, MNASpec, alloc_*,
+        # ZERO_VECTOR, AnyMNAContext, get_is_vdep, reset_detection_counter!,
+        # stamp_current_contribution!) is emitted fully-qualified and needs no
+        # using-statement. Dual/value/partials from ForwardDiff likewise
+        # emitted via `ForwardDiff.Dual` / `ForwardDiff.partials` / `ForwardDiff.value`.
         import ForwardDiff
         $(dep_usings...)
         $([:( export $e) for e in all_exports]...)
@@ -3456,160 +3462,78 @@ Base.show(io::IO, vap::VAParseError) = NyanVerilogAParser.VerilogACSTParser.visi
 #==============================================================================#
 
 """
-    load_mna_va_module(into::Module, file::String)
-    load_mna_va_module(file::String)
+    precompile_va(into::Module, file::String)
 
-Load a Verilog-A file and generate MNA device module(s).
+Load a Verilog-A file and generate MNA device module(s) into `into`.
 
-When `into` module is provided, evaluates the module directly into that module
-and returns the created module. This is the preferred usage for device packages
-as it enables precompilation.
+**PDK/device-authoring API** — not intended for end users. Device packages call this
+at package build time to bake compiled device types into the package.
 
-When called without `into`, returns the expression for manual evaluation.
+Auto-detects single vs. multi-module files. For a single-module file, the resulting
+submodule is brought into scope with a top-level `using`. For multi-module files,
+each module is placed in its own submodule.
 
-# Arguments
-- `into`: Target module to define the device module in (for precompilation)
-- `file`: Path to the Verilog-A file
+Returns the created module (single-module case) or a NamedTuple mapping module names
+to the created Julia modules (multi-module case).
 
-# Alternative: VAFile + Base.include
-
-The existing pattern also works and is equivalent:
-```julia
-using RelocatableFolders
-const device_va = @path joinpath(@__DIR__, "device.va")
-Base.include(@__MODULE__, VAFile(device_va))
-```
-
-This is what packages like BSIM4.jl use. The difference is that `load_mna_va_module`
-returns the created module for convenience.
-
-# Example (Device package usage - enables precompilation)
+# Example (device package)
 ```julia
 module BSIM4
     using Cadnip
-    const bsim4_module = Cadnip.load_mna_va_module(@__MODULE__,
+    const bsim4_module = Cadnip.precompile_va(@__MODULE__,
         joinpath(@__DIR__, "bsim4.va"))
     using .bsim4_module: bsim4
     export bsim4
 end
 ```
-
-# Example (manual eval)
-```julia
-expr = Cadnip.load_mna_va_module("bsim4.va")
-eval(expr)
-using .bsim4_module: bsim4
-```
-
-# Generated Module Structure
-
-For a VA file containing `module bsim4(d, g, s, b); ... endmodule`, generates:
-- A submodule named `bsim4_module`
-- Exports the device type `bsim4`
-- Device has `stamp!(dev::bsim4, ctx, d, g, s, b; ...)` method
 """
-function load_mna_va_module end
-
-# Version that evals into target module (preferred for precompilation)
-function load_mna_va_module(into::Module, file::String)
-    # Parse the VA file
+function precompile_va(into::Module, file::String)
     va = NyanVerilogAParser.parsefile(file)
     if va.ps.errored
         throw(LoadError(file, 0, VAParseError(va)))
     end
 
-    # Generate the module expression
-    expr = make_mna_module(va)
+    # Count top-level VerilogModules to decide single vs multi-module
+    va_modules = [stmt for stmt in va.stmts if stmt isa VANode{VerilogModule}]
 
-    # expr is (:toplevel, module_def, using_stmt)
-    # We need to eval both parts
-    @assert expr.head == :toplevel
-    module_def = expr.args[1]
-    using_stmt = expr.args[2]
-
-    # Eval the module definition
-    Core.eval(into, module_def)
-
-    # Also eval the using statement to bring the module into scope
-    Core.eval(into, using_stmt)
-
-    # Get the created module name from the module definition
-    # module_def is :(baremodule modname ... end)
-    mod_name = module_def.args[2]  # The module name symbol
-
-    # Return the created module
-    return getfield(into, mod_name)
-end
-
-# Version that returns expression for manual eval
-function load_mna_va_module(file::String)
-    # Parse the VA file
-    va = NyanVerilogAParser.parsefile(file)
-    if va.ps.errored
-        throw(LoadError(file, 0, VAParseError(va)))
+    if length(va_modules) <= 1
+        # Single-module (or zero): use make_mna_module which produces (:toplevel, baremodule, using)
+        expr = make_mna_module(va)
+        @assert expr.head == :toplevel
+        module_def = expr.args[1]
+        using_stmt = expr.args[2]
+        Core.eval(into, module_def)
+        Core.eval(into, using_stmt)
+        mod_name = module_def.args[2]
+        return getfield(into, mod_name)
     end
 
-    # Return the expression for manual evaluation
-    return make_mna_module(va)
-end
-
-"""
-    load_mna_va_modules(into::Module, file::String)
-
-Load all Verilog-A modules from a file.
-
-Similar to `load_mna_va_module` but handles files with multiple modules,
-returning a NamedTuple mapping module names to the created Julia modules.
-
-# Example
-```julia
-module MyDevices
-    using Cadnip
-    const devices = Cadnip.load_mna_va_modules(@__MODULE__,
-        joinpath(@__DIR__, "devices.va"))
-    # devices.resistor_module, devices.capacitor_module, etc.
-end
-```
-"""
-function load_mna_va_modules(into::Module, file::String)
-    # Parse the VA file
-    va = NyanVerilogAParser.parsefile(file)
-    if va.ps.errored
-        throw(LoadError(file, 0, VAParseError(va)))
-    end
-
-    # Collect all VerilogModule nodes
+    # Multi-module: create one submodule per VA module
     result_modules = Dict{Symbol, Module}()
+    for vamod in va_modules
+        typename = Symbol(vamod.id)
+        mod_name = Symbol(String(vamod.id), "_module")
 
-    for stmt in va.stmts
-        if stmt isa VANode{VerilogModule}
-            vamod = stmt
-            typename = Symbol(vamod.id)
-            mod_name = Symbol(String(vamod.id), "_module")
+        device_expr = make_mna_device(vamod)
 
-            # Generate device expression
-            device_expr = make_mna_device(vamod)
+        module_expr = :(baremodule $mod_name
+            using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
+            # Drop `error` — emitted as `Base.error` to avoid collision with user params
+            using Base: hasproperty, getproperty, getfield, !==, iszero, abs
+            import Base
+            import ..Cadnip
+            using ..Cadnip.VerilogAEnvironment
+            # Type-A VA operators only; Type-B plumbing is emitted fully-qualified
+            using ..Cadnip.MNA: va_absdelay_V, va_laplace_nd_dss, va_laplace_zp_dss
+            import ForwardDiff
+            export $typename
+            $(device_expr.args...)
+        end)
 
-            # Create module expression
-            module_expr = :(baremodule $mod_name
-                using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
-                import Base
-                import ..Cadnip
-                using ..Cadnip.VerilogAEnvironment
-                using ..Cadnip.MNA: va_ddt, va_absdelay_V, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR, va_laplace_nd_dss, va_laplace_zp_dss
-                using ForwardDiff: Dual, value, partials
-                import ForwardDiff
-                export $typename
-                $(device_expr.args...)
-            end)
+        Core.eval(into, module_expr)
+        Core.eval(into, :(using .$mod_name))
 
-            # Eval into target module
-            Core.eval(into, module_expr)
-            Core.eval(into, :(using .$mod_name))
-
-            result_modules[mod_name] = getfield(into, mod_name)
-        end
+        result_modules[mod_name] = getfield(into, mod_name)
     end
 
     return NamedTuple(result_modules)

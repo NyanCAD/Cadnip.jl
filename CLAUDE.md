@@ -123,20 +123,82 @@ function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
 - `x`: Solution vector for nonlinear devices
 - `ctx`: MNAContext or DirectStampContext (reused across rebuilds)
 
-### Top-Level Eval for SPICE Circuits
-Parse and eval SPICE circuits at top level to avoid world age issues:
-```julia
-# Top-level - no invokelatest needed
-const circuit_code = Cadnip.make_mna_circuit(ast; circuit_name=:my_circuit)
-eval(circuit_code)
+### File-First Circuit Loading (canonical)
+Use `MNACircuit(path)` or `Base.include(@__MODULE__, SpiceFile(path))` for
+production code. The latter defines a builder function at top level and avoids
+all world-age and invokelatest overhead.
 
-# Now use directly in functions
+```julia
+# File path — language inferred from extension (.scs → Spectre, else SPICE)
+circuit = MNACircuit("amp.sp")
+sol = dc!(circuit)
+
+# For performance-sensitive code, define the builder at top level:
+Base.include(@__MODULE__, SpiceFile("amp.sp"))   # defines `amp(params, spec, ...)`
+c = MNACircuit(amp; R1=1e3)
+sol = dc!(c)
+
+# Inline SPICE (sp"...") and Spectre (spc"...") string macros work too:
+circuit = MNACircuit(sp"""
+* divider
+V1 vcc 0 DC 5
+R1 vcc out 1k
+R2 out 0 1k
+""")
+```
+
+For runtime-parsed netlist strings, `MNACircuit(code; lang=:spice|:spectre,
+source_dir=...)` works at the REPL or module top level. It eval's the builder
+on the spot. **Not safe inside a function body** — Julia freezes the caller's
+world age at entry and dispatch to the freshly-defined builder would error.
+Inside a function body, load the circuit at top level first and pass the
+builder fn:
+
+```julia
+Base.include(@__MODULE__, SpiceFile("amp.sp"))   # top level
+
 function run_sim()
-    circuit = MNACircuit(my_circuit)
-    sol = dc!(circuit)
+    c = MNACircuit(amp; R1=1e3)                  # no eval, no tax
+    dc!(c)
 end
 ```
-See `test/mna/audio_integration.jl` for the canonical pattern.
+
+The `sp"..."` / `spc"..."` / `va"..."` macros expand at the call site and
+work in both contexts.
+
+### Two-tier model resolution
+
+Device names in SPICE netlists resolve via two tiers:
+
+- **Tier 1 — builtins (registry).** R, C, L, D, and level-dispatched MOSFETs/BJTs
+  are resolved via `Cadnip.ModelRegistry.getmodel`. Populated by Cadnip +
+  stdlib packages (VADistillerModels, BSIM4, PSPModels). Just `using MyPkg`
+  and your `.model foo d` / `.model foo nmos level=1` picks it up.
+- **Tier 2 — scope (netlist directives).** PDK-specific and custom VA devices
+  are resolved from the sema scope walk list, populated by `.hdl "foo.va"`,
+  `.include "foo.sp"`, `.lib "foo.sp" section`, and `jlpkg://Package/path`
+  forms in the netlist. Most-recent include wins.
+
+PDK authors expose precompiled content via `Cadnip.precompile_pdk(@__MODULE__,
+"pdk.spice")` and `Cadnip.precompile_va(@__MODULE__, "device.va")`. End users
+reference the baked content via `.lib "jlpkg://MyPDK/..." typical` directives
+in their netlist.
+
+### Solution access: `sol[:name]`
+
+DC and transient solutions support name-based access via SymbolicIndexingInterface.
+
+```julia
+sol = dc!(circuit)
+sol[:vout]         # scalar voltage at node :vout
+sol[:I_v1]         # current through V1
+sol[:gnd]          # 0.0 (ground)
+
+# Transient:
+sol = tran!(circuit, (0.0, 1e-3))
+sol[:vout]         # trajectory
+sol(1e-4)          # state at t
+```
 
 ### ParamLens Pattern
 `ParamLens` navigates hierarchical params and merges overrides at `.params` fields:

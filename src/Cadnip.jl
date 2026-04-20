@@ -14,12 +14,10 @@ export DAEProblem
 export @dyn, @requires, @provides, @isckt_or
 export solve
 
-# Phase 4: MNA SPICE codegen exports
-export make_mna_circuit, parse_spice_to_mna, parse_spice_file_to_mna, solve_spice_mna
-export @sp_str
-
-# PDK/VA precompilation exports
-export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
+# MNA SPICE codegen exports
+export @sp_str, @spc_str
+# make_mna_circuit stays internal (not exported); precompile_pdk / precompile_va are
+# PDK-authoring APIs accessed as Cadnip.precompile_pdk / Cadnip.precompile_va.
 
 
 include("util.jl")

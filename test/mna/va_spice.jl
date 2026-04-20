@@ -20,7 +20,7 @@ using Test
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current, MNACircuit
+using Cadnip.MNA: MNACircuit
 using Cadnip: dc!
 using Cadnip.MNA: VoltageSource, Resistor
 
@@ -57,8 +57,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[varesistor_module])
 
         # Voltage divider: 10V * (2k / (2k + 2k)) = 5V
-        @test isapprox_deftol(voltage(sol, :vcc), 10.0)
-        @test isapprox_deftol(voltage(sol, :mid), 5.0)
+        @test isapprox_deftol(sol[:vcc], 10.0)
+        @test isapprox_deftol(sol[:mid], 5.0)
     end
 
     @testset "VA capacitor in SPICE RC network" begin
@@ -81,8 +81,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[vacapacitor_module])
 
         # DC: capacitor is open, V(cap) = V(vcc) = 5V
-        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-        @test isapprox_deftol(voltage(sol, :cap), 5.0)
+        @test isapprox_deftol(sol[:vcc], 5.0)
+        @test isapprox_deftol(sol[:cap], 5.0)
 
         # Verify capacitance is stamped
         sys = assemble!(ctx)
@@ -123,8 +123,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # Total R = 4k, I = 10/4k = 2.5mA
         # V(n1) = 10 - 2.5mA * 1k = 7.5V
         # V(n2) = 7.5 - 2.5mA * 2k = 2.5V
-        @test isapprox(voltage(sol, :n1), 7.5; atol=0.01)
-        @test isapprox(voltage(sol, :n2), 2.5; atol=0.01)
+        @test isapprox(sol[:n1], 7.5; atol=0.01)
+        @test isapprox(sol[:n2], 2.5; atol=0.01)
     end
 
 end
@@ -154,8 +154,8 @@ end
 
         ctx, sol = solve_mna_spectre_code(spectre; imported_hdl_modules=[spectreres_module])
 
-        @test isapprox_deftol(voltage(sol, :vcc), 10.0)
-        @test isapprox_deftol(voltage(sol, :mid), 5.0)
+        @test isapprox_deftol(sol[:vcc], 10.0)
+        @test isapprox_deftol(sol[:mid], 5.0)
     end
 
     @testset "VA parallel RC in Spectre" begin
@@ -177,9 +177,9 @@ end
 
         ctx, sol = solve_mna_spectre_code(spectre; imported_hdl_modules=[spectrerc_module])
 
-        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+        @test isapprox_deftol(sol[:vcc], 5.0)
         # I = V/R = 5/500 = 10mA
-        @test isapprox(current(sol, :I_v1), -0.01; atol=1e-5)
+        @test isapprox(sol[:I_v1], -0.01; atol=1e-5)
     end
 
     @testset "Mixed VA and native Spectre devices" begin
@@ -205,8 +205,8 @@ end
         # Total R = 4k, I = 12/4k = 3mA
         # V(n1) = 12 - 3mA * 1k = 9V
         # V(n2) = 9 - 3mA * 2k = 3V
-        @test isapprox(voltage(sol, :n1), 9.0; atol=0.01)
-        @test isapprox(voltage(sol, :n2), 3.0; atol=0.01)
+        @test isapprox(sol[:n1], 9.0; atol=0.01)
+        @test isapprox(sol[:n2], 3.0; atol=0.01)
     end
 
 end
@@ -242,10 +242,10 @@ using PhotonicModels
         ctx, sol = solve_mna_spectre_code(spectre;
             imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
 
-        @test isapprox(voltage(sol, :pol_0), 1.0; atol=0.01)
-        @test isapprox(voltage(sol, :pol_1), 0.0; atol=0.01)
-        @test isapprox(voltage(sol, :cart_0), 1.0; atol=0.01)
-        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+        @test isapprox(sol[:pol_0], 1.0; atol=0.01)
+        @test isapprox(sol[:pol_1], 0.0; atol=0.01)
+        @test isapprox(sol[:cart_0], 1.0; atol=0.01)
+        @test isapprox(sol[:cart_1], 0.0; atol=0.01)
     end
 
     @testset "Array port VA model in SPICE netlist" begin
@@ -261,10 +261,10 @@ using PhotonicModels
         ctx, sol = solve_mna_spice_code(spice;
             imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
 
-        @test isapprox(voltage(sol, :pol_0), 1.0; atol=0.01)
-        @test isapprox(voltage(sol, :pol_1), 0.0; atol=0.01)
-        @test isapprox(voltage(sol, :cart_0), 1.0; atol=0.01)
-        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+        @test isapprox(sol[:pol_0], 1.0; atol=0.01)
+        @test isapprox(sol[:pol_1], 0.0; atol=0.01)
+        @test isapprox(sol[:cart_0], 1.0; atol=0.01)
+        @test isapprox(sol[:cart_1], 0.0; atol=0.01)
     end
 
     @testset "Array port VA model with nonzero phase" begin
@@ -282,8 +282,8 @@ using PhotonicModels
             imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
 
         expected = 2.0 * cos(π/4)  # ≈ 1.4142
-        @test isapprox(voltage(sol, :cart_0), expected; atol=0.01)
-        @test isapprox(voltage(sol, :cart_1), expected; atol=0.01)
+        @test isapprox(sol[:cart_0], expected; atol=0.01)
+        @test isapprox(sol[:cart_1], expected; atol=0.01)
     end
 
     @testset "Mixed electrical and photonic VA devices" begin
@@ -305,10 +305,10 @@ using PhotonicModels
             imported_hdl_modules=[PhotonicModels.Polar2Cartesian_module])
 
         # Electrical divider
-        @test isapprox(voltage(sol, :mid), 5.0; atol=0.01)
+        @test isapprox(sol[:mid], 5.0; atol=0.01)
         # Photonic output: amplitude=5V, phase=0 -> cart_0=5, cart_1=0
-        @test isapprox(voltage(sol, :cart_0), 5.0; atol=0.01)
-        @test isapprox(voltage(sol, :cart_1), 0.0; atol=0.01)
+        @test isapprox(sol[:cart_0], 5.0; atol=0.01)
+        @test isapprox(sol[:cart_1], 0.0; atol=0.01)
     end
 
 end
@@ -350,8 +350,8 @@ end
         circuit = MNACircuit(directres_circuit)
         sol = dc!(circuit)
 
-        @test isapprox_deftol(voltage(sol, :vcc), 10.0)
-        @test isapprox_deftol(voltage(sol, :mid), 5.0)
+        @test isapprox_deftol(sol[:vcc], 10.0)
+        @test isapprox_deftol(sol[:mid], 5.0)
     end
 
     @testset "VA module chain" begin
@@ -385,8 +385,8 @@ end
         sol = dc!(circuit)
 
         # Total = 4k, I = 10V/4k = 2.5mA
-        @test isapprox(voltage(sol, :n1), 7.5; atol=0.01)
-        @test isapprox(voltage(sol, :n2), 2.5; atol=0.01)
+        @test isapprox(sol[:n1], 7.5; atol=0.01)
+        @test isapprox(sol[:n2], 2.5; atol=0.01)
     end
 
 end

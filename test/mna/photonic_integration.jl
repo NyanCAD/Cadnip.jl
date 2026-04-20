@@ -1,7 +1,7 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNAContext, get_node!, stamp!, MNACircuit, voltage, assemble!
+using Cadnip.MNA: MNAContext, get_node!, stamp!, MNACircuit, assemble!
 using Cadnip.MNA: VoltageSource, Resistor
 using Cadnip: dc!
 using PhotonicModels
@@ -284,7 +284,7 @@ end
         end
 
         sol = dc!(MNACircuit(circuit))
-        @test isapprox(voltage(sol, :ele_out), 1.0; atol=0.01)
+        @test isapprox(sol[:ele_out], 1.0; atol=0.01)
     end
 
     @testset "TunableFilter: DC passthrough (wavelength=1550)" begin
@@ -304,7 +304,7 @@ end
 
         sol = dc!(MNACircuit(circuit))
         # Forward path: in[0]=1.0 → CartMul1(×1) → laplace(DC≈1) → CartMul2(×1) → out[0]
-        @test isapprox(voltage(sol, :outp_0), 1.0; atol=0.1)
+        @test isapprox(sol[:outp_0], 1.0; atol=0.1)
     end
 
     @testset "TunableFilter: transient with \$abstime" begin

@@ -22,12 +22,15 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNACircuit, MNASolutionAccessor, MNASpec
-using Cadnip.MNA: voltage, assemble!, CedarDCOp, CedarUICOp, solve_dc
+using Cadnip.MNA: nameat
+using Cadnip.MNA: MNACircuit, MNASpec
+using Cadnip.MNA: assemble!, CedarDCOp, CedarUICOp, solve_dc
 using SciMLBase
-using Cadnip: tran!, parse_spice_to_mna
+using Cadnip: tran!
 using OrdinaryDiffEq: Rodas5P
 using LinearSolve: KLUFactorization
+
+include(joinpath(@__DIR__, "..", "common.jl"))
 
 #==============================================================================#
 # Helper functions
@@ -142,12 +145,12 @@ eval(astable_code)
         @test sol.retcode == SciMLBase.ReturnCode.Success
 
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Verify we can read voltages without NaN/Inf
-        V_q1 = voltage(acc, :q1_coll, 50e-3)
-        V_q2 = voltage(acc, :q2_coll, 50e-3)
-        V_vcc = voltage(acc, :vcc, 50e-3)
+        V_q1 = nameat(acc, :q1_coll, 50e-3)
+        V_q2 = nameat(acc, :q2_coll, 50e-3)
+        V_vcc = nameat(acc, :vcc, 50e-3)
 
         @test isfinite(V_q1)
         @test isfinite(V_q2)
@@ -169,14 +172,14 @@ eval(astable_code)
         @test sol.retcode == SciMLBase.ReturnCode.Success
 
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Sample collector voltages after startup transient
         t_start = 20e-3
         t_end = 100e-3
         n_samples = 2000
         times = range(t_start, t_end; length=n_samples)
-        V_q1 = [voltage(acc, :q1_coll, t) for t in times]
+        V_q1 = [nameat(acc, :q1_coll, t) for t in times]
 
         q1_min, q1_max = extrema(V_q1)
         midpoint = (q1_max + q1_min) / 2
@@ -220,13 +223,13 @@ eval(astable_code)
         @test sol.retcode == SciMLBase.ReturnCode.Success
 
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Check voltages at a few time points
         for t in [1e-3, 5e-3, 10e-3]
-            V_q1 = voltage(acc, :q1_coll, t)
-            V_q2 = voltage(acc, :q2_coll, t)
-            V_vcc = voltage(acc, :vcc, t)
+            V_q1 = nameat(acc, :q1_coll, t)
+            V_q2 = nameat(acc, :q2_coll, t)
+            V_vcc = nameat(acc, :vcc, t)
 
             # Collector voltages should be between 0 and Vcc
             @test V_q1 >= -0.1

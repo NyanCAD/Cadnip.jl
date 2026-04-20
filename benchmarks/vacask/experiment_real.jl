@@ -29,22 +29,14 @@ const BENCHMARK_DIR = joinpath(@__DIR__)
 # Load actual benchmark circuits
 #==============================================================================#
 
-# RC Circuit
-const rc_spice = read(joinpath(BENCHMARK_DIR, "rc/cedarsim/runme.sp"), String)
-const rc_code = parse_spice_to_mna(rc_spice; circuit_name=:rc_circuit)
-eval(rc_code)
+# RC Circuit (no HDL dependency)
+Base.include(@__MODULE__, SpiceFile(joinpath(BENCHMARK_DIR, "rc/cedarsim/runme.sp"); name=:rc_circuit))
 
-# Graetz Bridge
-const graetz_spice = read(joinpath(BENCHMARK_DIR, "graetz/cedarsim/runme.sp"), String)
-const graetz_code = parse_spice_to_mna(graetz_spice; circuit_name=:graetz_circuit,
-                                       imported_hdl_modules=[sp_diode_module])
-eval(graetz_code)
+# Graetz Bridge — sp_diode resolves via ModelRegistry (Tier 1, from VADistillerModels).
+Base.include(@__MODULE__, SpiceFile(joinpath(BENCHMARK_DIR, "graetz/cedarsim/runme.sp"); name=:graetz_circuit))
 
-# Voltage Multiplier
-const mul_spice = read(joinpath(BENCHMARK_DIR, "mul/cedarsim/runme.sp"), String)
-const mul_code = parse_spice_to_mna(mul_spice; circuit_name=:mul_circuit,
-                                    imported_hdl_modules=[sp_diode_module])
-eval(mul_code)
+# Voltage Multiplier — same Tier-1 resolution for sp_diode.
+Base.include(@__MODULE__, SpiceFile(joinpath(BENCHMARK_DIR, "mul/cedarsim/runme.sp"); name=:mul_circuit))
 
 #==============================================================================#
 # Solver configurations

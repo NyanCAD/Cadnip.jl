@@ -30,12 +30,15 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNACircuit, MNASolutionAccessor
-using Cadnip.MNA: voltage, assemble!, CedarDCOp, CedarUICOp
+using Cadnip.MNA: nameat
+using Cadnip.MNA: MNACircuit
+using Cadnip.MNA: assemble!, CedarDCOp, CedarUICOp
 using SciMLBase
-using Cadnip: tran!, parse_spice_to_mna
+using Cadnip: tran!
 using OrdinaryDiffEq: Rodas5P
 using LinearSolve: KLUFactorization
+
+include(joinpath(@__DIR__, "..", "common.jl"))
 
 #==============================================================================#
 # Define simplified Ebers-Moll BJT (no internal nodes)
@@ -132,11 +135,11 @@ eval(monostable_code)
         @test sol.retcode == SciMLBase.ReturnCode.Success
 
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Check stable state before trigger (t < 1ms)
-        v_q1_coll_before = voltage(acc, :q1_coll, 0.5e-3)
-        v_q2_coll_before = voltage(acc, :q2_coll, 0.5e-3)
+        v_q1_coll_before = nameat(acc, :q1_coll, 0.5e-3)
+        v_q2_coll_before = nameat(acc, :q2_coll, 0.5e-3)
 
         @info "Before trigger" v_q1_coll_before v_q2_coll_before
 
@@ -155,11 +158,11 @@ eval(monostable_code)
         try
             dc_sol = MNA.solve_dc(monostable_simple, (;), spec)
 
-            v_vcc = voltage(dc_sol, :vcc)
-            v_q1_base = voltage(dc_sol, :q1_base)
-            v_q1_coll = voltage(dc_sol, :q1_coll)
-            v_q2_base = voltage(dc_sol, :q2_base)
-            v_q2_coll = voltage(dc_sol, :q2_coll)
+            v_vcc = dc_sol[:vcc]
+            v_q1_base = dc_sol[:q1_base]
+            v_q1_coll = dc_sol[:q1_coll]
+            v_q2_base = dc_sol[:q2_base]
+            v_q2_coll = dc_sol[:q2_coll]
 
             @info "DC Operating Point" v_vcc v_q1_base v_q1_coll v_q2_base v_q2_coll
 

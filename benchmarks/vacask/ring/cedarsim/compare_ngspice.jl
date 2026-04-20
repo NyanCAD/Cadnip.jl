@@ -19,7 +19,7 @@
 
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: CedarTranOp, MNASolutionAccessor, voltage
+using Cadnip.MNA: CedarTranOp, nameat
 using OrdinaryDiffEq: FBDF
 using SciMLBase
 using Printf
@@ -29,10 +29,10 @@ using DelimitedFiles
 
 # Parse circuit (same netlist as ngspice — no load caps, 10uA pulse)
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_compare,
-                                         imported_hdl_modules=[VACASKModels])
-eval(circuit_code)
+let ast = Cadnip.NyanSpectreNetlistParser.parsefile(spice_file; start_lang=:spice, implicit_title=true),
+    sema_result = Cadnip.sema(ast; imported_hdl_modules=[VACASKModels])
+    eval(Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name=:ring_compare))
+end
 
 println("Running 1μs transient (matching ngspice settings)...")
 circuit = MNACircuit(ring_compare)
@@ -50,8 +50,8 @@ elapsed = time() - t0
     sol.retcode, length(sol.t), elapsed,
     sol.stats !== nothing ? sol.stats.nnonliniter : 0)
 
-# Extract Cadnip waveforms
-acc = MNASolutionAccessor(sol, sys)
+# Extract Cadnip waveforms. `sol` natively supports name lookup via SII —
+# `nameat(sol, :name, t)` returns the value at `t`.
 n_samples = 10000
 times_cs = range(0.0, 1e-6; length=n_samples)
 println("Extracting Cadnip waveforms...")
@@ -59,7 +59,7 @@ println("Extracting Cadnip waveforms...")
 V_cs = Dict{Int, Vector{Float64}}()
 for node_num in 1:9
     node_sym = Symbol(string(node_num))
-    V_cs[node_num] = [voltage(acc, node_sym, t) for t in times_cs]
+    V_cs[node_num] = [nameat(sol, node_sym, t) for t in times_cs]
 end
 
 # Load ngspice data

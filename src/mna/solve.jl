@@ -19,7 +19,8 @@ using Random
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
 export make_ode_problem, make_dae_problem  # For static MNAData
-export voltage, current, magnitude_db, phase_deg
+# voltage / current accessors deleted — use sol[:name]. magnitude_db / phase_deg stay for AC.
+export magnitude_db, phase_deg
 
 #==============================================================================#
 # Simulation Specification
@@ -155,37 +156,47 @@ Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
 Base.length(sol::DCSolution) = length(sol.x)
 
 """
-    voltage(sol::DCSolution, name::Symbol) -> Float64
+    sol[name::Symbol]
 
-Get the voltage at a node by name.
+Name-based solution access. `sol[:vout]` returns the voltage at node `vout`;
+if no such node exists, falls back to searching current variables. Mirrors the
+SymbolicIndexingInterface conventions so that `sol[:x]` works uniformly across
+DC and transient solutions.
 """
-function voltage(sol::DCSolution, name::Symbol)
+function Base.getindex(sol::DCSolution, name::Symbol)
     (name === :gnd || name === Symbol("0")) && return 0.0
     idx = findfirst(==(name), sol.node_names)
-    idx === nothing && error("Unknown node: $name")
-    return sol.x[idx]
-end
-
-"""
-    voltage(sol::DCSolution, idx::Int) -> Float64
-
-Get the voltage at a node by index (0 = ground).
-"""
-function voltage(sol::DCSolution, idx::Int)
-    idx == 0 && return 0.0
-    return sol.x[idx]
-end
-
-"""
-    current(sol::DCSolution, name::Symbol) -> Float64
-
-Get a current variable by name.
-"""
-function current(sol::DCSolution, name::Symbol)
+    idx === nothing || return sol.x[idx]
     idx = findfirst(==(name), sol.current_names)
-    idx === nothing && error("Unknown current: $name")
-    return sol.x[sol.n_nodes + idx]
+    idx === nothing || return sol.x[sol.n_nodes + idx]
+    error("Unknown variable: $name")
 end
+
+"""
+    nameat(sol, name::Symbol, t::Real)
+
+Look up a variable by name at time `t` on a SciML transient solution whose
+`prob.f.sys` carries SymbolicIndexingInterface metadata (i.e., an `MNAData`).
+
+Replaces the old `voltage(MNASolutionAccessor(sol, sys), :x, t)` pattern.
+
+```julia
+sol = tran!(circuit, (0.0, 1e-3))
+v_out_at_0p5ms = nameat(sol, :out, 5e-4)
+```
+"""
+function nameat(sol, name::Symbol, t::Real)
+    (name === :gnd || name === Symbol("0")) && return 0.0
+    sys = sol.prob.f.sys
+    idx = SII.variable_index(sys, name)
+    idx === nothing && error("Unknown variable: $name")
+    return sol(t)[idx]
+end
+export nameat
+
+# `voltage(sol::DCSolution, ...)` and `current(sol::DCSolution, ...)` deleted —
+# use `sol[:name]` (which walks node_names then current_names) or
+# `sol[idx::Int]` for positional access.
 
 function Base.show(io::IO, sol::DCSolution)
     print(io, "DCSolution(")
@@ -239,23 +250,19 @@ struct ACSolution
 end
 
 """
-    voltage(sol::ACSolution, name::Symbol) -> Vector{ComplexF64}
+    sol[name::Symbol]
 
-Get the complex voltage at a node across all frequencies.
+Name-based access to an AC solution — returns the complex trajectory across
+all frequencies. `sol[name, freq_idx]` returns the complex value at one frequency.
 """
-function voltage(sol::ACSolution, name::Symbol)
+function Base.getindex(sol::ACSolution, name::Symbol)
     (name === :gnd || name === Symbol("0")) && return zeros(ComplexF64, length(sol.freqs))
     idx = findfirst(==(name), sol.node_names)
     idx === nothing && error("Unknown node: $name")
     return [x[idx] for x in sol.x]
 end
 
-"""
-    voltage(sol::ACSolution, name::Symbol, freq_idx::Int) -> ComplexF64
-
-Get the complex voltage at a specific frequency index.
-"""
-function voltage(sol::ACSolution, name::Symbol, freq_idx::Int)
+function Base.getindex(sol::ACSolution, name::Symbol, freq_idx::Int)
     (name === :gnd || name === Symbol("0")) && return 0.0 + 0.0im
     idx = findfirst(==(name), sol.node_names)
     idx === nothing && error("Unknown node: $name")
@@ -267,14 +274,14 @@ end
 
 Get the voltage magnitude in dB at a node.
 """
-magnitude_db(sol::ACSolution, name::Symbol) = 20 .* log10.(abs.(voltage(sol, name)))
+magnitude_db(sol::ACSolution, name::Symbol) = 20 .* log10.(abs.(sol[name]))
 
 """
     phase_deg(sol::ACSolution, name::Symbol) -> Vector{Float64}
 
 Get the voltage phase in degrees at a node.
 """
-phase_deg(sol::ACSolution, name::Symbol) = rad2deg.(angle.(voltage(sol, name)))
+phase_deg(sol::ACSolution, name::Symbol) = rad2deg.(angle.(sol[name]))
 
 function Base.show(io::IO, sol::ACSolution)
     print(io, "ACSolution($(length(sol.freqs)) frequencies, ")
@@ -1110,67 +1117,12 @@ end
 # Symbolic Solution Access
 #==============================================================================#
 
-"""
-    MNASolutionAccessor
-
-Provides symbolic access to ODE solution via node names.
-Wraps an ODESolution with the MNAData for name resolution.
-
-# Example
-```julia
-circuit = MNACircuit(build_circuit; Vcc=5.0, R=1000.0)
-sol = tran!(circuit, (0.0, 1e-3))
-acc = MNASolutionAccessor(sol, assemble!(circuit))
-acc[:out]  # Voltage trajectory at node :out
-```
-"""
-struct MNASolutionAccessor{S}
-    sol::S
-    sys::MNAData
-end
-
-export MNASolutionAccessor
-
-# Symbolic indexing: acc[:node_name]
-function Base.getindex(acc::MNASolutionAccessor, name::Symbol)
-    (name === :gnd || name === Symbol("0")) && return zeros(length(acc.sol.t))
-    idx = findfirst(==(name), acc.sys.node_names)
-    if idx !== nothing
-        return [acc.sol(t)[idx] for t in acc.sol.t]
-    end
-    idx = findfirst(==(name), acc.sys.current_names)
-    if idx !== nothing
-        curr_idx = acc.sys.n_nodes + idx
-        return [acc.sol(t)[curr_idx] for t in acc.sol.t]
-    end
-    error("Unknown variable: $name")
-end
-
-# Time access
-Base.getproperty(acc::MNASolutionAccessor, s::Symbol) =
-    s === :t ? acc.sol.t : getfield(acc, s)
-
-# Interpolation
-(acc::MNASolutionAccessor)(t::Real) = acc.sol(t)
-
-"""
-    voltage(acc::MNASolutionAccessor, name::Symbol, t::Real)
-
-Get voltage at node at specific time.
-"""
-function voltage(acc::MNASolutionAccessor, name::Symbol, t::Real)
-    (name === :gnd || name === Symbol("0")) && return 0.0
-    idx = findfirst(==(name), acc.sys.node_names)
-    idx === nothing && error("Unknown node: $name")
-    return acc.sol(t)[idx]
-end
-
-"""
-    voltage(acc::MNASolutionAccessor, name::Symbol)
-
-Get voltage trajectory at node.
-"""
-voltage(acc::MNASolutionAccessor, name::Symbol) = acc[name]
+# `MNASolutionAccessor` deleted — SII on `ODEFunction.sys` / `DAEFunction.sys`
+# (see src/mna/build.jl) means transient solutions natively support `sol[:name]`.
+# For time-indexed access use `nameat(sol, :name, t)`.
+#
+# Hierarchical `sol[ref::NodeRef]` is handled below — delegates to the flat
+# name built by ScopedSystem (e.g., :x1_out).
 
 #==============================================================================#
 # Hierarchical Scope Access (for sol[sys.x1.r1] style)
@@ -1229,16 +1181,20 @@ end
 
 export ScopedSystem
 
-# Allow acc[NodeRef] access
-function Base.getindex(acc::MNASolutionAccessor, ref::NodeRef)
-    full_name = isempty(ref.path) ? ref.name : Symbol(join([ref.path..., ref.name], "_"))
-    return acc[full_name]
-end
+# Flat-name construction from a hierarchical NodeRef. :x1 / :out → :x1_out
+_flat_name(ref::NodeRef) = isempty(ref.path) ? ref.name :
+    Symbol(join([ref.path..., ref.name], "_"))
 
-function voltage(acc::MNASolutionAccessor, ref::NodeRef, t::Real)
-    full_name = isempty(ref.path) ? ref.name : Symbol(join([ref.path..., ref.name], "_"))
-    return voltage(acc, full_name, t)
-end
+# Support sol[NodeRef] on DCSolution and any SciML transient solution whose
+# f.sys supports SII. Delegates to the flat name lookup — `sol[:x1_out]`.
+Base.getindex(sol::DCSolution, ref::NodeRef) = sol[_flat_name(ref)]
+Base.getindex(sol::ACSolution, ref::NodeRef) = sol[_flat_name(ref)]
+# Transient solutions come from SciMLBase; add the NodeRef → flat lookup.
+Base.getindex(sol::SciMLBase.AbstractTimeseriesSolution, ref::NodeRef) =
+    sol[_flat_name(ref)]
+
+# Time-indexed name lookup for NodeRef.
+nameat(sol, ref::NodeRef, t::Real) = nameat(sol, _flat_name(ref), t)
 
 """
     scope(sys::MNAData) -> ScopedSystem
@@ -1414,8 +1370,7 @@ Note that time-dependent sources are evaluated at t=0.
 circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
 sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P())
 sys = assemble!(circuit)
-acc = MNASolutionAccessor(sol, sys)
-v_out = voltage(acc, :out, 0.5e-3)
+v_out = nameat(sol, :out, 0.5e-3)   # or sol[:out] for the full trajectory
 ```
 """
 function assemble!(circuit::MNACircuit)
@@ -1620,6 +1575,9 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
 
+    # Assemble once to get the MNAData used as SII `sys` on the resulting solution.
+    sys = assemble!(ctx)
+
     # Detect differential variables using the same detection context
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
     n = length(diff_vars)
@@ -1649,9 +1607,9 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
         # Do NOT use cs.G + cs.C - numeric cancellation can drop entries and cause
         # dimension mismatch errors with sparse solvers like KLU.
         jac_prototype = copy(cs.G)
-        f = SciMLBase.DAEFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+        f = SciMLBase.DAEFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype, sys=sys)
     else
-        f = SciMLBase.DAEFunction(residual!)
+        f = SciMLBase.DAEFunction(residual!; sys=sys)
     end
 
     # Note: p (workspace) must be positional argument (5th), not keyword
@@ -1751,12 +1709,16 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         return nothing
     end
 
+    # Assemble once for SII system metadata (native SciML `sys=` field).
+    sys = assemble!(ctx)
+
     # Mass matrix C is constant - voltage-dependent capacitors use charge formulation
     f = SciMLBase.ODEFunction(
         rhs!;
         mass_matrix = cs.C,
         jac = jac!,
-        jac_prototype = -cs.G
+        jac_prototype = -cs.G,
+        sys = sys,
     )
 
     # Pass workspace as p parameter
@@ -1825,8 +1787,11 @@ function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # History function: DC value for t < t0
     h_init(p, t; idxs=nothing) = idxs === nothing ? u0 : u0[idxs]
 
+    # Assemble once for SII system metadata.
+    sys = assemble!(ctx)
+
     # Mass matrix C is constant (voltage-dependent caps use charge formulation)
-    f = SciMLBase.DDEFunction(rhs!; mass_matrix=cs.C)
+    f = SciMLBase.DDEFunction(rhs!; mass_matrix=cs.C, sys=sys)
     return SciMLBase.DDEProblem(f, u0, h_init, Float64.(tspan), ws;
                                  constant_lags=constant_lags, kwargs...)
 end
@@ -1982,3 +1947,25 @@ function make_workspace_dae_jacobian()
     end
     return dae_jac!
 end
+
+#==============================================================================#
+# prepare!: explicit eager structure-discovery pass
+#
+# Discovers the circuit structure (nodes, current variables, voltage-dependent
+# charges) and caches it on the MNACircuit. This is called automatically by
+# dc!/tran!/ac! but can be invoked explicitly to separate setup from solve for
+# benchmarking. Replaces the `MNA.assemble!(circuit)` pre-warm pattern.
+#==============================================================================#
+"""
+    prepare!(circuit::MNACircuit) -> MNACircuit
+
+Run structure discovery on the circuit so that subsequent `dc!`/`tran!`/`ac!` calls
+reuse the cached structure. Idempotent.
+
+Useful in benchmarks to separate one-time setup cost from per-solve cost.
+"""
+function prepare!(circuit::MNACircuit)
+    build_with_detection(circuit)
+    return circuit
+end
+export prepare!

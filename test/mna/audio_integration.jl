@@ -20,9 +20,10 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNACircuit, MNASolutionAccessor
-using Cadnip.MNA: voltage, current, assemble!
-using Cadnip: tran!, parse_spice_to_mna, CircuitSweep, Sweep
+using Cadnip.MNA: nameat
+using Cadnip.MNA: MNACircuit
+using Cadnip.MNA: assemble!
+using Cadnip: tran!, CircuitSweep, Sweep
 using OrdinaryDiffEq
 using SciMLBase
 using LinearSolve: KLUFactorization
@@ -112,12 +113,12 @@ eval(ce_amplifier_code)
         sol = MNA.solve_dc(bjt_fixed_voltages, (;), spec)
 
         # Check voltages are as expected
-        @test isapprox(voltage(sol, :base), 0.65; atol=1e-6)
-        @test isapprox(voltage(sol, :coll), 5.0; atol=1e-6)
+        @test isapprox(sol[:base], 0.65; atol=1e-6)
+        @test isapprox(sol[:coll], 5.0; atol=1e-6)
 
         # The voltage source currents tell us the terminal currents
-        I_Vbe = current(sol, :I_vbe)  # Current into base
-        I_Vce = current(sol, :I_vce)  # Current into collector
+        I_Vbe = sol[:I_vbe]  # Current into base
+        I_Vce = sol[:I_vce]  # Current into collector
 
         # Base current should be small (μA range), collector current larger (mA range)
         @test abs(I_Vbe) > 1e-6   # Base current exists
@@ -138,8 +139,8 @@ eval(ce_amplifier_code)
         spec = MNA.MNASpec(mode=:dcop)
         sol = MNA.solve_dc(bjt_with_rc, (;), spec)
 
-        V_coll = voltage(sol, :coll)
-        V_base = voltage(sol, :base)
+        V_coll = sol[:coll]
+        V_base = sol[:base]
 
         # Base should be at Vb
         @test isapprox(V_base, 0.65; atol=1e-6)
@@ -167,8 +168,8 @@ eval(ce_amplifier_code)
         # First verify DC operating point
         spec = MNA.MNASpec(mode=:dcop)
         dc_sol = MNA.solve_dc(ce_amplifier, (;), spec)
-        V_coll_dc = voltage(dc_sol, :coll)
-        V_base_dc = voltage(dc_sol, :base)
+        V_coll_dc = dc_sol[:coll]
+        V_base_dc = dc_sol[:base]
 
         # Verify BJT is biased properly
         @test isapprox(V_base_dc, Vbias; atol=0.01)
@@ -186,14 +187,14 @@ eval(ce_amplifier_code)
 
         # Access results
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Measure output after initial transient (last 2 periods)
         t_start = 3 * period
         times = range(t_start, 5*period; length=100)
 
-        V_coll = [voltage(acc, :coll, t) for t in times]
-        V_base = [voltage(acc, :base, t) for t in times]
+        V_coll = [nameat(acc, :coll, t) for t in times]
+        V_base = [nameat(acc, :base, t) for t in times]
 
         # Calculate peak-to-peak voltages
         Vout_pp = maximum(V_coll) - minimum(V_coll)
@@ -211,7 +212,7 @@ eval(ce_amplifier_code)
 
         # Verify phase inversion (input peak → output trough)
         t_max_inp = times[argmax(V_base)]
-        V_out_at_inp_max = voltage(acc, :coll, t_max_inp)
+        V_out_at_inp_max = nameat(acc, :coll, t_max_inp)
 
         # At input maximum, output should be below DC level (inverted)
         @test V_out_at_inp_max < V_coll_dc
@@ -232,20 +233,17 @@ eval(ce_amplifier_code)
         sweep = Sweep(vac = [0.0005, 0.001, 0.002])
         cs = CircuitSweep(ce_amplifier, sweep; vac=0.001, freq=freq)
 
-        # Run transient sweep - returns vector of solutions
-        solutions = tran!(cs, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
+        # Run transient sweep - returns a SweepResult that iterates (params, sol) pairs
+        result = tran!(cs, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
 
         gains = Float64[]
-        for (sol, circuit) in zip(solutions, cs)
+        for (params, sol) in result
             if sol.retcode == ReturnCode.Success
-                sys = assemble!(circuit)
-                acc = MNASolutionAccessor(sol, sys)
-
                 t_start = 3 * period
                 times = range(t_start, 5*period; length=100)
 
-                V_coll = [voltage(acc, :coll, t) for t in times]
-                V_base = [voltage(acc, :base, t) for t in times]
+                V_coll = [nameat(sol, :coll, t) for t in times]
+                V_base = [nameat(sol, :base, t) for t in times]
 
                 Vout_pp = maximum(V_coll) - minimum(V_coll)
                 Vin_pp = maximum(V_base) - minimum(V_base)
@@ -291,15 +289,15 @@ eval(ce_amplifier_code)
 
             if sol.retcode == ReturnCode.Success
                 sys = assemble!(circuit)
-                acc = MNASolutionAccessor(sol, sys)
+                acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
                 # Measure last 3 periods
                 t_start = 7 * period
                 t_end = 10 * period
                 times = range(t_start, t_end; length=100)
 
-                V_coll = [voltage(acc, :coll, t) for t in times]
-                V_base = [voltage(acc, :base, t) for t in times]
+                V_coll = [nameat(acc, :coll, t) for t in times]
+                V_base = [nameat(acc, :base, t) for t in times]
 
                 Vout_pp = maximum(V_coll) - minimum(V_coll)
                 Vin_pp = maximum(V_base) - minimum(V_base)
@@ -359,10 +357,10 @@ eval(ce_amplifier_code)
         sol = MNA.solve_dc(ce_amplifier_builder, (;), spec)
 
         # Check that BJT is properly biased
-        V_vin = voltage(sol, :vin)
-        V_vcc = voltage(sol, :vcc)
-        V_emitter = voltage(sol, :emitter)
-        V_collector = voltage(sol, :collector)
+        V_vin = sol[:vin]
+        V_vcc = sol[:vcc]
+        V_emitter = sol[:emitter]
+        V_collector = sol[:collector]
 
         @test isapprox(V_vin, 3.0; atol=1e-6)
         @test isapprox(V_vcc, 6.0; atol=1e-6)
@@ -405,10 +403,10 @@ eval(ce_amplifier_code)
         spec = MNA.MNASpec(mode=:dcop)
         sol_high = MNA.solve_dc(ce_high_voltage_builder, (;), spec)
 
-        V_vin_h = voltage(sol_high, :vin)
-        V_vcc_h = voltage(sol_high, :vcc)
-        V_emitter_h = voltage(sol_high, :emitter)
-        V_collector_h = voltage(sol_high, :collector)
+        V_vin_h = sol_high[:vin]
+        V_vcc_h = sol_high[:vcc]
+        V_emitter_h = sol_high[:emitter]
+        V_collector_h = sol_high[:collector]
 
         @test isapprox(V_vin_h, 6.0; atol=1e-6)
         @test isapprox(V_vcc_h, 12.0; atol=1e-6)

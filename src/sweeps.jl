@@ -430,7 +430,7 @@ Returns a `DCSolution` with voltage/current accessors.
 ```julia
 circuit = MNACircuit(build_divider, (R1=1k, R2=1k), MNASpec())
 sol = dc!(circuit)
-voltage(sol, :out)  # Voltage at output node
+sol[:out]  # Voltage at output node
 ```
 """
 function dc!(circuit::MNA.MNACircuit)
@@ -441,13 +441,61 @@ function dc!(circuit::MNA.MNACircuit)
 end
 
 """
-    dc!(cs::CircuitSweep)
+    SweepResult{P,S}
 
-DC operating point analysis for a circuit sweep.
-Returns a vector of `DCSolution` objects.
+Result of running `dc!` or `tran!` over a `CircuitSweep`. Carries parameter tuples
+and corresponding solutions, aligned by index. Iterates as `(params, sol)` pairs.
+
+```julia
+cs = CircuitSweep(builder, ProductSweep(R=1:3:10))
+result = dc!(cs)
+for (p, sol) in result
+    @show p.R, sol[:vout]
+end
+result.points[1]      # first parameter set
+result.solutions[1]   # corresponding solution
+```
+
+Chosen over SciML's `EnsembleSolution`: that type doesn't carry per-trajectory
+parameter metadata and its plot recipes assume time-series inners, which breaks
+for DC.
+"""
+struct SweepResult{P,S}
+    points::Vector{P}
+    solutions::Vector{S}
+end
+
+Base.length(r::SweepResult) = length(r.solutions)
+Base.size(r::SweepResult) = (length(r),)
+Base.iterate(r::SweepResult, state=1) = state > length(r) ? nothing :
+    ((r.points[state], r.solutions[state]), state + 1)
+Base.getindex(r::SweepResult, i::Integer) = (r.points[i], r.solutions[i])
+Base.eltype(::Type{SweepResult{P,S}}) where {P,S} = Tuple{P,S}
+
+export SweepResult
+
+"""
+    dc!(cs::CircuitSweep) -> SweepResult
+
+DC operating point analysis over a circuit sweep. Returns a `SweepResult` that
+pairs each parameter point with its `DCSolution`.
 """
 function dc!(cs::CircuitSweep; kwargs...)
-    return [dc!(circuit; kwargs...) for circuit in cs]
+    points = Any[]
+    solutions = Any[]
+    state = nothing
+    it_state = iterate(cs.iterator)
+    while it_state !== nothing
+        params_nt, next_state = it_state
+        circuit = MNA.alter(cs.circuit; params_nt...)
+        sol = dc!(circuit; kwargs...)
+        push!(points, NamedTuple(params_nt))
+        push!(solutions, sol)
+        it_state = iterate(cs.iterator, next_state)
+    end
+    P = isempty(points) ? NamedTuple : typeof(first(points))
+    S = isempty(solutions) ? Any : typeof(first(solutions))
+    return SweepResult{P,S}(Vector{P}(points), Vector{S}(solutions))
 end
 
 #==============================================================================#
@@ -566,7 +614,20 @@ Returns a vector of solution objects.
 - `solver`: Solver algorithm (default: IDA from Sundials.jl)
 """
 function tran!(cs::CircuitSweep, tspan::Tuple{<:Real,<:Real}; kwargs...)
-    return [tran!(circuit, tspan; kwargs...) for circuit in cs]
+    points = Any[]
+    solutions = Any[]
+    it_state = iterate(cs.iterator)
+    while it_state !== nothing
+        params_nt, next_state = it_state
+        circuit = MNA.alter(cs.circuit; params_nt...)
+        sol = tran!(circuit, tspan; kwargs...)
+        push!(points, NamedTuple(params_nt))
+        push!(solutions, sol)
+        it_state = iterate(cs.iterator, next_state)
+    end
+    P = isempty(points) ? NamedTuple : typeof(first(points))
+    S = isempty(solutions) ? Any : typeof(first(solutions))
+    return SweepResult{P,S}(Vector{P}(points), Vector{S}(solutions))
 end
 
 # Base case; a single parameter mapped on certain values:

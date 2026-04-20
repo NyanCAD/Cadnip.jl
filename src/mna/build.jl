@@ -383,3 +383,46 @@ function show_C(sys::MNAData)
     all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
     show_matrix(stdout, sys.C, all_names)
 end
+
+#==============================================================================#
+# SymbolicIndexingInterface (SII) on MNAData
+#
+# Wire up the system so that `ODEFunction(f; sys=mna_data)` + solve() gives a
+# solution that supports `sol[:node_name]` and `sol[:current_name]` uniformly
+# for DC and transient analysis. This is Phase 3 of the API consolidation plan.
+#==============================================================================#
+import SymbolicIndexingInterface as SII
+
+function _sii_all_names(sys::MNAData)
+    return vcat(sys.node_names, sys.current_names, sys.charge_names)
+end
+
+# Do NOT define `SII.symbolic_container` — it triggers default recursive
+# forwarding that causes StackOverflowError when paired with ODEFunction's
+# own SII machinery. Define the concrete methods directly.
+SII.is_variable(sys::MNAData, sym::Symbol) = sym in _sii_all_names(sys)
+SII.is_variable(::MNAData, ::Any) = false
+SII.variable_symbols(sys::MNAData) = _sii_all_names(sys)
+
+function SII.variable_index(sys::MNAData, sym::Symbol)
+    (sym === :gnd || sym === Symbol("0")) && return nothing
+    idx = findfirst(==(sym), sys.node_names)
+    idx === nothing || return idx
+    idx = findfirst(==(sym), sys.current_names)
+    idx === nothing || return sys.n_nodes + idx
+    idx = findfirst(==(sym), sys.charge_names)
+    idx === nothing || return sys.n_nodes + sys.n_currents + idx
+    return nothing
+end
+SII.variable_index(::MNAData, ::Any) = nothing
+
+SII.is_independent_variable(::MNAData, sym::Symbol) = sym === :t
+SII.is_independent_variable(::MNAData, ::Any) = false
+SII.independent_variable_symbols(::MNAData) = [:t]
+SII.is_time_dependent(::MNAData) = true
+SII.constant_structure(::MNAData) = true
+SII.parameter_symbols(::MNAData) = Symbol[]
+SII.is_parameter(::MNAData, ::Any) = false
+SII.parameter_index(::MNAData, ::Any) = nothing
+SII.is_observed(::MNAData, ::Any) = false
+SII.all_variable_symbols(sys::MNAData) = _sii_all_names(sys)

@@ -3,7 +3,7 @@ module varegress
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: make_ode_problem
 using Cadnip.MNA: VoltageSource, Capacitor, MNACircuit
 using Cadnip: dc!
 using OrdinaryDiffEq
@@ -43,8 +43,8 @@ endmodule
     # V_out should equal V_vcc = 1V (no DC current through capacitor)
     circuit = MNACircuit(circuit1)
     sol = dc!(circuit)
-    @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
-    @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
+    @test isapprox(sol[:vcc], 1.0; atol=1e-10)
+    @test isapprox(sol[:out], 1.0; atol=1e-10)
 
     # Transient analysis - RC charging
     ctx = circuit1((;), MNASpec(mode=:tran))
@@ -114,8 +114,8 @@ endmodule
     # DC analysis
     circuit = MNACircuit(circuit2)
     sol = dc!(circuit)
-    @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
-    @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
+    @test isapprox(sol[:vcc], 1.0; atol=1e-10)
+    @test isapprox(sol[:out], 1.0; atol=1e-10)
 
     # Transient analysis
     ctx = circuit2((;), MNASpec(mode=:tran))

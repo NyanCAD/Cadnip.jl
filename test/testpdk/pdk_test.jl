@@ -1,10 +1,9 @@
 """
 Test PDK and VA device precompilation with MNA.
 
-This tests:
-- `load_mna_modules()` for SPICE PDK files with subcircuits
-- `load_mna_va_module()` for Verilog-A device files
-- SPICE circuits that reference VA devices via `imported_hdl_modules`
+This tests the Cadnip.precompile_pdk / Cadnip.precompile_va APIs (the PDK-authoring
+side of the two-tier model). End users reach the output via netlist .hdl / jlpkg://
+directives; these tests exercise the bake-time codegen path directly.
 """
 
 using Test
@@ -17,43 +16,27 @@ const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
 const test_va_path = joinpath(@__DIR__, "test_resistor.va")
 const circuit_with_va_path = joinpath(@__DIR__, "circuit_with_va.spice")
 
-# Load PDK modules directly into this module (like a real PDK package would do)
-# This is the preferred API for precompilation - evals internally and returns modules
-const corners = Cadnip.load_mna_modules(@__MODULE__, testpdk_path)
-
-# Load VA device module (like a device package would do)
-const va_device_mod = Cadnip.load_mna_va_module(@__MODULE__, test_va_path)
+const corners = Cadnip.precompile_pdk(@__MODULE__, testpdk_path)
+const va_device_mod = Cadnip.precompile_va(@__MODULE__, test_va_path)
 
 @testset "PDK MNA Module Generation" begin
 
-    @testset "load_mna_modules into module" begin
-        # Check that modules were created
+    @testset "precompile_pdk into module" begin
         @test haskey(corners, :typical)
         @test haskey(corners, :fast)
         @test haskey(corners, :slow)
 
-        # Check that submodules are defined in this module
         @test isdefined(@__MODULE__, :typical)
         @test isdefined(@__MODULE__, :fast)
         @test isdefined(@__MODULE__, :slow)
     end
 
-    @testset "load_mna_modules expression form" begin
-        # Test backward compatible expression-returning form
-        expr = Cadnip.load_mna_modules(testpdk_path)
-        @test expr.head == :toplevel
-        @test length(expr.args) == 3
-    end
-
-    @testset "load_mna_modules with names filter" begin
-        # Load only typical section (expression form)
-        expr = Cadnip.load_mna_modules(testpdk_path; names=["typical"])
-        @test length(expr.args) == 1
-    end
-
-    @testset "load_mna_pdk single section expression" begin
-        expr = Cadnip.load_mna_pdk(testpdk_path; section="typical")
-        @test expr.head == :module  # Direct module expression
+    @testset "precompile_pdk names filter" begin
+        # Load only typical section into a fresh module
+        m = Module(:pdk_only_typical)
+        nt = Cadnip.precompile_pdk(m, testpdk_path; names=["typical"])
+        @test haskey(nt, :typical)
+        @test !haskey(nt, :fast)
     end
 
     @testset "PDK module structure" begin
@@ -156,20 +139,10 @@ end
 
 @testset "VA Device Precompilation" begin
 
-    @testset "load_mna_va_module into module" begin
-        # Check that the module was created
+    @testset "precompile_va into module" begin
         @test va_device_mod isa Module
         @test isdefined(@__MODULE__, :test_resistor_module)
-
-        # Check that device type is exported
         @test isdefined(test_resistor_module, :test_resistor)
-    end
-
-    @testset "load_mna_va_module expression form" begin
-        # Test expression-returning form
-        expr = Cadnip.load_mna_va_module(test_va_path)
-        @test expr.head == :toplevel
-        @test length(expr.args) == 2  # module def + using statement
     end
 
     @testset "Use VA device in circuit" begin
@@ -254,43 +227,33 @@ end
 end
 
 @testset "SPICE Circuit with VA Device" begin
-    # This demonstrates the typical use case where:
-    # 1. A VA device comes from a precompiled package (like BSIM4.jl)
-    # 2. A SPICE netlist references that device by name
-    # 3. The circuit is built using make_mna_circuit with imported_hdl_modules
-    #
-    # In a real PDK, the SPICE file would use:
-    #   .hdl "jlpkg://BSIM4/bsim4.va"
-    # to reference the package. Here we demonstrate the equivalent pattern
-    # by passing the module via imported_hdl_modules.
+    # A VA device comes from a precompiled package (here: test_resistor_module).
+    # In a real PDK the SPICE netlist would reference it via `.hdl "jlpkg://..."`.
+    # For this unit test we construct the circuit via Cadnip._make_mna_circuit_with_sema
+    # on a sema result that has the module pre-populated on its scope walk list.
+
+    function _build_from_spice(ast, circuit_name::Symbol, mods::Vector{Module})
+        sema_result = Cadnip.sema(ast; imported_hdl_modules=mods)
+        return Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name)
+    end
 
     @testset "Build circuit from SPICE with VA device" begin
-        # Parse the SPICE circuit
         using NyanSpectreNetlistParser
         ast = NyanSpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
         @test !ast.ps.errored
 
-        # Build the MNA circuit, passing the VA device module
-        # This is equivalent to what happens when SPICE uses .hdl "jlpkg://..."
-        builder_code = Cadnip.make_mna_circuit(ast;
-            circuit_name=:va_circuit,
-            imported_hdl_modules=[test_resistor_module])
-
-        # Eval the builder
+        builder_code = _build_from_spice(ast, :va_circuit, [test_resistor_module])
         builder = @eval $builder_code
 
-        # Build and solve
         circuit = MNACircuit(builder)
         sol = dc!(circuit)
 
-        # Build ctx to get node indices
         ctx = builder((;), MNASpec())
         out_idx = ctx.node_to_idx[:out]
         @test sol.x[out_idx] ≈ 0.5 atol=1e-6
     end
 
     @testset "Compare SPICE-defined vs Julia-defined circuit" begin
-        # Build the same circuit in pure Julia for comparison
         function build_julia_circuit(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing
                 ctx = MNAContext()
@@ -301,36 +264,27 @@ end
             vin = get_node!(ctx, :vin)
             out = get_node!(ctx, :out)
 
-            # VA resistor
             dev = test_resistor_module.test_resistor(R=500.0)
             stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
-            # Regular resistor
             stamp!(Cadnip.MNA.Resistor(500.0), ctx, out, 0)
-
-            # Voltage source
             stamp!(VoltageSource(1.0), ctx, vin, 0)
 
             return ctx
         end
 
-        # Solve Julia-defined circuit
         circuit_julia = MNACircuit(build_julia_circuit)
         sol_julia = dc!(circuit_julia)
         ctx_julia = build_julia_circuit((;), MNASpec())
 
-        # Solve SPICE-defined circuit
         using NyanSpectreNetlistParser
         ast = NyanSpectreNetlistParser.parsefile(circuit_with_va_path; implicit_title=true)
-        builder_code = Cadnip.make_mna_circuit(ast;
-            circuit_name=:va_circuit2,
-            imported_hdl_modules=[test_resistor_module])
+        builder_code = _build_from_spice(ast, :va_circuit2, [test_resistor_module])
         builder = @eval $builder_code
         circuit_spice = MNACircuit(builder)
         sol_spice = dc!(circuit_spice)
         ctx_spice = builder((;), MNASpec())
 
-        # Both should give same output voltage
         out_julia = sol_julia.x[ctx_julia.node_to_idx[:out]]
         out_spice = sol_spice.x[ctx_spice.node_to_idx[:out]]
 

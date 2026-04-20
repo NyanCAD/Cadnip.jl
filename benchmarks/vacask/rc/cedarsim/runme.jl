@@ -18,13 +18,10 @@ using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
 
-# Load and parse the SPICE netlist from file
+# Load and parse the SPICE netlist from file.
+# File-first load: defines `rc_circuit(params, spec, ...)` at top level.
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
-
-# Parse SPICE to code, then evaluate to get the builder function
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:rc_circuit)
-eval(circuit_code)
+Base.include(@__MODULE__, SpiceFile(spice_file; name=:rc_circuit))
 
 """
     setup_simulation()

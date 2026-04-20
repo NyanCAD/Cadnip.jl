@@ -9,7 +9,7 @@ using LinearAlgebra
 # Import MNA module - use Cadnip.MNA
 using Cadnip.MNA: MNAContext, get_node!, resolve_index, get_rhs, reset_for_restamping!
 using Cadnip.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
-using Cadnip.MNA: MNASpec, DCSolution, solve_dc, voltage, current
+using Cadnip.MNA: MNASpec, DCSolution, solve_dc
 using Cadnip.MNA: compile_structure, create_workspace, EvalWorkspace, CompiledStructure
 using Cadnip.MNA: fast_residual!, fast_rebuild!, system_size
 using Cadnip.MNA: MNACircuit, compile
@@ -132,8 +132,8 @@ end
     sol = solve_dc(cs.builder, cs.params, MNASpec(mode=:dcop))
 
     # Check voltage divider: V_mid = V * R2 / (R1 + R2) = 10 * 0.5 = 5.0
-    @test voltage(sol, :mid) ≈ 5.0 atol=1e-10
-    @test voltage(sol, :vin) ≈ 10.0 atol=1e-10
+    @test sol[:mid] ≈ 5.0 atol=1e-10
+    @test sol[:vin] ≈ 10.0 atol=1e-10
 end
 
 @testset "EvalWorkspace with DC solve" begin
@@ -162,8 +162,8 @@ end
 
     # DC solve using builder
     sol = solve_dc(cs.builder, cs.params, MNASpec(mode=:dcop))
-    @test voltage(sol, :vin) ≈ 5.0 atol=1e-10
-    @test voltage(sol, :out) ≈ 5.0 atol=1e-10  # No load, so V_out = V_in
+    @test sol[:vin] ≈ 5.0 atol=1e-10
+    @test sol[:out] ≈ 5.0 atol=1e-10  # No load, so V_out = V_in
 end
 
 @testset "fast_residual! computation" begin
@@ -265,8 +265,8 @@ end
     sol2 = solve_dc(ws2.structure.builder, ws2.structure.params, MNASpec(mode=:dcop))
 
     # Current I = V/R
-    I1 = current(sol1, :I_V1)
-    I2 = current(sol2, :I_V1)
+    I1 = sol1[:I_V1]
+    I2 = sol2[:I_V1]
 
     @test I1 ≈ -10.0/1000.0 atol=1e-10  # Negative due to sign convention
     @test I2 ≈ -10.0/500.0 atol=1e-10

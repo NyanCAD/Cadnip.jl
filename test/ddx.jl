@@ -3,7 +3,7 @@ module ddx_tests
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using Cadnip.MNA: voltage, current
+
 using Cadnip.MNA: VoltageSource
 using Test
 
@@ -59,14 +59,14 @@ endmodule
     sol = solve_dc(VRcircuit, (;), MNASpec(mode=:dcop))
 
     # Verify voltages
-    @test isapprox(voltage(sol, :vcc), 5.0; atol=1e-10)
-    @test isapprox(voltage(sol, :vg), 3.0; atol=1e-10)
+    @test isapprox(sol[:vcc], 5.0; atol=1e-10)
+    @test isapprox(sol[:vg], 3.0; atol=1e-10)
 
     # Verify current:
     # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from d(vcc) to s(gnd)
     # V1 sources this current (pushing out of positive terminal), so I_V1 = -60A
     expected_I = 5.0 * 2.0 * 2.0 * 3.0
-    @test isapprox(current(sol, :I_V1), -expected_I; atol=1e-6)
+    @test isapprox(sol[:I_V1], -expected_I; atol=1e-6)
 end
 
 end # module ddx_tests

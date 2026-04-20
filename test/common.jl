@@ -10,6 +10,12 @@ using SciMLBase
 using Sundials
 using LinearSolve: KLUFactorization
 
+using Cadnip.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
+using Cadnip.MNA: MNACircuit
+using Cadnip.MNA: get_node!, stamp!
+using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using Cadnip.MNA: make_ode_problem, ZERO_VECTOR
+
 const deftol = 1e-8
 
 # Our default tolerances are one order of magnitude above our default solve tolerances
@@ -19,235 +25,85 @@ isapprox_deftol(x) = y->isapprox(x, y; atol=deftol*10, rtol=deftol*10)
 allapprox_deftol(itr) = isempty(itr) ? true : all(isapprox_deftol(first(itr)), itr)
 
 #==============================================================================#
-# MNA-based solve functions (Phase 4+, no DAECompiler required)
+# Compat shims for test files — thin wrappers around the new MNACircuit API.
+#
+# Tests that still return `(ctx, sol)` tuples are supported here; the idiomatic
+# call is `dc!(MNACircuit(code; lang=...))`, which returns just the solution.
+# These shims make old test code compile while Phase 4 migration is in progress.
 #==============================================================================#
 
-using Cadnip.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
-using Cadnip.MNA: voltage, current, get_node!, stamp!
-using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using Cadnip.MNA: make_ode_problem, ZERO_VECTOR
-
-"""
-    solve_mna_spice_code(spice_code::String; temp=27.0) -> (ctx, sol)
-
-Parse SPICE code and solve DC operating point using MNA backend.
-Returns (MNAContext, DCSolution).
-
-# Example
-```julia
-code = \"\"\"
-V1 vcc 0 DC 5
-R1 vcc out 1k
-R2 out 0 1k
-\"\"\"
-ctx, sol = solve_mna_spice_code(code)
-voltage(sol, :out)  # Returns 2.5
-```
-"""
-function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[], maxiters::Int=100)
-    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
-
-    # Evaluate in temporary module
+# These shims eval the builder inside a function body (we're called from an
+# `@testset`). `MNACircuit(code; lang=...)` from production would error with
+# "method too new" here (by design), so we wrap the builder in an explicit
+# invokelatest closure ourselves — same pattern tests have always used for
+# runtime-parsed circuits.
+function _eval_spice_builder(spice_code, imported_hdl_modules)
+    code = parse_spice_to_mna(spice_code; circuit_name=:circuit, imported_hdl_modules)
     m = Module()
-    Base.eval(m, :(using Cadnip.MNA))
-    Base.eval(m, :(using Cadnip: ParamLens))
-    Base.eval(m, :(using Cadnip.SpectreEnvironment))
-    # Import VA device types
-    for hdl_mod in imported_hdl_modules
-        for name in names(hdl_mod; all=true, imported=false)
-            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
-                val = getfield(hdl_mod, name)
-                isa(val, Type) && Base.eval(m, :(const $name = $val))
-            end
-        end
-    end
-    circuit_fn = Base.eval(m, code)
-
-    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
-    # for nonlinear devices (VA BJTs, diodes, etc.)
-    spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec; maxiters)
-
-    # Build context for returning (at the solved operating point)
-    ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
-
-    return ctx, sol
+    Base.eval(m, code)
+    builder = getfield(m, :circuit)
+    return (args...; kwargs...) -> Base.invokelatest(builder, args...; kwargs...)
 end
 
-"""
-    solve_mna_spectre_code(spectre_code::String; temp=27.0) -> (ctx, sol)
-
-Parse Spectre code and solve DC operating point using MNA backend.
-Returns (MNAContext, DCSolution).
-
-# Example
-```julia
-code = \"\"\"
-v1 (vcc 0) vsource dc=5
-r1 (vcc out) resistor r=1k
-r2 (out 0) resistor r=1k
-\"\"\"
-ctx, sol = solve_mna_spectre_code(code)
-voltage(sol, :out)  # Returns 2.5
-```
-"""
-function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[], maxiters::Int=100)
+function _eval_spectre_builder(spectre_code, imported_hdl_modules)
     ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
-    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
-
-    # Evaluate in temporary module
+    sema_result = Cadnip.sema(ast; imported_hdl_modules)
+    code = Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name=:circuit)
     m = Module()
-    Base.eval(m, :(using Cadnip.MNA))
-    Base.eval(m, :(using Cadnip: ParamLens))
-    Base.eval(m, :(using Cadnip.SpectreEnvironment))
-    # Import VA device types
-    for hdl_mod in imported_hdl_modules
-        for name in names(hdl_mod; all=true, imported=false)
-            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
-                val = getfield(hdl_mod, name)
-                isa(val, Type) && Base.eval(m, :(const $name = $val))
-            end
-        end
-    end
-    circuit_fn = Base.eval(m, code)
+    Base.eval(m, code)
+    builder = getfield(m, :circuit)
+    return (args...; kwargs...) -> Base.invokelatest(builder, args...; kwargs...)
+end
 
-    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
-    # for nonlinear devices (VA BJTs, diodes, etc.)
-    spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec; maxiters)
-
-    # Build context for returning (at the solved operating point)
-    ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
-
+function solve_mna_spice_code(spice_code::AbstractString; temp::Real=27.0, maxiters::Int=100,
+                              imported_hdl_modules::Vector{Module}=Module[])
+    wrapped = _eval_spice_builder(spice_code, imported_hdl_modules)
+    circuit = MNACircuit(wrapped, (;), MNASpec(temp=Float64(temp), mode=:dcop))
+    sol = solve_dc(circuit)
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=sol.x)
     return ctx, sol
 end
 
-"""
-    solve_mna_circuit(builder; params=(;), temp=27.0) -> (ctx, sol)
-
-Build and solve a circuit using MNA backend.
-`builder` should be a function (params, spec, t; x=...) -> MNAContext.
-
-# Example
-```julia
-function my_circuit(params, spec, t::Real=0.0; x=Float64[])
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    stamp!(VoltageSource(5.0), ctx, vcc, 0)
-    stamp!(Resistor(params.R), ctx, vcc, 0)
-    return ctx
-end
-ctx, sol = solve_mna_circuit(my_circuit; params=(R=1000.0,))
-```
-"""
-function solve_mna_circuit(builder; params=(;), temp::Real=27.0)
-    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
-    # for nonlinear devices (VA BJTs, diodes, etc.)
-    spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    sol = solve_dc(builder, params, spec)
-    ctx = builder(params, spec, 0.0; x=sol.x)
+function solve_mna_spectre_code(spectre_code::AbstractString; temp::Real=27.0, maxiters::Int=100,
+                                imported_hdl_modules::Vector{Module}=Module[])
+    wrapped = _eval_spectre_builder(spectre_code, imported_hdl_modules)
+    circuit = MNACircuit(wrapped, (;), MNASpec(temp=Float64(temp), mode=:dcop))
+    sol = solve_dc(circuit)
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=sol.x)
     return ctx, sol
 end
 
-"""
-    tran_mna_circuit(builder, tspan; params=(;), temp=27.0, solver=Rodas5P(linsolve=KLUFactorization())) -> (ctx, sol)
+# `solve_mna_circuit`, `tran_mna_circuit`, and `make_mna_spice_circuit` were
+# compat shims for old test code; no current test calls them. Deleted.
 
-Build and solve a transient simulation using MNA backend.
-
-# Example
-```julia
-function rc_circuit(params, spec, t::Real=0.0)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-    stamp!(VoltageSource(params.V), ctx, vcc, 0)
-    stamp!(Resistor(params.R), ctx, vcc, out)
-    stamp!(Capacitor(params.C), ctx, out, 0)
-    return ctx
-end
-ctx, sol = tran_mna_circuit(rc_circuit, (0.0, 1e-3); params=(V=5.0, R=1000.0, C=1e-6))
-```
-"""
-function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, solver=Rodas5P(linsolve=KLUFactorization()))
-    spec = MNASpec(temp=Float64(temp), mode=:tran)
-    ctx = builder(params, spec)
-    sys = assemble!(ctx)
-
-    # Create and solve ODE problem
-    prob_data = make_ode_problem(sys, tspan)
-    f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
-                    jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
-    prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
-    sol = solve(prob, solver; reltol=deftol, abstol=deftol)
-
-    return ctx, sol
+#==============================================================================#
+# Test-only shim: `parse_spice_to_mna` returns a builder Expr and accepts an
+# internal `imported_hdl_modules` list for test code that defines VA devices via
+# the `va"""..."""` macro. Not a public API.
+#==============================================================================#
+function parse_spice_to_mna(spice_code::AbstractString;
+                            circuit_name::Symbol=:circuit,
+                            imported_hdl_modules::Vector{Module}=Module[])
+    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code);
+        start_lang=:spice, implicit_title=true)
+    sema_result = Cadnip.sema(ast; imported_hdl_modules)
+    return _make_mna_circuit_from_sema(sema_result, circuit_name)
 end
 
-using Cadnip.MNA: MNACircuit
+function parse_spice_file_to_mna(filepath::AbstractString;
+                                  circuit_name::Symbol=:circuit,
+                                  imported_hdl_modules::Vector{Module}=Module[])
+    ast = Cadnip.NyanSpectreNetlistParser.parsefile(filepath;
+        start_lang=:spice, implicit_title=true)
+    sema_result = Cadnip.sema(ast; imported_hdl_modules)
+    return _make_mna_circuit_from_sema(sema_result, circuit_name)
+end
 
-"""
-    make_mna_spice_circuit(spice_code::String; temp=27.0, imported_hdl_modules=Module[]) -> MNACircuit
-
-Parse SPICE code and return an MNACircuit ready for simulation.
-
-This is a convenience function for test code. It uses `invokelatest` internally
-to handle world age issues with runtime-parsed code.
-
-For production code loading SPICE from files, use the top-level eval pattern:
-
-```julia
-# At module/file load time (top level)
-using Cadnip: parse_spice_to_mna
-const circuit_code = parse_spice_to_mna(read("circuit.sp", String);
-                                        imported_hdl_modules=[MyVA_module])
-eval(circuit_code)  # Defines `circuit` function, advances world
-
-# Now can use normally without invokelatest
-circuit = MNACircuit(circuit)
-sol = tran!(circuit, (0.0, 1e-3))
-```
-
-# Example (test code)
-```julia
-spice = \"\"\"
-* BJT amplifier
-V1 vcc 0 DC 12
-Vb base 0 DC 0.65
-Rc vcc coll 4.7k
-X1 base 0 coll npnbjt
-\"\"\"
-
-circuit = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
-sol = tran!(circuit, (0.0, 1e-3))
-```
-"""
-function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
-    ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = Cadnip.make_mna_circuit(ast; imported_hdl_modules)
-
-    # Evaluate in temporary module
-    m = Module()
-    Base.eval(m, :(using Cadnip.MNA))
-    Base.eval(m, :(using Cadnip: ParamLens))
-    Base.eval(m, :(using Cadnip.SpectreEnvironment))
-    # Import VA device types
-    for hdl_mod in imported_hdl_modules
-        for name in names(hdl_mod; all=true, imported=false)
-            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
-                val = getfield(hdl_mod, name)
-                isa(val, Type) && Base.eval(m, :(const $name = $val))
-            end
-        end
-    end
-    circuit_fn = Base.eval(m, code)
-
-    # Wrap in invokelatest to handle world age issues.
-    # This is needed because circuit_fn was defined via eval and is called from
-    # ODE solver callbacks which are in an older world.
-    # For production performance, use the sp"..." macro instead.
-    wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
-
-    spec = MNASpec(temp=Float64(temp), mode=:tran)
-    return MNACircuit(wrapped_fn, (;), spec)
+# Reuse codegen with a pre-built sema result. Duplicates a bit of codegen.jl
+# logic but avoids surfacing imported_hdl_modules on a public API.
+function _make_mna_circuit_from_sema(sema_result, circuit_name::Symbol)
+    # Reach into Cadnip's codegen — this is an internal/test-only bridge.
+    # We assemble the same expression make_mna_circuit would, but with a sema
+    # that already has imported_hdl_modules populated.
+    Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name)
 end
