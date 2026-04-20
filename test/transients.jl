@@ -5,7 +5,7 @@ include("common.jl")
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using Cadnip.MNA: pwl_at_time
-using Cadnip.MNA: voltage, current, MNACircuit
+using Cadnip.MNA: MNACircuit
 using SciMLBase: ODEProblem
 
 # We'll create a piecewise linear current source that goes through a resistor

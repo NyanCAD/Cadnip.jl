@@ -27,12 +27,10 @@ println("=" ^ 70)
 println("\nLoading circuits...")
 println("  Loaded: sp_diode from VADistillerModels package")
 
-# Load Graetz circuit (4 diodes)
+# Load Graetz circuit (4 diodes). VADistillerModels registers sp_diode via
+# ModelRegistry (Tier 1), so SpiceFile loading resolves the .model card.
 const graetz_spice_file = joinpath(@__DIR__, "graetz", "cedarsim", "runme.sp")
-const graetz_spice_code = read(graetz_spice_file, String)
-const graetz_circuit_code = parse_spice_to_mna(graetz_spice_code; circuit_name=:graetz_circuit,
-                                                imported_hdl_modules=[sp_diode_module])
-eval(graetz_circuit_code)
+Base.include(@__MODULE__, SpiceFile(graetz_spice_file; name=:graetz_circuit))
 println("  Loaded: Graetz rectifier circuit")
 
 #==============================================================================#
@@ -182,11 +180,13 @@ function profile_solver_allocations()
         return
     end
 
-    rc_spice_code = read(rc_spice_file, String)
-    rc_circuit_code = parse_spice_to_mna(rc_spice_code; circuit_name=:rc_circuit)
-    eval(rc_circuit_code)
-
-    rc_circ = MNACircuit(rc_circuit)
+    # Load the RC circuit at function scope. Because this is inside a function
+    # body (world-age frozen), we pass the freshly-eval'd builder through an
+    # invokelatest wrapper so dc!/tran! can dispatch it safely.
+    @eval Base.include(@__MODULE__, SpiceFile($rc_spice_file; name=:rc_circuit))
+    rc_builder = (args...; kwargs...) -> Base.invokelatest(
+        getfield(@__MODULE__, :rc_circuit), args...; kwargs...)
+    rc_circ = MNACircuit(rc_builder)
 
     println("\nComparing solvers on RC circuit (10k steps):")
 

@@ -281,39 +281,34 @@ end
 
 Select the appropriate model type for a SPICE device declaration.
 
-Uses the ModelRegistry dispatch system to find registered models. Falls back to
-searching imported HDL modules (Verilog-A `.hdl` includes) if no registered model
-is found.
+Resolution order (two-tier model):
+1. **Tier 2 (scope walk)** — netlist-included modules (via `.hdl`, `.include`, `.lib`,
+   `jlpkg://`). Most-recent include wins. Used for PDK-specific and custom devices.
+2. **Tier 1 (registry)** — `ModelRegistry.getmodel` fallback. Used for SPICE-standard
+   builtins (R, C, L, D, level-dispatched MOSFETs/BJTs) populated by method addition
+   from Cadnip + stdlib packages (VADistillerModels, BSIM4, PSPModels).
 
 Returns a GlobalRef to the model type, or GlobalRef(Cadnip, :UnimplementedDevice)
 if no suitable model is found.
-
-Note: For VA models to be resolved, they must either:
-1. Be registered with Cadnip.ModelRegistry (preferred for standard device types)
-2. Be included via `.hdl` directive in the SPICE netlist
 """
 function spice_select_device(sema::SemaResult, devkind::Symbol, level, version, stmt; dialect=:ngspice)
-    # Convert version to string for registry lookup
-    version_str = version === nothing ? nothing : string(Int(version))
-    level_int = level === nothing ? nothing : Int(level)
-
-    # Try the model registry first (preferred path)
-    model_type = Cadnip.getmodel(devkind, level_int, version_str)
-
-    if model_type !== nothing
-        # Found in registry - convert type to GlobalRef
-        return GlobalRef(parentmodule(model_type), nameof(model_type))
-    end
-
-    # Search for this model in HDL modules included via .hdl directive
+    # Tier 2: scope walk. Most-recent include wins — reverse iteration.
     # SPICE is case-insensitive, so try both exact match and uppercase
     devkind_upper = Symbol(uppercase(String(devkind)))
-    for hdl_mod in sema.imported_hdl_modules
+    for hdl_mod in Iterators.reverse(sema.imported_hdl_modules)
         if isdefined(hdl_mod, devkind)
             return GlobalRef(hdl_mod, devkind)
         elseif isdefined(hdl_mod, devkind_upper)
             return GlobalRef(hdl_mod, devkind_upper)
         end
+    end
+
+    # Tier 1: registry fallback.
+    version_str = version === nothing ? nothing : string(Int(version))
+    level_int = level === nothing ? nothing : Int(level)
+    model_type = Cadnip.getmodel(devkind, level_int, version_str)
+    if model_type !== nothing
+        return GlobalRef(parentmodule(model_type), nameof(model_type))
     end
 
     # No model found - warn and return UnimplementedDevice
@@ -606,6 +601,10 @@ function sema_file_or_section(n::SNode; imps=nothing, parse_cache=nothing, impor
     scope
 end
 
+# `imported_hdl_modules` is INTERNAL. Public callers should use netlist directives
+# (.hdl, .include, .lib, jlpkg://) to populate the Tier-2 scope walk list. The
+# kwarg is retained for test-infrastructure use only — do not add it to new
+# public APIs.
 function sema(n::SNode; imps = nothing, parse_cache=nothing, imported_hdl_modules::Vector{Module}=Module[])
     scope = SemaResult(n)
     if imps !== nothing

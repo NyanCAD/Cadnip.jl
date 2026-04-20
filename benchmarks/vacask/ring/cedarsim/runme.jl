@@ -20,16 +20,16 @@ using Printf
 # Import precompiled PSP103 builders (nmos_mna_builder, pmos_mna_builder)
 using VACASKModels
 
-# Load and parse the SPICE netlist from file
+# Parse SPICE from file, inject VACASKModels as a Tier-2 scope module (the
+# netlist references `nmos`/`pmos` subckt calls whose builders live in
+# VACASKModels), then codegen via the internal sema-pre-built bridge.
+# Runs at top level so the resulting `ring_circuit` is eval'd into this module
+# without any world-age tax.
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
-
-# Parse SPICE to code, then evaluate to get the builder function
-# VACASKModels provides precompiled nmos_mna_builder/pmos_mna_builder
-# which are resolved via imported_hdl_modules for the exposed subcircuit references
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_circuit,
-                                         imported_hdl_modules=[VACASKModels])
-eval(circuit_code)
+let ast = Cadnip.NyanSpectreNetlistParser.parsefile(spice_file; start_lang=:spice, implicit_title=true),
+    sema_result = Cadnip.sema(ast; imported_hdl_modules=[VACASKModels])
+    eval(Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name=:ring_circuit))
+end
 
 """
     setup_simulation()

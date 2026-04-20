@@ -27,10 +27,11 @@ using Cadnip.MNA: get_source_value, pwl_at_time
 using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS
 using Cadnip.MNA: assemble!, assemble_G, assemble_C, get_rhs
 using Cadnip.MNA: DCSolution, ACSolution, solve_dc, solve_ac
-using Cadnip.MNA: voltage, current, magnitude_db, phase_deg
+using Cadnip.MNA: magnitude_db, phase_deg
 using Cadnip.MNA: make_ode_problem, make_ode_function
 using Cadnip.MNA: make_dae_problem, make_dae_function
 using Cadnip.MNA: reset_for_restamping!
+using Cadnip.MNA: nameat
 
 # Import Cadnip for macros and dc!/tran!
 using Cadnip
@@ -183,12 +184,12 @@ using NyanVerilogAParser
         # Verify voltages using voltage divider
         # V(anode) = 5.0 (forced by voltage source)
         # V(a_int) = 5.0 * 1000 / (10 + 1000) ≈ 4.9505
-        @test voltage(sol, :anode) ≈ 5.0
+        @test sol[:anode] ≈ 5.0
         @test isapprox(sol.x[a_int], 5.0 * 1000 / 1010; rtol=1e-6)
 
         # Current through circuit
         # I = 5.0 / (10 + 1000) = 5.0 / 1010 ≈ 4.95mA
-        @test isapprox(-current(sol, :I_V1), 5.0 / 1010; rtol=1e-6)
+        @test isapprox(-sol[:I_V1], 5.0 / 1010; rtol=1e-6)
     end
 
     @testset "Stamping primitives" begin
@@ -512,8 +513,8 @@ using NyanVerilogAParser
         R2 out 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :vcc) ≈ 5.0
-        @test voltage(sol, :out) ≈ 2.5 atol=1e-10
+        @test sol[:vcc] ≈ 5.0
+        @test sol[:out] ≈ 2.5 atol=1e-10
     end
 
     @testset "DC: Voltage divider (unequal)" begin
@@ -525,7 +526,7 @@ using NyanVerilogAParser
         R2 out 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :out) ≈ 5.0 / 3.0 atol=1e-10
+        @test sol[:out] ≈ 5.0 / 3.0 atol=1e-10
     end
 
     @testset "DC: Current source into resistor" begin
@@ -536,7 +537,7 @@ using NyanVerilogAParser
         R1 n1 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :n1) ≈ 1.0 atol=1e-10
+        @test sol[:n1] ≈ 1.0 atol=1e-10
     end
 
     @testset "DC: Two voltage sources" begin
@@ -549,8 +550,8 @@ using NyanVerilogAParser
         R2 mid 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :vcc) ≈ 5.0
-        @test voltage(sol, :mid) ≈ 3.0
+        @test sol[:vcc] ≈ 5.0
+        @test sol[:mid] ≈ 3.0
     end
 
     @testset "DC: VCCS amplifier" begin
@@ -564,8 +565,8 @@ using NyanVerilogAParser
         R1 out 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :inp) ≈ 1.0
-        @test voltage(sol, :out) ≈ 10.0 atol=1e-10
+        @test sol[:inp] ≈ 1.0
+        @test sol[:out] ≈ 10.0 atol=1e-10
     end
 
     @testset "DC: Inverting amplifier with VCVS" begin
@@ -576,8 +577,8 @@ using NyanVerilogAParser
         E1 out 0 inp 0 -10.0
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :inp) ≈ 0.5
-        @test voltage(sol, :out) ≈ -5.0 atol=1e-10
+        @test sol[:inp] ≈ 0.5
+        @test sol[:out] ≈ -5.0 atol=1e-10
     end
 
     @testset "DC: Transresistance amplifier with CCVS" begin
@@ -592,7 +593,7 @@ using NyanVerilogAParser
         R1 out 0 1Meg
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :out) ≈ 1.0 atol=1e-6
+        @test sol[:out] ≈ 1.0 atol=1e-6
     end
 
     @testset "DC: Current mirror with CCCS" begin
@@ -608,7 +609,7 @@ using NyanVerilogAParser
         R1 out 0 1k
         """i)
         sol = dc!(circuit)
-        @test voltage(sol, :out) ≈ 2.0 atol=1e-10
+        @test sol[:out] ≈ 2.0 atol=1e-10
     end
 
     @testset "DC: Multi-node network" begin
@@ -626,7 +627,7 @@ using NyanVerilogAParser
         """i)
         sol = dc!(circuit)
         expected = 9.0 / (1.0 + 0.5 + 1.0/3.0)
-        @test voltage(sol, :center) ≈ expected atol=1e-10
+        @test sol[:center] ≈ expected atol=1e-10
     end
 
     #==========================================================================#
@@ -657,15 +658,15 @@ using NyanVerilogAParser
         ac_sol = solve_ac(sys, freqs)
 
         # At low frequency: Vout ≈ Vin
-        Vout_low = abs(voltage(ac_sol, :out, 1))
+        Vout_low = abs(ac_sol[:out, 1])
         @test Vout_low > 0.99
 
         # At cutoff: |Vout/Vin| ≈ 0.707
-        Vout_fc = abs(voltage(ac_sol, :out, 2))
+        Vout_fc = abs(ac_sol[:out, 2])
         @test Vout_fc ≈ 1.0/sqrt(2) atol=0.01
 
         # At high frequency: Vout << Vin
-        Vout_high = abs(voltage(ac_sol, :out, 3))
+        Vout_high = abs(ac_sol[:out, 3])
         @test Vout_high < 0.15
     end
 
@@ -693,15 +694,15 @@ using NyanVerilogAParser
         ac_sol = solve_ac(sys, freqs)
 
         # At low frequency: Vout << Vin (inductor is short)
-        Vout_low = abs(voltage(ac_sol, :out, 1))
+        Vout_low = abs(ac_sol[:out, 1])
         @test Vout_low < 0.15
 
         # At cutoff: |Vout/Vin| ≈ 0.707
-        Vout_fc = abs(voltage(ac_sol, :out, 2))
+        Vout_fc = abs(ac_sol[:out, 2])
         @test Vout_fc ≈ 1.0/sqrt(2) atol=0.01
 
         # At high frequency: Vout ≈ Vin (inductor is open)
-        Vout_high = abs(voltage(ac_sol, :out, 3))
+        Vout_high = abs(ac_sol[:out, 3])
         @test Vout_high > 0.99
     end
 
@@ -757,7 +758,7 @@ using NyanVerilogAParser
         R1 n1 0 1T
         """i)
         sol3 = dc!(circuit3)
-        @test voltage(sol3, :n1) ≈ 1.0
+        @test sol3[:n1] ≈ 1.0
 
         # Very small resistance
         circuit4 = MNACircuit(sp"""
@@ -766,7 +767,7 @@ using NyanVerilogAParser
         R2 n2 0 1u
         """i)
         sol4 = dc!(circuit4)
-        @test voltage(sol4, :n2) ≈ 2.5 atol=1e-6
+        @test sol4[:n2] ≈ 2.5 atol=1e-6
     end
 
     #==========================================================================#
@@ -1164,7 +1165,7 @@ using NyanVerilogAParser
 
         # Build and solve
         sol = solve_dc(circuit)
-        @test voltage(sol, :out) ≈ 5.0  # Voltage divider: Vcc * R2/(R1+R2)
+        @test sol[:out] ≈ 5.0  # Voltage divider: Vcc * R2/(R1+R2)
 
         # Alter parameters
         circuit2 = alter(circuit; R2=3000.0)
@@ -1172,7 +1173,7 @@ using NyanVerilogAParser
         @test circuit2.params.R1 == 1000.0  # Unchanged
 
         sol2 = solve_dc(circuit2)
-        @test voltage(sol2, :out) ≈ 7.5  # 10 * 3000/4000
+        @test sol2[:out] ≈ 7.5  # 10 * 3000/4000
 
         # Change mode
         circuit3 = with_mode(circuit, :dcop)
@@ -1205,7 +1206,7 @@ using NyanVerilogAParser
 
         # DC solution (capacitor is open circuit)
         sol = solve_dc(circuit)
-        @test voltage(sol, :out) ≈ 5.0  # At DC, capacitor is open
+        @test sol[:out] ≈ 5.0  # At DC, capacitor is open
 
         # AC sweep - cutoff fc = 1/(2πRC) ≈ 159Hz for R=1kΩ, C=1μF
         # At 10Hz (well below cutoff), gain should be ~1
@@ -1213,9 +1214,9 @@ using NyanVerilogAParser
         ac_sol = solve_ac(circuit, freqs)
 
         # At 10Hz (f << fc), gain ≈ 1 (within 1%)
-        @test abs(voltage(ac_sol, :out)[1]) > 0.99 * circuit.params.Vcc
+        @test abs(ac_sol[:out][1]) > 0.99 * circuit.params.Vcc
         # At 1000Hz (f >> fc), gain should be < 0.2 (rolloff)
-        @test abs(voltage(ac_sol, :out)[3]) < 0.2 * circuit.params.Vcc
+        @test abs(ac_sol[:out][3]) < 0.2 * circuit.params.Vcc
     end
 
     @testset "DC-initialized transient (ODE)" begin
@@ -1334,14 +1335,14 @@ using NyanVerilogAParser
 
         # Test 1: DC analysis with default mode (:tran)
         sol_dc = solve_dc(circuit)
-        @test voltage(sol_dc, :vcc) ≈ 5.0
-        @test voltage(sol_dc, :out) ≈ 5.0  # steady state
+        @test sol_dc[:vcc] ≈ 5.0
+        @test sol_dc[:out] ≈ 5.0  # steady state
 
         # Test 2: Change parameters using alter()
         circuit_modified = alter(circuit; R=2000.0, C=2e-6)
         sol_mod = solve_dc(circuit_modified)
-        @test voltage(sol_mod, :vcc) ≈ 5.0
-        @test voltage(sol_mod, :out) ≈ 5.0  # same DC, different dynamics
+        @test sol_mod[:vcc] ≈ 5.0
+        @test sol_mod[:out] ≈ 5.0  # same DC, different dynamics
 
         # Verify time constant changed: τ = R*C
         τ_original = 1000.0 * 1e-6   # 1ms
@@ -1351,13 +1352,13 @@ using NyanVerilogAParser
         # Test 3: Change Vcc parameter and verify DC changes
         circuit_highv = alter(circuit; Vcc=10.0)
         sol_highv = solve_dc(circuit_highv)
-        @test voltage(sol_highv, :out) ≈ 10.0
+        @test sol_highv[:out] ≈ 10.0
 
         # Test 4: Mode switching with with_mode()
         circuit_dcop = with_mode(circuit, :dcop)
         @test circuit_dcop.spec.mode == :dcop
         sol_dcop = solve_dc(circuit_dcop)
-        @test voltage(sol_dcop, :out) ≈ 5.0
+        @test sol_dcop[:out] ≈ 5.0
 
         # Test 5: Transient simulation with different parameters
         # Compare τ=1ms circuit vs τ=4ms circuit using high-level tran! API
@@ -1378,8 +1379,8 @@ using NyanVerilogAParser
         # Test 6: Chain multiple alterations
         circuit_chain = alter(alter(circuit; Vcc=3.3); R=4700.0)
         sol_chain = solve_dc(circuit_chain)
-        @test voltage(sol_chain, :vcc) ≈ 3.3
-        @test voltage(sol_chain, :out) ≈ 3.3
+        @test sol_chain[:vcc] ≈ 3.3
+        @test sol_chain[:out] ≈ 3.3
         @test circuit_chain.params.R == 4700.0
         @test circuit_chain.params.Vcc == 3.3
         @test circuit_chain.params.C == 1e-6  # unchanged from original
@@ -1452,14 +1453,14 @@ using NyanVerilogAParser
         # Test DC mode gives Vdc
         circuit_dcop = with_mode(circuit, :dcop)
         sol_dcop = solve_dc(circuit_dcop)
-        @test voltage(sol_dcop, :vcc) ≈ 0.0
-        @test voltage(sol_dcop, :out) ≈ 0.0
+        @test sol_dcop[:vcc] ≈ 0.0
+        @test sol_dcop[:out] ≈ 0.0
 
         # Test transient mode gives Vss
         circuit_tran = with_mode(circuit, :tran)
         sol_tran = solve_dc(circuit_tran)
-        @test voltage(sol_tran, :vcc) ≈ 5.0
-        @test voltage(sol_tran, :out) ≈ 5.0
+        @test sol_tran[:vcc] ≈ 5.0
+        @test sol_tran[:out] ≈ 5.0
 
         # Run transient from DC operating point
         # This simulates the typical SPICE flow:
@@ -1468,7 +1469,7 @@ using NyanVerilogAParser
 
         # First, get DC operating point (cap starts at 0V)
         dc_sol = dc!(circuit_dcop)
-        V_cap_dc = voltage(dc_sol, :out)
+        V_cap_dc = dc_sol[:out]
         @test V_cap_dc ≈ 0.0  # Cap at 0V in DC mode
 
         # Now run transient with source at 5V, cap starting at 0V
@@ -1549,20 +1550,20 @@ using NyanVerilogAParser
         # With identity lens: all defaults
         circuit_default = MNACircuit(build_with_lens; lens=IdentityLens())
         sol_default = dc!(circuit_default)
-        @test voltage(sol_default, :out) ≈ 2.5  # 5V * 1k/(1k+1k)
+        @test sol_default[:out] ≈ 2.5  # 5V * 1k/(1k+1k)
 
         # With partial override: only R1 changed
         override_lens = ParamLens((params=(R1=3000.0,),))
         circuit_override = MNACircuit(build_with_lens; lens=override_lens)
         sol_override = dc!(circuit_override)
         # Vout = 5V * R2/(R1+R2) = 5 * 1000/4000 = 1.25V
-        @test voltage(sol_override, :out) ≈ 1.25 rtol=1e-6
+        @test sol_override[:out] ≈ 1.25 rtol=1e-6
 
         # Verify R2 and Vcc still at defaults (unmodified)
         # We can check by computing what voltage would be with different values
         # If R2=2000: Vout = 5 * 2000/5000 = 2.0V (not what we see)
         # So R2 must be at default 1000
-        @test voltage(sol_override, :vcc) ≈ 5.0  # Vcc at default
+        @test sol_override[:vcc] ≈ 5.0  # Vcc at default
 
         # Test 5: Hierarchical lens traversal
         # lens.subcircuit returns a new lens for that subcircuit
@@ -1623,20 +1624,20 @@ using NyanVerilogAParser
                         spec=MNASpec(temp=27.0),
                         Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0)
         sol_27 = solve_dc(circuit_27)
-        @test voltage(sol_27, :out) ≈ 5.0  # Equal resistors
+        @test sol_27[:out] ≈ 5.0  # Equal resistors
 
         # At 127°C, R_temp = 1000 * (1 + 0.004*100) = 1400 Ω
         circuit_127 = with_temp(circuit_27, 127.0)
         @test circuit_127.spec.temp == 127.0
         sol_127 = solve_dc(circuit_127)
         # Voltage divider: Vout = Vcc * R2/(R_temp + R2) = 10 * 1000/2400 ≈ 4.167V
-        @test voltage(sol_127, :out) ≈ 10.0 * 1000.0 / 2400.0 rtol=1e-6
+        @test sol_127[:out] ≈ 10.0 * 1000.0 / 2400.0 rtol=1e-6
 
         # At -73°C, R_temp = 1000 * (1 + 0.004*(-100)) = 600 Ω
         circuit_m73 = with_temp(circuit_27, -73.0)
         sol_m73 = solve_dc(circuit_m73)
         # Voltage divider: Vout = 10 * 1000/1600 = 6.25V
-        @test voltage(sol_m73, :out) ≈ 10.0 * 1000.0 / 1600.0 rtol=1e-6
+        @test sol_m73[:out] ≈ 10.0 * 1000.0 / 1600.0 rtol=1e-6
 
         # Test with_spec
         new_spec = MNASpec(temp=85.0, mode=:dcop)
@@ -1657,7 +1658,7 @@ using NyanVerilogAParser
     #==========================================================================#
 
     # dc!/tran! are already imported at the top of this file from Cadnip
-    using Cadnip.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
+    using Cadnip.MNA:scope, NodeRef, ScopedSystem
 
     @testset "dc! and tran! API with MNACircuit" begin
         # Define a simple RC circuit
@@ -1683,7 +1684,7 @@ using NyanVerilogAParser
         # Test dc!(circuit) - matches Cadnip API
         dc_sol = dc!(circuit)
         @test dc_sol isa DCSolution
-        @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
+        @test dc_sol[:out] ≈ 5.0  # DC steady state
 
         # Test tran!(circuit, tspan) with ODE solver (Rodas5P)
         ode_sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(linsolve=KLUFactorization()))
@@ -1691,14 +1692,14 @@ using NyanVerilogAParser
 
         # Wrap for symbolic access
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(ode_sol, sys)
+        acc = ode_sol  # MNASolutionAccessor removed
 
         # Test voltage access by name
-        v_out_final = voltage(acc, :out, 5τ)
+        v_out_final = nameat(acc, :out, 5τ)
         @test v_out_final ≈ 5.0 rtol=1e-2  # Should stay at DC steady state
 
         # Test voltage trajectory
-        v_trajectory = voltage(acc, :out)
+        v_trajectory = acc[:out]
         @test length(v_trajectory) == length(acc.t)
 
         # Test acc[:name] syntax
@@ -1750,7 +1751,7 @@ using NyanVerilogAParser
 
         # Test with tran! using ODE solver
         ode_sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P(linsolve=KLUFactorization()))
-        acc = MNASolutionAccessor(ode_sol, sys)
+        acc = ode_sol  # MNASolutionAccessor removed
 
         # Access via NodeRef
         v_x1_out = acc[s.x1.out]
@@ -1761,7 +1762,7 @@ using NyanVerilogAParser
         @test v_x1_out == v_direct
 
         # Test voltage with NodeRef
-        v_at_t = voltage(acc, s.x1.out, 0.0)
+        v_at_t = nameat(acc, s.x1.out, 0.0)
         @test v_at_t isa Float64
     end
 
@@ -1855,7 +1856,7 @@ using NyanVerilogAParser
         circuit = MNACircuit(pwl_circuit)
         sol = dc!(circuit)
         # At t=0.5ms, PWL value = 2.5V
-        @test voltage(sol, :vcc) ≈ 2.5 atol=1e-10
+        @test sol[:vcc] ≈ 2.5 atol=1e-10
 
         # Test SIN voltage source stamping via builder pattern
         # At t=0.25ms (1/4 period of 1kHz), sin = 5*sin(90°) = 5
@@ -1873,7 +1874,7 @@ using NyanVerilogAParser
 
         circuit2 = MNACircuit(sin_circuit)
         sol2 = dc!(circuit2)
-        @test voltage(sol2, :vcc) ≈ 5.0 atol=1e-10
+        @test sol2[:vcc] ≈ 5.0 atol=1e-10
     end
 
     @testset "Time-dependent ODE with builder" begin

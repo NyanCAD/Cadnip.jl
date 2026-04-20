@@ -14,12 +14,10 @@ export DAEProblem
 export @dyn, @requires, @provides, @isckt_or
 export solve
 
-# Phase 4: MNA SPICE codegen exports
-export make_mna_circuit, parse_spice_to_mna, parse_spice_file_to_mna, solve_spice_mna
-export @sp_str
-
-# PDK/VA precompilation exports
-export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
+# MNA SPICE codegen exports
+export @sp_str, @spc_str
+# make_mna_circuit stays internal (not exported); precompile_pdk / precompile_va are
+# PDK-authoring APIs accessed as Cadnip.precompile_pdk / Cadnip.precompile_va.
 
 
 include("util.jl")
@@ -90,11 +88,20 @@ include("spectre.jl")
 # defining additional getmodel/getparams methods.
 #==============================================================================#
 
-# Simple passive devices (no level required)
+# Simple passive devices (no level required) — keep these as defaults.
+# `.model foo r`, `.model foo c`, `.model foo l` resolve to the MNA built-in
+# primitives, which have full parameter coverage for passives.
 ModelRegistry.getmodel(::Val{:r}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Resistor
 ModelRegistry.getmodel(::Val{:c}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Capacitor
 ModelRegistry.getmodel(::Val{:l}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Inductor
-ModelRegistry.getmodel(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.AbstractSimulator}) = MNA.Diode
+
+# `:d` is deliberately not registered here. `MNA.Diode` is an incomplete
+# reference implementation (no `cjo`, `m`, `bv`, `tt`, ...). Registering it
+# as a default would block stdlib Tier-1 packages (VADistillerModels) from
+# claiming `(:d, nothing, nothing)` without triggering Julia 1.12's
+# method-overwriting precompile error. Users who need diode `.model` cards
+# load `using VADistillerModels` (or another Tier-1 diode provider). Users
+# who want `MNA.Diode` build it directly via `stamp!(Diode(), ctx, a, k)`.
 
 # Phase 4: New SPC SPICE codegen (used by MNA backend)
 include("spc/cache.jl")  # Must be before sema.jl (CedarParseCache)

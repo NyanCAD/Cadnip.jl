@@ -179,6 +179,12 @@ Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Val{1}, ::Nothing, ::Type{<:Abstra
 Cadnip.ModelRegistry.getparams(::Val{:njf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=1,)
 Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:AbstractSimulator}) = (type=-1,)
 
+# Diode — `using VADistillerModels` overrides Cadnip's default `MNA.Diode`
+# so `.model foo d <params>` in a SPICE netlist resolves to the full VA diode
+# model. Tier-1 registry contribution per the API consolidation plan.
+Cadnip.ModelRegistry.getmodel(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_diode
+Cadnip.ModelRegistry.getparams(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (;)
+
 # Precompile stamp! methods for all three method variants:
 # 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
 # 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])

@@ -32,13 +32,13 @@ using PSPModels
 const PSP103VA_module = sp_psp103va_module
 println("PSP103VA loaded from PSPModels package")
 
-# Load and parse the SPICE netlist from file
+# Parse SPICE file, inject PSP103VA module as Tier-2 scope so `.model` cards
+# referring to PSP103VA resolve. Codegen runs at top level (no world-age tax).
 const spice_file = joinpath(@__DIR__, "runme.sp")
-
-# Parse SPICE file to code, then evaluate to get the builder function
-const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:c6288_circuit,
-                                              imported_hdl_modules=[PSP103VA_module])
-eval(circuit_code)
+let ast = Cadnip.NyanSpectreNetlistParser.parsefile(spice_file; start_lang=:spice, implicit_title=true),
+    sema_result = Cadnip.sema(ast; imported_hdl_modules=[PSP103VA_module])
+    eval(Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name=:c6288_circuit))
+end
 
 """
     setup_simulation()

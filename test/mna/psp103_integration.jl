@@ -18,7 +18,7 @@
 
 using Cadnip
 using Cadnip.NyanSpectreNetlistParser
-using Cadnip.MNA: MNAContext, MNASpec, solve_dc, voltage, current, n_internal_nodes
+using Cadnip.MNA: MNAContext, MNASpec, solve_dc, n_internal_nodes
 using PSPModels
 using Test
 
@@ -34,18 +34,18 @@ Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
         ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = Cadnip._make_mna_circuit_with_sema(Cadnip.sema(ast; imported_hdl_modules=[PSPModels]); circuit_name=:circuit)
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
         spec = MNASpec(temp=27.0, mode=:dcop)
         sol = solve_dc(circuit_fn, (;), spec)
 
-        @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
-        @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
+        @test isapprox(sol[:d], 1.2, atol=1e-6)
+        @test isapprox(sol[:g], 0.6, atol=1e-6)
 
         # Drain current should be reasonable (100s of µA for these bias conditions)
-        Id = current(sol, :I_vds)
+        Id = sol[:I_vds]
         @test abs(Id) > 100e-6 && abs(Id) < 1e-3
     end
 
@@ -93,18 +93,18 @@ Vds d 0 DC 1.2
 Vgs g 0 DC 0.6
 """
         ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = Cadnip._make_mna_circuit_with_sema(Cadnip.sema(ast; imported_hdl_modules=[PSPModels]); circuit_name=:circuit)
         circuit_fn = eval(code)
         @test circuit_fn !== nothing
 
         spec = MNASpec(temp=27.0, mode=:dcop)
         sol = solve_dc(circuit_fn, (;), spec)
 
-        @test isapprox(voltage(sol, :d), 1.2, atol=1e-6)
-        @test isapprox(voltage(sol, :g), 0.6, atol=1e-6)
+        @test isapprox(sol[:d], 1.2, atol=1e-6)
+        @test isapprox(sol[:g], 0.6, atol=1e-6)
 
         # Current should be reasonable
-        Id = current(sol, :I_vds)
+        Id = sol[:I_vds]
         @test abs(Id) > 10e-6 && abs(Id) < 10e-3
     end
 
@@ -138,7 +138,7 @@ Vin2 in2 0 DC 0.3
 Vdd vdd 0 DC 1.2
 """
         ast = NyanSpectreNetlistParser.parse(IOBuffer(netlist); start_lang=:spice, implicit_title=true)
-        code = Cadnip.make_mna_circuit(ast; imported_hdl_modules=[PSPModels])
+        code = Cadnip._make_mna_circuit_with_sema(Cadnip.sema(ast; imported_hdl_modules=[PSPModels]); circuit_name=:circuit)
         circuit_fn = eval(code)
 
         # Build structure and check internal nodes

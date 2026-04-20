@@ -448,7 +448,7 @@ end
     using Cadnip: dc!, tran!, MNACircuit, MNASpec
     using Cadnip.MNA: MNAContext, get_node!, stamp!, assemble!, reset_for_restamping!
     using Cadnip.MNA: stamp_charge_state!, VoltageSource, Resistor, Capacitor, resolve_index
-    using Cadnip.MNA: MNASolutionAccessor, voltage
+    
     using OrdinaryDiffEq: Rodas5P
     using LinearSolve: KLUFactorization
     using SciMLBase: ReturnCode
@@ -510,7 +510,7 @@ end
 
         # Get the assembled system to find variable indices
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Variable layout: [vcc, cap, I_Vsource, q_scaled]
         # vcc = index 1, cap = index 2, I_V = index 3, q_scaled = index 4

@@ -5,7 +5,7 @@ include("common.jl")
 # MNA imports for parameter tests
 using Cadnip.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, VoltageSource
-using Cadnip.MNA: voltage, current
+
 using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using Cadnip: ParamLens, IdentityLens
 using Cadnip: dc!
@@ -42,7 +42,7 @@ end
 circuit = MNACircuit(build_par_cir; spec=MNASpec(temp=340.0), R=1.0)
 sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
-@test current(sol, :I_V) == -5.0
+@test sol[:I_V] == -5.0
 
 #==============================================================================#
 # Test 2: Nested subcircuit with ParamLens (replaces NestedParCir)
@@ -78,7 +78,7 @@ circuit = MNACircuit(build_nested_par_cir;
              child=(params=(R=1.0,),))
 sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
-@test current(sol, :I_V) == -5.0
+@test sol[:I_V] == -5.0
 
 #==============================================================================#
 # Test 3: Function-based circuit with lens (replaces FuncCir)
@@ -113,7 +113,7 @@ circuit = MNACircuit(build_func_cir;
              params=(R=1.0,))
 sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
-@test current(sol, :I_V) == -5.0
+@test sol[:I_V] == -5.0
 
 #==============================================================================#
 # Test 4: CairoMakie exploration (skip for MNA - requires different API)
@@ -196,7 +196,7 @@ sol = dc!(circuit)
 # With foo=2.0 override at x1.x1 level, R1 = foo = 2.0 Ohms
 # Current source i1 uses top-level foo=1 by default
 # V = I * R = 1A * 2Ω = 2V across R1
-@test isapprox_deftol(voltage(sol, :out), -2)
+@test isapprox_deftol(sol[:out], -2)
 
 # Test with top-level foo=2.0 - should affect both i1 and (via expression) R1
 # params=(foo=2.0,) at top level merges with defaults
@@ -205,7 +205,7 @@ sol = dc!(circuit)
 # foo=2.0 at top level: i1 DC = 2A, R1 = foo+2000 = 2002Ω at inner level
 # With default foo expression in subcircuit: foo = parent_foo + 2000 = 2002
 # V = I * R = 2A * 2002Ω = 4004V
-@test isapprox_deftol(voltage(sol, :out), -4004.0)
+@test isapprox_deftol(sol[:out], -4004.0)
 
 # Note: Direct component-level parameter overrides (like r1=(params=(r=100.0,),))
 # are not yet supported by MNA codegen - the resistor stamp uses the foo parameter
@@ -215,7 +215,7 @@ circuit = MNACircuit(mna_builder; x1=(x1=(params=(foo=100.0,),),))
 sol = dc!(circuit)
 # Override foo=100.0 at x1.x1 level, R1 = foo = 100Ω, i1 uses foo=1, so I = 1A
 # V = I * R = 1A * 100Ω = 100V
-@test isapprox_deftol(voltage(sol, :out), -100)
+@test isapprox_deftol(sol[:out], -100)
 
 # Test that our 'default parameterization' helper sees `foo` and `inner`
 default_params = Cadnip.get_default_parameterization(ast)
@@ -283,7 +283,7 @@ end
     # Test alter() on MNACircuit objects
     circuit = MNACircuit(build_par_cir; R=1000.0, V=5.0)
     sol = dc!(circuit)
-    @test voltage(sol, :vcc) ≈ 5.0
+    @test sol[:vcc] ≈ 5.0
 
     # Alter R parameter
     circuit2 = alter(circuit; R=500.0)
@@ -292,10 +292,10 @@ end
 
     # Both should give correct DC solution
     sol2 = dc!(circuit2)
-    @test voltage(sol2, :vcc) ≈ 5.0
+    @test sol2[:vcc] ≈ 5.0
 
     # Current should reflect new R: I = -V/R = -5/500 = -0.01
-    @test current(sol2, :I_V) ≈ -0.01
+    @test sol2[:I_V] ≈ -0.01
 end
 
 end # module params_tests

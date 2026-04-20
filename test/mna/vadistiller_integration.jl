@@ -14,20 +14,22 @@
 using Test
 using Cadnip
 using Cadnip.MNA
+using Cadnip.MNA: nameat
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: make_ode_problem
 using Cadnip.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
-using Cadnip.MNA: MNACircuit, MNASolutionAccessor
+using Cadnip.MNA: MNACircuit
 using Cadnip.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
 using LinearSolve: KLUFactorization
 using SciMLBase
-using Cadnip: tran!, dc!, parse_spice_to_mna
-
+using Cadnip: tran!, dc!
 # Import pre-parsed models from VADistillerModels package
 using VADistillerModels
+
+include(joinpath(@__DIR__, "..", "common.jl"))
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -109,8 +111,8 @@ Q2 q2_coll q2_base 0 npn1
                 circuit = MNACircuit(sp_resistor_divider)
                 sol = dc!(circuit)
 
-                @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-                @test isapprox_deftol(voltage(sol, :mid), 2.5)
+                @test isapprox_deftol(sol[:vcc], 5.0)
+                @test isapprox_deftol(sol[:mid], 2.5)
             end
 
             @testset "sp_capacitor DC" begin
@@ -133,8 +135,8 @@ Q2 q2_coll q2_base 0 npn1
                 circuit = MNACircuit(sp_capacitor_circuit)
                 sol = dc!(circuit)
 
-                @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-                @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
+                @test isapprox_deftol(sol[:vcc], 5.0)
+                @test isapprox_deftol(sol[:mid], 5.0)  # Open circuit at DC
             end
 
             @testset "sp_inductor DC" begin
@@ -156,7 +158,7 @@ Q2 q2_coll q2_base 0 npn1
 
                 circuit = MNACircuit(sp_inductor_circuit)
                 sol = dc!(circuit)
-                @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
+                @test isapprox(sol[:mid], 0.0; atol=0.01)
             end
         end
 
@@ -253,11 +255,11 @@ Q2 q2_coll q2_base 0 npn1
 
                 if sol.retcode == SciMLBase.ReturnCode.Success
                     sys = assemble!(circuit)
-                    acc = MNASolutionAccessor(sol, sys)
+                    acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
                     # Check we got valid values (not NaN) at t=0.5ms
-                    v_q1_coll = voltage(acc, :q1_coll, 0.5e-3)
-                    v_q2_coll = voltage(acc, :q2_coll, 0.5e-3)
+                    v_q1_coll = nameat(acc, :q1_coll, 0.5e-3)
+                    v_q2_coll = nameat(acc, :q2_coll, 0.5e-3)
 
                     @test !isnan(v_q1_coll)
                     @test !isnan(v_q2_coll)
@@ -485,11 +487,11 @@ Q2 q2_coll q2_base 0 npn1
                 @test sol.retcode == SciMLBase.ReturnCode.Success
 
                 sys = assemble!(circuit)
-                acc = MNASolutionAccessor(sol, sys)
+                acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
                 # Sample in last half after startup transient
                 times = range(100e-9, 200e-9; length=500)
-                V_out1 = [voltage(acc, :out1, t) for t in times]
+                V_out1 = [nameat(acc, :out1, t) for t in times]
 
                 out1_min, out1_max = extrema(V_out1)
 
@@ -530,7 +532,7 @@ Q2 q2_coll q2_base 0 npn1
                 end
 
                 sol = solve_dc(sp_vdmos_circuit, (;), MNASpec())
-                @test 0.0 < voltage(sol, :drain) < 10.0
+                @test 0.0 < sol[:drain] < 10.0
             end
         end
 
@@ -593,7 +595,7 @@ Q2 q2_coll q2_base 0 npn1
                 end
 
                 sol = solve_dc(sp_bsim4v8_circuit, (;), MNASpec())
-                @test 0.9 < voltage(sol, :drain) < 1.0
+                @test 0.9 < sol[:drain] < 1.0
             end
         end
 
@@ -778,7 +780,7 @@ Q2 q2_coll q2_base 0 npn1
             @test sol_ida.retcode == SciMLBase.ReturnCode.Success
 
             sys = assemble!(circuit)
-            acc = MNASolutionAccessor(sol_ida, sys)
+            acc = sol_ida  # MNASolutionAccessor removed
 
             T = 1e-3
             @test length(sol_ida.t) > 50
@@ -792,13 +794,13 @@ Q2 q2_coll q2_base 0 npn1
                 @test abs(vout) < 10.0
             end
 
-            vin_pos = voltage(acc, :vin, T/4)
-            vout_pos = voltage(acc, :vout, T/4)
+            vin_pos = nameat(acc, :vin, T/4)
+            vout_pos = nameat(acc, :vout, T/4)
             @test vin_pos > 4.5
             @test vout_pos > 0.0
 
-            vin_neg = voltage(acc, :vin, 3T/4)
-            vout_neg = voltage(acc, :vout, 3T/4)
+            vin_neg = nameat(acc, :vin, 3T/4)
+            vout_neg = nameat(acc, :vout, 3T/4)
             @test vin_neg < -4.5
             @test vout_neg >= -0.1
         end
@@ -830,7 +832,7 @@ Q2 q2_coll q2_base 0 npn1
             @test sol_ida.retcode == SciMLBase.ReturnCode.Success
 
             sys = assemble!(circuit)
-            acc = MNASolutionAccessor(sol_ida, sys)
+            acc = sol_ida  # MNASolutionAccessor removed
 
             T = 1e-3
 
@@ -844,9 +846,9 @@ Q2 q2_coll q2_base 0 npn1
                 @test vdrain > 0.0 && vdrain < 5.5
             end
 
-            vd_t0 = voltage(acc, :vdrain, T)
-            vd_pos = voltage(acc, :vdrain, T + T/4)
-            vd_neg = voltage(acc, :vdrain, T + 3T/4)
+            vd_t0 = nameat(acc, :vdrain, T)
+            vd_pos = nameat(acc, :vdrain, T + T/4)
+            vd_neg = nameat(acc, :vdrain, T + 3T/4)
 
             @test !isnan(vd_t0) && !isnan(vd_pos) && !isnan(vd_neg)
             @test vd_pos < vd_neg

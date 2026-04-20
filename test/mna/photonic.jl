@@ -1,7 +1,7 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, voltage, current
+using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!
 using Cadnip.MNA: VoltageSource, Resistor, MNACircuit
 using Cadnip: dc!
 using NyanVerilogAParser
@@ -157,8 +157,8 @@ const deftol = 1e-6
         sol = dc!(circuit)
 
         # Two 1k resistors in series: R_total = 2000Ω, I = 0.5mA
-        @test isapprox(voltage(sol, :vcc), 1.0; atol=deftol)
-        @test isapprox(current(sol, :I_V1), -0.0005; atol=1e-5)
+        @test isapprox(sol[:vcc], 1.0; atol=deftol)
+        @test isapprox(sol[:I_V1], -0.0005; atol=1e-5)
     end
 
     @testset "Array ports with slicing" begin
@@ -216,14 +216,14 @@ const deftol = 1e-6
         circuit = MNACircuit(array_circuit)
         sol = dc!(circuit)
 
-        @test isapprox(voltage(sol, :a0), 1.0; atol=deftol)
-        @test isapprox(voltage(sol, :a1), 2.0; atol=deftol)
-        @test isapprox(voltage(sol, :a2), 3.0; atol=deftol)
-        @test isapprox(voltage(sol, :a3), 4.0; atol=deftol)
-        @test abs(voltage(sol, :b0)) > 0.1
-        @test abs(voltage(sol, :b1)) > 0.1
-        @test abs(voltage(sol, :b2)) > 0.1
-        @test abs(voltage(sol, :b3)) > 0.1
+        @test isapprox(sol[:a0], 1.0; atol=deftol)
+        @test isapprox(sol[:a1], 2.0; atol=deftol)
+        @test isapprox(sol[:a2], 3.0; atol=deftol)
+        @test isapprox(sol[:a3], 4.0; atol=deftol)
+        @test abs(sol[:b0]) > 0.1
+        @test abs(sol[:b1]) > 0.1
+        @test abs(sol[:b2]) > 0.1
+        @test abs(sol[:b3]) > 0.1
     end
 
     @testset "Photonic-style: Polar2Cartesian + Attenuator" begin

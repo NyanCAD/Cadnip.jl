@@ -93,7 +93,7 @@ end
     # Through 1Ω: V(out) = 1V
     # I(out) <+ 1.0 means 1A flowing out of 'out' node
     # With 1Ω to ground: V(out) = -1.0 (current leaves node)
-    @test abs(voltage(sol, :out)) ≈ 1.0 atol=0.01
+    @test abs(sol[:out]) ≈ 1.0 atol=0.01
 end
 
 @testset "idt() DC with non-zero initial condition" begin
@@ -125,7 +125,7 @@ end
     sol = dc!(circuit)
     # At DC, idt(0.0, 5.0) should return ic = 5.0
     # V(out) <+ 5.0 means V(out) - V(gnd) is constrained to 5.0
-    @test voltage(sol, :out) ≈ 5.0 atol=0.01
+    @test sol[:out] ≈ 5.0 atol=0.01
 end
 
 @testset "laplace_nd() AC frequency response" begin

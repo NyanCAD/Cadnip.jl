@@ -8,7 +8,7 @@ using Test
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current, make_ode_problem, MNACircuit
+using Cadnip.MNA: make_ode_problem, MNACircuit
 using Cadnip: dc!
 using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, ContributionTag, JacobianTag
 using Cadnip.MNA: VoltageSource, Resistor  # Use MNA versions explicitly
@@ -253,8 +253,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         # V = 5V, R = 2000Ω, I = 2.5mA
         # Voltage source current = -2.5mA (negative = sourcing)
-        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-        @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)
+        @test isapprox_deftol(sol[:vcc], 5.0)
+        @test isapprox(sol[:I_V1], -0.0025; atol=1e-5)
     end
 
     @testset "VA capacitor transient" begin
@@ -354,8 +354,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # DC solution: I = V/R = 5/1000 = 5mA
         circuit = MNACircuit(va_parallel_rc_circuit)
         sol = dc!(circuit)
-        @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-        @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
+        @test isapprox_deftol(sol[:vcc], 5.0)
+        @test isapprox(sol[:I_V1], -0.005; atol=1e-5)
     end
 
 end

@@ -7,7 +7,7 @@ include(joinpath(Base.pkgdir(Cadnip), "test", "common.jl"))
 # MNA imports for sweep tests
 using Cadnip.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restamping!
 using Cadnip.MNA: Resistor, VoltageSource
-using Cadnip.MNA: voltage, current, DCSolution
+using Cadnip.MNA: DCSolution
 using Cadnip: ParamLens
 
 # Simple two-resistor circuit (MNA builder function):
@@ -226,8 +226,8 @@ end
     circuit = MNACircuit(build_two_resistor; R1=100.0, R2=100.0)
     sol = dc!(circuit)
     @test sol isa DCSolution
-    @test voltage(sol, :vcc) ≈ 1.0
-    @test voltage(sol, :out) ≈ 0.5  # Voltage divider: 1V * 100/(100+100)
+    @test sol[:vcc] ≈ 1.0
+    @test sol[:out] ≈ 0.5  # Voltage divider: 1V * 100/(100+100)
 end
 
 @testset "CircuitSweep" begin
@@ -299,22 +299,20 @@ end
     # Construct `CircuitSweep` object and run dc! on it
     cs = CircuitSweep(build_two_resistor, ProductSweep(R1 = 100.0:100.0:2000.0, R2 = 100.0:100.0:2000.0))
 
-    # Perform the solve - dc! on CircuitSweep returns vector of solutions
-    solutions = dc!(cs)
+    # Perform the solve — dc! on a CircuitSweep returns a SweepResult that
+    # iterates (params, sol) pairs, with parameters aligned to their solution.
+    result = dc!(cs)
 
-    # Verify results for each simulation in the sweep
-    for (sol, sim) in zip(solutions, cs)
-        R1 = sim.params.R1
-        R2 = sim.params.R2
+    for (params, sol) in result
         # Current through voltage source is negative (sources current)
         # I = V / (R1 + R2) = 1 / (R1 + R2)
-        @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
+        @test isapprox(sol[:I_V], -1/(params.R1 + params.R2); atol=deftol)
     end
 end
 
 # Phase 4: MNA-based SPICE codegen tests
 @testset "MNA SPICE codegen: basic resistor circuit" begin
-    using Cadnip.MNA: voltage, current
+    
 
     spice_code = """
         * Simple voltage divider
@@ -341,12 +339,12 @@ end
     sol = Cadnip.dc!(circuit)
 
     # Verify voltage divider: out = 5 * 1k/(1k+1k) = 2.5V
-    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
-    @test isapprox(voltage(sol, :out), 2.5; atol=deftol)
+    @test isapprox(sol[:vcc], 5.0; atol=deftol)
+    @test isapprox(sol[:out], 2.5; atol=deftol)
 end
 
 @testset "MNA SPICE codegen: RLC circuit" begin
-    using Cadnip.MNA: voltage
+    
 
     spice_code = """
         * RLC circuit
@@ -373,15 +371,15 @@ end
     # At DC, inductor is short, capacitor is open
     # So n1 = 10V (after R, but L is short)
     # n2 = 10V (capacitor open, no current)
-    @test isapprox(voltage(sol, :in), 10.0; atol=deftol)
+    @test isapprox(sol[:in], 10.0; atol=deftol)
     # Inductor at DC is a short, so n1 ≈ n2 ≈ in (no resistor drop when no current)
     # Actually with capacitor open, no current flows, so all nodes at 10V
-    @test isapprox(voltage(sol, :n1), 10.0; atol=deftol)
-    @test isapprox(voltage(sol, :n2), 10.0; atol=deftol)
+    @test isapprox(sol[:n1], 10.0; atol=deftol)
+    @test isapprox(sol[:n2], 10.0; atol=deftol)
 end
 
 @testset "MNA SPICE codegen: current source" begin
-    using Cadnip.MNA: voltage
+    
 
     spice_code = """
         * Current source into resistor
@@ -404,11 +402,11 @@ end
     sol = Cadnip.dc!(circuit)
 
     # V = I * R = 1mA * 1kΩ = 1V
-    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+    @test isapprox(sol[:out], 1.0; atol=deftol)
 end
 
 @testset "dc! sweep on SPICE-generated circuit with subcircuit params" begin
-    using Cadnip.MNA: voltage
+    
 
     # Subcircuit with parameterized resistors
     spice_code = """
@@ -437,8 +435,8 @@ end
     sol = Cadnip.dc!(circuit)
 
     # With r1val=2k and r2val=1k, vout = 3.0 * 1k/(2k+1k) = 1.0V
-    @test isapprox(voltage(sol, :vin), 3.0; atol=deftol)
-    @test isapprox(voltage(sol, :vout), 1.0; atol=deftol)
+    @test isapprox(sol[:vin], 3.0; atol=deftol)
+    @test isapprox(sol[:vout], 1.0; atol=deftol)
 end
 
 @testset "find_param_ranges" begin

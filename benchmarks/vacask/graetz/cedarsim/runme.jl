@@ -21,15 +21,11 @@ using Printf
 # Import pre-parsed diode model from VADistillerModels package
 using VADistillerModels
 
-# Load and parse the SPICE netlist from file
+# Load and parse the SPICE netlist from file.
+# File-first load: `VADistillerModels` registers `sp_diode` via ModelRegistry
+# (Tier 1), so no imported_hdl_modules kwarg is needed.
 const spice_file = joinpath(@__DIR__, "runme.sp")
-const spice_code = read(spice_file, String)
-
-# Parse SPICE to code, then evaluate to get the builder function
-# Pass sp_diode_module so the SPICE parser knows about our VA device
-const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:graetz_circuit,
-                                         imported_hdl_modules=[sp_diode_module])
-eval(circuit_code)
+Base.include(@__MODULE__, SpiceFile(spice_file; name=:graetz_circuit))
 
 """
     setup_simulation()

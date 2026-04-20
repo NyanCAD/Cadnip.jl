@@ -4,7 +4,7 @@ include("common.jl")
 
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using Cadnip.MNA: voltage, current, make_ode_problem
+using Cadnip.MNA: make_ode_problem
 
 #=
 NOTE: Tests that require DAECompiler are skipped:
@@ -41,8 +41,8 @@ end
     sol = dc!(circuit)
 
     # I = V/R = 5/2 = 2.5A
-    R_v = voltage(sol, :vcc)
-    R_i = -current(sol, :I_v1)  # Voltage source current is negative when sourcing (SPICE is case-insensitive)
+    R_v = sol[:vcc]
+    R_i = -sol[:I_v1]  # Voltage source current is negative when sourcing (SPICE is case-insensitive)
     @test isapprox_deftol(R_v, 5.0)
     @test isapprox_deftol(R_i, 2.5)
 end
@@ -83,7 +83,7 @@ end
     """i)
     sol = dc!(circuit)
 
-    R_v = voltage(sol, :icc)
+    R_v = sol[:icc]
     @test isapprox_deftol(R_v, 10.0)
 end
 
@@ -177,8 +177,8 @@ end
 
     ctx, sol = solve_mna_spectre_code(spectre_code)
     # Voltage divider: 5V * (1k / (1k + 1k)) = 2.5V
-    @test isapprox_deftol(voltage(sol, :out), 2.5)
-    @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+    @test isapprox_deftol(sol[:out], 2.5)
+    @test isapprox_deftol(sol[:vcc], 5.0)
 end
 
 @testset "Spectre current source" begin
@@ -191,7 +191,7 @@ end
 
     ctx, sol = solve_mna_spectre_code(spectre_code)
     # V = I * R = 1mA * 1kΩ = 1V
-    @test isapprox_deftol(voltage(sol, :vcc), 1.0)
+    @test isapprox_deftol(sol[:vcc], 1.0)
 end
 
 # TODO: Full Spectre sources test with PWL and B-source (requires transient simulation)
@@ -249,8 +249,8 @@ end
     """
     ctx, sol = solve_mna_spectre_code(spectre_code)
     # I = V/R = 1V/2kΩ = 0.5mA
-    @test isapprox_deftol(voltage(sol, :vcc), 1.0)
-    @test isapprox_deftol(current(sol, :I_v1), -0.5e-3)
+    @test isapprox_deftol(sol[:vcc], 1.0)
+    @test isapprox_deftol(sol[:I_v1], -0.5e-3)
 end
 
 @testset "Simple SPICE sources" begin
@@ -265,7 +265,7 @@ end
     # Original: @test all(isapprox.(sol[sys.node_1], -1.0))
     # V1 has + at 0, - at 1, so node 1 = -1V
     # Note: SPICE numeric nodes become Symbol("1"), not :node_1
-    @test isapprox_deftol(voltage(sol, Symbol("1")), -1.0)
+    @test isapprox_deftol(sol[Symbol("1")], -1.0)
 end
 
 @testset "Simple SPICE controlled sources" begin
@@ -286,12 +286,12 @@ end
     # V1 makes node 1 = -1V (+ at 0, - at 1)
     # E6: VCVS with gain=2, Vout = 2 * V(0,1) = 2 * 1 = 2V at node 6 relative to 0
     # Since E6 has + at 0 and - at 6, node 6 = -2V
-    @test isapprox_deftol(voltage(sol, Symbol("1")), -1.0)
-    @test isapprox(voltage(sol, Symbol("6")), -2.0; atol=deftol*10)
+    @test isapprox_deftol(sol[Symbol("1")], -1.0)
+    @test isapprox(sol[Symbol("6")], -2.0; atol=deftol*10)
     # G7: VCCS with gm=2, I = 2 * V(0,1) = 2A into node 7
     # With R7=1k to ground: V = I*R = 2*1000 = 2000V (but sign depends on convention)
     # G7 outputs current from 0 to 7, so 2A flows into 7, V7 = -2000V
-    @test isapprox(voltage(sol, Symbol("7")), -2000.0; atol=deftol*10)
+    @test isapprox(sol[Symbol("7")], -2000.0; atol=deftol*10)
 end
 
 @testset "SPICE B-source" begin
@@ -307,7 +307,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # V1 makes node 1 = -1V
     # B5: v = V(1)*2 = -1*2 = -2V, but B5 has + at 0, - at 5, so node 5 = 2V
-    @test isapprox(voltage(sol, Symbol("5")), 2.0; atol=deftol*10)
+    @test isapprox(sol[Symbol("5")], 2.0; atol=deftol*10)
 end
 
 @testset "SPICE B-source (nonlinear current)" begin
@@ -336,9 +336,9 @@ end
     sol = Cadnip.MNA.solve_dc(circuit_fn, (;), spec)
 
     # Node 1 should be 1V (the positive solution to V^2 + V - 2 = 0)
-    @test isapprox(voltage(sol, Symbol("1")), 1.0; atol=1e-6)
+    @test isapprox(sol[Symbol("1")], 1.0; atol=1e-6)
     # V_vcc = 2V
-    @test isapprox(voltage(sol, :vcc), 2.0; atol=1e-6)
+    @test isapprox(sol[:vcc], 2.0; atol=1e-6)
 end
 
 # TODO: Alternate E/G forms with vol=/cur= syntax
@@ -359,8 +359,8 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # E8: vol=V(0,1)*2 = 1*2 = 2V, since + at 0, - at 8, node 8 = -2V
     # G9: cur=V(0,1)*2 = 1*2 = 2A into node 9, V = 2*1000 = 2000V
-    @test isapprox(voltage(sol, Symbol("8")), -2.0; atol=deftol*10)
-    @test isapprox(voltage(sol, Symbol("9")), -2000.0; atol=deftol*10)
+    @test isapprox(sol[Symbol("8")], -2.0; atol=deftol*10)
+    @test isapprox(sol[Symbol("9")], -2000.0; atol=deftol*10)
 end
 =#
 
@@ -379,8 +379,8 @@ end
 
     ctx, sol = solve_mna_spice_code(spice_code)
     # Original: @test all(isapprox.(sol[sys.x1.r1.I], 0.5e-3))
-    @test isapprox_deftol(voltage(sol, :vcc), 1.0)
-    @test isapprox_deftol(current(sol, :I_v1), -0.5e-3)  # 1V / 2kΩ
+    @test isapprox_deftol(sol[:vcc], 1.0)
+    @test isapprox_deftol(sol[:I_v1], -0.5e-3)  # 1V / 2kΩ
 end
 
 @testset "SPICE include .LIB" begin
@@ -415,7 +415,7 @@ end
         sol = dc!(circuit)
 
         # I = V / R = 1V / 1337Ω
-        @test isapprox_deftol(current(sol, :I_v1), -1/1337)
+        @test isapprox_deftol(sol[:I_v1], -1/1337)
     end
 end
 
@@ -466,7 +466,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # R = l - par_l = 11 - 1 = 10Ω
     # I = V/R = 1/10 = 0.1A
-    @test isapprox_deftol(current(sol, :I_v1), -0.1)
+    @test isapprox_deftol(sol[:I_v1], -0.1)
 end
 
 # TODO: Extended parameter scope tests - nested dynamic scoping
@@ -491,7 +491,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo=1 at top level, inner sees foo+2000 = 2001
     # V = I * R = 1 * 2001 = 2001V
-    @test isapprox_deftol(voltage(sol, :vcc), -2001.0)
+    @test isapprox_deftol(sol[:vcc], -2001.0)
 end
 =#
 
@@ -507,7 +507,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo = temper = 10 (from .option temp)
-    @test_broken isapprox_deftol(voltage(sol, :vcc), -10.0)
+    @test_broken isapprox_deftol(sol[:vcc], -10.0)
 end
 
 # Currently errors at sema stage - .temp directive handling calls error()
@@ -523,7 +523,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo = temper = 10 (from .temp)
-    @test isapprox_deftol(voltage(sol, :vcc), -10.0)
+    @test isapprox_deftol(sol[:vcc], -10.0)
 end
 =#
 
@@ -537,7 +537,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # Default temper = 27
-    @test isapprox_deftol(voltage(sol, :vcc), -27.0)
+    @test isapprox_deftol(sol[:vcc], -27.0)
 end
 
 # Currently errors at runtime - instance param referencing other params not scoped correctly
@@ -557,7 +557,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # nrd='w/2' where w=4, so nrd=2, R = rsh*nrd = 1*2 = 2
     # I = V/R = 1/2 = 0.5A
-    @test isapprox_deftol(current(sol, :I_v1), -0.5)
+    @test isapprox_deftol(sol[:I_v1], -0.5)
 end
 =#
 
@@ -602,7 +602,7 @@ end
     # With m=10, r1a is effectively 0.1Ω
     # Total R = 0.1 + 1 = 1.1Ω
     # V at node 1 = 1 * (1/1.1) = 0.909V (voltage divider)
-    @test isapprox(voltage(sol, Symbol("1")), 10/11; atol=deftol*10)
+    @test isapprox(sol[Symbol("1")], 10/11; atol=deftol*10)
 end
 
 # TODO: Extended multiplicities tests with subcircuits
@@ -619,7 +619,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # Subcircuit with m=10 divides resistance by 10
-    @test_broken isapprox(voltage(sol, Symbol("2")), 10/11; atol=deftol*10)
+    @test_broken isapprox(sol[Symbol("2")], 10/11; atol=deftol*10)
 end
 
 # Currently errors at codegen - nested subcircuits not resolved
@@ -642,7 +642,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # Two x5 each with m=5 on r10 (which has m=10)
-    @test isapprox(voltage(sol, Symbol("4")), 10/11; atol=deftol*10)
+    @test isapprox(sol[Symbol("4")], 10/11; atol=deftol*10)
 end
 =#
 
@@ -661,7 +661,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # r2 has m=2 internally, x5a has m=5, so effective m=10
-    @test isapprox(voltage(sol, Symbol("5")), 10/11; atol=deftol*10)
+    @test isapprox(sol[Symbol("5")], 10/11; atol=deftol*10)
 end
 =#
 
@@ -675,7 +675,7 @@ end
     r6b 6 0 1
     """
     ctx, sol = solve_mna_spice_code(spice_code)
-    @test isapprox(voltage(sol, Symbol("6")), 10/11; atol=deftol*10)
+    @test isapprox(sol[Symbol("6")], 10/11; atol=deftol*10)
 end
 
 @testset ".model case sensitivity" begin
@@ -689,7 +689,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # r1 uses model rr with R=1, r2 overrides R=2
     # Total resistance = 1 + 2 = 3, V at node 1 = 1 * 2/3
-    @test isapprox(voltage(sol, Symbol("1")), 2/3; atol=deftol*10)
+    @test isapprox(sol[Symbol("1")], 2/3; atol=deftol*10)
 end
 
 @testset "units and magnitudes" begin
@@ -702,7 +702,7 @@ end
 
     ctx, sol = solve_mna_spice_code(spice_code)
     # V = I*R = 1e-3 * 1e6 = 1000V
-    @test isapprox(voltage(sol, :vcc), 1000.0; atol=deftol*10)
+    @test isapprox(sol[:vcc], 1000.0; atol=deftol*10)
 
     spice_code2 = """
     * units and magnitudes 2
@@ -712,7 +712,7 @@ end
 
     ctx, sol = solve_mna_spice_code(spice_code2)
     # 1 mil = 25.4e-6 (25.4 micrometers)
-    @test isapprox(voltage(sol, :vcc), 2.54e-5; atol=1e-8)
+    @test isapprox(sol[:vcc], 2.54e-5; atol=1e-8)
 end
 
 # TODO: Test that magnitudes don't introduce floating point errors
@@ -775,7 +775,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_ckt)
     # intp=1, intn=-1, floorp=1 -> V = 1 + (-1) + 1 = 1V
-    @test isapprox(voltage(sol, :vcc), 1.0; atol=deftol)
+    @test isapprox(sol[:vcc], 1.0; atol=deftol)
 end
 
 # TODO: Extended functions test - verify all function results via ParamObserver
@@ -878,7 +878,7 @@ end
     # I = 1A (from current source), V = I*R
     # Current source I1: -1A means extracting 1A from vcc, injecting into 0
     # V_vcc = I * R = 1 * 2000 = 2000V
-    @test isapprox(voltage(sol, :vcc), 2000.0; rtol=1e-6)
+    @test isapprox(sol[:vcc], 2000.0; rtol=1e-6)
 end
 
 # TODO: Extended device == param tests
@@ -944,7 +944,7 @@ end
     # R1 = rsh * l / w = 500 * 2m / 1m = 1000Ω
     # R2 = res = 1000Ω
     # Parallel: R_eq = 500Ω, I = 1/500 = 2mA
-    @test_broken isapprox(current(sol, :I_v1), -2e-3; atol=deftol*10)
+    @test_broken isapprox(sol[:I_v1], -2e-3; atol=deftol*10)
     =#
 end
 
@@ -962,7 +962,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # With switch=1, R1=1Ω, I = V/R = 1A
-    @test isapprox(current(sol, :I_v1), -1.0; atol=deftol*10)
+    @test isapprox(sol[:I_v1], -1.0; atol=deftol*10)
 end
 
 @testset "SPICE CCVS (H element)" begin
@@ -980,9 +980,9 @@ end
 
     # Current through Vsense = 5V/1kΩ = 5mA
     # Vout = rm * I = 200 * 5mA = 1V
-    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
-    @test isapprox(voltage(sol, :sense), 0.0; atol=deftol)
-    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+    @test isapprox(sol[:vcc], 5.0; atol=deftol)
+    @test isapprox(sol[:sense], 0.0; atol=deftol)
+    @test isapprox(sol[:out], 1.0; atol=deftol)
 end
 
 @testset "SPICE CCCS (F element)" begin
@@ -1001,9 +1001,9 @@ end
     # Current through Vsense = 5V/1kΩ = 5mA
     # I_out = gain * I = 2 * 5mA = 10mA
     # V_out = I_out * R = 10mA * 100Ω = 1V
-    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
-    @test isapprox(voltage(sol, :sense), 0.0; atol=deftol)
-    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+    @test isapprox(sol[:vcc], 5.0; atol=deftol)
+    @test isapprox(sol[:sense], 0.0; atol=deftol)
+    @test isapprox(sol[:out], 1.0; atol=deftol)
 end
 
 end # basic_tests

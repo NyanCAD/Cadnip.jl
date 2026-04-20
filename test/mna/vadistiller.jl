@@ -14,7 +14,7 @@ using Test
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current, make_ode_problem, MNACircuit
+using Cadnip.MNA: make_ode_problem, MNACircuit
 using Cadnip: dc!
 using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using Cadnip.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
@@ -66,9 +66,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(resistor_divider)
             sol = dc!(circuit)
 
-            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-            @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
-            @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)  # 5V / 2kΩ
+            @test isapprox_deftol(sol[:vcc], 5.0)
+            @test isapprox_deftol(sol[:mid], 2.5)  # Voltage divider
+            @test isapprox(sol[:I_V1], -0.0025; atol=1e-5)  # 5V / 2kΩ
         end
 
         @testset "Simple capacitor" begin
@@ -170,7 +170,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             # Expected: I = 1e-14 * (exp(0.6/0.02585) - 1) ≈ 1.05e-4 A
             Vt = 0.02585
             expected_I = 1e-14 * (exp(0.6/Vt) - 1)
-            actual_I = -current(sol, :I_V1)  # Negative because V1 sources current
+            actual_I = -sol[:I_V1]  # Negative because V1 sources current
             @test isapprox(actual_I, expected_I; rtol=0.01)
         end
 
@@ -213,7 +213,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             # V_internal ≈ 0.6V (drops ~0.1V across Rs)
             # I ≈ 10mA (rough estimate)
             # The exact current depends on Newton convergence
-            actual_I = -current(sol, :I_V1)
+            actual_I = -sol[:I_V1]
             @test actual_I > 0  # Current should flow
             @test actual_I < 0.1  # Should be less than 100mA
         end
@@ -267,7 +267,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Ids = gm * Vgs = 1e-3 * 1.0 = 1mA
             # Vdrain = Vdd - Ids * Rd = 5 - 1e-3 * 1000 = 4V
-            @test isapprox(voltage(sol, :drain), 4.0; atol=0.01)
+            @test isapprox(sol[:drain], 4.0; atol=0.01)
         end
 
         @testset "Simple square-law MOSFET" begin
@@ -308,7 +308,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Ids = (1e-4/2) * (1.5 - 0.5)² = 0.5e-4 * 1 = 50µA
             # Vdrain = 5 - 50e-6 * 10000 = 5 - 0.5 = 4.5V
-            @test isapprox(voltage(sol, :drain), 4.5; atol=0.1)
+            @test isapprox(sol[:drain], 4.5; atol=0.1)
         end
 
     end
@@ -356,7 +356,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             sol = solve_dc(nmos4_circuit, (;), MNASpec())
 
             # Same result as 3-terminal MOSFET
-            @test isapprox(voltage(sol, :drain), 4.5; atol=0.1)
+            @test isapprox(sol[:drain], 4.5; atol=0.1)
         end
 
     end
@@ -410,8 +410,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Ids = (1e-4/2) * (2.0 - 0.5)² = 0.5e-4 * 2.25 = 112.5µA
             # Vdrain = 5 - 112.5e-6 * 10000 = 5 - 1.125 = 3.875V
-            @test isapprox(voltage(sol, :drain), 3.875; atol=0.1)
-            @test isapprox(voltage(sol, :gate), 2.0; atol=1e-6)
+            @test isapprox(sol[:drain], 3.875; atol=0.1)
+            @test isapprox(sol[:gate], 2.0; atol=1e-6)
         end
 
         @testset "MOSFET with gate capacitances (Transient)" begin
@@ -510,7 +510,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             # With small Rs/Rd, drain voltage should be close to ideal MOSFET
             # Ids ≈ 112.5µA, voltage drops: Ids*Rs ≈ 1.1mV, Ids*Rd ≈ 1.1mV
             # So drain voltage should be very close to 3.875V
-            @test isapprox(voltage(sol, :drain), 3.875; atol=0.1)
+            @test isapprox(sol[:drain], 3.875; atol=0.1)
         end
 
         @testset "MOSFET with capacitances AND internal nodes" begin
@@ -561,7 +561,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
 
             sol_dc = solve_dc(mosfull_dc_circuit, (;), MNASpec())
-            @test isapprox(voltage(sol_dc, :drain), 3.875; atol=0.1)
+            @test isapprox(sol_dc[:drain], 3.875; atol=0.1)
 
             # Transient test
             function mosfull_tran_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
@@ -635,7 +635,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # At Vgs=2.5V: Ids = (1e-4/2) * (2.5-0.5)² = 200µA
             # Vout = 5 - 200e-6 * 10000 = 3V
-            @test isapprox(voltage(sol_dc, :vout), 3.0; atol=0.2)
+            @test isapprox(sol_dc[:vout], 3.0; atol=0.2)
 
             # Verify capacitances are present in the system matrix
             ctx = inverter_circuit((;), MNASpec(mode=:tran))
@@ -693,14 +693,14 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             sol = solve_dc(temp_resistor_circuit, (;), spec)
             # R = 1000 * (1 + 0.004 * (300.15 - 300)) = 1000 * 1.0006 ≈ 1000.6
             # I = 5V / 1000.6 ≈ 0.005
-            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-4)
+            @test isapprox(sol[:I_V1], -0.005; atol=1e-4)
 
             # At 100°C (373.15K), resistance should be higher
             spec_hot = MNASpec(temp=100.0)
             sol_hot = solve_dc(temp_resistor_circuit, (;), spec_hot)
             # R = 1000 * (1 + 0.004 * (373.15 - 300)) = 1000 * 1.293 ≈ 1292.6
             # I = 5V / 1292.6 ≈ 0.00387
-            @test isapprox(current(sol_hot, :I_V1), -0.00387; atol=1e-4)
+            @test isapprox(sol_hot[:I_V1], -0.00387; atol=1e-4)
         end
 
         @testset "\$simparam access" begin
@@ -736,13 +736,13 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             spec = MNASpec()
             sol = solve_dc(gmin_circuit, (;), spec)
             # I ≈ 5/1000 + 5*1e-12 ≈ 0.005
-            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-6)
+            @test isapprox(sol[:I_V1], -0.005; atol=1e-6)
 
             # With custom gmin=1e-3 (very high for testing)
             spec_gmin = MNASpec(gmin=1e-3)
             sol_gmin = solve_dc(gmin_circuit, (;), spec_gmin)
             # I = 5/1000 + 5*1e-3 = 0.005 + 0.005 = 0.01
-            @test isapprox(current(sol_gmin, :I_V1), -0.01; atol=1e-6)
+            @test isapprox(sol_gmin[:I_V1], -0.01; atol=1e-6)
         end
 
         @testset "\$param_given check" begin
@@ -776,7 +776,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end, (;), MNASpec())
             # $param_given(R) is true, so uses R=2000
             # I = 5V / 2000Ω = 0.0025A
-            @test isapprox(current(sol_explicit, :I_V1), -0.0025; atol=1e-6)
+            @test isapprox(sol_explicit[:I_V1], -0.0025; atol=1e-6)
 
             # With only Ralt given (R is NOT "given")
             sol_default = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
@@ -792,7 +792,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end, (;), MNASpec())
             # $param_given(R) is false, so uses Ralt=500
             # I = 5V / 500Ω = 0.01A
-            @test isapprox(current(sol_default, :I_V1), -0.01; atol=1e-6)
+            @test isapprox(sol_default[:I_V1], -0.01; atol=1e-6)
         end
 
     end
@@ -831,7 +831,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end, (;), MNASpec())
         # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
         # I = 5V / 1073Ω ≈ 0.00466A
-        @test isapprox(current(sol_tnom, :I_V1), -0.00466; atol=1e-4)
+        @test isapprox(sol_tnom[:I_V1], -0.00466; atol=1e-4)
 
         # Test 2: Using the alias (tref) - should have same effect as tnom
         sol_tref = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
@@ -846,7 +846,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             return ctx
         end, (;), MNASpec())
         # Same result - alias forwards to tnom
-        @test isapprox(current(sol_tref, :I_V1), -0.00466; atol=1e-4)
+        @test isapprox(sol_tref[:I_V1], -0.00466; atol=1e-4)
 
         # Test 3: Verify property access - dev.tref should return dev.tnom
         dev = VAAliasTest(tnom=50.0)
@@ -894,9 +894,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(var_init_divider)
             sol = dc!(circuit)
 
-            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
-            @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
-            @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)  # 5V / 2kΩ
+            @test isapprox_deftol(sol[:vcc], 5.0)
+            @test isapprox_deftol(sol[:mid], 2.5)  # Voltage divider
+            @test isapprox(sol[:I_V1], -0.0025; atol=1e-5)  # 5V / 2kΩ
         end
 
         @testset "Real variable with non-zero initialization" begin
@@ -930,9 +930,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(var_init_offset)
             sol = dc!(circuit)
 
-            @test isapprox_deftol(voltage(sol, :vcc), 4.5)
+            @test isapprox_deftol(sol[:vcc], 4.5)
             # Current should be (4.5 + 0.5) / 1000 = 5mA
-            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
+            @test isapprox(sol[:I_V1], -0.005; atol=1e-5)
         end
 
         @testset "Internal nodes" begin
@@ -972,8 +972,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # With two 1kΩ in series across 10V:
             # Total R = 2kΩ, I = 10V / 2kΩ = 5mA
-            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
-            @test isapprox(voltage(sol, :vcc), 10.0; atol=1e-6)
+            @test isapprox(sol[:I_V1], -0.005; atol=1e-5)
+            @test isapprox(sol[:vcc], 10.0; atol=1e-6)
 
             # Test 2: Multiple internal nodes (3 resistors in series)
             va"""
@@ -1007,7 +1007,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # With three 1kΩ in series across 9V:
             # Total R = 3kΩ, I = 9V / 3kΩ = 3mA
-            @test isapprox(current(sol2, :I_V1), -0.003; atol=1e-5)
+            @test isapprox(sol2[:I_V1], -0.003; atol=1e-5)
         end
 
     end

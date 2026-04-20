@@ -9,10 +9,11 @@
 using Test
 using Cadnip
 using Cadnip.MNA
+using Cadnip.MNA: nameat
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
-using Cadnip.MNA: voltage, current
+
 using Cadnip.MNA: VoltageSource, Resistor, Capacitor
-using Cadnip.MNA: MNACircuit, MNASolutionAccessor
+using Cadnip.MNA: MNACircuit
 using Cadnip.MNA: reset_for_restamping!, CedarUICOp
 using SciMLBase
 using Cadnip: tran!
@@ -98,7 +99,7 @@ C3 in1 0 10f
         @test sol.retcode == SciMLBase.ReturnCode.Success
 
         sys = assemble!(circuit)
-        acc = MNASolutionAccessor(sol, sys)
+        acc = sol  # MNASolutionAccessor removed — sol supports SII directly
 
         # Sample output voltages in the last half of simulation (after startup transient)
         t_start = 100e-9
@@ -106,9 +107,9 @@ C3 in1 0 10f
         n_samples = 1000
         times = range(t_start, t_end; length=n_samples)
 
-        V_out1 = [voltage(acc, :out1, t) for t in times]
-        V_out2 = [voltage(acc, :out2, t) for t in times]
-        V_in1 = [voltage(acc, :in1, t) for t in times]
+        V_out1 = [nameat(acc, :out1, t) for t in times]
+        V_out2 = [nameat(acc, :out2, t) for t in times]
+        V_in1 = [nameat(acc, :in1, t) for t in times]
 
         # Verify oscillation occurs - outputs should swing significantly
         out1_min, out1_max = extrema(V_out1)

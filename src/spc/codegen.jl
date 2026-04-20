@@ -640,6 +640,22 @@ using ..MNA: MNAContext, MNASpec, get_node!, stamp!
 using ..MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using ..MNA: VCVS, VCCS, CCVS, CCCS
 
+"""
+    _scoped_sym_expr(local_name::Symbol) -> Expr
+
+Emit a Julia expression that evaluates, at runtime inside a generated
+builder, to `_mna_prefix_ == Symbol("") ? local_name : Symbol(_mna_prefix_, "_", local_name)`.
+
+Used to prefix subckt-internal node names (in `get_node!` calls), device
+`name=` kwargs (which feed `alloc_current!`), and the callee's `_mna_prefix_`
+when chaining nested subckt calls. Top-level circuits have
+`_mna_prefix_ == Symbol("")` so the bare `local_name` is used — backwards
+compatible.
+"""
+_scoped_sym_expr(local_name::Symbol) =
+    :(_mna_prefix_ == Symbol("") ? $(QuoteNode(local_name)) :
+                                   Symbol(_mna_prefix_, "_", $(QuoteNode(local_name))))
+
 # Helper to get a param value
 function getparam(params, name, default=nothing)
     for p in params
@@ -770,7 +786,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     return quote
         let r_val = $r_expr, m_val = $m_expr
             # Parallel resistors: R_eff = R / m
-            stamp!($(MNA).Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            $(MNA).stamp!($(MNA).Resistor(r_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -799,7 +815,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Capacitor})
     return quote
         let c_val = $c_expr, m_val = $m_expr
             # Parallel capacitors: C_eff = C * m
-            stamp!(Capacitor(c_val * m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            $(MNA).stamp!(Capacitor(c_val * m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -824,7 +840,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Inductor})
 
     return quote
         let l_val = $l_expr
-            stamp!(Inductor(l_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            $(MNA).stamp!(Inductor(l_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -847,7 +863,7 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.V
 
     return quote
         let v = $dc_val
-            stamp!(VoltageSource(v; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+            $(MNA).stamp!(VoltageSource(v; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
         end
     end
 end
@@ -876,7 +892,7 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.C
     # Swap nodes: MNA injects into first arg, SPICE injects into neg
     return quote
         let i = $dc_val
-            stamp!(CurrentSource(i; name=$(QuoteNode(Symbol(name)))), ctx, $neg, $pos, t, spec.mode)
+            $(MNA).stamp!(CurrentSource(i; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $neg, $pos, t, spec.mode)
         end
     end
 end
@@ -907,7 +923,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
 
     return quote
         let gain = $gain_expr
-            stamp!(VCVS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
+            $(MNA).stamp!(VCVS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
         end
     end
 end
@@ -938,7 +954,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
 
     return quote
         let gm = $gm_expr
-            stamp!(VCCS(gm; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
+            $(MNA).stamp!(VCCS(gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
         end
     end
 end
@@ -976,8 +992,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     return quote
         let rm = $rm_expr
             # Get the current index of the referenced voltage source
-            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
-            stamp!(CCVS(rm; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+            I_in_idx = $(MNA).get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            $(MNA).stamp!(CCVS(rm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
     end
 end
@@ -1015,8 +1031,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     return quote
         let gain = $gain_expr
             # Get the current index of the referenced voltage source
-            I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
-            stamp!(CCCS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+            I_in_idx = $(MNA).get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            $(MNA).stamp!(CCCS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
     end
 end
@@ -1236,7 +1252,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
             ctrl_n_expr = ctrl_n === :gnd ? 0 : ctrl_n
             return quote
                 let gain = $gain
-                    stamp!(VCVS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $ctrl_p, $ctrl_n_expr)
+                    $(MNA).stamp!(VCVS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $ctrl_p, $ctrl_n_expr)
                 end
             end
         else
@@ -1267,7 +1283,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
             # which is opposite to VCCS convention, so swap p and n
             return quote
                 let gm = $gm
-                    stamp!(VCCS(gm; name=$(QuoteNode(Symbol(name)))), ctx, $n, $p, $ctrl_p, $ctrl_n_expr)
+                    $(MNA).stamp!(VCCS(gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $n, $p, $ctrl_p, $ctrl_n_expr)
                 end
             end
         else
@@ -1518,11 +1534,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Generate code that:
     # 1. Navigates to subcircuit's portion of the lens via getproperty
     # 2. Calls builder with navigated lens, parent_params as positional arg, and explicit params as kwargs
-    # 3. Passes instance_name as _mna_prefix_ for hierarchical naming
+    # 3. Passes instance_name as _mna_prefix_ for hierarchical naming — chained
+    #    with the caller's own _mna_prefix_ so nested subckts get unique flat
+    #    names like :arma_x1_mid.
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
+    chained_prefix_expr = _scoped_sym_expr(instance_name)
     return quote
         let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
         end
     end
 end
@@ -1679,6 +1698,11 @@ Supported masters:
 - isource: dc=value, type=pwl/pulse/sine
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
+    return cg_mna_instance!(state, instance, Dict{Symbol, SemaResult}())
+end
+
+function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
+                          subckt_semas::Dict{Symbol, SemaResult})
     master = lowercase(String(instance.master))
     nets = sema_nets(instance)
     name = LString(instance.name)
@@ -1698,7 +1722,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
         return quote
             let r_val = $r_expr, m_val = $m_expr
-                stamp!(Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                $(MNA).stamp!(Resistor(r_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
         end
 
@@ -1717,7 +1741,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
         return quote
             let c_val = $c_expr, m_val = $m_expr
-                stamp!(Capacitor(c_val * m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                $(MNA).stamp!(Capacitor(c_val * m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
         end
 
@@ -1736,7 +1760,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
 
         return quote
             let l_val = $l_expr, m_val = $m_expr
-                stamp!(Inductor(l_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+                $(MNA).stamp!(Inductor(l_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
         end
 
@@ -1760,7 +1784,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             return quote
                 let wave = $wave_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
-                    stamp!(VoltageSource(ys[1]; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                    $(MNA).stamp!(VoltageSource(ys[1]; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
@@ -1771,14 +1795,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             freq = hasparam(instance.params, "freq") ? cg_expr!(state, getparam(instance.params, "freq")) : 1e3
             return quote
                 let vo = $vo, va = $va, freq = $freq
-                    stamp!(VoltageSource(vo; tran=_t -> vo + va * sin(2π * freq * _t), name=$(QuoteNode(Symbol(name)))),
+                    $(MNA).stamp!(VoltageSource(vo; tran=_t -> vo + va * sin(2π * freq * _t), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
         else
             # DC source - still use time/mode for consistency (DC sources return dc in all modes)
             return quote
-                stamp!(VoltageSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                $(MNA).stamp!(VoltageSource($dc_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
 
@@ -1804,14 +1828,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             return quote
                 let wave = $wave_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
-                    stamp!(CurrentSource(ys[1]; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                    $(MNA).stamp!(CurrentSource(ys[1]; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
         else
             # DC source - still use time/mode for consistency
             return quote
-                stamp!(CurrentSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                $(MNA).stamp!(CurrentSource($dc_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
 
@@ -1826,7 +1850,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
         gain = hasparam(instance.params, "gain") ? cg_expr!(state, getparam(instance.params, "gain")) : 1.0
 
         return quote
-            stamp!(VCVS($gain; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+            $(MNA).stamp!(VCVS($gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
         end
 
     elseif master == "vccs"
@@ -1840,7 +1864,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
         gm = hasparam(instance.params, "gm") ? cg_expr!(state, getparam(instance.params, "gm")) : 1.0
 
         return quote
-            stamp!(VCCS($gm; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+            $(MNA).stamp!(VCCS($gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
         end
 
     else
@@ -1911,8 +1935,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                     end
                 end
             end
-        elseif haskey(state.sema.subckts, master_sym)
-            # User-defined subcircuit - generate call to subcircuit builder
+        elseif haskey(state.sema.subckts, master_sym) || haskey(subckt_semas, master_sym)
+            # User-defined subcircuit - generate call to subcircuit builder.
+            # The subckt may be defined in a parent scope (passed in
+            # `subckt_semas` when this instance lives inside a subckt body)
+            # or in the current sema's own subckts table (top-level).
             instance_name = Symbol(LString(instance.name))
             builder_name = Symbol(master_sym, "_mna_builder")
 
@@ -1927,12 +1954,28 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                 push!(explicit_kwargs, Expr(:kw, param_name, param_val))
             end
 
-            # Build parent_params NamedTuple with exposed parameters from caller's scope
-            ssema = resolve_subckt(state.sema, master_sym)
-            all_exposed = collect_exposed_parameters_recursively(state.sema, ssema)
+            # Resolve callee sema: local first, then parent-scope dict.
+            ssema = haskey(state.sema.subckts, master_sym) ?
+                resolve_subckt(state.sema, master_sym) :
+                subckt_semas[master_sym]
+
+            # Build parent_params NamedTuple with exposed parameters from caller's scope.
+            # Use the dict-based transitive collector when available, otherwise
+            # fall back to the local-sema one.
+            all_exposed = if !isempty(subckt_semas)
+                collect_exposed_parameters_from_dict(subckt_semas, ssema)
+            else
+                collect_exposed_parameters_recursively(state.sema, ssema)
+            end
+            locally_defined = Set{Symbol}(keys(state.sema.params))
             parent_param_pairs = Expr[]
             for name in all_exposed
-                push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
+                if isempty(subckt_semas) || name in locally_defined
+                    push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
+                else
+                    # Forward from caller's parent_params when we're inside a subckt.
+                    push!(parent_param_pairs, Expr(:(=), name, :(parent_params.$name)))
+                end
             end
             parent_params_expr = if isempty(parent_param_pairs)
                 :((;))
@@ -1940,11 +1983,16 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                 Expr(:tuple, Expr(:parameters, parent_param_pairs...))
             end
 
-            # Generate subcircuit call similar to SPICE SubcktCall
-            # Pass instance_name as _mna_prefix_ for hierarchical naming
+            # Chain `_mna_prefix_` with this instance's name so nested subckt
+            # internals get uniquely scoped flat names (:outer_inner_mid etc).
+            # Pick the lens variable name based on is_subcircuit context: when
+            # codegen runs inside a subckt body, `lens` is the parameter;
+            # at top level, `var"*lens#"` is the gensym'd lens variable.
+            chained_prefix_expr = _scoped_sym_expr(instance_name)
+            lens_var = isempty(subckt_semas) ? Symbol("*lens#") : :lens
             return quote
-                let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $(QuoteNode(instance_name)); _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
+                let subckt_lens = Base.getproperty($lens_var, $(QuoteNode(instance_name)))
+                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
                 end
             end
         else
@@ -2277,7 +2325,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
                             dc = $dc_value
-                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2286,7 +2334,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
                             dc = $dc_value
-                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2301,7 +2349,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             dc = $dc_expr
-                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2311,7 +2359,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             dc = $dc_expr
-                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2348,7 +2396,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                                 vo + va * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
                             end
                         end
-                        stamp!(VoltageSource(dc; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
+                        $(MNA).stamp!(VoltageSource(dc; tran=tran_fn, name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2363,7 +2411,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                                 io + ia * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
                             end
                         end
-                        stamp!(CurrentSource(dc; tran=tran_fn, name=$(QuoteNode(Symbol(name)))),
+                        $(MNA).stamp!(CurrentSource(dc; tran=tran_fn, name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2403,7 +2451,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
                             ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
                             dc = $dc_value
-                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2412,7 +2460,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
                             ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
                             dc = $dc_value
-                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(ts, ys, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2427,7 +2475,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [v1, v1, v2, v2, v1, v1]
-                            stamp!(VoltageSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2437,7 +2485,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [i1, i1, i2, i2, i1, i1]
-                            stamp!(CurrentSource(dc; tran=_t -> pwl_at_time(times, values, _t), name=$(QuoteNode(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2450,11 +2498,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             dc_val_actual = dc_val !== nothing ? dc_val : 0.0
             if is_voltage
                 return quote
-                    stamp!(VoltageSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                    $(MNA).stamp!(VoltageSource($dc_val_actual; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
             else
                 return quote
-                    stamp!(CurrentSource($dc_val_actual; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                    $(MNA).stamp!(CurrentSource($dc_val_actual; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
             end
         end
@@ -2465,13 +2513,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
     if is_voltage
         return quote
             let v = $dc_val_actual, ac = $ac_expr
-                stamp!(VoltageSource(v; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                $(MNA).stamp!(VoltageSource(v; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     else
         return quote
             let i = $dc_val_actual, ac = $ac_expr
-                stamp!(CurrentSource(i; ac=ac, name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, t, spec.mode)
+                $(MNA).stamp!(CurrentSource(i; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
             end
         end
     end
@@ -2599,7 +2647,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     # Handle temperature option - update spec if temp is set
     if haskey(state.sema.options, :temp)
         temp_expr = cg_expr!(state, state.sema.options[:temp][end][2].val)
-        push!(block.args, :(spec = MNASpec(temp=$temp_expr, mode=spec.mode)))
+        push!(block.args, :(spec = $(MNASpec)(temp=$temp_expr, mode=spec.mode)))
     end
 
     # Import exposed models from HDL modules (VA-generated device types)
@@ -2616,7 +2664,9 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Codegen nets - get_node! for each net (except ports passed as arguments)
+    # Codegen nets - get_node! for each net (except ports passed as arguments).
+    # Internal nets are name-scoped by the caller's `_mna_prefix_` so each
+    # subckt instance allocates distinct nodes in the flat MNAContext map.
     for (net, _) in state.sema.nets
         net_name = cg_net_name!(state, net)
         # Skip nets that are subcircuit ports - they're passed as function args
@@ -2627,7 +2677,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         if net_name === Symbol("0")
             push!(block.args, :($net_name = 0))
         else
-            push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
+            push!(block.args, :($net_name = $(MNA).get_node!(ctx, $(_scoped_sym_expr(net_name)))))
         end
     end
 
@@ -2809,10 +2859,14 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     end
 
     # Codegen device instances using MNA stamps
-    # For SubcktCall, we need to use the appropriate function based on context
+    # For SubcktCall (SPICE) and Instance (Spectre) calls to user-defined
+    # subckts, when inside a subckt body pass subckt_semas through so the
+    # callee can be resolved from a parent scope.
     function codegen_instance(inst)
         if inst isa SNode{SP.SubcktCall} && is_subcircuit
             cg_mna_instance_subcircuit!(state, inst, Dict{Symbol, Symbol}(), subckt_semas)
+        elseif inst isa SNode{SC.Instance} && is_subcircuit
+            cg_mna_instance!(state, inst, subckt_semas)
         else
             cg_mna_instance!(state, inst)
         end
@@ -3026,9 +3080,16 @@ ctx = circuit_fn((R1=1000.0,), MNASpec())
 sol = MNA.solve_dc(ctx)
 ```
 """
-function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modules::Vector{Module}=Module[])
+function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
     # Run semantic analysis (use sema() not sema_file_or_section to get parameter_order)
-    sema_result = sema(ast; imported_hdl_modules)
+    # Tier 2 scope walk (imported_hdl_modules) is populated by netlist directives only.
+    sema_result = sema(ast)
+    return _make_mna_circuit_with_sema(sema_result; circuit_name)
+end
+
+# Internal: codegen from a pre-built SemaResult. Separates AST parsing from
+# codegen so test infrastructure can pre-populate `sema_result.imported_hdl_modules`.
+function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     state = CodegenState(sema_result)
 
     # Build a dictionary mapping subcircuit names to their SemaResult
@@ -3089,12 +3150,12 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     # Wrap in function definition with necessary imports
     # These imports are needed when the generated code is eval'd directly in Main
     return quote
-        # Import MNA device types needed for stamping
+        # Device type constructors emitted bare in generated code — keep these
+        # in scope. Runtime plumbing (stamp!, MNAContext, get_node!, ZERO_VECTOR,
+        # pwl_at_time, get_current_idx, reset_for_restamping!) is emitted as
+        # fully-qualified `Cadnip.MNA.foo(...)` and needs no using-statement.
         using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
-        using Cadnip.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
-        using Cadnip.MNA: get_current_idx  # For CCVS/CCCS current sensing
-        using Cadnip.MNA: pwl_at_time  # For PWL transient functions
         using Cadnip: ParamLens, IdentityLens, StaticArrays
         using Cadnip.SpectreEnvironment
 
@@ -3113,7 +3174,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
         # ctx can be MNAContext (structure discovery) or DirectStampContext (fast restamping)
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
-                                 x::AbstractVector=ZERO_VECTOR,
+                                 x::AbstractVector=$(ZERO_VECTOR),
                                  ctx::Union{$(MNAContext), $(DirectStampContext), Nothing}=nothing,
                                  _mna_h_=nothing, _mna_h_p_=nothing)
             # Default prefix for top-level instances (empty = no prefix)
@@ -3164,10 +3225,10 @@ eval(mod_expr)  # Defines the module
 using .typical: nfet_mna_builder, pfet_mna_builder
 ```
 """
-function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[],
-                             imported_hdl_modules::Vector{Module}=Module[])
+function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[])
     # Run semantic analysis
-    sema_result = sema(ast; imported_hdl_modules)
+    # Tier 2 scope walk (imported_hdl_modules) is populated by netlist directives only.
+    sema_result = sema(ast)
 
     # Build subckt_semas dictionary for cross-references
     subckt_semas = Dict{Symbol, SemaResult}()
@@ -3289,9 +3350,9 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
             # Note: baremodule requires explicit imports for functions used in generated code
             :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
             :(import Base),  # Needed for explicit Base.X references in generated code
-            # Import MNA context and stamping functions
-            :(using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
-            # Import device types needed for stamping
+            # Device types emitted bare in generated code — keep in scope.
+            # Runtime plumbing (MNAContext/MNASpec/get_node!/stamp!/alloc_*) is
+            # emitted fully-qualified and needs no using-statement.
             :(using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
             :(using Cadnip: ParamLens, IdentityLens, spicecall, ParsedModel),
             :(using Cadnip.SpectreEnvironment),
@@ -3304,41 +3365,33 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
 end
 
 """
-    load_mna_modules(into::Module, file::String; names=nothing, pdk_include_paths=[], preload=[])
-    load_mna_modules(file::String; names=nothing, ...)  # Returns expression for manual eval
+    precompile_pdk(into::Module, file::String; names=nothing, preload=[])
 
 Parse a PDK SPICE file and generate MNA builder modules.
 
-When `into` module is provided, evaluates modules directly into that module and returns
-a NamedTuple mapping section names to the created modules. This is the preferred usage
-for PDK packages as it enables precompilation.
+**PDK-authoring API** — not intended for end users. PDK packages call this at package
+build time to bake compiled device modules into the package. End users reference the
+resulting PDK content via `jlpkg://MyPDK/...` directives inside their netlist.
 
-When called without `into`, returns a `:toplevel` expression for manual evaluation.
+Evaluates modules directly into `into` and returns a NamedTuple mapping section names
+to the created modules.
 
 # Arguments
 - `into`: Target module to define submodules in (for precompilation)
 - `file`: Path to the PDK SPICE file
 - `names`: Optional list of library section names to include (default: all)
-- `pdk_include_paths`: Paths to search for `.include` files
 - `preload`: Modules to add as `using` statements in generated code
 
 # Example (PDK package usage - enables precompilation)
 ```julia
 module MyPDK
     using Cadnip
-    const corners = Cadnip.load_mna_modules(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
+    const corners = Cadnip.precompile_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
     # corners.typical, corners.fast, corners.slow are now available
 end
 ```
-
-# Example (manual eval)
-```julia
-path = joinpath(@__DIR__, "pdk.spice")
-eval(load_mna_modules(path; names=["typical", "fast"]))
-# Now you can use: typical.nfet_03v3_mna_builder, fast.nfet_03v3_mna_builder, etc.
-```
 """
-function load_mna_modules end  # Forward declaration for docstring
+function precompile_pdk end  # Forward declaration for docstring
 
 """
     collect_lib_statements(node) -> Vector
@@ -3370,7 +3423,7 @@ function collect_lib_statements(node)
 end
 
 # Internal helper to generate module expressions from parsed PDK
-function _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
+function _generate_mna_module_exprs(sa, names, preload)
     modules = Pair{Symbol, Expr}[]
 
     # Collect all LibStatements from the parsed tree
@@ -3385,7 +3438,7 @@ function _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
 
         # Generate MNA module for this library section
         mod_name = Symbol(lib_name)
-        mod_expr = make_mna_pdk_module(node; name=mod_name, imported_hdl_modules=imported_hdl_modules)
+        mod_expr = make_mna_pdk_module(node; name=mod_name)
 
         # Add preload usings if needed
         if !isempty(preload)
@@ -3409,97 +3462,24 @@ function _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
     return modules
 end
 
-# Version that evals into a target module (preferred for precompilation)
-function load_mna_modules(into::Module, file::String; names=nothing,
-                          pdk_include_paths::Vector{String}=String[],
-                          preload::Vector{Module}=Module[],
-                          imported_hdl_modules::Vector{Module}=Module[])
+function precompile_pdk(into::Module, file::String; names=nothing,
+                        preload::Vector{Module}=Module[])
     # Parse the file
     sa = NyanSpectreNetlistParser.parsefile(file; implicit_title=false)
     if sa.ps.errored
         throw(LoadError(file, 0, SpectreParseError(sa)))
     end
 
-    module_exprs = _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
+    module_exprs = _generate_mna_module_exprs(sa, names, preload)
 
     # Eval each module into the target module and collect results
     result_modules = Dict{Symbol, Module}()
     for (mod_name, mod_expr) in module_exprs
-        # Eval the module definition in the target module
         Core.eval(into, mod_expr)
-        # Get the created module
         result_modules[mod_name] = getfield(into, mod_name)
     end
 
-    # Return as NamedTuple for convenient access
     return NamedTuple(result_modules)
-end
-
-# Version that returns expression for manual eval (backward compatible)
-function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
-                          preload::Vector{Module}=Module[],
-                          imported_hdl_modules::Vector{Module}=Module[])
-    # Parse the file
-    sa = NyanSpectreNetlistParser.parsefile(file; implicit_title=false)
-    if sa.ps.errored
-        throw(LoadError(file, 0, SpectreParseError(sa)))
-    end
-
-    module_exprs = _generate_mna_module_exprs(sa, names, preload, imported_hdl_modules)
-
-    res = Expr(:toplevel)
-    for (_, mod_expr) in module_exprs
-        push!(res.args, mod_expr)
-    end
-
-    return res
-end
-
-"""
-    load_mna_pdk(into::Module, file::String; section::String, ...)
-    load_mna_pdk(file::String; section::String, ...)
-
-Load a single library section from a PDK file as an MNA module.
-
-When `into` module is provided, evaluates the module directly into that module
-and returns the created module. This is the preferred usage for precompilation.
-
-When called without `into`, returns the module expression for manual evaluation.
-
-# Example (PDK package usage - enables precompilation)
-```julia
-module MyPDK
-    using Cadnip
-    const typical = Cadnip.load_mna_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"); section="typical")
-end
-```
-
-# Example (manual eval)
-```julia
-mod_expr = load_mna_pdk("pdk.spice"; section="typical")
-eval(mod_expr)
-using .typical: nfet_mna_builder
-```
-"""
-function load_mna_pdk(into::Module, file::String; section::String,
-                      pdk_include_paths::Vector{String}=String[],
-                      preload::Vector{Module}=Module[],
-                      imported_hdl_modules::Vector{Module}=Module[])
-    result = load_mna_modules(into, file; names=[section], pdk_include_paths, preload, imported_hdl_modules)
-    if isempty(result)
-        error("Section '$section' not found in $file")
-    end
-    return only(values(result))
-end
-
-function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{String}=String[],
-                      preload::Vector{Module}=Module[],
-                      imported_hdl_modules::Vector{Module}=Module[])
-    expr = load_mna_modules(file; names=[section], pdk_include_paths, preload, imported_hdl_modules)
-    if isempty(expr.args)
-        error("Section '$section' not found in $file")
-    end
-    return only(expr.args)
 end
 
 #==============================================================================#
