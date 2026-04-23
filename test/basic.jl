@@ -451,6 +451,19 @@ open(_HDL_SCS_NETLIST; write=true) do io
 end
 const _HDL_SCS_CIRCUIT = MNACircuit(_HDL_SCS_NETLIST)
 
+# cwd-relative .hdl from an inline netlist (no source_dir, no srcfile).
+# Tests the cache.jl fallback that handles `pathof(thismod) === nothing`.
+const _HDL_CWD_DIR = mktempdir(; cleanup=true)
+cp(_HDL_RESISTOR_VA, joinpath(_HDL_CWD_DIR, "resistor.va"))
+const _HDL_CWD_CIRCUIT = cd(_HDL_CWD_DIR) do
+    MNACircuit("""
+    * relative .hdl, no source_dir — must resolve via cwd
+    .hdl "resistor.va"
+    V1 vcc 0 DC 1
+    X1 vcc 0 BasicVAResistor R=1000
+    """; lang=:spice)
+end
+
 @testset "SPICE .hdl include (on-the-fly VA codegen)" begin
     @testset "inline MNACircuit(code) with absolute path" begin
         code = """
@@ -501,6 +514,12 @@ const _HDL_SCS_CIRCUIT = MNACircuit(_HDL_SCS_NETLIST)
         sol = dc!(_HDL_SCS_CIRCUIT)
         @test isapprox_deftol(sol[:vcc], 2.0)
         @test isapprox_deftol(sol[:I_v1], -2/4000)
+    end
+
+    @testset "relative .hdl from MNACircuit(code; lang) resolves against cwd" begin
+        sol = dc!(_HDL_CWD_CIRCUIT)
+        @test isapprox_deftol(sol[:vcc], 1.0)
+        @test isapprox_deftol(sol[:I_v1], -1/1000)
     end
 end
 
