@@ -2,15 +2,28 @@
 #==============================================================================#
 # PSP103VA Integration Tests
 #
-# Tests that PSP103VA model works correctly through the SPICE parsing and
-# MNA codegen path. Key challenges addressed:
+# Two compile-time pitfalls that this test (and the PSP103 path generally)
+# depends on avoiding:
 #
-# 1. LLVM crashes on very large functions (96K+ IR statements) during compilation
-#    - Fix: Use `invokelatest` for VA model stamp! calls in generated code
-#    - This forces runtime dispatch to precompiled stamp! methods
+# 1. Caller-side inference walk through stamp!'s 782-field body. Julia's
+#    inference is transitive across method calls, so a direct `stamp!(…)` from
+#    a generated circuit builder makes inference walk the body to learn its
+#    return type — burning ~180s and ~6 GiB of transient IR for output that's
+#    byte-identical to the precompiled stamp!.
+#    - Fix: codegen emits `invoke(stamp!, Tuple{DeviceType, AnyMNAContext,
+#      Int…}, …)` for models with >=200 parameters (see src/spc/codegen.jl
+#      `va_device_type`). `invoke` dispatches to a specific MethodInstance
+#      whose return type is cached — inference reads the cache instead of
+#      walking the body. Zero runtime overhead; ~1s extra one-time compile.
 #
-# 2. Very large structs (782 fields) cause LLVM SROA to explode
-#    - Fix: Use `inferencebarrier` to hide exact type from Julia compiler
+# 2. Nested-AD specialization explosion. NonlinearSolvePolyAlgorithm would
+#    construct `ForwardDiff.Tag{NonlinearFunction{…, typeof(circuit), …},
+#    Float64}` even with an explicit Jacobian — for safety checks / JVP
+#    fallback. When those Duals flowed through stamp!'s `_mna_x_`, the body
+#    specialized for a nested-Dual input and compilation exploded.
+#    - Fix: CedarRobustNLSolve passes `autodiff=nothing` to each algorithm, so
+#      NonlinearSolve doesn't construct its own AD machinery. See
+#      src/mna/solve.jl and doc/psp103_noinline_investigation.md.
 #
 # 3. Internal node naming collisions in subcircuits
 #    - Fix: Use hierarchical instance names (prefix_localname) for internal nodes

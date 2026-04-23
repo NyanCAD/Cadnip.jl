@@ -328,8 +328,13 @@ The algorithm order is:
 3. PseudoTransient (pseudo-transient continuation)
 """
 function CedarRobustNLSolve()
-    rmn = RobustMultiNewton()
-    algs = (rmn.algs..., LevenbergMarquardt(), PseudoTransient())
+    # autodiff=nothing: we supply an explicit Jacobian via NonlinearFunction.jac,
+    # so NonlinearSolve must not construct its own ForwardDiff.Tag machinery.
+    # The Tag would embed typeof(circuit) in a Dual and trigger a nested-AD
+    # specialization of the 782-field stamp! body at first call — see
+    # doc/psp103_noinline_investigation.md.
+    rmn = RobustMultiNewton(autodiff=nothing)
+    algs = (rmn.algs..., LevenbergMarquardt(autodiff=nothing), PseudoTransient(autodiff=nothing))
     return NonlinearSolvePolyAlgorithm(algs)
 end
 
