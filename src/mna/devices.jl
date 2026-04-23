@@ -36,38 +36,40 @@ Uses searchsortedfirst for O(log n) lookup on SVector.
 end
 
 """
-    pwl_at_time(ts, ys, t) -> value
+    pwl_at_time(ts, ys, t, extrap=0.0) -> value
 
-Evaluate piecewise-linear function at time t.
-Works with SVector (uses searchsortedfirst for O(log n) lookup).
+Evaluate piecewise-linear function at `t`. Interior points are linearly
+interpolated. Off-edge behavior is controlled by `extrap`:
+- `0.0` (default): hold — returns `ys[1]` or `ys[end]`. Matches Spectre PWL.
+- `1.0`: linear extrapolation using the edge-segment slope. Matches
+  Verilog-A LRM 9.21 `\$table_model` control-string `"L"`.
 
-Handles edge cases: before first point, after last point, flat segments,
-and infinitely steep segments (same time, different values).
+Off-edge result is `ys[edge] + extrap * slope * (t - ts[edge])`.
+Works with SVector; type-stable for ForwardDiff.Dual; O(log n) lookup.
+Handles flat segments and infinitely steep segments in the interior.
 """
-@inline function pwl_at_time(ts, ys, t)
+@inline function pwl_at_time(ts, ys, t, extrap::Real=0.0)
     i = find_t_in_ts(ts, t)
     type_stable_time = 0.0 * t  # Preserves type (e.g., ForwardDiff.Dual)
+    n = length(ts)
     if i <= 1
-        # Signal is before the first timepoint, hold the first value.
-        return ys[1] + type_stable_time
+        slope = (ys[2] - ys[1]) / (ts[2] - ts[1])
+        return ys[1] + extrap * slope * (t - ts[1]) + type_stable_time
     end
-    if i > length(ts)
-        # Signal is beyond the final timepoint, hold the final value.
-        return ys[end] + type_stable_time
+    if i > n
+        slope = (ys[n] - ys[n-1]) / (ts[n] - ts[n-1])
+        return ys[n] + extrap * slope * (t - ts[n]) + type_stable_time
     end
-    begin
-        if ys[i-1] == ys[i]
-            # signal is constant/flat (singularity in y)
-            return ys[i] + type_stable_time
-        end
-        if ts[i] == ts[i-1]
-            # signal is infinitely steep (singularity in t)
-            return (ys[i-1] + ys[i])/2 + type_stable_time
-        end
-        # The general case: linear interpolation
-        slope = (ys[i] - ys[i-1])/(ts[i] - ts[i-1])
-        return ys[i-1] + (t - ts[i-1])*slope
+    if ys[i-1] == ys[i]
+        # signal is constant/flat (singularity in y)
+        return ys[i] + type_stable_time
     end
+    if ts[i] == ts[i-1]
+        # signal is infinitely steep (singularity in t)
+        return (ys[i-1] + ys[i])/2 + type_stable_time
+    end
+    slope = (ys[i] - ys[i-1])/(ts[i] - ts[i-1])
+    return ys[i-1] + (t - ts[i-1])*slope
 end
 
 export stamp!
