@@ -33,80 +33,13 @@ function generate_sp_code(world::UInt64, source::LineNumberNode, ::Type{SpCircui
     return gen(world, source, codegen(sema))
 end
 
-function analyze_mosfet_import(dialect, level)
-    if dialect == :ngspice
-        if level == 5
-            #error("bsim2 not supported")
-            #return :bsim2
-        elseif level == 8 || level == 49
-            #error("bsim3 not supported")
-            #return :bsim3
-        elseif level == 14 || level == 54
-            return :BSIM4
-        end
-    end
-    return nothing
-end
-
-function analyze_imports!(n::SNode, parse_cache::Union{CedarParseCache, Nothing}, traverse_imports::Bool=false;
-        imports=Set{Symbol}(),
-        hdl_imports=Set{String}(),
-        includes::Set{String}=Set{String}(),
-        pkg_hdl_imports=Set{String}(),
-        pkg_spc_import=Set{String}(),
-        thispath::Union{String, Nothing}=nothing)
-    for stmt in n.stmts
-        if isa(stmt, SNode{SP.IncludeStatement}) || isa(stmt, SNode{SP.LibInclude}) || isa(stmt, SNode{SP.HDLStatement})
-            str = strip(unescape_string(String(stmt.path)), ['"', '\'']) # verify??
-            if startswith(str, JLPATH_PREFIX)
-                path = str[sizeof(JLPATH_PREFIX)+1:end]
-                components = splitpath(path)
-                push!(imports, Symbol(components[1]))
-                if isa(stmt, SNode{SP.HDLStatement})
-                    push!(pkg_hdl_imports, str)
-                else
-                    push!(pkg_spc_import, str)
-                end
-            else
-                if thispath !== nothing
-                    str = joinpath(dirname(thispath), str)
-                end
-                if parse_cache !== nothing
-                    if isa(stmt, SNode{SP.HDLStatement})
-                        parse_and_cache_va!(parse_cache, str)
-                    else
-                        str in includes && continue
-                        push!(includes, str)
-                        analyze_imports!(parse_and_cache_spc!(parse_cache, str), parse_cache; imports, hdl_imports, includes, thispath=str)
-                    end
-                else
-                    if isa(stmt, SNode{SP.HDLStatement})
-                        push!(hdl_imports, str)
-                    else
-                        push!(includes, str)
-                    end
-                end
-            end
-        elseif isa(stmt, SNode{SP.Model})
-            typ = LSymbol(stmt.typ)
-            mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
-            local level = 1
-            for p in stmt.parameters
-                name = LSymbol(p.name)
-                if name == :level
-                    # TODO
-                    level = parse(Float64, String(p.val))
-                    continue
-                end
-            end
-            mosfet_type === nothing && continue
-            imp = analyze_mosfet_import(:ngspice, level)
-            imp !== nothing && push!(imports, imp)
-        elseif isa(stmt, Union{SNode{SPICENetlistSource}, SNode{SP.Subckt}, SNode{SP.LibStatement}})
-            analyze_imports!(stmt, parse_cache; imports, hdl_imports, includes, pkg_hdl_imports, pkg_spc_import, thispath)
-        end
-    end
-    return imports, hdl_imports, includes, pkg_hdl_imports, pkg_spc_import
+# Create a fresh top-level-ish module for holding a generated SPICE builder
+# and any on-the-fly VA baremodules. Imports Cadnip so the generated
+# `import ..Cadnip` inside VA baremodules resolves.
+function _fresh_netlist_module(name::Symbol)
+    mod = Module(gensym(name))
+    Core.eval(mod, :(import Cadnip))
+    return mod
 end
 
 function ensure_cache!(mod::Module)
@@ -118,59 +51,37 @@ function ensure_cache!(mod::Module)
     return cache
 end
 
-function codegen_missing_imports!(thismod::Module, imps::Union{Dict{Symbol, Module}, NamedTuple}, pkg_hdl_imports::Set{String}, pkg_spc_import::Set{String})
-    if isa(imps, NamedTuple)
-        imps = Dict{Symbol, Module}(pairs(imps)...)
-    end
-    for imp in pkg_spc_import
-        @assert startswith(imp, JLPATH_PREFIX)
-        path = imp[sizeof(JLPATH_PREFIX)+1:end]
-        components = splitpath(path)
-        mod = imps[Symbol(components[1])]
-        localpath = joinpath(components[2:end])
-        cache = ensure_cache!(mod)
-        if haskey(cache.spc_cache, localpath)
-            continue
-        end
-        imports, _, _, sub_pkg_hdl_imports, sub_pkg_spc_import = analyze_imports!(parse_and_cache_spc!(cache, localpath), cache, thispath=localpath)
-        sub_imps = Dict{Symbol, Module}(Symbol(pkg) => Base.require(mod, Symbol(pkg)) for pkg in imports)
-        codegen_missing_imports!(mod, sub_imps, sub_pkg_hdl_imports, sub_pkg_spc_import)
-    end
-    for imp in pkg_hdl_imports
-        @assert startswith(imp, JLPATH_PREFIX)
-        path = imp[sizeof(JLPATH_PREFIX)+1:end]
-        components = splitpath(path)
-        mod = imps[Symbol(components[1])]
-        localpath = joinpath(components[2:end])
-        cache = ensure_cache!(mod)
-        codegen_hdl_import!(mod, cache, localpath)
-    end
-end
+"""
+    codegen_hdl!(cache::CedarParseCache, path::String) -> Module
 
-function codegen_hdl_import!(mod::Module, cache::CedarParseCache, imp::String)
-    va = get(cache.va_cache, imp, nothing)
-    va isa Pair && return
-    if va === nothing
-        va = parse_and_cache_va!(cache, imp)
+Parse and codegen a Verilog-A file referenced by a SPICE `.hdl` directive,
+returning the generated baremodule. Idempotent: if the cache already holds
+a `(VANode, Module)` pair (e.g. from PDK precompilation), the cached module
+is returned unchanged.
+
+Called from the sema walk in `src/spc/sema.jl` when a `.hdl` directive is
+encountered. Evals into `cache.thismod`, which is the same module where the
+SPICE builder function will be eval'd — so the generated device types are
+visible at stamp time via ordinary module-level resolution.
+"""
+codegen_hdl!(cache::CedarParseCache, path::AbstractString) = codegen_hdl!(cache, String(path))
+
+function codegen_hdl!(cache::CedarParseCache, path::String)
+    entry = get(cache.va_cache, path, nothing)
+    if entry isa Pair{VANode, Module}
+        return entry.second
     end
-
-    vamod = va.stmts[end]
-    s = gensym(String(vamod.id))
-    sm = Core.eval(mod, :(baremodule $s
-        const VerilogAEnvironment = $(Cadnip.VerilogAEnvironment)
-        using .VerilogAEnvironment
-        $(Cadnip.make_spice_device(vamod))
-        const $(Symbol(lowercase(String(vamod.id)))) = $(Symbol(vamod.id))
-    end))
-
-    recache_va!(mod, imp, Pair{VANode, Module}(va, sm))
-end
-
-function codegen_hdl_imports!(mod::Module, hdl_imports)
-    cache = mod.var"#cedar_parse_cache#"
-    for imp in hdl_imports
-        codegen_hdl_import!(mod, cache, imp)
-    end
+    va = entry === nothing ? parse_and_cache_va!(cache, path) : entry
+    @assert va isa VANode
+    expr = Cadnip.make_mna_module(va)
+    @assert expr.head === :toplevel
+    module_def = expr.args[1]
+    @assert module_def.head === :module
+    mod_name = module_def.args[2]::Symbol
+    Core.eval(cache.thismod, expr)
+    sm = getfield(cache.thismod, mod_name)
+    recache_va!(cache.thismod, path, Pair{VANode, Module}(va, sm))
+    return sm
 end
 
 #==============================================================================#
@@ -227,9 +138,11 @@ macro sp_str(str, flag="")
     sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
         implicit_title = !inline, fname=String(__source__.file), srcline=__source__.line)
 
-    # Generate MNA builder function
+    # Generate MNA builder function. Pass the caller's cache so `.hdl` VA
+    # includes codegen into the caller's module alongside the SPICE builder.
+    parse_cache = ensure_cache!(__module__)
     circuit_name = gensym(:circuit)
-    code = make_mna_circuit(sa; circuit_name)
+    code = make_mna_circuit(sa; circuit_name, parse_cache)
 
     # Return the builder function
     return esc(quote
@@ -258,8 +171,9 @@ macro spc_str(str, flag="")
     sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spectre, enable_julia_escape,
         fname=String(__source__.file), srcline=__source__.line)
 
+    parse_cache = ensure_cache!(__module__)
     circuit_name = gensym(:circuit)
-    code = make_mna_circuit(sa; circuit_name)
+    code = make_mna_circuit(sa; circuit_name, parse_cache)
 
     return esc(quote
         $code
@@ -338,14 +252,16 @@ end
 
 function Base.include(mod::Module, f::SpiceFile)
     sa = _parse_netlist_file(f.path, :spice)
-    code = make_mna_circuit(sa; circuit_name=f.name)
+    parse_cache = ensure_cache!(mod)
+    code = make_mna_circuit(sa; circuit_name=f.name, parse_cache)
     Base.eval(mod, code)
     return nothing
 end
 
 function Base.include(mod::Module, f::SpectreFile)
     sa = _parse_netlist_file(f.path, :spectre)
-    code = make_mna_circuit(sa; circuit_name=f.name)
+    parse_cache = ensure_cache!(mod)
+    code = make_mna_circuit(sa; circuit_name=f.name, parse_cache)
     Base.eval(mod, code)
     return nothing
 end
@@ -415,7 +331,7 @@ function MNA.MNACircuit(path_or_code::AbstractString;
         eff_lang = infer_lang_from_ext(path)
         eff_name = name === nothing ?
             Symbol(first(splitext(basename(path)))) : name
-        mod = Module(gensym(eff_name))
+        mod = _fresh_netlist_module(eff_name)
         if eff_lang === :spice
             Base.include(mod, SpiceFile(path; name=eff_name))
         else
@@ -426,8 +342,9 @@ function MNA.MNACircuit(path_or_code::AbstractString;
         eff_lang = something(lang, :spice)
         sa = _parse_netlist_string(path_or_code, eff_lang; source_dir=source_dir)
         eff_name = name === nothing ? gensym(:circuit) : name
-        builder_code = make_mna_circuit(sa; circuit_name=eff_name)
-        mod = Module(gensym(:netlist))
+        mod = _fresh_netlist_module(:netlist)
+        parse_cache = ensure_cache!(mod)
+        builder_code = make_mna_circuit(sa; circuit_name=eff_name, parse_cache)
         Base.eval(mod, builder_code)
         builder = getfield(mod, eff_name)
     end

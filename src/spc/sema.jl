@@ -46,7 +46,6 @@ mutable struct SemaResult
     options::Dict{Symbol, Vector{Pair{UInt, SNode}}}
 
     instances::OrderedDict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}
-    hdl_includes::Vector{Pair{UInt, Pair{SNode, VANode}}}
 
     warnings::Vector
 
@@ -67,7 +66,7 @@ end
 function SemaResult(ast::SNode)
     SemaResult(ast, nothing, nothing, nothing, UInt64(0), SpectreCircuit,
         Vector{Pair{UInt, MaybeConditional{SNode}}}(), Vector{UInt}(),
-        Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Vector(), Vector(),
+        Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Vector(),
         OrderedSet{Symbol}(), OrderedSet{Symbol}(), OrderedSet{Symbol}(),
         OrderedSet{Symbol}(),
         Int[], Module[], nothing)
@@ -445,11 +444,13 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 push!(get!(()->[], scope.params, name), scope.global_position=>MaybeConditional(scope, param))
                 sema_visit_expr!(scope, param.val)
             end
-        elseif isa(stmt, SNode{SP.IncludeStatement}) || isa(stmt, SNode{SP.LibInclude}) || isa(stmt, SNode{SP.HDLStatement})
+        elseif isa(stmt, SNode{SP.IncludeStatement}) || isa(stmt, SNode{SP.LibInclude}) || isa(stmt, SNode{SP.HDLStatement}) || isa(stmt, SNode{SC.AHDLInclude})
             if !isempty(scope.condition_stack)
                 error("Includes not allowed in conditional blocks. If you need this feature, please file an issue.")
             end
-            str = strip(unescape_string(String(stmt.path)), ['"', '\'']) # verify??
+            # AHDLInclude (Spectre) uses `filename`; the SPICE nodes use `path`.
+            raw_str = isa(stmt, SNode{SC.AHDLInclude}) ? String(stmt.filename) : String(stmt.path)
+            str = strip(unescape_string(raw_str), ['"', '\'']) # verify??
             if startswith(str, JLPATH_PREFIX)
                 path = str[sizeof(JLPATH_PREFIX)+1:end]
                 components = splitpath(path)
@@ -475,16 +476,9 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                     end
                 end
             end
-            if isa(stmt, SNode{SP.HDLStatement})
-                isempty(scope.condition_stack) || error("HDL includes not allowed in conditional blocks")
-                vm = parse_and_cache_va!(parse_cache, path)
-                if vm === nothing
-                    error("Preprocessing pass missed HDL include $path")
-                elseif isa(vm, VANode)
-                    error("HDL include $path was not codegen'ed at sema time")
-                else
-                    push!(scope.imported_hdl_modules, vm[2])
-                end
+            if isa(stmt, SNode{SP.HDLStatement}) || isa(stmt, SNode{SC.AHDLInclude})
+                sm = codegen_hdl!(parse_cache, path)
+                push!(scope.imported_hdl_modules, sm)
             else
                 # Handle self-referential includes: when a file includes a .LIB section from itself
                 this_path = scope.ast.ps.srcfile.path
@@ -802,10 +796,3 @@ function sema_assign_ids(r::SemaResult)
     end
 end
 
-function sema_codegen_hdl(r::SemaResult)
-    ret = Expr(:toplevel)
-    for (_, (_, va)) in r.hdl_includes
-        push!(ret.args, Cadnip.make_mna_module(va))
-    end
-    return ret
-end

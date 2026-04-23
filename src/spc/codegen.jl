@@ -3080,10 +3080,12 @@ ctx = circuit_fn((R1=1000.0,), MNASpec())
 sol = MNA.solve_dc(ctx)
 ```
 """
-function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
+function make_mna_circuit(ast; circuit_name::Symbol=:circuit,
+                           parse_cache::Union{CedarParseCache,Nothing}=nothing)
     # Run semantic analysis (use sema() not sema_file_or_section to get parameter_order)
     # Tier 2 scope walk (imported_hdl_modules) is populated by netlist directives only.
-    sema_result = sema(ast)
+    # parse_cache enables on-the-fly codegen of `.hdl` VA includes via codegen_hdl!.
+    sema_result = sema(ast; parse_cache)
     return _make_mna_circuit_with_sema(sema_result; circuit_name)
 end
 
