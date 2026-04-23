@@ -77,6 +77,11 @@ elseif RUN_CORE
         @testset "mna/laplace.jl" include("mna/laplace.jl")
     end
 
+    # Table-model operator (LRM 9.21)
+    @testset "\$table_model" begin
+        @testset "mna/table_model.jl" include("mna/table_model.jl")
+    end
+
     # AC small-signal analysis
     @testset "AC Analysis" begin
         @testset "ac.jl" include("ac.jl")

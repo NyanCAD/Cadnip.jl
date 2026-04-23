@@ -681,6 +681,63 @@ function (to_julia::MNAScope)(stmt::VANode{ArrayLiteral})
     return Expr(:tuple, elements...)
 end
 
+#==============================================================================#
+# $table_model helpers (LRM 9.21)
+#
+# Called at VA codegen time only; the runtime evaluation reuses
+# Cadnip.MNA.pwl_at_time with extrap=1.0 for LRM "L" (linear extrapolation).
+#==============================================================================#
+
+struct _TableData
+    input::Vector{Float64}       # column 1, sorted ascending
+    outputs::Matrix{Float64}     # (n_samples, n_deps)
+    source_path::String
+end
+
+function _tm_parse_file(abs::AbstractString)::_TableData
+    isfile(abs) || error("\$table_model file not found: \"$abs\"")
+    raw_rows = Vector{Vector{Float64}}()
+    open(abs, "r") do io
+        for (lineno, line) in enumerate(eachline(io))
+            s = strip(first(split(line, '#'; limit=2)))
+            isempty(s) && continue
+            toks = split(s)
+            row = try
+                [parse(Float64, t) for t in toks]
+            catch err
+                error("\$table_model parse error at $abs:$lineno: $(sprint(showerror, err))")
+            end
+            push!(raw_rows, row)
+        end
+    end
+    isempty(raw_rows) && error("\$table_model file is empty: \"$abs\"")
+    ncols = length(raw_rows[1])
+    ncols >= 2 || error("\$table_model file \"$abs\" must have at least 2 columns (input + 1 dependent)")
+    for (i, r) in enumerate(raw_rows)
+        length(r) == ncols || error(
+            "\$table_model file \"$abs\" has inconsistent column count at row $i (expected $ncols, got $(length(r)))")
+    end
+    # Sort by input column if not already sorted (LRM allows unsorted input).
+    perm = sortperm(first.(raw_rows))
+    sorted = raw_rows[perm]
+    n = length(sorted)
+    input = [sorted[i][1] for i in 1:n]
+    outputs = Matrix{Float64}(undef, n, ncols - 1)
+    for i in 1:n, j in 1:(ncols - 1)
+        outputs[i, j] = sorted[i][j + 1]
+    end
+    return _TableData(input, outputs, abs)
+end
+
+function _tm_parse_control(ctrl::AbstractString)::Int
+    parts = split(ctrl, ';')
+    length(parts) == 2 || error(
+        "\$table_model control string must be \"<interp>;<col>\"; got \"$ctrl\"")
+    parts[1] == "1L" || error(
+        "\$table_model v1 supports only \"1L\" (linear interp + extrap); got \"$(parts[1])\"")
+    parse(Int, parts[2])
+end
+
 """
 Generate stamps for a Laplace transfer function (laplace_nd or laplace_zp).
 Allocates internal state nodes and stamps the (A, E, B, C, D) state-space
@@ -902,6 +959,37 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
 
         return _emit_laplace_stamps(to_julia, input_expr, order,
             :(Cadnip.MNA.va_laplace_zp_dss($zeros_expr, $poles_expr, 1.0)))
+    elseif fname == Symbol("\$table_model")
+        # $table_model(input, filename, control_string) — LRM 9.21
+        # v1 scope: 1-D input, control "1L;<col>" (linear interp + extrap).
+        # File is read + parsed at codegen time; data is baked into the
+        # stamp function as SVector literals. Runtime uses pwl_at_time
+        # with extrap=1.0 for LRM-compliant linear extrapolation.
+        @assert length(stmt.args) == 3 "\$table_model requires 3 arguments (input, filename, control)"
+        fn_ast = stmt.args[2].item
+        fn_ast isa VANode{StringLiteral} || error(
+            "\$table_model filename must be a string literal (compile-time)")
+        filename = String(fn_ast)[2:end-1]
+        ctrl_ast = stmt.args[3].item
+        ctrl_ast isa VANode{StringLiteral} || error(
+            "\$table_model control string must be a string literal")
+        ctrl = String(ctrl_ast)[2:end-1]
+        col = _tm_parse_control(ctrl)
+
+        tbl = _tm_parse_file(abspath(filename))
+        col <= size(tbl.outputs, 2) || error(
+            "\$table_model column $col out of range for \"$filename\" (has $(size(tbl.outputs, 2)) dependent columns)")
+
+        n = length(tbl.input)
+        xs_expr = Expr(:call, :(Cadnip.MNA.SVector{$n,Float64}), tbl.input...)
+        ys_expr = Expr(:call, :(Cadnip.MNA.SVector{$n,Float64}), tbl.outputs[:, col]...)
+        input_expr = to_julia(stmt.args[1].item)
+
+        return quote
+            let _tm_xs = $xs_expr, _tm_ys = $ys_expr
+                Cadnip.MNA.pwl_at_time(_tm_xs, _tm_ys, $input_expr, 1.0)
+            end
+        end
     elseif fname == :ddx
         # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
         # For n-terminal MNA devices, duals are indexed by node_order (port positions)
