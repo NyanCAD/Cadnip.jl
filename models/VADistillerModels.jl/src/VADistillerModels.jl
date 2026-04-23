@@ -42,7 +42,7 @@ module VADistillerModels
 
 using Cadnip
 using Cadnip: VAFile
-using Cadnip.MNA: MNAContext, MNASpec, stamp!, get_node!,
+using Cadnip.MNA: MNAContext, MNASpec, DirectStampContext, stamp!, get_node!,
                     compile_structure, create_workspace, fast_rebuild!, reset_direct_stamp!
 using Cadnip.ModelRegistry: getmodel, getparams, AbstractSimulator
 using NyanVerilogAParser
@@ -185,88 +185,59 @@ Cadnip.ModelRegistry.getparams(::Val{:pjf}, ::Val{2}, ::Nothing, ::Type{<:Abstra
 Cadnip.ModelRegistry.getmodel(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = sp_diode
 Cadnip.ModelRegistry.getparams(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:AbstractSimulator}) = (;)
 
-# Precompile stamp! methods for all three method variants:
-# 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
-# 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
-# 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
+# Precompile stamp! for the exact kwarg signature Cadnip's SPICE codegen emits
+# (_mna_t_, _mna_mode_, _mna_x_, _mna_spec_, _mna_instance_, _mna_h_, _mna_h_p_).
+# A narrower workload doesn't match what codegen actually calls, so the
+# precompiled MIs never get hit at runtime.
+# Both ctx types are covered: MNAContext (structure discovery + initial Newton)
+# and DirectStampContext (fast_rebuild! hot path).
 @compile_workload begin
     using Cadnip.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
-    # Helper to precompile all three method variants for a device
+    # Exercises both ctx types × both x types (ZeroVector, Vector{Float64}).
     function precompile_device(builder, params)
-        # Phase 1a: MNAContext + ZeroVector (stamp! called without _mna_x_)
-        ctx1 = builder(params, spec, 0.0; use_zero_vector=true)
-
-        # Phase 1b: MNAContext + Vector{Float64} (stamp! called with _mna_x_=Float64[])
-        ctx2 = builder(params, spec, 0.0; use_zero_vector=false)
-
-        # Phase 2: Compile structure and create DirectStampContext workspace
-        cs = compile_structure(builder, params, spec; ctx=ctx2)
-        ws = create_workspace(cs; ctx=ctx2)
-
-        # Phase 3: DirectStampContext + Vector{Float64} (runtime restamping)
+        ctx = builder(params, spec, 0.0; x=ZERO_VECTOR)
+        builder(params, spec, 0.0; x=Float64[], ctx=ctx)
+        cs = compile_structure(builder, params, spec; ctx=ctx)
+        ws = create_workspace(cs; ctx=ctx)
         reset_direct_stamp!(ws.dctx)
         fast_rebuild!(ws, zeros(cs.n), 0.0)
     end
 
-    # Helper to build stamp call with optional _mna_x_
-    function stamp_with_x!(dev, ctx, nodes...; spec, x, use_zero_vector)
-        if use_zero_vector
-            stamp!(dev, ctx, nodes...; _mna_spec_=spec)
-        else
-            stamp!(dev, ctx, nodes...; _mna_spec_=spec, _mna_x_=x)
-        end
+    # stamp! call matching codegen's emitted signature (7 kwargs).
+    function stamp_codegen!(dev, ctx, nodes...; t, spec, x, _mna_h_, _mna_h_p_)
+        stamp!(dev, ctx, nodes...;
+               _mna_t_=t, _mna_mode_=spec.mode, _mna_x_=x, _mna_spec_=spec,
+               _mna_instance_=:d1, _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_)
     end
 
-    # Generic builder factory for 2-terminal devices
-    function make_2term_builder(device_fn)
-        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+    # Generic builder factory: takes an N-tuple of node keys.
+    function make_builder(device_fn, node_keys::Tuple)
+        function builder(params, spec::MNASpec, t::Real=0.0;
+                         x::AbstractVector=Float64[],
+                         ctx::Union{MNAContext,DirectStampContext,Nothing}=nothing,
+                         _mna_h_=nothing, _mna_h_p_=nothing)
             if ctx === nothing
                 ctx = MNAContext()
             else
                 reset_for_restamping!(ctx)
             end
-            n1 = get_node!(ctx, :n1)
-            stamp_with_x!(device_fn(), ctx, n1, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            nodes = ntuple(i -> get_node!(ctx, node_keys[i]), length(node_keys))
+            stamp_codegen!(device_fn(), ctx, nodes..., 0;
+                           t=t, spec=spec, x=x, _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_)
             return ctx
         end
     end
 
-    # Generic builder factory for 3-terminal devices (jfet, mes)
-    function make_3term_builder(device_fn)
-        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-            d = get_node!(ctx, :d)
-            g = get_node!(ctx, :g)
-            stamp_with_x!(device_fn(), ctx, d, g, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
-            return ctx
-        end
-    end
-
-    # Generic builder factory for 4-terminal devices (mos, bjt)
-    function make_4term_builder(device_fn)
-        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-            d = get_node!(ctx, :d)
-            g = get_node!(ctx, :g)
-            s = get_node!(ctx, :s)
-            stamp_with_x!(device_fn(), ctx, d, g, s, 0; spec=spec, x=x, use_zero_vector=use_zero_vector)
-            return ctx
-        end
-    end
-
-    # Generic builder factory for 5-terminal devices (vdmos)
+    make_2term_builder(fn) = make_builder(fn, (:n1,))
+    make_3term_builder(fn) = make_builder(fn, (:d, :g))
+    make_4term_builder(fn) = make_builder(fn, (:d, :g, :s))
     function make_5term_builder(device_fn)
-        function builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+        function builder(params, spec::MNASpec, t::Real=0.0;
+                         x::AbstractVector=Float64[],
+                         ctx::Union{MNAContext,DirectStampContext,Nothing}=nothing,
+                         _mna_h_=nothing, _mna_h_p_=nothing)
             if ctx === nothing
                 ctx = MNAContext()
             else
@@ -276,7 +247,8 @@ Cadnip.ModelRegistry.getparams(::Val{:d}, ::Nothing, ::Nothing, ::Type{<:Abstrac
             g = get_node!(ctx, :g)
             s = get_node!(ctx, :s)
             tj = get_node!(ctx, :tj)
-            stamp_with_x!(device_fn(), ctx, d, g, s, 0, tj; spec=spec, x=x, use_zero_vector=use_zero_vector)
+            stamp_codegen!(device_fn(), ctx, d, g, s, 0, tj;
+                           t=t, spec=spec, x=x, _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_)
             return ctx
         end
     end
