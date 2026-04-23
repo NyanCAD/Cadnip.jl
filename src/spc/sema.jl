@@ -174,6 +174,21 @@ function sema!(scope::SemaResult, n::SNode{<:SC.AbstractBlockASTNode})
             # Global node declaration - handled implicitly
         elseif isa(stmt, SNode{SC.Simulator})
             # Simulator directive (lang=spectre etc.) - skip
+        elseif isa(stmt, SNode{SC.AHDLInclude})
+            # On-the-fly Verilog-A include, Spectre dialect.
+            if !isempty(scope.condition_stack)
+                error("ahdl_include not allowed in conditional blocks")
+            end
+            raw_str = String(stmt.filename)
+            str = strip(unescape_string(raw_str), ['"', '\''])
+            if isabspath(str)
+                path = str
+            else
+                thispath = scope.ast.ps.srcfile.path
+                path = thispath === nothing ? str : joinpath(dirname(thispath), str)
+            end
+            sm = codegen_hdl!(scope.parse_cache, path)
+            push!(scope.imported_hdl_modules, sm)
         else
             # Unknown Spectre statement - warn but continue
             # @warn "Skipping unknown Spectre statement type: $(typeof(stmt))"

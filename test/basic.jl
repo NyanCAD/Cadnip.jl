@@ -441,6 +441,16 @@ open(_HDL_NETLIST; write=true) do io
 end
 const _HDL_FILE_CIRCUIT = MNACircuit(_HDL_NETLIST)
 
+const _HDL_SCS_NETLIST = joinpath(_HDL_FIXTURE_DIR, "hdl_test.scs")
+open(_HDL_SCS_NETLIST; write=true) do io
+    write(io, """
+    ahdl_include "resistor.va"
+    v1 (vcc 0) vsource type=dc dc=2
+    x1 (vcc 0) BasicVAResistor R=4000
+    """)
+end
+const _HDL_SCS_CIRCUIT = MNACircuit(_HDL_SCS_NETLIST)
+
 @testset "SPICE .hdl include (on-the-fly VA codegen)" begin
     @testset "inline MNACircuit(code) with absolute path" begin
         code = """
@@ -476,7 +486,7 @@ const _HDL_FILE_CIRCUIT = MNACircuit(_HDL_NETLIST)
         @test isapprox_deftol(sol[:I_v1], -1/1000)
     end
 
-    @testset "Spectre ahdl_include" begin
+    @testset "Spectre ahdl_include (inline)" begin
         code = """
         ahdl_include "$_HDL_RESISTOR_VA"
         x1 (vcc 0) BasicVAResistor R=2000
@@ -485,6 +495,12 @@ const _HDL_FILE_CIRCUIT = MNACircuit(_HDL_NETLIST)
         circuit = MNACircuit(code; lang=:spectre)
         sol = dc!(circuit)
         @test isapprox_deftol(sol[:vcc], 1.0)
+    end
+
+    @testset "Spectre .scs file with ahdl_include + sibling .va" begin
+        sol = dc!(_HDL_SCS_CIRCUIT)
+        @test isapprox_deftol(sol[:vcc], 2.0)
+        @test isapprox_deftol(sol[:I_v1], -2/4000)
     end
 end
 
