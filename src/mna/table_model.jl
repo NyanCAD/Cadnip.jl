@@ -24,15 +24,15 @@ using Interpolations: interpolate, extrapolate, Gridded, Linear, Constant, Line,
 export va_table_model_build
 
 function _tm_interp_mode(c::Char)
-    c == '1' ? Gridded(Linear()) :
-    c == 'D' ? Gridded(Constant()) :
+    c == '1' && return Gridded(Linear())
+    c == 'D' && return Gridded(Constant())
     error("\$table_model: unsupported interp code '$c' (v1 supports '1' linear, 'D' discrete)")
 end
 
 function _tm_extrap_bc(c::Char)
-    c == 'L' ? Line() :
-    c == 'C' ? Flat() :
-    c == 'E' ? Throw() :
+    c == 'L' && return Line()
+    c == 'C' && return Flat()
+    c == 'E' && return Throw()
     error("\$table_model: unsupported extrap code '$c' (v1 supports 'L' linear, 'C' constant, 'E' error)")
 end
 
