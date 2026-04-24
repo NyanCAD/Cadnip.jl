@@ -419,32 +419,109 @@ end
     end
 end
 
-# TODO: Verilog-A include support
-#=
-@testset "Verilog include" begin
-    # Test Spectre ahdl_include
-    ckt = """
-    ahdl_include "resistor.va"
+# HDL include tests — `va"..."`-level fixture path is resolved at module
+# top level so @testset closures (function bodies) can call MNACircuit/dc!
+# without tripping world-age.
+const _HDL_RESISTOR_VA = joinpath(dirname(pathof(Cadnip.NyanVerilogAParser)),
+                                   "..", "test", "inputs", "resistor.va")
+@assert isfile(_HDL_RESISTOR_VA) "fixture missing: $(_HDL_RESISTOR_VA)"
 
-    x1 (vcc 0) BasicVAResistor R=2k
-    v1 (vcc 0) vsource dc=1
-    """
-    inc = joinpath(dirname(pathof(Cadnip.NyanVerilogAParser)), "../test/inputs")
-    sys, sol = solve_spectre_code(ckt; include_dirs=[inc]);
-    @test all(isapprox.(sol[sys.v1.I], -1/2e3))
-
-    # Test SPICE .hdl
-    ckt2 = """
-    * Verilog Include 2
+# File-path MNACircuit call requires the builder to be defined at top level.
+# Write a persistent fixture netlist next to the .va in a subdir of @__DIR__.
+const _HDL_FIXTURE_DIR = mktempdir(; cleanup=true)
+cp(_HDL_RESISTOR_VA, joinpath(_HDL_FIXTURE_DIR, "resistor.va"))
+const _HDL_NETLIST = joinpath(_HDL_FIXTURE_DIR, "hdl_test.sp")
+open(_HDL_NETLIST; write=true) do io
+    write(io, """
+    * HDL via file path
     .hdl "resistor.va"
-
-    x1 vcc 0 BasicVAResistor r=2k
-    v1 vcc 0 dc=1
-    """
-    sys, sol = solve_spice_code(ckt2; include_dirs=[inc]);
-    @test all(isapprox.(sol[sys.v1.I], -1/2e3))
+    X1 vcc 0 BasicVAResistor R=4000
+    V1 vcc 0 DC 2
+    """)
 end
-=#
+const _HDL_FILE_CIRCUIT = MNACircuit(_HDL_NETLIST)
+
+const _HDL_SCS_NETLIST = joinpath(_HDL_FIXTURE_DIR, "hdl_test.scs")
+open(_HDL_SCS_NETLIST; write=true) do io
+    write(io, """
+    ahdl_include "resistor.va"
+    v1 (vcc 0) vsource type=dc dc=2
+    x1 (vcc 0) BasicVAResistor R=4000
+    """)
+end
+const _HDL_SCS_CIRCUIT = MNACircuit(_HDL_SCS_NETLIST)
+
+# cwd-relative .hdl from an inline netlist (no source_dir, no srcfile).
+# Tests the cache.jl fallback that handles `pathof(thismod) === nothing`.
+const _HDL_CWD_DIR = mktempdir(; cleanup=true)
+cp(_HDL_RESISTOR_VA, joinpath(_HDL_CWD_DIR, "resistor.va"))
+const _HDL_CWD_CIRCUIT = cd(_HDL_CWD_DIR) do
+    MNACircuit("""
+    * relative .hdl, no source_dir — must resolve via cwd
+    .hdl "resistor.va"
+    V1 vcc 0 DC 1
+    X1 vcc 0 BasicVAResistor R=1000
+    """; lang=:spice)
+end
+
+@testset "SPICE .hdl include (on-the-fly VA codegen)" begin
+    @testset "inline MNACircuit(code) with absolute path" begin
+        code = """
+        * HDL on-the-fly smoke test
+        .hdl "$_HDL_RESISTOR_VA"
+        X1 vcc 0 BasicVAResistor R=2000
+        V1 vcc 0 DC 1
+        """
+        circuit = MNACircuit(code; lang=:spice)
+        sol = dc!(circuit)
+        @test isapprox_deftol(sol[:vcc], 1.0)
+        @test isapprox_deftol(sol[:I_v1], -1/2000)
+    end
+
+    @testset "file-path MNACircuit with sibling .va" begin
+        sol = dc!(_HDL_FILE_CIRCUIT)
+        @test isapprox_deftol(sol[:vcc], 2.0)
+        @test isapprox_deftol(sol[:I_v1], -2/4000)
+    end
+
+    @testset "double .hdl of same file is idempotent" begin
+        # Two directives referencing the same file should not error; the second
+        # finds the cached Pair and reuses the existing module.
+        code = """
+        * Double HDL include
+        .hdl "$_HDL_RESISTOR_VA"
+        .hdl "$_HDL_RESISTOR_VA"
+        X1 vcc 0 BasicVAResistor R=1000
+        V1 vcc 0 DC 1
+        """
+        circuit = MNACircuit(code; lang=:spice)
+        sol = dc!(circuit)
+        @test isapprox_deftol(sol[:I_v1], -1/1000)
+    end
+
+    @testset "Spectre ahdl_include (inline)" begin
+        code = """
+        ahdl_include "$_HDL_RESISTOR_VA"
+        x1 (vcc 0) BasicVAResistor R=2000
+        v1 (vcc 0) vsource type=dc dc=1
+        """
+        circuit = MNACircuit(code; lang=:spectre)
+        sol = dc!(circuit)
+        @test isapprox_deftol(sol[:vcc], 1.0)
+    end
+
+    @testset "Spectre .scs file with ahdl_include + sibling .va" begin
+        sol = dc!(_HDL_SCS_CIRCUIT)
+        @test isapprox_deftol(sol[:vcc], 2.0)
+        @test isapprox_deftol(sol[:I_v1], -2/4000)
+    end
+
+    @testset "relative .hdl from MNACircuit(code; lang) resolves against cwd" begin
+        sol = dc!(_HDL_CWD_CIRCUIT)
+        @test isapprox_deftol(sol[:vcc], 1.0)
+        @test isapprox_deftol(sol[:I_v1], -1/1000)
+    end
+end
 
 @testset "SPICE parameter scope" begin
     # Same SPICE code as original
