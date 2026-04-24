@@ -32,29 +32,6 @@ jobs:
 
       - uses: julia-actions/cache@v3
 
-      - name: Install dependencies
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
-
-      - name: Run NyanSpectreNetlistParser tests
-        run: |
-          julia --project=NyanSpectreNetlistParser.jl -e '
-            using Pkg
-            Pkg.instantiate()
-            Pkg.test()
-          '
-
-      - name: Run NyanVerilogAParser tests
-        run: |
-          julia --project=NyanVerilogAParser.jl -e '
-            using Pkg
-            Pkg.instantiate()
-            Pkg.test()
-          '
-
       - name: Disable heavy precompile workloads
         run: |
           cat > test/LocalPreferences.toml << 'EOF'
@@ -104,13 +81,6 @@ jobs:
           version: ${{ matrix.version }}
 
       - uses: julia-actions/cache@v3
-
-      - name: Install dependencies
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
 
       - name: Install and precompile test dependencies
         run: |

@@ -5,16 +5,26 @@ using Random
 # fixed seed chosen by fair dice roll
 Random.seed!(10)
 
-# Test group filtering via ARGS (from Pkg.test(test_args=[...]))
+# Test group filtering via ARGS
 # Supported groups:
 #   - "integration": Run only vadistiller integration tests (large VA models)
 #   - "core": Run core tests only (excludes integration)
+#   - "parsers": Run only parser tests
 #   - "all": Run all tests including integration
 #   - (default): Same as "core" - integration tests are opt-in
 const RUN_INTEGRATION = "integration" in ARGS || "all" in ARGS
 const RUN_CORE = !("integration" in ARGS) || "all" in ARGS
+const RUN_PARSERS = "parsers" in ARGS || RUN_CORE || "all" in ARGS
 
-if RUN_INTEGRATION && !RUN_CORE
+if RUN_PARSERS && !RUN_CORE && !RUN_INTEGRATION
+    @info "Running parser tests only"
+    @testset "NyanSpectreNetlistParser" begin
+        include("../NyanSpectreNetlistParser.jl/test/runtests.jl")
+    end
+    @testset "NyanVerilogAParser" begin
+        include("../NyanVerilogAParser.jl/test/runtests.jl")
+    end
+elseif RUN_INTEGRATION && !RUN_CORE
     # Integration-only mode
     @info "Running integration tests only (large VA models)"
     using Cadnip
@@ -32,6 +42,14 @@ if RUN_INTEGRATION && !RUN_CORE
     end
 elseif RUN_CORE
     @info "Running core tests"
+
+    # Parser tests (run before loading Cadnip - no dependency on it)
+    @testset "NyanSpectreNetlistParser" begin
+        include("../NyanSpectreNetlistParser.jl/test/runtests.jl")
+    end
+    @testset "NyanVerilogAParser" begin
+        include("../NyanVerilogAParser.jl/test/runtests.jl")
+    end
 
     using Cadnip
 
