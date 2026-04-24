@@ -1,0 +1,7 @@
+// Minimal Spectre rig for $table_model 1-D round-trip.
+// Drives V(p) = 1V via V1; X1 is the VA table-model device.
+// Expected: sol[:I_V1] = -g(wl_sweep).
+parameters wl_sweep = 1.55
+ahdl_include "tm_1d.va"
+V1 (p 0) vsource type=dc dc=1.0
+X1 (p 0) TMRoundTrip wl=wl_sweep

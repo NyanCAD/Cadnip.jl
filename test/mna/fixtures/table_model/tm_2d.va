@@ -1,0 +1,9 @@
+module TM2D(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real wl = 1.55;
+    parameter real T = 25.0;
+    analog begin
+        I(p, n) <+ $table_model(wl, T, "tm_2d.tbl", "1L,1L;1");
+    end
+endmodule
