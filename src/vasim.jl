@@ -199,7 +199,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Pair{Symbol,Symbol}}(), nothing,
         Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
         Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
-        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}())
+        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -317,7 +318,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         ddx_order,
         named_branches, nothing,
         array_nodes, access_map,
-        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}())
+        Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -535,6 +537,9 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     if getproperty_override !== nothing
         push!(result_args, getproperty_override)
     end
+    # Module-level consts hoisted by codegen (e.g. $table_model interpolators).
+    # Must precede stamp_method so they're defined when the stamp function is first called.
+    append!(result_args, to_julia_mna.extra_module_stmts)
     push!(result_args, stamp_method)
 
     Expr(:toplevel, result_args...)
@@ -561,6 +566,12 @@ struct MNAScope
     extra_stamps_b::Vector{Any}  # Mutable buffer for post-dual b-stamp descriptors (NamedTuples)
     extra_internal_nodes::Vector{Symbol}  # Mutable buffer for dynamically added internal nodes (idt/laplace state nodes)
     current_probes::Set{Pair{Symbol,Symbol}}  # I(a,b) probes encountered in contribution RHS
+    # Module-level consts emitted at baremodule scope alongside the stamp method.
+    # Used by $table_model to hoist Interpolations.jl interpolators keyed by
+    # (abspath, col, interp_modes, extrap_code).
+    extra_module_stmts::Vector{Expr}
+    table_itp_consts::Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}
+    table_files::Dict{String, Any}  # abspath -> parsed _TableData{D}
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -568,7 +579,8 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.parameters, s.node_order, s.ninternal_nodes, s.branch_order,
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
     s.ddx_order, s.named_branches, delay_jl,
-    s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes)
+    s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes,
+    s.extra_module_stmts, s.table_itp_consts, s.table_files)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -688,13 +700,57 @@ end
 # Cadnip.MNA.pwl_at_time with extrap=1.0 for LRM "L" (linear extrapolation).
 #==============================================================================#
 
-struct _TableData
-    input::Vector{Float64}       # column 1, sorted ascending
-    outputs::Matrix{Float64}     # (n_samples, n_deps)
+struct _TableData{D}
+    axes::NTuple{D, Vector{Float64}}      # sorted ascending per dim
+    outputs::Array{Float64}               # size (axes..., n_deps)  (D+1 dims)
     source_path::String
 end
 
-function _tm_parse_file(abs::AbstractString)::_TableData
+# ------------------------------------------------------------------
+# Control-string parser.
+# Accepts e.g. "1L;3" (1-D) or "1L,1L;2" (2-D) or "D,1;1" (per-dim mixed).
+# Returns (interp_modes::NTuple{D,Char}, extrap_code::Char, col::Int).
+# v1 enforces uniform extrap across dims (Interpolations.jl limitation).
+# ------------------------------------------------------------------
+function _tm_parse_control(ctrl::AbstractString, expected_D::Int)
+    parts = split(ctrl, ';')
+    length(parts) == 2 || error(
+        "\$table_model control string must be \"<interp>;<col>\"; got \"$ctrl\"")
+    dims = split(parts[1], ',')
+    length(dims) == expected_D || error(
+        "\$table_model control string specifies $(length(dims)) dim(s) but the call has $expected_D input argument(s); got \"$ctrl\"")
+
+    interp_modes = Char[]
+    extrap_codes = Char[]
+    for (i, d) in enumerate(dims)
+        s = String(strip(d))
+        isempty(s) && error("\$table_model: empty interp spec at dim $i in \"$ctrl\"")
+        interp = s[1]
+        interp in ('1', 'D') || error(
+            "\$table_model: unsupported interp code '$interp' at dim $i (v1 supports '1' linear, 'D' discrete); got \"$ctrl\"")
+        # extrap char is optional; default to 'L' (linear) to match LRM convention
+        extrap = length(s) >= 2 ? s[2] : 'L'
+        extrap in ('L', 'C', 'E') || error(
+            "\$table_model: unsupported extrap code '$extrap' at dim $i (v1 supports 'L','C','E'); got \"$ctrl\"")
+        length(s) <= 2 || error(
+            "\$table_model: per-dim spec too long at dim $i — \"$s\" in \"$ctrl\"")
+        push!(interp_modes, interp)
+        push!(extrap_codes, extrap)
+    end
+    allequal(extrap_codes) || error(
+        "\$table_model v1 requires uniform extrapolation across dimensions; got \"$ctrl\"")
+    col = parse(Int, parts[2])
+    return (Tuple(interp_modes), extrap_codes[1], col)
+end
+
+# ------------------------------------------------------------------
+# File parser — generalised over D dimensions.
+# Expects rows of `x_1 x_2 ... x_D  y_1 y_2 ... y_M` (whitespace-separated,
+# `#` comments). For D=1 the grid is trivial. For D≥2 we require a regular
+# (non-ragged) grid: every combination of per-dim axis values appears
+# exactly once; ragged grids error cleanly.
+# ------------------------------------------------------------------
+function _tm_parse_file(abs::AbstractString; n_inputs::Int)
     isfile(abs) || error("\$table_model file not found: \"$abs\"")
     raw_rows = Vector{Vector{Float64}}()
     open(abs, "r") do io
@@ -712,30 +768,53 @@ function _tm_parse_file(abs::AbstractString)::_TableData
     end
     isempty(raw_rows) && error("\$table_model file is empty: \"$abs\"")
     ncols = length(raw_rows[1])
-    ncols >= 2 || error("\$table_model file \"$abs\" must have at least 2 columns (input + 1 dependent)")
     for (i, r) in enumerate(raw_rows)
         length(r) == ncols || error(
             "\$table_model file \"$abs\" has inconsistent column count at row $i (expected $ncols, got $(length(r)))")
     end
-    # Sort by input column if not already sorted (LRM allows unsorted input).
-    perm = sortperm(first.(raw_rows))
-    sorted = raw_rows[perm]
-    n = length(sorted)
-    input = [sorted[i][1] for i in 1:n]
-    outputs = Matrix{Float64}(undef, n, ncols - 1)
-    for i in 1:n, j in 1:(ncols - 1)
-        outputs[i, j] = sorted[i][j + 1]
+    n_deps = ncols - n_inputs
+    n_deps >= 1 || error(
+        "\$table_model file \"$abs\": need at least $n_inputs input + 1 dep column(s); got $ncols total")
+
+    # Collect sorted-unique values per input dim → axes.
+    axes_v = Vector{Vector{Float64}}(undef, n_inputs)
+    for k in 1:n_inputs
+        axes_v[k] = sort!(unique(r[k] for r in raw_rows))
+        length(axes_v[k]) >= 2 || error(
+            "\$table_model dim $k in \"$abs\" has fewer than 2 distinct values; cannot interpolate")
     end
-    return _TableData(input, outputs, abs)
+
+    # Regular-grid check: total row count = product of axis lengths.
+    expected = prod(length.(axes_v))
+    length(raw_rows) == expected || error(
+        "\$table_model file \"$abs\": ragged grid detected (rows=$(length(raw_rows)), expected $(expected) for axes $(length.(axes_v))); v1 requires a regular product grid")
+
+    # Build lookup maps: axis value -> index in axes_v[k].
+    axis_index = [Dict{Float64,Int}(v => i for (i, v) in enumerate(axes_v[k])) for k in 1:n_inputs]
+
+    # Dense tensor.
+    outputs = Array{Float64}(undef, length.(axes_v)..., n_deps)
+    filled = falses(length.(axes_v)...)
+    for (rowno, row) in enumerate(raw_rows)
+        idx = ntuple(k -> axis_index[k][row[k]], n_inputs)
+        filled[idx...] && error(
+            "\$table_model file \"$abs\" row $rowno: duplicate entry for axis values $(row[1:n_inputs])")
+        filled[idx...] = true
+        for j in 1:n_deps
+            outputs[idx..., j] = row[n_inputs + j]
+        end
+    end
+
+    return _TableData{n_inputs}(Tuple(axes_v), outputs, abs)
 end
 
-function _tm_parse_control(ctrl::AbstractString)::Int
-    parts = split(ctrl, ';')
-    length(parts) == 2 || error(
-        "\$table_model control string must be \"<interp>;<col>\"; got \"$ctrl\"")
-    parts[1] == "1L" || error(
-        "\$table_model v1 supports only \"1L\" (linear interp + extrap); got \"$(parts[1])\"")
-    parse(Int, parts[2])
+# Emit a Julia Expr that reconstructs a dense Array{Float64,D} at baremodule
+# eval time. Uses `reshape(Float64[flat_values...], size...)` — cheap and
+# doesn't balloon the lowered-IR as much as a nested array literal.
+function _tm_array_literal_expr(a::AbstractArray{<:Real})
+    sz = size(a)
+    flat = Expr(:vect, Float64.(vec(a))...)
+    return :(Base.reshape($flat, $(sz...)))
 end
 
 """
@@ -960,36 +1039,63 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return _emit_laplace_stamps(to_julia, input_expr, order,
             :(Cadnip.MNA.va_laplace_zp_dss($zeros_expr, $poles_expr, 1.0)))
     elseif fname == Symbol("\$table_model")
-        # $table_model(input, filename, control_string) — LRM 9.21
-        # v1 scope: 1-D input, control "1L;<col>" (linear interp + extrap).
-        # File is read + parsed at codegen time; data is baked into the
-        # stamp function as SVector literals. Runtime uses pwl_at_time
-        # with extrap=1.0 for LRM-compliant linear extrapolation.
-        @assert length(stmt.args) == 3 "\$table_model requires 3 arguments (input, filename, control)"
-        fn_ast = stmt.args[2].item
+        # $table_model(input_1, ..., input_D, filename, control_string) — LRM 9.21
+        # D ≥ 1. File is parsed at codegen time. Interpolator is built
+        # once per unique (file, col, interp_modes, extrap_code) via a
+        # module-level const emitted on to_julia.extra_module_stmts; the
+        # stamp-time call site is a bare const_sym(inputs...) invocation.
+        length(stmt.args) >= 3 || error(
+            "\$table_model requires at least 3 arguments (input_1, ..., input_D, filename, control)")
+        D = length(stmt.args) - 2
+
+        # Filename: compile-time string literal.
+        fn_ast = stmt.args[D + 1].item
         fn_ast isa VANode{StringLiteral} || error(
             "\$table_model filename must be a string literal (compile-time)")
         filename = String(fn_ast)[2:end-1]
-        ctrl_ast = stmt.args[3].item
+
+        # Control string: compile-time string literal.
+        ctrl_ast = stmt.args[D + 2].item
         ctrl_ast isa VANode{StringLiteral} || error(
             "\$table_model control string must be a string literal")
         ctrl = String(ctrl_ast)[2:end-1]
-        col = _tm_parse_control(ctrl)
+        (interp_modes, extrap_code, col) = _tm_parse_control(ctrl, D)
 
-        tbl = _tm_parse_file(abspath(filename))
-        col <= size(tbl.outputs, 2) || error(
-            "\$table_model column $col out of range for \"$filename\" (has $(size(tbl.outputs, 2)) dependent columns)")
-
-        n = length(tbl.input)
-        xs_expr = Expr(:call, :(Cadnip.MNA.SVector{$n,Float64}), tbl.input...)
-        ys_expr = Expr(:call, :(Cadnip.MNA.SVector{$n,Float64}), tbl.outputs[:, col]...)
-        input_expr = to_julia(stmt.args[1].item)
-
-        return quote
-            let _tm_xs = $xs_expr, _tm_ys = $ys_expr
-                Cadnip.MNA.pwl_at_time(_tm_xs, _tm_ys, $input_expr, 1.0)
-            end
+        # Parse file once per (compilation, abspath). Cache on the scope so
+        # repeated references to the same file (e.g. different columns) reuse
+        # the parsed tensor.
+        abs = abspath(filename)
+        tbl = get!(to_julia.table_files, abs) do
+            _tm_parse_file(abs; n_inputs=D)
         end
+        n_deps = size(tbl.outputs, ndims(tbl.outputs))
+        col <= n_deps || error(
+            "\$table_model column $col out of range for \"$filename\" (has $n_deps dependent columns)")
+
+        # Emit (or reuse) the hoisted module-level const.
+        const_sym = get!(to_julia.table_itp_consts, (abs, col, interp_modes, extrap_code)) do
+            sym = gensym(string("_tm_itp_", basename(filename), "_c", col))
+            # Extract this column's slice of the output tensor as an
+            # Array{Float64, D} and bake it into the baremodule alongside
+            # the axis vectors + control-character literals.
+            axes_expr = Expr(:tuple,
+                (Expr(:vect, ax...) for ax in tbl.axes)...)
+            col_slice = selectdim(tbl.outputs, ndims(tbl.outputs), col) |> copy
+            ys_expr = _tm_array_literal_expr(col_slice)
+            interp_tuple = Expr(:tuple, (QuoteNode(c) for c in interp_modes)...)
+            push!(to_julia.extra_module_stmts, :(
+                const $sym = Cadnip.MNA.va_table_model_build(
+                    $axes_expr,
+                    $ys_expr,
+                    $interp_tuple,
+                    $(QuoteNode(extrap_code)),
+                )
+            ))
+            sym
+        end
+
+        input_exprs = [to_julia(stmt.args[i].item) for i in 1:D]
+        return Expr(:call, const_sym, input_exprs...)
     elseif fname == :ddx
         # Partial derivative - ddx(expr, V(a,b)) returns ∂expr/∂V(a,b)
         # For n-terminal MNA devices, duals are indexed by node_order (port positions)
@@ -2264,7 +2370,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
         to_julia.named_branches, nothing,
         to_julia.array_nodes, to_julia.access_map,
-        to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes)
+        to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes,
+        to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
