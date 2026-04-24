@@ -58,6 +58,9 @@ include("delay.jl")
 # Laplace transfer function support (laplace_nd, laplace_zp)
 include("laplace.jl")
 
+# $table_model support (LRM 9.21) — Interpolations.jl wrapper for 1-D & N-D tables
+include("table_model.jl")
+
 # VA contribution function support (Phase 5)
 include("contrib.jl")
 
