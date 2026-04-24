@@ -1,0 +1,8 @@
+// Minimal Spectre rig for $table_model 2-D round-trip.
+// Drives V(p) = 1V via V1; X1 is the VA 2-D table-model device.
+// Expected: sol[:I_V1] = -g(wl_sweep, T_sweep).
+parameters wl_sweep = 1.55
+parameters T_sweep = 25.0
+ahdl_include "tm_2d.va"
+V1 (p 0) vsource type=dc dc=1.0
+X1 (p 0) TM2D wl=wl_sweep T=T_sweep

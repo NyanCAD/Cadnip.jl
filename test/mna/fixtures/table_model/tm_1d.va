@@ -1,0 +1,8 @@
+module TMRoundTrip(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real wl = 1.55;
+    analog begin
+        I(p, n) <+ $table_model(wl, "tm_1d.tbl", "1L;1");
+    end
+endmodule
