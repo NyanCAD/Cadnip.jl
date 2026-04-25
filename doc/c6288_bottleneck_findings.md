@@ -21,8 +21,9 @@ of any of that.
 
 ## The numbers
 
-Profiled with `julia --project=benchmarks benchmarks/vacask/c6288/cedarsim/profile_c6288.jl`
-(see `profile_c6288.jl` in this directory):
+Two profiles. Both used `julia --project=benchmarks benchmarks/vacask/c6288/cedarsim/profile_c6288.jl`.
+
+### Default (`julia` ≡ `-O2`): hangs in LLVM RAGreedy
 
 | phase                               | time          | notes |
 |-------------------------------------|---------------|-------|
@@ -32,8 +33,8 @@ Profiled with `julia --project=benchmarks benchmarks/vacask/c6288/cedarsim/profi
 | `eval(quoted)`                      | 2.72 s        | adds bindings; JIT deferred |
 | **first builder call** (inside `build_with_detection`) | **>7 min, killed** | LLVM register allocator |
 
-`gdb -p <pid> -batch -ex 'thread apply all bt'` on the stuck process shows the
-main thread is in:
+`gdb -p <pid> -batch -ex 'thread apply all bt'` on the stuck process shows
+the main thread is in:
 
 ```
 llvm::RAGreedy::calcGapWeights(...)
@@ -45,11 +46,73 @@ llvm::RAGreedy::runOnMachineFunction(...)
 [ Julia ] jl_compile_method_internal at gf.c:2538
 ```
 
-i.e. **LLVM's greedy register allocator local-splitting on a single huge
-function**. This is the Julia 1.11 code path for compiling a generated
-function into the JIT execution engine. RAGreedy is super-linear in basic
-block size; for a body that's a single straight-line block of thousands of
-calls, this is where the time goes.
+LLVM's greedy register allocator local-splitting on a single huge function.
+RAGreedy is super-linear in basic block size; for a body that's straight-line
+with thousands of inlined calls, it doesn't terminate.
+
+### `julia -O0`: completes — RAGreedy was the hangup
+
+`-O0` switches LLVM to the *fast* register allocator. Same profile, same
+PSPModels, same circuit:
+
+```
+parse:                    0.18 s
+sema:                     0.80 s
+codegen (build expr):     1.04 s
+eval (compile):           3.36 s     # bindings only; deferred JIT
+MNACircuit ctor:          0.00 s
+build_with_detection:    58.31 s     # 5 passes; pass 1 includes JIT
+  system size:          212228 vars
+  n_nodes:               90850
+  n_currents:            70818
+  n_charges:             50560
+  G_I COO entries:     4661828
+  C_I COO entries:       819072
+  internal nodes:        80896
+compile_structure:        2.20 s
+  G nnz:               2452148
+  C nnz:               2452148
+create_workspace:         0.03 s
+fast_rebuild! (1st):     25.95 s     # DirectStampContext JIT, separate MI
+fast_rebuild! (warm):    0.480 s
+fast_residual! warm:     0.657 s
+fast_jacobian! warm:     1.017 s
+KLU full solve (1st):    2.95 s
+KLU full solve warm:     2.72 s
+setup total: 91.9 s
+```
+
+Total setup at -O0: **92 s**. So the -O2 hang is genuinely RAGreedy, not an
+infinite loop in our code.
+
+These numbers also overturn two assumptions in `STATUS.md` and
+`c6288_comparison.md`:
+
+- **System size is 212k vars, not 154k.** Both prior docs say "154k"; the
+  actual MNA size after detection is 212,228 (90,850 nodes + 70,818 currents
+  + 50,560 charges). Internal nodes alone = 80,896 — confirming the PSP103
+  bloat thesis below.
+- **There are *two* huge JIT compiles, not one.** `build_with_detection`
+  triggers `c6288_circuit(MNAContext)` JIT (~50s of those 58s), and the
+  *first* `fast_rebuild!` triggers `c6288_circuit(DirectStampContext)` JIT
+  (25.95s). Julia specializes the builder per ctx type. Both functions have
+  the 2419-call body and both hit RAGreedy at -O2.
+
+### Per-Newton-step cost (after JIT, at -O0)
+
+```
+fast_rebuild!  (10k device stamps + nzval writes):  0.48 s
+fast_residual! (= rebuild + 2× mul! sparse+vec):    0.66 s
+fast_jacobian! (= rebuild + nzval combine):         1.02 s
+KLU factorize + solve (n=212k, nnz=2.45M):          2.72 s
+```
+
+At -O2 (when JIT terminates), `fast_rebuild!` and the matvec ops should be
+~10× faster (LLVM optimizing PSP103 stamps' inner loops). KLU factorize+solve
+is C code in `Sundials`, so the 2.72s is essentially solver-floor regardless
+of `-O0`/`-O2`. **One Newton iteration ≈ 3-4 seconds even after warmup**;
+50 iterations through a few hundred timesteps puts c6288 in the 5-15 minute
+*solve* range on top of the ~2-min JIT.
 
 ## Why this function is so big
 
@@ -154,14 +217,18 @@ The main solve path passes `jac=jac!, jac_prototype=copy(cs.G)`
 (`src/mna/solve.jl:1609-1615`); the warmup path does not. Pass the same
 through to `warmup_f`.
 
-### Internal-node bloat — the system is roughly 2× larger than it needs to be
+### Internal-node bloat — system is 212k vars (verified), should be ~half
 
 PSP103's `PSP103_module.include` declares 17 internal nodes per device
 (`NOI, GP, SI, DI, BP, BI, BS, BD, INT1..INT9`). **All 17 are allocated
 unconditionally** by `generate_mna_stamp_method_nterm` (`src/vasim.jl:3086-
 3117`). Each gets a `gmin` stamp on its diagonal (`src/vasim.jl:3120-3131`).
-With ~10k MOSFETs that's ≈170k internal nodes ⇒ 154k system size. jax-spice
-collapses them, lands at 86k.
+The profile reports **80,896 internal nodes** out of 90,850 total nodes —
+so 89% of every voltage row is internal-to-PSP103 and barely participates
+in the dynamics.
+
+KLU pays for it: 2.45M nnz in G+C, 2.72s/factorize+solve. Halve the
+internal-node count and KLU drops roughly proportionally.
 
 `detect_short_circuits` (`src/vasim.jl:2535`) only catches the explicit
 `if (...) V(int, ext) <+ 0` pattern. PSP103 has none. Many of the INT* nodes
