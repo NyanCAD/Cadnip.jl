@@ -68,27 +68,120 @@ struct ArchiveConfig
 end
 
 """
-    generate_template_code(code, mode, archive_url, file_path)
+    spice_type_letter(mosaic_type) -> String
 
-Generate template code for Mosaic format.
-- mode = :inline: returns the actual code
-- mode = :include: returns .include statement
-- mode = :lib: returns .lib statement with {corner} section
-
-Paths are always quoted to handle spaces and special characters.
+Map a Mosaic device type to its SPICE element-type letter, used as the
+`spice-type` of a `.model` primitive's model entry (R/C/L/D/M/Q). Returns
+"" for types without a primitive letter (e.g. "ckt").
 """
-function generate_template_code(code, mode, archive_url, file_path)
+function spice_type_letter(mosaic_type)
+    t = lowercase(string(mosaic_type))
+    if t == "resistor"
+        "R"
+    elseif t == "capacitor"
+        "C"
+    elseif t == "inductor"
+        "L"
+    elseif t == "diode"
+        "D"
+    elseif t in ("nmos", "pmos")
+        "M"
+    elseif t in ("npn", "pnp")
+        "Q"
+    else
+        ""
+    end
+end
+
+"""
+    ports_to_entries(layout) -> Vector{Dict}
+
+Flatten a side-bucketed port layout (from `determine_port_layout`) into the
+flat `ports` list the Mosaic schema expects:
+`[{name, side, type:"electric"}, ...]`. All ports are electric — SPICE PDKs
+have no photonic ports.
+"""
+function ports_to_entries(layout)
+    entries = Vector{Dict{String, Any}}()
+    for side in ("top", "bottom", "left", "right")
+        for name in layout[side]
+            push!(entries, Dict{String, Any}("name" => name, "side" => side, "type" => "electric"))
+        end
+    end
+    return entries
+end
+
+"""
+    build_spice_models(name, spice_type; code, mode, archive_url, file_path,
+                       lib_sections=String[], port_order=nothing,
+                       target_simulators=AbstractSimulator[]) -> Vector{Dict}
+
+Build the flat `models` entry list for one model definition.
+
+- `:inline` mode embeds the raw SPICE `code`, plus one extra entry per target
+  simulator (tagged with `implementation`) when conversions are requested.
+- `:lib`/`:include` mode emits structured `library` (+ `sections` when a corner
+  whitelist is set) instead of code; `netlist.py` selects the corner and emits
+  the `.lib`/`.include` line, so no `{corner}` token is baked in here.
+
+`spice_type` is the element letter for `.model` primitives or "SUBCKT" for
+subcircuits. `port_order` (the original ordered subckt pin list) is included
+when provided and omitted for primitives.
+"""
+function build_spice_models(name, spice_type;
+                            code, mode, archive_url, file_path,
+                            lib_sections=String[], port_order=nothing,
+                            target_simulators=AbstractSimulator[])
+    entries = Vector{Dict{String, Any}}()
+
+    function with_port_order!(entry)
+        if port_order !== nothing
+            entry["port-order"] = string.(port_order)
+        end
+        entry
+    end
+
     if mode == :inline
-        return code
-    elseif mode == :include
-        path = archive_url !== nothing ? "\"$(archive_url)#$(file_path)\"" : "\"$(file_path)\""
-        return ".include $(path)"
-    elseif mode == :lib
-        path = archive_url !== nothing ? "\"$(archive_url)#$(file_path)\"" : "\"$(file_path)\""
-        return ".lib $(path) {corner}"
+        push!(entries, with_port_order!(Dict{String, Any}(
+            "language" => "spice",
+            "name" => string(name),
+            "spice-type" => spice_type,
+            "code" => code,
+        )))
+
+        # Simulator-specific conversions (only meaningful for inline code)
+        for sim in target_simulators
+            try
+                ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
+                converted_code = generate_code(ast, sim)
+                push!(entries, with_port_order!(Dict{String, Any}(
+                    "language" => "spice",
+                    "name" => string(name),
+                    "spice-type" => spice_type,
+                    "implementation" => string(symbol_from_simulator(sim)),
+                    "code" => converted_code,
+                )))
+            catch e
+                println("  Warning: Failed to convert $name to $(typeof(sim)) simulator: $e")
+            end
+        end
+    elseif mode == :include || mode == :lib
+        library = archive_url !== nothing ? "$(archive_url)#$(file_path)" : "$(file_path)"
+        entry = Dict{String, Any}(
+            "language" => "spice",
+            "name" => string(name),
+            "spice-type" => spice_type,
+            "library" => library,
+        )
+        if !isempty(lib_sections)
+            entry["sections"] = lib_sections
+        end
+        push!(entries, with_port_order!(entry))
     else
         error("Invalid mode: $mode. Must be :inline, :include, or :lib")
     end
+
+    return entries
 end
 
 """
@@ -346,14 +439,16 @@ Parameters:
 - subcircuits: Vector of (name, ports, parameters, code) tuples from extract_definitions
 - source_file: Optional source filename for metadata
 - base_category: Base category path as vector of strings
-- mode: Either :inline (embed code directly), :include (use .include), or :lib (use .lib with {corner})
+- mode: Either :inline (embed code directly), :include (use .include), or :lib (structured library + sections)
 - archive_url: For include/lib modes, the archive URL in zipurl#archive/path format
 - file_device_type: Override device type for all subcircuits in this file (e.g., "capacitor")
+- lib_sections: For :lib mode, the corner/section whitelist recorded on each entry's `sections` field
 - target_simulators: Vector of simulators to generate converted templates for (e.g., [Ngspice()]). Only works with :inline mode.
 
-Returns Vector{Dict} with model definitions including _id keys.
+Returns Vector{Dict} with model definitions including _id keys (new Mosaic schema:
+`tags`, flat `models` list, flat `ports` list).
 """
-function to_mosaic_format(models, subcircuits; source_file=nothing, base_category=String[], mode=:inline, archive_url=nothing, file_device_type=nothing, target_simulators=AbstractSimulator[])
+function to_mosaic_format(models, subcircuits; source_file=nothing, base_category=String[], mode=:inline, archive_url=nothing, file_device_type=nothing, lib_sections=String[], target_simulators=AbstractSimulator[])
     result = Vector{Dict{String, Any}}()
     
     # Convert models (SPICE .model statements)
@@ -361,60 +456,27 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
         try
             # Create unique random ID for this model
             model_id = "models:$(string(uuid4()))"
-            
+
             # Map SPICE device types directly to Mosaic types, using subtype for polarity
             mosaic_type = device_type_mapping(typ, subtype)
 
-            # Generate template code based on mode
-            template_code = generate_template_code(code, mode, archive_url, source_file)
-
-            # Build templates array: default first, then dialect-specific conversions
-            spice_templates = [Dict(
-                "name" => "default",
-                "code" => template_code,
-                "use-x" => false
-            )]
-
-            # Add simulator-specific conversions (only for :inline mode)
-            if mode == :inline && !isempty(target_simulators)
-                for sim in target_simulators
-                    try
-                        # Parse the code and convert to target simulator
-                        ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
-                        converted_code = generate_code(ast, sim)
-
-                        push!(spice_templates, Dict(
-                            "name" => string(symbol_from_simulator(sim)),
-                            "code" => converted_code,
-                            "use-x" => false
-                        ))
-                    catch e
-                        println("  Warning: Failed to convert model $name to $(typeof(sim)) simulator: $e")
-                    end
-                end
-            end
+            # Tags: base category plus the source filename when known
+            tags = source_file !== nothing ? vcat(base_category, [basename(source_file)]) : base_category
 
             model_def = Dict{String, Any}(
                 "_id" => model_id,
                 "name" => string(name),
                 "type" => mosaic_type,
-                "category" => base_category,  # Put models in Models subcategory
-                # SPICE models define device templates, not schematic circuits
-                "templates" => Dict(
-                    "spice" => spice_templates,
-                    "spectre" => Vector{Dict{String,Any}}(),
-                    "verilog" => Vector{Dict{String,Any}}(),
-                    "vhdl" => Vector{Dict{String,Any}}()
-                ),
+                "tags" => tags,
+                # SPICE .model primitives reference a built-in symbol, so the
+                # entry carries the element letter (R/C/M/...), no port-order.
+                "models" => build_spice_models(name, spice_type_letter(mosaic_type);
+                    code=code, mode=mode, archive_url=archive_url, file_path=source_file,
+                    lib_sections=lib_sections, target_simulators=target_simulators),
                 # TODO: Extract parameter info from model statement
-                "props" => Vector{Dict{String,Any}}()
+                "props" => Vector{Dict{String, Any}}()
             )
-            
-            # Add source file info if available
-            if source_file !== nothing
-                model_def["category"] = vcat(base_category, [basename(source_file)])
-            end
-            
+
             push!(result, model_def)
         catch e
             showerror(stderr, e)
@@ -423,7 +485,7 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
         end
     end
     
-    # Convert subcircuits  
+    # Convert subcircuits
     for (name, ports, parameters, code) in subcircuits
         try
             # Use file-level override if specified, otherwise detect from name
@@ -431,60 +493,28 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
 
             # Create unique random ID for this subcircuit
             model_id = "models:$(string(uuid4()))"
-            
-            # Determine port layout using heuristics based on port names
+
+            # Determine port layout (for the symbol) using heuristics based on port names
             port_layout = determine_port_layout(ports)
 
-            # Generate template code based on mode
-            template_code = generate_template_code(code, mode, archive_url, source_file)
-
-            # Build templates array: default first, then dialect-specific conversions
-            spice_templates = [Dict(
-                "name" => "default",
-                "code" => template_code,
-                "use-x" => true  # subcircuits always use X prefix
-            )]
-
-            # Add simulator-specific conversions (only for :inline mode)
-            if mode == :inline && !isempty(target_simulators)
-                for sim in target_simulators
-                    try
-                        # Parse the code and convert to target simulator
-                        ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=false)
-                        converted_code = generate_code(ast, sim)
-
-                        push!(spice_templates, Dict(
-                            "name" => string(symbol_from_simulator(sim)),
-                            "code" => converted_code,
-                            "use-x" => true  # subcircuits always use X prefix
-                        ))
-                    catch e
-                        println("  Warning: Failed to convert subcircuit $name to $(typeof(sim)) simulator: $e")
-                    end
-                end
-            end
+            # Tags: base category plus the source filename when known
+            tags = source_file !== nothing ? vcat(base_category, [basename(source_file)]) : base_category
 
             model_def = Dict{String, Any}(
                 "_id" => model_id,
                 "name" => string(name),
                 "type" => device_type,
-                "category" => base_category,
-                "ports" => port_layout,
-                "templates" => Dict(
-                    "spice" => spice_templates,
-                    "spectre" => Vector{Dict{String,Any}}(),
-                    "verilog" => Vector{Dict{String,Any}}(),
-                    "vhdl" => Vector{Dict{String,Any}}()
-                ),
+                "tags" => tags,
+                "ports" => ports_to_entries(port_layout),
+                # Subcircuits are instantiated with X; port-order preserves the
+                # original ordered subckt pin list for netlist generation.
+                "models" => build_spice_models(name, "SUBCKT";
+                    code=code, mode=mode, archive_url=archive_url, file_path=source_file,
+                    lib_sections=lib_sections, port_order=ports, target_simulators=target_simulators),
                 # Convert parameter names to props format
-                "props" => [Dict("name" => string(param), "tooltip" => "") for param in parameters]
+                "props" => [Dict{String, Any}("name" => string(param), "tooltip" => "") for param in parameters]
             )
-            
-            # Add source file info if available  
-            if source_file !== nothing
-                model_def["category"] = vcat(base_category, [basename(source_file)])
-            end
-            
+
             push!(result, model_def)
         catch e
             showerror(stderr, e)
@@ -757,6 +787,7 @@ function process_archive(config::ArchiveConfig)
                         mode=config.mode,
                         archive_url=is_archive ? config.url : nothing,
                         file_device_type=file_device_type,
+                        lib_sections=config.lib_sections,
                         target_simulators=config.target_simulators
                     )
 
