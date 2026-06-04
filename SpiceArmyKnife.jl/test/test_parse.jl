@@ -55,7 +55,8 @@ using SpiceArmyKnife
     end
 
     @testset "inline subcircuit" begin
-        subs = [(:myamp, [:in, :out, :vdd, :vss], [:gain], ".subckt myamp in out vdd vss\n...")]
+        # params are (name, default) pairs; nothing default → no "default" key
+        subs = [(:myamp, [:in, :out, :vdd, :vss], [(:gain, nothing)], ".subckt myamp in out vdd vss\n...")]
         result = to_mosaic_format([], subs; base_category=["Lib"],
                                   source_file="amps.lib", mode=:inline)
         @test length(result) == 1
@@ -75,8 +76,21 @@ using SpiceArmyKnife
         @test !haskey(doc, "templates")
     end
 
+    @testset "subcircuit params with defaults" begin
+        # Simple-constant defaults are recorded; expression/identifier defaults
+        # are kept as bare params (no "default" key) so the subckt fills them in.
+        subs = [(:mysub, [:d, :g, :s], [(:w, "0.35u"), (:l, "2"), (:k, nothing)],
+                 ".subckt mysub d g s w=0.35u l=2 k={a+b}\n...")]
+        result = to_mosaic_format([], subs; base_category=["Lib"],
+                                  source_file="dev.lib", mode=:inline)
+        props = result[1]["props"]
+        @test props == [Dict("name" => "w", "tooltip" => "", "default" => "0.35u"),
+                        Dict("name" => "l", "tooltip" => "", "default" => "2"),
+                        Dict("name" => "k", "tooltip" => "")]
+    end
+
     @testset ":lib subcircuit -> structured library + sections" begin
-        subs = [(:nfet, [:d, :g, :s, :b], Symbol[], ".subckt nfet d g s b\n...")]
+        subs = [(:nfet, [:d, :g, :s, :b], Tuple{Symbol,Union{String,Nothing}}[], ".subckt nfet d g s b\n...")]
         result = to_mosaic_format([], subs; base_category=["Sky130"],
                                   source_file="sky130.lib.spice",
                                   mode=:lib, archive_url="https://example.com/pdk.zip",

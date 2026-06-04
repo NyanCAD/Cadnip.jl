@@ -349,8 +349,9 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
                 continue
             end
             ports = [LSymbol(node) for node in stmt.subckt_nodes]
-            # Start with parameters from subckt line
-            params = [LSymbol(p.name) for p in stmt.parameters]
+            # Start with parameters from subckt line, capturing simple-constant
+            # defaults so they survive into the model's props.
+            params = Tuple{Symbol,Union{String,Nothing}}[(LSymbol(p.name), simple_const_default(p)) for p in stmt.parameters]
             # Add parameters from .param statements inside subcircuit
             extract_subckt_params!(stmt, params)
             # Use fullcontents to capture preceding comments
@@ -363,7 +364,7 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
                 continue
             end
             ports = [LSymbol(node) for node in stmt.subckt_nodes.nodes]
-            params = Symbol[]
+            params = Tuple{Symbol,Union{String,Nothing}}[]
             # Add parameters from .param statements inside subcircuit
             extract_subckt_params!(stmt, params)
             # Use fullcontents to capture preceding comments
@@ -374,15 +375,25 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
     return models, subcircuits
 end
 
+# nothing → no usable default; else the literal's source text (e.g. "0.35u").
+# A "simple constant" is exactly a numeric literal node — SI suffixes are part of
+# the number token. Identifiers, {brace} expressions, binary expressions and
+# function calls are not simple constants, so their defaults are omitted (the
+# subckt's own definition supplies them at netlist time).
+simple_const_default(par) =
+    (par.val !== nothing &&
+     (par.val isa SNode{SP.NumberLiteral} || par.val isa SNode{SC.NumberLiteral})) ?
+        String(par.val) : nothing
+
 function extract_subckt_params!(subckt, params)
     for stmt in subckt.stmts
         if isa(stmt, SNode{SP.ParamStatement})
             for par in stmt.params
-                push!(params, LSymbol(par.name))
+                push!(params, (LSymbol(par.name), simple_const_default(par)))
             end
         elseif isa(stmt, SNode{SC.Parameters})
             for par in stmt.params
-                push!(params, LSymbol(par.name))
+                push!(params, (LSymbol(par.name), simple_const_default(par)))
             end
         end
     end
@@ -511,8 +522,14 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
                 "models" => build_spice_models(name, "SUBCKT";
                     code=code, mode=mode, archive_url=archive_url, file_path=source_file,
                     lib_sections=lib_sections, port_order=ports, target_simulators=target_simulators),
-                # Convert parameter names to props format
-                "props" => [Dict{String, Any}("name" => string(param), "tooltip" => "") for param in parameters]
+                # Convert parameters to props format. Every param stays editable
+                # in the UI; a "default" is recorded only for simple constants.
+                "props" => [begin
+                              d = Dict{String, Any}("name" => string(name), "tooltip" => "")
+                              default === nothing || (d["default"] = default)
+                              d
+                            end
+                            for (name, default) in parameters]
             )
 
             push!(result, model_def)
