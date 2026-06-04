@@ -76,7 +76,7 @@ function (@main)(ARGS)
 
         ArchiveConfig(
             "https://nyancad.com/gh/fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pr/archive/refs/heads/main.zip",
-            ["globalfoundries-pdk-libs-gf180mcu_fd_pr-main/models/ngspice/sm141064.ngspice"],
+            ["globalfoundries-pdk-libs-gf180mcu_fd_pr-main/models/ngspice/sm141064.spice"],
             ["GF180MCU"],
             :lib; # FOSSi but large
             lib_sections=["typical"]

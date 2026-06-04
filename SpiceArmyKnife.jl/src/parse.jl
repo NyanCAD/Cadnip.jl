@@ -717,9 +717,12 @@ function process_archive(config::ArchiveConfig)
         # Use p7zip to extract
         p7zip_exe = p7zip_jll.p7zip_path
 
-        try
-            println("Extracting archive...")
-            run(`$p7zip_exe x $archive_file -o$extract_dir -y`)
+        println("Extracting archive...")
+        p7zip_proc = run(ignorestatus(`$p7zip_exe x $archive_file -o$extract_dir -y`))
+
+        # 7zip may exit non-zero for warnings (e.g. skipped symlinks) even
+        # when all real files extracted fine.  Check for actual content.
+        if p7zip_proc.exitcode == 0 || !isempty(readdir(extract_dir))
             is_archive = true
 
             # Archive extraction succeeded - find files to process
@@ -748,8 +751,7 @@ function process_archive(config::ArchiveConfig)
                     end
                 end
             end
-
-        catch ProcessFailedException
+        else
             # Not an archive - treat downloaded file as single SPICE file
             println("Not an archive, processing as bare SPICE file")
             push!(matching_files, archive_file => basename(config.url))
