@@ -76,7 +76,7 @@ function (@main)(ARGS)
 
         ArchiveConfig(
             "https://nyancad.com/gh/fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pr/archive/refs/heads/main.zip",
-            ["globalfoundries-pdk-libs-gf180mcu_fd_pr-main/models/ngspice/sm141064.ngspice"],
+            ["globalfoundries-pdk-libs-gf180mcu_fd_pr-main/models/ngspice/sm141064.spice"],
             ["GF180MCU"],
             :lib; # FOSSi but large
             lib_sections=["typical"]
@@ -173,7 +173,7 @@ function (@main)(ARGS)
     println("\nSample models:")
     for model in first(all_models, min(3, length(all_models)))
         println("  - $(model["name"]) ($(model["type"]))")
-        println("    Category: $(join(model["category"], " / "))")
+        println("    Tags: $(join(get(model, "tags", String[]), " / "))")
         println("    ID: $(model["_id"])")
     end
     
@@ -209,6 +209,34 @@ function upload_to_couchdb(models, chunk_size=100)
     )
     
     try
+        # Back up shared state that does NOT come from this generator before we
+        # nuke the database: the compiled ClojureScript `name_search` view +
+        # Mango index (deployed by Mosaic CI) and the public read/write security
+        # object. The delete+recreate is intentional (it leaves no tombstones,
+        # so re-downloading a removed model is a harmless no-op and an upstream
+        # change can never clobber a user's locally-edited copy) — but it must
+        # not take these non-data documents down with it. The backup is a live
+        # GET taken immediately before DELETE, so Mosaic CI remains the source
+        # of truth for the design doc and no staleness is reintroduced here.
+        design = nothing
+        try
+            response = HTTP.get("$url/models/_design/models", headers)
+            design = JSON.parse(String(response.body))
+            delete!(design, "_rev")  # drop rev so the restore creates a fresh rev 1
+            println("Backed up _design/models")
+        catch
+            println("Note: no existing _design/models to back up")
+        end
+
+        sec = nothing
+        try
+            response = HTTP.get("$url/models/_security", headers)
+            sec = JSON.parse(String(response.body))
+            println("Backed up _security")
+        catch
+            println("Note: no existing _security to back up")
+        end
+
         # Delete existing database
         try
             HTTP.delete("$url/models", headers)
@@ -220,6 +248,17 @@ function upload_to_couchdb(models, chunk_size=100)
         # Create fresh database
         HTTP.put("$url/models", headers)
         println("Created fresh 'models' database")
+
+        # Restore the preserved non-data documents into the fresh database
+        if sec !== nothing && !isempty(sec)
+            HTTP.put("$url/models/_security", headers, JSON.json(sec))
+            println("Restored _security")
+        end
+        if design !== nothing
+            # No _rev ⇒ creates rev 1; the view index rebuilds lazily on first query
+            HTTP.put("$url/models/_design/models", headers, JSON.json(design))
+            println("Restored _design/models")
+        end
 
         # Upload in chunks
         total_uploaded = 0
