@@ -433,7 +433,7 @@ end  # testset "Audio Integration Tests"
 # REQUIREMENTS for zero allocation:
 # 1. Dense matrices (dense=true) - Sparse UMFPACK lu! allocates ~1696 bytes/call
 # 2. blind_step!() wrapper - step!() returns ReturnCode causing 16 bytes boxing
-# 3. autodiff=false - Use explicit Jacobian from MNA
+# 3. Explicit Jacobian from MNA (autodiff=AutoFiniteDiff() to suppress ForwardDiff)
 #
 # ZERO-ALLOCATION SOLVERS (with adaptive=true):
 # - QNDF (variable-order quasi-constant BDF, recommended)
@@ -447,7 +447,7 @@ end  # testset "Audio Integration Tests"
 # - TRBDF2, KenCarp4
 #==============================================================================#
 
-using OrdinaryDiffEq: QNDF
+using OrdinaryDiffEqBDF: QNDF
 
 """
 Helper function to measure allocations correctly.
@@ -503,7 +503,7 @@ end
         prob = ODEProblem(circuit, (0.0, 1e-6); dense=true)
 
         # QNDF achieves zero allocation even with adaptive=true
-        integrator = init(prob, QNDF(autodiff=false);
+        integrator = init(prob, QNDF();
             adaptive=true,
             dt=1e-9,
             save_on=false,

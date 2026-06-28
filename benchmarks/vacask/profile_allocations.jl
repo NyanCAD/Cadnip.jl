@@ -193,13 +193,13 @@ function profile_solver_allocations()
     # FBDF
     print("  FBDF:    ")
     GC.gc()
-    stats_fbdf = @timed tran!(rc_circ, 10e-3; solver=FBDF(autodiff=false))
+    stats_fbdf = @timed tran!(rc_circ, 10e-3; solver=FBDF(autodiff=AutoFiniteDiff()))
     @printf("%.1f MB, %.2f sec\n", stats_fbdf.bytes / 1e6, stats_fbdf.time)
 
     # Rodas5P
     print("  Rodas5P: ")
     GC.gc()
-    stats_rodas = @timed tran!(rc_circ, 10e-3; solver=Rodas5P(autodiff=false))
+    stats_rodas = @timed tran!(rc_circ, 10e-3; solver=Rodas5P(autodiff=AutoFiniteDiff()))
     @printf("%.1f MB, %.2f sec\n", stats_rodas.bytes / 1e6, stats_rodas.time)
 
     println("\n--- Analysis ---")

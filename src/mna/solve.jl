@@ -1727,7 +1727,10 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     )
 
     # Pass workspace as p parameter
-    return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws; kwargs...)
+    # Default to ShampineCollocationInit for mass matrix initialization (OrdinaryDiffEq v7+
+    # broke BrownFullBasicInit for mass-matrix ODEs)
+    return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws;
+                                initializealg=DiffEqBase.ShampineCollocationInit(), kwargs...)
 end
 
 """

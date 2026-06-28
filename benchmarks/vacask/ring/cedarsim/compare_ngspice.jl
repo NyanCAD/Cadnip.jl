@@ -20,7 +20,8 @@
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: CedarTranOp, nameat
-using OrdinaryDiffEq: FBDF
+using OrdinaryDiffEqBDF: FBDF
+using ADTypes: AutoFiniteDiff
 using SciMLBase
 using Printf
 using VACASKModels
@@ -40,7 +41,7 @@ sys = MNA.assemble!(circuit)
 
 t0 = time()
 sol = tran!(circuit, (0.0, 1e-6);
-    solver=FBDF(autodiff=false), dtmax=0.05e-9,
+    solver=FBDF(autodiff=AutoFiniteDiff()), dtmax=0.05e-9,
     initializealg=CedarTranOp(), maxiters=100_000_000, dense=false,
     force_dtmin=true, abstol=1e-4, reltol=1e-2,
     unstable_check=(dt,u,p,t)->false)

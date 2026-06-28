@@ -566,7 +566,7 @@ end
 # Default initializealg is CedarTranOp which:
 # 1. Switches to :tranop mode (evaluates transient sources at t=0)
 # 2. Solves DC steady state with robust nonlinear solver
-# 3. Uses BrownFullBasicInit to fix differential vars
+# 3. Uses ShampineCollocationInit for final consistency
 # This matches SPICE behavior where transient initialization evaluates sources at t=0.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;

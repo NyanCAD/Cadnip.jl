@@ -16,7 +16,8 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, ImplicitEuler
+using OrdinaryDiffEqBDF: FBDF
+using OrdinaryDiffEqSDIRK: ImplicitEuler
 using LinearSolve: KLUFactorization, LUFactorization
 
 using Cadnip

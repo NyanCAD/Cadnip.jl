@@ -7,6 +7,7 @@ using Cadnip.MNA: make_ode_problem
 using Cadnip.MNA: VoltageSource, Capacitor, MNACircuit
 using Cadnip: dc!
 using OrdinaryDiffEq
+using DiffEqBase: BrownFullBasicInit
 using LinearSolve: KLUFactorization
 using Test
 
@@ -63,7 +64,8 @@ endmodule
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                                     initializealg=BrownFullBasicInit())
 
     # At t=0, V_out = 0
     @test isapprox(sol_tran.u[1][out_idx], 0.0; atol=1e-6)
@@ -132,7 +134,8 @@ endmodule
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+    sol_tran = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                                     initializealg=BrownFullBasicInit())
 
     # Current through resistor should still be non-negative
     # (The reversed I(n,p) <+ V(n,p)/R is mathematically equivalent)

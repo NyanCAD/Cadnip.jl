@@ -21,7 +21,8 @@ using Cadnip.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using Cadnip.MNA: MNACircuit
 using Cadnip.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
-using OrdinaryDiffEq: QNDF, Rodas5P
+using OrdinaryDiffEq: Rodas5P
+using OrdinaryDiffEqBDF: QNDF
 using Sundials: IDA
 using LinearSolve: KLUFactorization
 using SciMLBase

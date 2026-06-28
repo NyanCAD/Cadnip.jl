@@ -18,6 +18,7 @@ using Cadnip.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using Cadnip.MNA: VoltageSource, CurrentSource, Resistor
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
+using DiffEqBase: BrownFullBasicInit
 using LinearSolve: KLUFactorization
 
 const deftol = 1e-6
@@ -309,7 +310,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                         jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
         prob = ODEProblem(f, u0, prob_data.tspan)
-        sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-9)
+        sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-9,
+                                   initializealg=BrownFullBasicInit())
 
         # Check that gate charges to ~2V with RC time constant behavior
         # At t=0: Vg = 0
