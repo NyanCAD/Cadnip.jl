@@ -48,8 +48,18 @@ Per case, the golden reference is the most accurate one available:
   exist they are cross-checked against each other (printed as `analytic vs
   VACASK-tight`).
 
-Error is the relative L2 (RMS) norm of the output node, sampled on a common time
-grid (SciML `error_estimate = :l2`).
+Error is the relative L2 (RMS) norm of the output node (SciML `error_estimate =
+:l2`), evaluated at **each run's own output timepoints** against the *dense*
+reference (analytic: 200k pts; VACASK-tight: ~100k pts). Measuring at native points
+matters: a high-order solver takes large steps and emits few points, so
+interpolating *its* output onto a fixed grid would penalise it for the
+interpolation rather than its real accuracy. Interpolating the dense reference onto
+the run's points instead is accurate and fair.
+
+**VACASK is run at its best, not its default.** VACASK defaults to trapezoidal
+(2nd order); the benchmark sets `tran_method="gear" tran_maxord=5` so it uses its
+variable-order Gear/BDF (up to 5th order) — configurable via `vacask_tran_method` /
+`vacask_tran_maxord` in `config.json`.
 
 ## Circuits
 

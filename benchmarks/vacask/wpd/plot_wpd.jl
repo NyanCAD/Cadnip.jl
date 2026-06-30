@@ -90,42 +90,42 @@ end
 #------------------------------------------------------------------------------#
 # Per-case processing
 #------------------------------------------------------------------------------#
-function load_golden(case, spec, grid, reltols)
+# Returns the DENSE reference as raw (t, v) arrays plus a label. The reference is
+# kept dense (analytic: 200k pts; VACASK-tight: ~100k pts) so it can be
+# interpolated accurately onto any solver's *own* timepoints - that way a
+# high-order solver taking large steps is not penalised by interpolation of its
+# own (sparse) output.
+function load_golden(case, spec, reltols)
     anap = joinpath(OUT, "analytic_$(case).csv")
-    # Prefer the exact analytic solution when the case has one (no reference
-    # floor); otherwise use the tight VACASK run (the mature simulator).
     if get(spec, "analytic", false) && isfile(anap)
-        t, v = read_wave(anap)
-        return interp_to(t, v, grid), "analytic (exact)"
+        return read_wave(anap)..., "analytic (exact)"
     end
     refp = joinpath(OUT, "ref_$(case).csv")
     if isfile(refp)
-        t, v = read_wave(refp)
-        return interp_to(t, v, grid), "VACASK (tight)"
+        return read_wave(refp)..., "VACASK (tight)"
     end
     if isfile(anap)
-        t, v = read_wave(anap)
-        return interp_to(t, v, grid), "analytic"
+        return read_wave(anap)..., "analytic"
     end
     for r in sort(reltols), s in ("Rodas5P", "FBDF", "IDA")
         p = joinpath(OUT, "cadnip_$(case)_$(s)_$(reltol_tag(r)).csv")
-        if isfile(p)
-            t, v = read_wave(p)
-            return interp_to(t, v, grid), "Cadnip $s @ $(reltol_tag(r))"
-        end
+        isfile(p) && return read_wave(p)..., "Cadnip $s @ $(reltol_tag(r))"
     end
-    return nothing, ""
+    return nothing, nothing, ""
+end
+
+"Relative-L2 error of run waveform (rt,rv) vs the dense reference (gt,gv), evaluated at the run's OWN points."
+function run_error(rt, rv, gt, gv)
+    ref = interp_to(gt, gv, rt)
+    return sqrt(mean((rv .- ref) .^ 2)) / sqrt(mean(ref .^ 2))
 end
 
 function process_case(case)
     spec = CFG["cases"][case]
-    tspan = (Float64(spec["tspan"][1]), Float64(spec["tspan"][2]))
-    n_grid = Int(CFG["n_grid"])
-    grid = collect(range(tspan[1], tspan[2]; length=n_grid))
     reltols = Float64.(CFG["reltols"])
 
-    golden, gsrc = load_golden(case, spec, grid, reltols)
-    golden === nothing && (@warn "no golden for $case; skipping"; return nothing)
+    gt, gv, gsrc = load_golden(case, spec, reltols)
+    gt === nothing && (@warn "no golden for $case; skipping"; return nothing)
     println("$case: golden = $gsrc")
 
     # Cross-check the analytic solution against the tight VACASK run when both
@@ -135,13 +135,13 @@ function process_case(case)
     if isfile(anap) && isfile(refp)
         ta, va = read_wave(anap); tr, vr = read_wave(refp)
         @printf("  analytic vs VACASK-tight cross-check: rel-L2 = %.2e\n",
-                rel_l2(interp_to(tr, vr, grid), interp_to(ta, va, grid)))
+                run_error(tr, vr, ta, va))
     end
 
     curves = Dict{String,Vector{Tuple{Float64,Float64}}}()  # label -> (err,time)
     table = Tuple{String,Float64,Float64,Float64}[]          # (sim,reltol,err,time)
 
-    # Cadnip
+    # Each run's error is measured at its OWN timepoints vs the dense reference.
     cpath = joinpath(OUT, "cadnip_$(case).csv")
     if isfile(cpath)
         rows, _ = read_table(cpath)
@@ -151,7 +151,7 @@ function process_case(case)
             wp = joinpath(OUT, "cadnip_$(case)_$(solver)_$(reltol_tag(r)).csv")
             isfile(wp) || continue
             tw, vw = read_wave(wp)
-            err = rel_l2(interp_to(tw, vw, grid), golden)
+            err = run_error(tw, vw, gt, gv)
             label = "Cadnip $solver"
             if isfinite(err) && t !== nothing && isfinite(t)
                 push!(get!(curves, label, Tuple{Float64,Float64}[]), (err, t))
@@ -160,7 +160,6 @@ function process_case(case)
         end
     end
 
-    # VACASK
     vpath = joinpath(OUT, "vacask_$(case).csv")
     if isfile(vpath)
         rows, _ = read_table(vpath)
@@ -169,7 +168,7 @@ function process_case(case)
             wp = joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv")
             isfile(wp) || continue
             tw, vw = read_wave(wp)
-            err = rel_l2(interp_to(tw, vw, grid), golden)
+            err = run_error(tw, vw, gt, gv)
             if isfinite(err) && t !== nothing && isfinite(t)
                 push!(get!(curves, "VACASK", Tuple{Float64,Float64}[]), (err, t))
             end

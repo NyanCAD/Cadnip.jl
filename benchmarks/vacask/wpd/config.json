@@ -9,7 +9,13 @@
   "ref_abstol": 1e-7,
   "ref_maxstep_factor": 50,
 
+  "_vacask_integration_comment": "VACASK defaults to trapezoidal (2nd order). Use its variable-order Gear/BDF (up to 5th order) so VACASK is benchmarked at its best, not artificially limited to 2nd order.",
+  "vacask_tran_method": "gear",
+  "vacask_tran_maxord": 5,
+
   "n_grid": 2000,
+
+  "_rc_comment": "rc tspan is one pulse period only (pulse rises at t=1us, high for 1ms). Cadnip's PULSE source does not repeat (the 'period' parameter is ignored - it fires once then stays at val0), so the window is limited to the first pulse where Cadnip and VACASK agree. This still exercises adaptive discontinuity handling at the two sharp edges. Widen once the Cadnip pulse-repetition bug is fixed.",
 
   "cases": {
     "filter": {
@@ -19,7 +25,6 @@
       "linear": true,
       "analytic": true
     },
-    "_rc_comment": "tspan is one pulse period only (the pulse rises at t=1us, high for 1ms). Cadnip's PULSE source does not repeat (the 'period' parameter is ignored - it fires once then stays at val0), so the window is limited to the first pulse where Cadnip and VACASK agree. This still exercises adaptive discontinuity handling at the two sharp edges. Widen once the Cadnip pulse-repetition bug is fixed.",
     "rc": {
       "title": "RC circuit, single pulse step response (linear)",
       "tspan": [0.0, 0.002],

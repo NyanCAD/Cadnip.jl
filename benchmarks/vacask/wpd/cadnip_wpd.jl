@@ -172,10 +172,12 @@ function run_case(case::String)
     idxs = [node_index(builder, n) for n in out_nodes]
     tstops = case_tstops(case, (t0, t1))
 
-    # Analytic cross-check waveform on the grid (linear cases only).
+    # Analytic reference, written DENSELY (not on the 2000-pt grid) so the plot
+    # stage can interpolate it accurately onto any solver's native timepoints.
     if get(spec, "analytic", false) && haskey(ANALYTIC, case)
         f = ANALYTIC[case]
-        write_wave(joinpath(OUT, "analytic_$(case).csv"), grid, f.(grid))
+        fine = collect(range(t0, t1; length=200_000))
+        write_wave(joinpath(OUT, "analytic_$(case).csv"), fine, f.(fine))
     end
 
     summary = open(joinpath(OUT, "cadnip_$(case).csv"), "w")

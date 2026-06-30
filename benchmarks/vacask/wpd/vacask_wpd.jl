@@ -41,6 +41,11 @@ const CFG = load_config()
 
 const VACASK_REPEATS = parse(Int, get(ENV, "WPD_VACASK_REPEATS", "3"))
 
+# VACASK defaults to trapezoidal (2nd order); use its variable-order Gear/BDF so
+# it is benchmarked at its best rather than limited to 2nd order.
+const VTRAN_METHOD = String(get(CFG, "vacask_tran_method", "gear"))
+const VTRAN_MAXORD = Int(get(CFG, "vacask_tran_maxord", 5))
+
 #------------------------------------------------------------------------------#
 # Locate the VACASK binary (mirrors run_vacask.sh's cache layout)
 #------------------------------------------------------------------------------#
@@ -180,7 +185,7 @@ function run_vacask_once(case, reltol, vntol, tspan, n_grid, out_nodes; maxstep=
     step = (tspan[2] - tspan[1]) / n_grid
     sim = sim_body(case) * """
     control
-      options reltol=$(reltol) vntol=$(vntol)
+      options reltol=$(reltol) vntol=$(vntol) tran_method="$(VTRAN_METHOD)" tran_maxord=$(VTRAN_MAXORD)
       analysis tran1 tran step=$(step) stop=$(tspan[2]) maxstep=$(maxstep)
       print stats
     endc
