@@ -37,7 +37,9 @@ using Cadnip.MNA: nameat
 using Cadnip
 using Cadnip: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
 using Cadnip.MNA: MNACircuit, MNASpec, CedarUICOp
-using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+using OrdinaryDiffEq: Rodas5P, FBDF
+using OrdinaryDiffEqBDF: QNDF
+using DiffEqBase: BrownFullBasicInit
 using LinearSolve: KLUFactorization
 import Sundials
 using NyanVerilogAParser
@@ -860,7 +862,8 @@ using NyanVerilogAParser
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
         # Solve with stiff solver (Rodas5 handles mass matrices well)
-        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                    initializealg=BrownFullBasicInit())
 
         @test sol.retcode == ReturnCode.Success
 
@@ -980,7 +983,8 @@ using NyanVerilogAParser
                         jac_prototype = prob_data.jac_prototype)
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
-        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                   initializealg=BrownFullBasicInit())
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1056,7 +1060,8 @@ using NyanVerilogAParser
                         jac_prototype = prob_data.jac_prototype)
         prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
 
-        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                    initializealg=BrownFullBasicInit())
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1075,7 +1080,6 @@ using NyanVerilogAParser
     @testset "Transient - Comparison ODE vs DAE" begin
         using OrdinaryDiffEq
         using Sundials
-        using DiffEqBase: BrownFullBasicInit
 
         # Solve the same RC circuit with both methods and compare
         Vcc = 3.3
@@ -1108,7 +1112,8 @@ using NyanVerilogAParser
                             jac = prob_ode.jac,
                             jac_prototype = prob_ode.jac_prototype)
         ode_prob = ODEProblem(f_ode, prob_ode.u0, prob_ode.tspan)
-        sol_ode = solve(ode_prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-10, abstol=1e-12)
+        sol_ode = solve(ode_prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-10, abstol=1e-12,
+                        initializealg=BrownFullBasicInit())
 
         # Solve with DAE using Brown's initialization
         dae_data = make_dae_problem(sys, tspan; u0=u0)
@@ -1250,7 +1255,8 @@ using NyanVerilogAParser
                         jac = ode_data.jac,
                         jac_prototype = ode_data.jac_prototype)
         prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
-        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                   initializealg=BrownFullBasicInit())
 
         @test sol.retcode == ReturnCode.Success
 
@@ -1493,7 +1499,8 @@ using NyanVerilogAParser
 
         ode_fn = ODEFunction(f!; mass_matrix=M, jac=jac!, jac_prototype=jac_proto)
         prob = ODEProblem(ode_fn, u0, tspan)
-        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10)
+        sol = solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-8, abstol=1e-10,
+                    initializealg=BrownFullBasicInit())
 
         @test sol.retcode == ReturnCode.Success
 

@@ -14,7 +14,8 @@
 using Cadnip
 using Cadnip.MNA
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, Rodas5P
+using OrdinaryDiffEqBDF: FBDF
+using OrdinaryDiffEqRosenbrock: Rodas5P
 using BenchmarkTools
 using Printf
 

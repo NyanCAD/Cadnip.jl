@@ -14,7 +14,8 @@
 using Accessors: @set
 using OrdinaryDiffEq
 using OrdinaryDiffEq.OrdinaryDiffEqCore: ODEIntegrator
-using OrdinaryDiffEq: BrownFullBasicInit, CheckInit, NoInit, DImplicitEuler
+using OrdinaryDiffEqSDIRK: ImplicitEuler
+using DiffEqBase: CheckInit, NoInit, ShampineCollocationInit
 using DelayDiffEq
 using LinearAlgebra
 using NonlinearSolve
@@ -31,8 +32,8 @@ export CedarDCOp, CedarTranOp, CedarUICOp
 
 Initialization algorithm for MNA circuits that:
 1. For Sundials IDA: Switches to :dcop mode, solves DC steady state with
-   robust nonlinear solver, then calls DefaultInit (CheckInit) or ShampineCollocationInit
-2. For OrdinaryDiffEq: Same DC solve followed by DefaultInit or ShampineCollocationInit
+   robust nonlinear solver, then calls DefaultInit or ShampineCollocationInit
+2. For OrdinaryDiffEq: Same DC solve followed by ShampineCollocationInit
 
 This is the recommended initialization algorithm for circuits with nonlinear
 devices (diodes, MOSFETs, voltage-dependent capacitors).
@@ -43,9 +44,9 @@ devices (diodes, MOSFETs, voltage-dependent capacitors).
   nodes (like BJT excess phase) may need more iterations to converge at tight
   tolerances.
 - `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
-- `use_shampine`: Use ShampineCollocationInit after DC solve (default: false).
-  This can help oscillators where DC solve gets close but doesn't fully satisfy
-  the DAE constraints - Shampine takes a small step to find a consistent state.
+- `use_shampine`: Use ShampineCollocationInit for Sundials IDA final consistency
+  (default: false). ODE solvers always use ShampineCollocationInit since
+  BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
 - `use_stepping`: Enable ngspice-style fallback chain (default: true).
   If regular solve fails, tries GMIN stepping (gshunt homotopy) then
   source stepping (srcFact homotopy) for robust convergence.
@@ -206,7 +207,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -254,14 +255,9 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
         integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
     end
 
-    # Use Shampine or DefaultInit for final consistency
-    if alg.use_shampine
-        # ShampineCollocationInit takes a small step to find consistent state
-        # Good for oscillators where DC solve gets close but doesn't fully converge
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
-    else
-        return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
-    end
+    # ShampineCollocationInit takes a small step to find consistent state.
+    # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
 end
 
 #==============================================================================#
@@ -339,7 +335,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     # Use ImplicitEuler for warmup (backward Euler for relaxation)
     # force_dtmin=true lets it march through even if Newton struggles
     # NoInit skips initialization - we start from zeros intentionally
-    warmup_int = init(warmup_prob, ImplicitEuler();
+    warmup_int = init(warmup_prob, ImplicitEuler(autodiff=ADTypes.AutoFiniteDiff());
                       adaptive=false, dt=alg.dt, force_dtmin=true,
                       initializealg=NoInit())
 
@@ -359,7 +355,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         # Good for oscillators where we need to refine the approximated derivatives
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -376,7 +372,7 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     # Use NoInit for the warmup phase - we're intentionally starting from
     # potentially inconsistent initial conditions and letting the solver relax them
     # force_dtmin=true lets it march through even if Newton struggles
-    warmup_int = init(warmup_prob, ImplicitEuler();
+    warmup_int = init(warmup_prob, ImplicitEuler(autodiff=ADTypes.AutoFiniteDiff());
                       adaptive=false, dt=alg.dt, force_dtmin=true,
                       initializealg=NoInit())
 
@@ -387,11 +383,7 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     # For mass matrix ODE, we use the finite difference from the last step as du estimate
     integrator.u .= warmup_int.u
 
-    # Apply final consistency: Shampine or DefaultInit
-    if alg.use_shampine
-        # ShampineCollocationInit takes a small step and adjusts both u and du
-        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
-    else
-        return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
-    end
+    # ShampineCollocationInit takes a small step and adjusts both u and du.
+    # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
 end

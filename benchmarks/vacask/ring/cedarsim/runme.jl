@@ -12,7 +12,8 @@
 using Cadnip
 using Cadnip.MNA
 using Cadnip.MNA: CedarTranOp
-using OrdinaryDiffEq: FBDF
+using OrdinaryDiffEqBDF: FBDF
+using ADTypes: AutoFiniteDiff
 using SciMLBase
 using BenchmarkTools
 using Printf
@@ -94,6 +95,6 @@ end
 
 # Run if executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
-    solver = FBDF(autodiff=false)
+    solver = FBDF(autodiff=AutoFiniteDiff())
     run_benchmark(solver)
 end

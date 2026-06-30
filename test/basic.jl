@@ -5,6 +5,7 @@ include("common.jl")
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using Cadnip.MNA: make_ode_problem
+using DiffEqBase: BrownFullBasicInit
 
 #=
 NOTE: Tests that require DAECompiler are skipped:
@@ -118,7 +119,8 @@ const c_val = 1e-6
     f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
                     jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
     prob = ODEProblem(f, u0, prob_data.tspan)
-    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=deftol, abstol=deftol)
+    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=deftol, abstol=deftol,
+                               initializealg=BrownFullBasicInit())
 
     # At t=0, capacitor voltage should be 0
     # At t=10τ, capacitor voltage approaches v_val (within ~0.005%)

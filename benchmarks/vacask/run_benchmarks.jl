@@ -20,7 +20,10 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: ABDF2, FBDF, Rodas3, ImplicitEuler
+using OrdinaryDiffEqBDF: ABDF2, FBDF
+using OrdinaryDiffEqRosenbrock: Rodas3
+using OrdinaryDiffEqSDIRK: ImplicitEuler
+using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
@@ -29,12 +32,12 @@ const BENCHMARK_DIR = @__DIR__
 # Based on benchmarks: ABDF2 is fastest BDF, Rodas3 is fastest Rosenbrock
 # All use KLU sparse solver (3-4x faster than dense LU for these circuits)
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
-const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization()))
-const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization()))
-const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization()))
+const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
 # Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
-const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=false))
+const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 
 # Per-benchmark solver configurations
 # RC Circuit (linear): ImplicitEuler 2.6x faster than IDA (1.0s vs 2.6s)
