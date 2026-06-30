@@ -1,0 +1,35 @@
+{
+  "_comment": "Shared work-precision-diagram config, read by cadnip_wpd.jl (Julia) and run_wpd.py (Python/InSpice). Keep grid/tspan/sweep identical across both so Cadnip and VACASK are compared on the same time grid against the same golden reference.",
+
+  "reltols": [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9],
+  "abstol_scale": 1.0,
+
+  "ref_reltol": 1e-11,
+  "ref_abstol": 1e-12,
+
+  "n_grid": 2000,
+
+  "cases": {
+    "filter": {
+      "title": "3rd-order Butterworth LC filter (linear, analytic)",
+      "tspan": [0.0, 100.0],
+      "output": ["vout"],
+      "linear": true,
+      "analytic": true
+    },
+    "graetz": {
+      "title": "Graetz bridge full-wave rectifier (nonlinear)",
+      "tspan": [0.0, 0.1],
+      "output": ["outp", "outn"],
+      "linear": false,
+      "analytic": false
+    },
+    "mul": {
+      "title": "Diode voltage multiplier (nonlinear, stiffer)",
+      "tspan": [0.0, 5e-4],
+      "output": ["20"],
+      "linear": false,
+      "analytic": false
+    }
+  }
+}
