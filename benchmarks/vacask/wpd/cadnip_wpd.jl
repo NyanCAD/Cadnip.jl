@@ -57,12 +57,10 @@ const CFG = JSON.parsefile(joinpath(HERE, "config.json"))
 # Circuit builders (top-level so dispatch to the freshly-defined builders is OK)
 #------------------------------------------------------------------------------#
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "graetz", "cedarsim", "runme.sp"); name=:graetz_circuit))
-Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "mul", "cedarsim", "runme.sp"); name=:mul_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(HERE, "filter.sp"); name=:filter_circuit))
 
 const BUILDERS = Dict(
     "graetz" => graetz_circuit,
-    "mul"    => mul_circuit,
     "filter" => filter_circuit,
 )
 
@@ -202,7 +200,7 @@ function main()
         run_case(String(case))
     end
     println("\nCadnip waveforms + summaries written to $OUT")
-    println("Now run: python3 $(joinpath(HERE, "run_wpd.py"))")
+    println("Next: vacask_wpd.jl (VACASK sweep), then plot_wpd.jl (diagrams).")
 end
 
 main()

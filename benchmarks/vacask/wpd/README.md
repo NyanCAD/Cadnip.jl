@@ -13,6 +13,44 @@ methodology. A higher-order BDF/Rosenbrock method that takes big accurate steps
 should sit *below* a simple low-order method at tight tolerance; that separation is
 exactly what the throughput benchmark hides.
 
+It is pure Julia: Cadnip runs in-process, VACASK is shelled out to (its SPICE3 raw
+output is parsed directly), and plotting is done with Plots.jl. No Python.
+
+## Pipeline (three stages)
+
+```bash
+# (sandbox: use ~/.juliaup/bin/julia, Julia 1.11)
+
+# 0. one-time: fetch the VACASK binary (downloads the pinned release into the cache)
+CASES="" benchmarks/vacask/run_vacask.sh        # or set $VACASK_COMMAND yourself
+
+# 1. Cadnip sweep -> out/cadnip_*.csv (waveforms) + out/cadnip_<case>.csv (timing)
+julia --project=benchmarks benchmarks/vacask/wpd/cadnip_wpd.jl
+
+# 2. VACASK sweep + golden -> out/vacask_*.csv, out/ref_<case>.csv
+julia --project=benchmarks benchmarks/vacask/wpd/vacask_wpd.jl
+
+# 3. errors + diagrams -> plots/<case>.png/.svg, out/wpd_results.md
+julia --project=benchmarks benchmarks/vacask/wpd/plot_wpd.jl
+```
+
+Pass case names to any stage to restrict it, e.g. `... cadnip_wpd.jl filter`.
+
+## Precision / golden reference
+
+Per case, the golden reference is the most accurate one available:
+
+- **Analytic** closed-form solution when the circuit has one (the linear filter).
+  Exact, so it never floors the tightest runs.
+- Otherwise a **tight VACASK run** (the more mature simulator), using a moderately
+  tight `reltol` with a *fine* `maxstep` so the trajectory is accurate without
+  tripping VACASK's min-timestep abort. When both an analytic and a VACASK golden
+  exist they are cross-checked against each other (printed as `analytic vs
+  VACASK-tight`).
+
+Error is the relative L2 (RMS) norm of the output node, sampled on a common time
+grid (SciML `error_estimate = :l2`).
+
 ## Circuits
 
 Chosen to be **driven and dissipative** with a stable forced response, so error
@@ -20,67 +58,41 @@ degrades gracefully with tolerance. Autonomous/digital circuits (ring oscillator
 digital multiplier) are deliberately avoided: their phase error accumulates without
 bound, so the WPD curve saturates at O(1) and "falls off a cliff".
 
-| Case     | What                                   | Reference        |
-|----------|----------------------------------------|------------------|
-| `filter` | 3rd-order Butterworth LC ladder (linear) | closed-form analytic |
-| `graetz` | Graetz bridge full-wave rectifier      | VACASK (tight)   |
-| `mul`    | Diode voltage multiplier (stiffer)     | VACASK (tight)   |
+| Case     | What                                     | Reference | Status |
+|----------|------------------------------------------|-----------|--------|
+| `filter` | 3rd-order Butterworth LC ladder (linear) | analytic  | active |
+| `graetz` | Graetz bridge full-wave rectifier        | VACASK    | disabled — see below |
 
-The circuits mirror the existing `<case>/cedarsim/runme.sp` netlists so Cadnip and
-VACASK simulate the *same* problem.
+### Why graetz (and the diode multiplier) are disabled
 
-## Precision / golden reference
+These nonlinear cases are wired up end-to-end (Cadnip builder, VACASK netlist,
+sweep), but they are **disabled in `config.json`** (`_disabled_cases`) because
+**Cadnip's SPICE diode model does not currently conduct**: a single diode reads as
+an open circuit in DC (`5 V` through `1 kΩ` into a diode to ground leaves the node
+at `5 V`), and the rectified output of the bridge is identically `0`. VACASK
+simulates the same netlists correctly. The existing throughput benchmarks never
+check output values, so this had gone unnoticed.
 
-VACASK is the more mature simulator, so a **tight-tolerance VACASK run**
-(`ref_reltol`/`ref_abstol` in `config.json`) is the golden reference. The output
-node is sampled on a common time grid, and error is the relative L2 (RMS) norm of
-every swept run against that single golden. For the linear filter the closed-form
-solution is carried alongside as an independent check that the golden is itself
-correct (printed as a `golden vs analytic` cross-check).
-
-If the VACASK binary / InSpice-VACASK backend is unavailable, the harness degrades
-gracefully: it falls back to the analytic golden (linear) or the tightest Cadnip
-run (nonlinear) and plots Cadnip-only curves.
-
-## Running
-
-Two steps. First the Cadnip side (Julia), then the VACASK side + plots (Python).
-
-```bash
-# 1. Cadnip waveforms + timing (writes wpd/out/*.csv)
-julia --project=benchmarks benchmarks/vacask/wpd/cadnip_wpd.jl
-#    (sandbox: ~/.juliaup/bin/julia, Julia 1.11)
-
-# 2. VACASK sweep + work-precision diagrams (writes wpd/plots/*.png and wpd/out/wpd_results.md)
-pip install -r benchmarks/vacask/wpd/requirements.txt
-python3 benchmarks/vacask/wpd/run_wpd.py
-```
-
-Run a single case by name, e.g. `... cadnip_wpd.jl graetz` and `... run_wpd.py graetz`.
-
-### Making VACASK discoverable
-
-`run_wpd.py` looks for the VACASK binary in this order:
-
-1. `$VACASK_COMMAND` (and optionally `$OSDI_PATH` for the compiled `.osdi` models),
-2. the cache populated by `../run_vacask.sh` (`~/.cache/cadnip-vacask/vacask/simulator/vacask`).
-
-The simplest setup is to run `../run_vacask.sh` once (it downloads the pinned
-VACASK release and its model libraries), then run `run_wpd.py`. Otherwise point
-`VACASK_COMMAND`/`OSDI_PATH` at your own VACASK build.
+Re-enable a case by moving its entry from `_disabled_cases` back into `cases` once
+the Cadnip diode model is fixed. (The diode voltage multiplier additionally trips
+VACASK's own min-timestep abort below `reltol ~ 1e-5`, so it is a poor
+work-precision case regardless and is not included.)
 
 ## Outputs
 
 - `out/cadnip_<case>_<solver>_<reltol>.csv` — Cadnip output waveform per run.
-- `out/cadnip_<case>.csv` — per-run timing/steps/retcode summary.
-- `out/analytic_<case>.csv` — closed-form waveform (linear cases).
+- `out/cadnip_<case>.csv` — per-run timing / accepted-steps / rejects / NR iters.
+- `out/vacask_<case>_<reltol>.csv`, `out/vacask_<case>.csv` — VACASK waveforms/timing.
+- `out/ref_<case>.csv` — VACASK tight golden on the grid; `out/analytic_<case>.csv`
+  — closed-form waveform (linear cases).
 - `out/wpd_results.md` — error/runtime table per circuit.
 - `plots/<case>.png` / `.svg` — the work-precision diagrams.
 
+`out/` and `plots/` are git-ignored (regenerated by the scripts).
+
 ## Configuration
 
-`config.json` is the single source of truth shared by both scripts: the tolerance
-sweep (`reltols`), the golden tolerances (`ref_reltol`/`ref_abstol`), the grid size
-(`n_grid`), and per-case `tspan` / `output` node(s). Keep both scripts reading it so
-the two simulators stay on the same grid and reference.
-```
+`config.json` is the single source of truth shared by all three stages: the
+tolerance sweep (`reltols`), the golden tolerances (`ref_reltol`/`ref_abstol`) and
+its fine-maxstep factor (`ref_maxstep_factor`), the grid size (`n_grid`), and the
+per-case `tspan` / `output` node(s).

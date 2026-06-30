@@ -1,11 +1,13 @@
 {
-  "_comment": "Shared work-precision-diagram config, read by cadnip_wpd.jl (Julia) and run_wpd.py (Python/InSpice). Keep grid/tspan/sweep identical across both so Cadnip and VACASK are compared on the same time grid against the same golden reference.",
+  "_comment": "Shared work-precision-diagram config, read by cadnip_wpd.jl, vacask_wpd.jl and plot_wpd.jl. Keep grid/tspan/sweep identical so Cadnip and VACASK are compared on the same time grid against the same golden reference.",
 
   "reltols": [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9],
   "abstol_scale": 1.0,
 
-  "ref_reltol": 1e-11,
-  "ref_abstol": 1e-12,
+  "_ref_comment": "Golden = VACASK at ref_reltol with a fine maxstep (tspan/(n_grid*ref_maxstep_factor)) so the reference trajectory is accurate without tripping VACASK's min-timestep abort, which fires at very tight reltol on stiff diode switching. ref_abstol is used as VACASK's vntol.",
+  "ref_reltol": 1e-7,
+  "ref_abstol": 1e-7,
+  "ref_maxstep_factor": 50,
 
   "n_grid": 2000,
 
@@ -16,18 +18,15 @@
       "output": ["vout"],
       "linear": true,
       "analytic": true
-    },
+    }
+  },
+
+  "_disabled_cases_comment": "graetz (and the diode voltage multiplier) are wired up end-to-end but DISABLED because Cadnip's SPICE diode model currently does not conduct (a single diode reads as an open circuit in DC; the rectified output is 0). VACASK simulates them correctly. Re-enable by moving an entry back into 'cases' once the Cadnip diode model is fixed. The voltage multiplier additionally trips VACASK's min-timestep abort below reltol~1e-5, so it is a poor work-precision case regardless.",
+  "_disabled_cases": {
     "graetz": {
       "title": "Graetz bridge full-wave rectifier (nonlinear)",
       "tspan": [0.0, 0.1],
       "output": ["outp", "outn"],
-      "linear": false,
-      "analytic": false
-    },
-    "mul": {
-      "title": "Diode voltage multiplier (nonlinear, stiffer)",
-      "tspan": [0.0, 5e-4],
-      "output": ["20"],
       "linear": false,
       "analytic": false
     }

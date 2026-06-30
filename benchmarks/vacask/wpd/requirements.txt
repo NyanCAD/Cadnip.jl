@@ -1,9 +1,0 @@
-# Python dependencies for the work-precision-diagram harness (run_wpd.py).
-#
-# InSpice must be the fork with the native VACASK backend
-# (InSpice/Spice/Vacask/...). The PyPI build only ships ngspice/Xyce backends,
-# so install from the fork that adds VACASK:
-#   pip install git+https://github.com/insim-ai/InSpice.git
-InSpice
-numpy
-matplotlib
