@@ -128,6 +128,10 @@ function generate_markdown(results::Vector{BenchmarkResult})
     println(io)
     println(io, "Benchmarks run on Julia $(VERSION)")
     println(io)
+    if any(r -> r.solver == VACASK_REF_SOLVER, results)
+        println(io, "Rows labelled **$(VACASK_REF_SOLVER)** are the real VACASK simulator measured on the same machine (see `run_vacask.sh`), for an apples-to-apples comparison.")
+        println(io)
+    end
 
     # Summary table with all solvers
     println(io, "## Summary")
@@ -156,11 +160,10 @@ function generate_markdown(results::Vector{BenchmarkResult})
         successful = filter(r -> r.status == :success, bench_results)
 
         if !isempty(successful)
-            println(io, "| Solver | Median | Min | Max | Rejected | Memory | Notes |")
-            println(io, "|--------|--------|-----|-----|----------|--------|-------|")
+            println(io, "| Solver | Median | Min | Max | Rejected | Memory |")
+            println(io, "|--------|--------|-----|-----|----------|--------|")
             for r in successful
-                notes = isempty(r.error_msg) ? "" : r.error_msg
-                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(r.rejected) | $(format_memory(r.memory)) | $(notes) |")
+                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(r.rejected) | $(format_memory(r.memory)) |")
             end
             println(io)
 
