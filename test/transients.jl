@@ -109,6 +109,71 @@ end
 end
 =#
 
+@testset "PULSE repeats" begin
+    # A PULSE source must be periodic. Regression test: previously the codegen
+    # built PWL points for only a single period, so after the first cycle the
+    # output held v1 forever instead of repeating.
+    using Cadnip.MNA: pulse_at_time
+
+    v1, v2 = 0.0, 1.0
+    td, tr, tf, pw, per = 1e-3, 1e-6, 1e-6, 2e-3, 5e-3
+
+    # Direct helper checks across several periods. Sample mid-plateau (phase
+    # tr + pw/2) so the value is unambiguously v2 regardless of float rounding.
+    high_phase = tr + pw / 2
+    low_phase = tr + tf + pw + (per - (tr + tf + pw)) / 2  # solidly in the flat-bottom region
+    @test pulse_at_time(v1, v2, td, tr, tf, pw, per, 0.0) == v1                       # before delay
+    @test pulse_at_time(v1, v2, td, tr, tf, pw, per, td + high_phase) == v2           # 1st pulse
+    # The high portion must recur in later periods, not stay flat at v1.
+    @test pulse_at_time(v1, v2, td, tr, tf, pw, per, td + per + high_phase) == v2     # 2nd pulse
+    @test pulse_at_time(v1, v2, td, tr, tf, pw, per, td + 3*per + high_phase) == v2   # 4th pulse
+    # And the low portion must recur too.
+    @test pulse_at_time(v1, v2, td, tr, tf, pw, per, td + 2*per + low_phase) == v1
+
+    # Now drive a node through a SPICE PULSE source and confirm the simulated
+    # waveform pulses more than once. Feed a PULSE voltage into an RC low-pass
+    # filter so the output tracks (smoothed) the periodic input.
+    R_val, C_val = 1e3, 1e-9  # τ = 1µs ≪ pw, so vout settles near v2/v1 each cycle
+    spice_code = """
+    * PULSE repeat test
+    V1 vin 0 PULSE($(v1) $(v2) $(td) $(tr) $(tf) $(pw) $(per))
+    R1 vin vout $(R_val)
+    C1 vout 0 $(C_val)
+    """
+
+    ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = Cadnip.make_mna_circuit(ast)
+    m = Module()
+    Base.eval(m, :(using Cadnip.MNA))
+    Base.eval(m, :(using Cadnip: ParamLens))
+    Base.eval(m, :(using Cadnip.SpectreEnvironment))
+    builder = Base.eval(m, code)
+
+    tspan = (0.0, td + 3*per)  # span several periods
+    circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0))
+    n = Cadnip.MNA.system_size(circuit)
+    prob = Base.invokelatest(ODEProblem, circuit, tspan; u0=zeros(n))
+    sol = OrdinaryDiffEq.solve(prob, Rodas5P(linsolve=KLUFactorization()); reltol=1e-6, abstol=1e-6, maxiters=1_000_000)
+
+    dc_spec = MNASpec(temp=27.0, mode=:dcop, time=0.0)
+    ctx = Base.invokelatest(builder, (;), dc_spec)
+    sys = Cadnip.MNA.assemble!(ctx)
+    vout_idx = findfirst(nm -> nm == :vout, sys.node_names)
+
+    # Sample the output near the middle of the high portion of each pulse.
+    # With τ ≪ pw the filtered output reaches close to v2 on every cycle.
+    for k in 0:3
+        t_high = td + k*per + tr + pw/2
+        @test isapprox(sol(t_high)[vout_idx], v2; atol=0.1)
+    end
+
+    # And near the end of each low portion it should be back near v1.
+    for k in 0:2
+        t_low = td + k*per + per - 1e-6
+        @test isapprox(sol(t_low)[vout_idx], v1; atol=0.1)
+    end
+end
+
 # Create a third-order Butterworth filter, according to https://en.wikipedia.org/wiki/Butterworth_filter#Example
 # The circuit diagram is:
 #
