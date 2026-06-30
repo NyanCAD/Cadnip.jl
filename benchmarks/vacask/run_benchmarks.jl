@@ -64,6 +64,36 @@ end
 
 BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, 0, error_msg)
 
+# Label used for rows sourced from the real VACASK simulator (run_vacask.sh).
+const VACASK_REF_SOLVER = "VACASK (ref)"
+
+#==============================================================================#
+# VACASK reference numbers
+#
+# run_vacask.sh runs the real VACASK binary via the upstream benchmark.py and
+# writes a TSV (benchmark, time_s, timepoints, rejected, iterations). If the
+# path is provided via $VACASK_REFERENCE_TSV we fold those rows into the same
+# comparison tables for an apples-to-apples, same-machine comparison.
+#==============================================================================#
+function load_vacask_reference()
+    refs = BenchmarkResult[]
+    path = get(ENV, "VACASK_REFERENCE_TSV", "")
+    (isempty(path) || !isfile(path)) && return refs
+    for line in eachline(path)
+        isempty(strip(line)) && continue
+        cols = split(line, '\t')
+        length(cols) < 5 && continue
+        name = String(cols[1])
+        t = tryparse(Float64, cols[2])
+        t === nothing && continue
+        tp = something(tryparse(Int, cols[3]), 0)
+        rej = something(tryparse(Int, cols[4]), 0)
+        push!(refs, BenchmarkResult(name, VACASK_REF_SOLVER, :success,
+                                    t, t, t, NaN, 0, tp, rej, "reference simulator"))
+    end
+    return refs
+end
+
 function format_time(seconds::Float64)
     if isnan(seconds)
         return "-"
@@ -98,6 +128,10 @@ function generate_markdown(results::Vector{BenchmarkResult})
     println(io)
     println(io, "Benchmarks run on Julia $(VERSION)")
     println(io)
+    if any(r -> r.solver == VACASK_REF_SOLVER, results)
+        println(io, "Rows labelled **$(VACASK_REF_SOLVER)** are the real VACASK simulator measured on the same machine (see `run_vacask.sh`), for an apples-to-apples comparison.")
+        println(io)
+    end
 
     # Summary table with all solvers
     println(io, "## Summary")
@@ -134,10 +168,20 @@ function generate_markdown(results::Vector{BenchmarkResult})
             end
             println(io)
 
-            # Show fastest
-            fastest = argmin(r -> r.median_time, successful)
-            println(io, "> 🏆 Fastest: **$(fastest.solver)** ($(format_time(fastest.median_time)))")
-            println(io)
+            # Show fastest Cadnip solver (excluding the VACASK reference row)
+            cadnip_successful = filter(r -> r.solver != VACASK_REF_SOLVER, successful)
+            if !isempty(cadnip_successful)
+                fastest = argmin(r -> r.median_time, cadnip_successful)
+                note = ""
+                ref = filter(r -> r.solver == VACASK_REF_SOLVER, successful)
+                if !isempty(ref)
+                    ratio = ref[1].median_time / fastest.median_time
+                    note = ratio >= 1 ? " — $(round(ratio, digits=2))× faster than VACASK" :
+                                        " — $(round(1/ratio, digits=2))× slower than VACASK"
+                end
+                println(io, "> 🏆 Fastest Cadnip solver: **$(fastest.solver)** ($(format_time(fastest.median_time)))$(note)")
+                println(io)
+            end
         end
 
         # Show failures
@@ -218,33 +262,42 @@ function main()
 
     results = BenchmarkResult[]
 
+    # VACASK reference numbers (real simulator, same machine) if available.
+    vacask_refs = load_vacask_reference()
+    if !isempty(vacask_refs)
+        println("Including VACASK reference numbers for: ",
+                join((r.name for r in vacask_refs), ", "))
+        println()
+    end
+
+    # Append a benchmark's Cadnip solver results, immediately followed by the
+    # matching VACASK reference row so the tables compare side by side.
+    function add_benchmark!(name, script, solvers)
+        append!(results, run_benchmark_all_solvers(name, script, solvers))
+        for ref in vacask_refs
+            ref.name == name && push!(results, ref)
+        end
+    end
+
     # RC Circuit - linear circuit, ImplicitEuler is 3x faster
-    append!(results, run_benchmark_all_solvers(
-        "RC Circuit",
+    add_benchmark!("RC Circuit",
         joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl"),
-        SOLVERS_RC
-    ))
+        SOLVERS_RC)
 
     # Graetz Bridge - nonlinear (diodes), needs robust DAE solver
-    append!(results, run_benchmark_all_solvers(
-        "Graetz Bridge",
+    add_benchmark!("Graetz Bridge",
         joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme.jl"),
-        SOLVERS_NONLINEAR
-    ))
+        SOLVERS_NONLINEAR)
 
     # Voltage Multiplier - nonlinear (diodes), needs robust DAE solver
-    append!(results, run_benchmark_all_solvers(
-        "Voltage Multiplier",
+    add_benchmark!("Voltage Multiplier",
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"),
-        SOLVERS_NONLINEAR
-    ))
+        SOLVERS_NONLINEAR)
 
     # Ring Oscillator - IDA only (needs tuned settings for oscillation)
-    append!(results, run_benchmark_all_solvers(
-        "Ring Oscillator (PSP103)",
+    add_benchmark!("Ring Oscillator (PSP103)",
         joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"),
-        SOLVERS_RING
-    ))
+        SOLVERS_RING)
 
     # # C6288 Multiplier - all solvers
     # append!(results, run_benchmark_all_solvers(
