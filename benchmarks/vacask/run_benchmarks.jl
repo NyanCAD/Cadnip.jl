@@ -65,7 +65,7 @@ end
 BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, 0, error_msg)
 
 # Label used for rows sourced from the real VACASK simulator (run_vacask.sh).
-const VACASK_REF_SOLVER = "VACASK (ref)"
+const VACASK_REF_SOLVER = "VACASK"
 
 #==============================================================================#
 # VACASK reference numbers
@@ -89,7 +89,7 @@ function load_vacask_reference()
         tp = something(tryparse(Int, cols[3]), 0)
         rej = something(tryparse(Int, cols[4]), 0)
         push!(refs, BenchmarkResult(name, VACASK_REF_SOLVER, :success,
-                                    t, t, t, NaN, 0, tp, rej, "reference simulator"))
+                                    t, t, t, NaN, 0, tp, rej, ""))
     end
     return refs
 end
@@ -128,10 +128,6 @@ function generate_markdown(results::Vector{BenchmarkResult})
     println(io)
     println(io, "Benchmarks run on Julia $(VERSION)")
     println(io)
-    if any(r -> r.solver == VACASK_REF_SOLVER, results)
-        println(io, "Rows labelled **$(VACASK_REF_SOLVER)** are the real VACASK simulator measured on the same machine (see `run_vacask.sh`), for an apples-to-apples comparison.")
-        println(io)
-    end
 
     # Summary table with all solvers
     println(io, "## Summary")
