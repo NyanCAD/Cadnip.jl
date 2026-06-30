@@ -24,6 +24,18 @@ Ngspice, Xyce and Gnucap were using builtin models of circuit elements. VACASK u
 
 For each test problem the number of timepoints and the number of Newton-Raphson (NR) iterations (residual evaluations for Xyce) is listed. In some cases the number of rejected timepoints is also given. All benchmarks were run on a computer with an AMD Threadripper 7970 processor. 
 
+# Reproducing the VACASK numbers
+
+The tables below were measured by the VACASK authors on an AMD Threadripper 7970. To obtain real VACASK numbers on the same machine that runs the Cadnip benchmarks (so the comparison is apples-to-apples), use [`run_vacask.sh`](run_vacask.sh):
+
+```bash
+benchmarks/vacask/run_vacask.sh results.md
+```
+
+The script downloads a prebuilt VACASK release (pinned to `0.3.3-dev`, which ships the PSP103.4 and SPICE-distilled OSDI models used here), then runs the official [`benchmark.py`](benchmark.py) methodology (1 warmup + 5 timed runs, averaged) on every case and writes a markdown table of wall-clock time, timepoints, rejected timepoints, and NR iterations. Set `VACASK_DIR` to point at an already-extracted release to skip the download, or `CASES="rc graetz mul ring"` to skip the slow c6288 case.
+
+Absolute timings depend on the machine, but the timepoint and iteration counts should match the upstream tables closely (the released binary reproduces the same algorithms).
+
 # Results
 
 ## RC circuit excited by a pulse train (rc)

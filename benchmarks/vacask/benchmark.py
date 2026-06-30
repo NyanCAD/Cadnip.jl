@@ -1,6 +1,20 @@
 #!/usr/bin/python3
-import sys, os, time, subprocess, shutil, importlib, platform
-import numpy as np
+import sys, os, time, subprocess, shutil, importlib, importlib.util, platform
+
+# numpy is optional - fall back to the stdlib statistics module so the script
+# runs in minimal CI environments without an extra pip install.
+try:
+    import numpy as np
+except ImportError:
+    import statistics as _st
+    class _np:
+        @staticmethod
+        def array(x): return list(x)
+        @staticmethod
+        def mean(x): return _st.mean(x)
+        @staticmethod
+        def std(x, ddof=0): return _st.stdev(x) if ddof == 1 else _st.pstdev(x)
+    np = _np()
 
 # Simple benchmarking framework
 # 
