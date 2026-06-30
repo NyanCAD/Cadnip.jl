@@ -149,7 +149,7 @@ end
     Base.eval(m, :(using Cadnip.SpectreEnvironment))
     builder = Base.eval(m, code)
 
-    tspan = (0.0, td + 3*per)  # span several periods
+    tspan = (0.0, td + 4*per)  # span several periods (room to sample the 4th pulse plateau)
     circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0))
     n = Cadnip.MNA.system_size(circuit)
     prob = Base.invokelatest(ODEProblem, circuit, tspan; u0=zeros(n))
