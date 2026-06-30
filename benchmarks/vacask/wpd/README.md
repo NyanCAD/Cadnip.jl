@@ -61,22 +61,36 @@ bound, so the WPD curve saturates at O(1) and "falls off a cliff".
 | Case     | What                                     | Reference | Status |
 |----------|------------------------------------------|-----------|--------|
 | `filter` | 3rd-order Butterworth LC ladder (linear) | analytic  | active |
+| `rc`     | RC single-pulse step response (linear)   | VACASK    | active |
 | `graetz` | Graetz bridge full-wave rectifier        | VACASK    | disabled — see below |
 
-### Why graetz (and the diode multiplier) are disabled
+`filter` is a smooth drive; `rc` adds two sharp source edges, so the adaptive
+controller must catch the discontinuities (it is given `tstops` at the pulse edges,
+mirroring how SPICE engines break at source breakpoints internally).
 
-These nonlinear cases are wired up end-to-end (Cadnip builder, VACASK netlist,
-sweep), but they are **disabled in `config.json`** (`_disabled_cases`) because
-**Cadnip's SPICE diode model does not currently conduct**: a single diode reads as
-an open circuit in DC (`5 V` through `1 kΩ` into a diode to ground leaves the node
-at `5 V`), and the rectified output of the bridge is identically `0`. VACASK
-simulates the same netlists correctly. The existing throughput benchmarks never
-check output values, so this had gone unnoticed.
+### Cadnip bugs this benchmark surfaced
 
-Re-enable a case by moving its entry from `_disabled_cases` back into `cases` once
-the Cadnip diode model is fixed. (The diode voltage multiplier additionally trips
-VACASK's own min-timestep abort below `reltol ~ 1e-5`, so it is a poor
-work-precision case regardless and is not included.)
+Checking *output values* (which the throughput benchmarks never do) exposed two
+latent Cadnip bugs:
+
+1. **SPICE diode does not conduct.** Via the `.model … d` netlist path the diode is
+   an open circuit (`5 V` through `1 kΩ` into a diode to ground stays at `5 V`; the
+   graetz bridge output is identically `0`). Root cause: the SPICE path passes the
+   instance default `area = 0` to `sp_diode`, which scales the current by area, so
+   `sp_diode(area=0.0)` is open while `sp_diode()` / `sp_diode(area=1.0)` conduct.
+   The direct `stamp!(sp_diode(), …)` API works and is tested; the netlist path is
+   untested. This **disables `graetz`** (kept in `config.json`'s `_disabled_cases`).
+   The diode voltage multiplier is also excluded — it additionally trips VACASK's
+   own min-timestep abort below `reltol ~ 1e-5`.
+
+2. **PULSE source does not repeat.** Cadnip's pulse fires once then stays at `val0`
+   (the `period` parameter is ignored); VACASK repeats correctly. So `rc` is
+   **windowed to a single pulse** (`tspan = [0, 2 ms]`), where Cadnip and VACASK
+   agree. Widen once the pulse-repetition bug is fixed.
+
+Both bugs surface only when comparing waveforms against a reference — exactly what
+this work-precision benchmark does. Re-enable `graetz` by moving its entry from
+`_disabled_cases` back into `cases` once the diode model is fixed.
 
 ## Outputs
 

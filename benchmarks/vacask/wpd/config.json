@@ -18,6 +18,14 @@
       "output": ["vout"],
       "linear": true,
       "analytic": true
+    },
+    "_rc_comment": "tspan is one pulse period only (the pulse rises at t=1us, high for 1ms). Cadnip's PULSE source does not repeat (the 'period' parameter is ignored - it fires once then stays at val0), so the window is limited to the first pulse where Cadnip and VACASK agree. This still exercises adaptive discontinuity handling at the two sharp edges. Widen once the Cadnip pulse-repetition bug is fixed.",
+    "rc": {
+      "title": "RC circuit, single pulse step response (linear)",
+      "tspan": [0.0, 0.002],
+      "output": ["2"],
+      "linear": true,
+      "analytic": false
     }
   },
 

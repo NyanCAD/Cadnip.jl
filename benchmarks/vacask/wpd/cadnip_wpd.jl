@@ -57,10 +57,12 @@ const CFG = JSON.parsefile(joinpath(HERE, "config.json"))
 # Circuit builders (top-level so dispatch to the freshly-defined builders is OK)
 #------------------------------------------------------------------------------#
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "graetz", "cedarsim", "runme.sp"); name=:graetz_circuit))
+Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "rc", "cedarsim", "runme.sp"); name=:rc_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(HERE, "filter.sp"); name=:filter_circuit))
 
 const BUILDERS = Dict(
     "graetz" => graetz_circuit,
+    "rc"     => rc_circuit,
     "filter" => filter_circuit,
 )
 
@@ -128,6 +130,29 @@ end
 
 reltol_tag(r) = @sprintf("%.0e", r)   # 1.0e-6 -> "1e-06"
 
+"""
+Source breakpoints for a case. Adaptive solvers will otherwise step over the
+sharp edges of a pulse source (FBDF takes ~3 steps and misses the whole train);
+SPICE engines like VACASK break at source breakpoints internally, so passing
+these as `tstops` makes the comparison fair and correct. Empty for smooth drives.
+"""
+function case_tstops(case, tspan)
+    case == "rc" || return Float64[]
+    td, tr, tf, pw, per = 1e-6, 1e-6, 1e-6, 1e-3, 2e-3  # PULSE(0 1 1u 1u 1u 1m 2m)
+    bps = Float64[]
+    k = 0
+    while true
+        base = td + k * per
+        base > tspan[2] && break
+        for off in (0.0, tr, tr + pw, tr + pw + tf)
+            e = base + off
+            tspan[1] <= e <= tspan[2] && push!(bps, e)
+        end
+        k += 1
+    end
+    return bps
+end
+
 #------------------------------------------------------------------------------#
 # Run one case
 #------------------------------------------------------------------------------#
@@ -145,6 +170,7 @@ function run_case(case::String)
     println("\n", "="^70, "\n", spec["title"], "  ($case, tspan=($t0,$t1))\n", "="^70)
 
     idxs = [node_index(builder, n) for n in out_nodes]
+    tstops = case_tstops(case, (t0, t1))
 
     # Analytic cross-check waveform on the grid (linear cases only).
     if get(spec, "analytic", false) && haskey(ANALYTIC, case)
@@ -163,7 +189,7 @@ function run_case(case::String)
             # One untimed solve for the waveform + stats.
             c = setup(builder)
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
-                        saveat=grid, maxiters=50_000_000)
+                        saveat=grid, tstops=tstops, maxiters=50_000_000)
             # saveat fixes length(sol.t) to the grid size, so report the actual
             # number of accepted internal steps (the true work) when available.
             steps = hasproperty(sol.stats, :naccept) && sol.stats.naccept > 0 ?
@@ -178,7 +204,7 @@ function run_case(case::String)
             # Timed runs (reuse a prepared circuit; tran! does not mutate structure).
             ct = setup(builder)
             bench = @benchmark tran!($ct, ($t0, $t1); abstol=$a, reltol=$r, solver=$(sfn()),
-                                     saveat=$grid, maxiters=50_000_000) samples=3 evals=1 seconds=120
+                                     saveat=$grid, tstops=$tstops, maxiters=50_000_000) samples=3 evals=1 seconds=120
             tmed = median(bench.times) / 1e9
 
             println(summary, "$sname,$r,$tmed,$steps,$rejects,$nniter,$(sol.retcode)")

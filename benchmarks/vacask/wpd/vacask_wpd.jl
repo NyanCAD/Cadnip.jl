@@ -140,6 +140,18 @@ function sim_body(case::String)
         rgnd1 (inn 0) r r=1meg
         rgnd2 (outn 0) r r=1meg
         """
+    elseif case == "rc"
+        return """
+        RC circuit excited by a pulse train
+        load "spice/resistor.osdi"
+        load "spice/capacitor.osdi"
+        model r sp_resistor
+        model c sp_capacitor
+        model vsource vsource
+        vs (1 0) vsource dc=0 type="pulse" val0=0 val1=1 delay=1u rise=1u fall=1u width=1m period=2m
+        r1 (1 2) r r=1k
+        c1 (2 0) c c=1u
+        """
     elseif case == "filter"
         return """
         Butterworth LC filter
