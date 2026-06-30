@@ -166,7 +166,10 @@ function run_case(case::String)
             c = setup(builder)
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
                         saveat=grid, maxiters=50_000_000)
-            steps = length(sol.t)
+            # saveat fixes length(sol.t) to the grid size, so report the actual
+            # number of accepted internal steps (the true work) when available.
+            steps = hasproperty(sol.stats, :naccept) && sol.stats.naccept > 0 ?
+                    sol.stats.naccept : length(sol.t)
             rejects = hasproperty(sol.stats, :nreject) ? sol.stats.nreject : 0
             nniter = hasproperty(sol.stats, :nnonliniter) ? sol.stats.nnonliniter : 0
             ok = sol.retcode == ReturnCode.Success && isapprox(sol.t[end], t1; rtol=1e-6)
