@@ -27,7 +27,7 @@ using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P
-using OrdinaryDiffEqSDIRK: ImplicitEuler
+using OrdinaryDiffEqSDIRK: Kvaerno5
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 using BenchmarkTools
@@ -50,7 +50,6 @@ const BUILDERS = Dict(
     "graetz" => graetz_circuit, "mul" => mul_circuit,
     "rc" => rc_circuit, "filter" => filter_circuit,
 )
-const NONLINEAR = ("graetz", "mul")
 
 #------------------------------------------------------------------------------#
 # Analytic references (exact closed forms)
@@ -94,14 +93,25 @@ const ANALYTIC = Dict("filter" => filter_analytic, "rc" => rc_analytic)
 mk_ida()     = IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=100)
 mk_fbdf()    = FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_rodas5p() = Rodas5P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
-mk_ie()      = ImplicitEuler(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_kvaerno5() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 
-# (name, constructor, min_reltol). ImplicitEuler is order 1: capped to loose
-# tolerances (runaway step counts otherwise) and to visibly lag on the WPD.
-# Rodas5P degenerates on the diode DAEs, so it is used only on the linear cases.
-solvers_for(case) = case in NONLINEAR ?
-    [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("ImplicitEuler", mk_ie, 1e-6)] :
-    [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("ImplicitEuler", mk_ie, 1e-6)]
+# (name, constructor, min_reltol) per case. Not a blanket linear/nonlinear split -
+# solver viability varies by circuit, confirmed empirically:
+#   - Kvaerno3/Kvaerno5 (SDIRK) get stuck in the diode's stiff turn-on transient on
+#     BOTH diode circuits (thousands of steps without leaving t~0) - used only on
+#     the linear cases.
+#   - Rodas5P works on `graetz` (correct rectified output at reltol 1e-3/1e-6,
+#     :Unstable only at the tightest 1e-9, already excluded by the retcode filter)
+#     but hangs on `mul` (its faster 100kHz cascaded-diode switching is far
+#     stiffer) even at the loosest reltol=1e-3 - excluded there.
+#   - IDA and FBDF are robust on every case.
+const SOLVERS = Dict(
+    "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0)],
+    "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0)],
+    "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0)],
+    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0)],
+)
+solvers_for(case) = SOLVERS[case]
 
 #------------------------------------------------------------------------------#
 # Helpers
@@ -256,6 +266,17 @@ function run_cadnip_sweep(case, spec)
             c = setup(builder)
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
                         tstops=tstops, dense=false, maxiters=50_000_000)
+            # A solver can bail out early (e.g. retcode :Unstable) without
+            # throwing. Only accept runs that actually reached t1 - otherwise
+            # the truncated waveform is not comparable to the others and
+            # corrupts the error/work-precision curve.
+            reached = sol.retcode == ReturnCode.Success && isapprox(sol.t[end], t1; rtol=1e-6)
+            if !reached
+                println(summary, "$sname,$r,NaN,0,0,0,$(sol.retcode)")
+                @printf("SKIP (%s, reached t=%.4g of %.4g)\n", sol.retcode, sol.t[end], t1)
+                flush(summary); flush(stdout)
+                continue
+            end
             steps = hasproperty(sol.stats, :naccept) && sol.stats.naccept > 0 ? sol.stats.naccept : length(sol.t)
             rejects = hasproperty(sol.stats, :nreject) ? sol.stats.nreject : 0
             nniter = hasproperty(sol.stats, :nnonliniter) ? sol.stats.nnonliniter : 0
@@ -276,17 +297,37 @@ function run_cadnip_sweep(case, spec)
     close(summary)
 end
 
-"Dense Cadnip-tight golden (robust IDA) for cases VACASK can't reference."
+"""
+Dense Cadnip-tight golden (robust IDA) for cases VACASK can't reference.
+
+Tries progressively looser tolerances starting from `1e-11` - a stiff circuit
+(e.g. the diode multiplier) can fail to converge at the tightest tolerance even
+with IDA, so back off until one actually solves to `t1`. Errors if even the
+loosest of these fails, since the case's pinned golden must exist.
+"""
 function cadnip_golden(case, spec)
     builder = BUILDERS[case]
     t0, t1 = Float64(spec["tspan"][1]), Float64(spec["tspan"][2])
     out_nodes = String.(spec["output"])
     grid = collect(range(t0, t1; length=Int(CFG["n_grid"]) * 50))
     tstops = case_tstops(case, (t0, t1))
-    c = setup(builder)
-    sol = tran!(c, (t0, t1); abstol=1e-12, reltol=1e-11, solver=mk_ida(),
-                saveat=grid, tstops=tstops, maxiters=100_000_000)
-    write_wave(joinpath(OUT, "cadnip_ref_$(case).csv"), sol.t, output_signal(sol, out_nodes))
+    for reltol in (1e-11, 1e-10, 1e-9, 1e-8, 1e-7)
+        @printf("  cadnip golden reltol=%.0e ... ", reltol); flush(stdout)
+        try
+            c = setup(builder)
+            sol = tran!(c, (t0, t1); abstol=reltol, reltol=reltol, solver=mk_ida(),
+                        saveat=grid, tstops=tstops, maxiters=100_000_000)
+            if sol.retcode == ReturnCode.Success && isapprox(sol.t[end], t1; rtol=1e-6)
+                write_wave(joinpath(OUT, "cadnip_ref_$(case).csv"), sol.t, output_signal(sol, out_nodes))
+                println("ok"); flush(stdout)
+                return
+            end
+            println("failed ($(sol.retcode)), backing off"); flush(stdout)
+        catch e
+            println("failed (", first(sprint(showerror, e), 80), "), backing off"); flush(stdout)
+        end
+    end
+    error("case $case: Cadnip golden failed to converge at every tolerance tried")
 end
 
 function run_vacask_sweep(case, spec, want_golden)
