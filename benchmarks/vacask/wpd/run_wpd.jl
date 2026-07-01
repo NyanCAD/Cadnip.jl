@@ -470,13 +470,17 @@ function ascii_plot(title, curves)
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
         marker = ASCII_MARKERS[mod1(i, length(ASCII_MARKERS))]
+        # Embed the marker in the legend text itself ("[o] Cadnip IDA") - the
+        # legend otherwise lists only names, with no way to tell which marker
+        # glyph belongs to which series once color is off.
+        legend_name = "[$marker] $label"
         if plt === nothing
-            plt = scatterplot(x, y; name=label, xlabel="rel-L2 error", ylabel="runtime s",
+            plt = scatterplot(x, y; name=legend_name, xlabel="rel-L2 error", ylabel="runtime s",
                               title=title, xscale=:log10, yscale=:log10,
                               width=64, height=16, canvas=AsciiCanvas, border=:ascii,
-                              marker=marker, xlim=xlim, ylim=ylim)
+                              marker=marker, xlim=xlim, ylim=ylim, unicode_exponent=false)
         else
-            scatterplot!(plt, x, y; name=label, marker=marker)
+            scatterplot!(plt, x, y; name=legend_name, marker=marker)
         end
     end
     io = IOBuffer()
