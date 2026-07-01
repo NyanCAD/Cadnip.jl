@@ -2635,7 +2635,7 @@ function codegen_toplevel_models!(state::CodegenState)
                     end
                 end
                 model_var = cg_model_name!(state, model_name)
-                push!(model_defs, :($model_var = ($(model_params...),)))
+                push!(model_defs, :(const $model_var = ($(model_params...),)))
             elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
                 # VA model from imported HDL module or external package
                 # Get the model type to build case-insensitive parameter lookup
@@ -2683,7 +2683,15 @@ function codegen_toplevel_models!(state::CodegenState)
                 model_var = cg_model_name!(state, model_name)
                 # Use Cadnip pattern: pass params as NamedTuple to spicecall
                 # This avoids embedding 200 kwargs in the generated code
-                push!(model_defs, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+                #
+                # const is essential here, not cosmetic: these bindings are
+                # captured by the circuit builder function as module globals
+                # (not locals/arguments), and a plain `=` global is always
+                # ::Any at use sites regardless of what's assigned to it. That
+                # made every `spicecall(model_var; ...)` call in the builder
+                # infer to Any, forcing the device struct to be heap-boxed on
+                # every stamp!() call (every Newton iteration).
+                push!(model_defs, :(const $model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
             end
         end
     end
