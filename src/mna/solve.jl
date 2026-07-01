@@ -340,6 +340,39 @@ end
 
 export CedarRobustNLSolve
 
+"""
+    CedarShampineNLSolve()
+
+Nonlinear solver for `ShampineCollocationInit`'s internal consistency solve
+(used by `CedarDCOp`/`CedarTranOp`/`CedarUICOp`'s ODE-integrator branches in
+`dcop.jl`). Deliberately narrower than `CedarRobustNLSolve()`: it only
+combines `NewtonRaphson` variants (no `TrustRegion`, `LevenbergMarquardt`, or
+`PseudoTransient`).
+
+Those excluded algorithms need a Jacobian-vector product for their
+trust-region-radius/geodesic-acceleration machinery, which falls back to
+`AutoForwardDiff()` even when the top-level `autodiff` is set to `nothing`
+(that only disables autodiff for the *materialized* Jacobian, not JVPs).
+Running that autodiff through `ShampineCollocationInit`'s auto-generated
+residual closure -- which itself calls back into our stamped circuit
+evaluation -- produced `MethodError: no method matching Float64(::Dual)`
+on the VADistiller sp_bjt monostable multivibrator integration test. A
+bare `NewtonRaphson(autodiff=nothing)` sidesteps that (only ever needs the
+full analytic Jacobian we supply) but isn't robust enough alone to converge
+that same circuit (it has BJT excess-phase internal nodes that don't reach
+consistency in one Newton attempt). Two `NewtonRaphson` variants with
+different linesearches gets the extra fallback attempt without ever
+touching the JVP/autodiff path.
+"""
+function CedarShampineNLSolve()
+    return NonlinearSolvePolyAlgorithm((
+        NewtonRaphson(autodiff=nothing),
+        NewtonRaphson(autodiff=nothing, linesearch=BackTracking()),
+    ))
+end
+
+export CedarShampineNLSolve
+
 #==============================================================================#
 # Unified DC Solve
 #
