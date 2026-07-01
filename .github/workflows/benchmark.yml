@@ -54,13 +54,30 @@ jobs:
         run: |
           julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl benchmark_results.md
 
+      - name: Run Cadnip c6288 benchmark (-O0)
+        # Separate process/step deliberately: c6288's generated builder (2419
+        # inlined subckt calls) hits LLVM RAGreedy's super-linear blowup at
+        # default -O2, so it needs its own `julia -O0` invocation rather than
+        # sharing the process the other circuits benchmark in above. See
+        # doc/c6288_bottleneck_findings.md.
+        continue-on-error: true
+        run: |
+          julia -O0 --project=benchmarks benchmarks/vacask/c6288/cedarsim/runme.jl Rodas5P | tee c6288_cadnip.log
+
       - name: Publish benchmark results
+        if: always()
         run: |
           cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
           echo >> $GITHUB_STEP_SUMMARY
           cat vacask_reference.md >> $GITHUB_STEP_SUMMARY
+          echo >> $GITHUB_STEP_SUMMARY
+          echo '## C6288 Multiplier (Cadnip, `-O0`)' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat c6288_cadnip.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(no output captured)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-julia-${{ matrix.version }}
@@ -68,4 +85,5 @@ jobs:
             benchmark_results.md
             vacask_reference.md
             vacask_reference.tsv
+            c6288_cadnip.log
           retention-days: 30

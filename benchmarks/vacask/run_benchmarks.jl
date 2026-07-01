@@ -298,11 +298,13 @@ function main()
         joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"),
         SOLVERS_RING)
 
-    # # C6288 Multiplier - all solvers
-    # append!(results, run_benchmark_all_solvers(
-    #     "C6288 Multiplier",
-    #     joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl")
-    # ))
+    # C6288 Multiplier deliberately NOT run here: its generated builder
+    # (2419 inlined subckt calls) hits LLVM RAGreedy's super-linear blowup
+    # at default -O2, so it needs its own `julia -O0` process. This process
+    # runs everything else at default optimization, so folding c6288 into
+    # this loop would reintroduce that hang. See the separate "Run Cadnip
+    # c6288 benchmark" CI step (.github/workflows/benchmark.yml) and
+    # doc/c6288_bottleneck_findings.md.
 
     println()
     println("=" ^ 60)

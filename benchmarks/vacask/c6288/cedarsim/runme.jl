@@ -2,16 +2,23 @@
 #==============================================================================#
 # VACASK Benchmark: C6288 16x16 Multiplier
 #
-# A 16x16 bit multiplier circuit using PSP103 MOSFETs.
+# A 16x16 bit multiplier circuit using PSP103 MOSFETs (212228 variables).
 #
-# Benchmark target: High complexity digital circuit (154k variables)
-#
-# STATUS: Uses CedarUICOp initialization (pseudo-transient relaxation)
+# STATUS: Uses CedarDCOp initialization (DC solve with GMIN/source stepping)
 #
 # Notes:
-# Digital circuits often don't have a valid DC solution. ngspice handles
-# this with 'uic' (use initial conditions). CedarUICOp provides similar
-# functionality using pseudo-transient relaxation.
+# ngspice's 'uic' skips DC operating point analysis and starts transient
+# integration directly from u=0, relying on its own per-step Newton retry
+# with timestep halving to work through the harsh startup (vdd hard-on at
+# t=0). SciML's DAE initialization framework requires a consistent t=0
+# state up front rather than tolerating repeated per-step failures, so the
+# naive translation of 'uic' -- CedarUICOp's fixed-dt pseudo-transient
+# relaxation -- cannot take even a single non-degenerate step here (Newton
+# fails identically at every dt, including with unlimited shrinking room).
+# CedarDCOp's existing GMIN-stepping/source-stepping homotopy chain (the
+# same machinery vacask/ngspice use to find a DC operating point for
+# awkward circuits) does find a usable t=0 state, and the transient
+# proceeds normally from there. See doc/c6288_bottleneck_findings.md.
 #
 # Usage: julia runme.jl [solver]
 #   solver: IDA, FBDF, or Rodas5P (default)
@@ -19,7 +26,7 @@
 
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: CedarUICOp
+using Cadnip.MNA: CedarDCOp
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P
@@ -58,10 +65,11 @@ function run_benchmark(solver; reltol=1e-3, maxiters=10_000_000)
     n = MNA.system_size(circuit)
     println("Circuit size: $n variables")
 
-    # Use CedarUICOp for initialization - digital circuits often don't have
-    # a valid DC solution. ngspice handles this with 'uic' (use initial conditions)
-    # CedarUICOp uses pseudo-transient relaxation to initialize
-    init = CedarUICOp()
+    # Use CedarDCOp for initialization: the GMIN/source-stepping fallback
+    # chain in _dc_solve_with_fallbacks finds a usable operating point for
+    # this circuit where CedarUICOp's pseudo-transient warmup cannot take a
+    # single step. See doc/c6288_bottleneck_findings.md.
+    init = CedarDCOp()
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (reltol=$reltol)...")

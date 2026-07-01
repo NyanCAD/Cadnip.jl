@@ -1,6 +1,16 @@
 # C6288 Benchmark Bottleneck — Investigation
 
-**Status:** identified. The c6288 (16x16 multiplier, ~10k PSP103 MOSFETs)
+**Status:** RESOLVED. `benchmarks/vacask/c6288/cedarsim/runme.jl` now runs
+end to end under `julia -O0` with `CedarDCOp` initialization: setup
+completes in ~90s, DC solve finds an operating point via GMIN/source
+stepping, and the transient reaches `retcode=Success` (17 accepted / 5
+rejected steps over the 2ns window in one validation run). See "Resolution"
+near the end of this document for the fixes and the remaining `-O0`
+requirement. The section below is kept as the original investigation log.
+
+---
+
+The c6288 (16x16 multiplier, ~10k PSP103 MOSFETs)
 benchmark blocks for ≥10 minutes inside Julia's first-call JIT and never
 reaches the solver. The profile run was killed at 7+ minutes still inside
 `build_with_detection`'s first `circuit.builder(...)` call — this is the
@@ -354,6 +364,80 @@ this requires giving the warmup's `ImplicitEuler` a proper sparse
 `AutoFiniteDiff()` to rediscover the 2.45M-entry sparsity pattern column by
 column at runtime.
 
+## Resolution
+
+Four real bugs, found and fixed by actually running the benchmark end to
+end (not just profiling setup) and reading gdb/Julia stack traces off the
+stuck process, plus one initialization-algorithm swap:
+
+1. **`runme.jl` itself was broken**, independent of everything else below:
+   it referenced `sp_psp103va_module`, which doesn't exist in `PSPModels`
+   (the export is `PSP103VA_module`). Fixed by dropping the stale alias.
+
+2. **`CedarUICOp`'s DAE (IDA) warmup had no Jacobian at all**
+   (`src/mna/dcop.jl`) — `ODEFunction(warmup_rhs!; mass_matrix=cs.C)` with no
+   `jac`/`jac_prototype`, forcing `ImplicitEuler` to rediscover the
+   Jacobian via autodiff/finite-diff. Fixed by adding an analytic
+   `warmup_jac!` (`d(du)/du = -G`) with `jac_prototype=copy(cs.G)`.
+
+3. **The main ODE `jac!` was `O(n²)` on sparse circuits, not zero-alloc**
+   (`src/mna/solve.jl`) — it looped `for i in eachindex(J, G); J[i] = -G[i]; end`.
+   For `SparseMatrixCSC`, `eachindex` over two sparse matrices is
+   `IndexCartesian`, i.e. `CartesianIndices` over the *full* `n²` index
+   space, not the ~nnz stored entries. At c6288's `n=212228` that's
+   ~4.5e10 iterations, each a scalar sparse write that can insert a new
+   structural entry (`O(current nnz)` per insert). This is what was
+   actually hanging after fix (2) — confirmed by sending `SIGINT` to the
+   stuck process and reading the resulting Julia stack trace, which pinned
+   it to `jac!` calling into `SparseArrays.setindex!`'s scalar path.
+   First fix attempt walked `nonzeros(J)`/`nonzeros(G)` directly (assuming
+   matching patterns); a follow-up (`0540661`) switched to `copyto!`
+   after that assumption broke under (4) below (see next point).
+
+4. **`ShampineCollocationInit`'s default `nlsolve` OOMs on large sparse
+   circuits** (`src/mna/dcop.jl`, all four call sites) — with no `nlsolve`
+   specified, `OrdinaryDiffEqNonlinearSolve.default_nlsolve` picks
+   `FastShortcutNonlinearPolyalg`, whose leading algorithms are dense
+   QuasiNewton methods (Broyden/Klement) that allocate an `n×n` dense
+   approximate-Jacobian regardless of the sparse `jac`/`jac_prototype`
+   already threaded through. At c6288's scale that's a ~360GB allocation →
+   instant `OutOfMemoryError`. Fixed by passing
+   `nlsolve=NewtonRaphson(autodiff=nothing)` explicitly, so it uses the
+   supplied sparse Jacobian directly. This changed `J`'s provenance (now
+   built by `NonlinearSolveBase.JacobianCache` rather than a straight
+   `deepcopy` of `jac_prototype`), which is what broke the `nonzeros`-based
+   fix in (3) — `J` and `G` no longer reliably shared identical stored-entry
+   counts (observed: 677700 vs. 2452148), hence the `copyto!`-based fix.
+
+With all four in place, `runme.jl` reaches the solver: no more JIT hang, no
+OOM, no dimension mismatch — but `retcode=InitialFailure` with only the
+`t=0` point saved. `CedarUICOp`'s warmup (fixed `dt=1e-12`, `adaptive=false`,
+10 steps by default) turned out to make **zero progress**: `|Δu|=0.0` and
+the DC-style residual `‖G(u)u - b(u)‖` identical to six decimal places
+across 300 steps in a targeted diagnostic — Newton fails identically on the
+very first attempted step and never moves `u` away from zero. Because
+`adaptive=false`, `force_dtmin=true` has nothing to act on: there is no
+dt-shrinking retry loop the way ngspice's real `uic` transient stepper has
+(ngspice's `.control ... tran 2p 2n uic` skips DC op entirely and leans on
+its own per-step Newton-with-timestep-halving; SciML's initialization
+framework instead requires a consistent `t=0` state up front). More warmup
+steps at a fixed `dt` would not have helped — the fixed-dt, no-retry
+approach itself is the wrong tool here, not an insufficient step count.
+
+**Swapping `CedarUICOp` for `CedarDCOp`** (which already implements a
+GMIN-stepping/source-stepping homotopy chain in
+`_dc_solve_with_fallbacks` — the same class of technique vacask/ngspice use
+to find an operating point for exactly this kind of circuit) resolves it:
+a validation run reached `retcode=Success` with 17 accepted / 5 rejected
+steps over the full 2ns window. `runme.jl` now uses `CedarDCOp()`.
+
+**The `-O0` requirement remains and is not expected to go away** without
+the deeper codegen work in "What to do about it" item 1/2 above (chunking
+the generated builder so LLVM's register allocator stays linear-time). CI
+therefore runs the Cadnip c6288 benchmark as its own `julia -O0` step,
+separate from `run_benchmarks.jl` (which runs the other circuits at
+default optimization) — see `.github/workflows/benchmark.yml`.
+
 ## References
 
 - `benchmarks/vacask/c6288/cedarsim/profile_c6288.jl` — phase-by-phase
@@ -363,3 +447,9 @@ column at runtime.
 - gdb backtraces from `pid` of stuck `julia -O0` process during the
   `CedarUICOp` warmup — `SparseArrays._insert!`/`setindex_scalar!` confirms
   the scalar-sparse-insertion hypothesis above
+- `SIGINT`-induced Julia stack trace pinning the post-fix hang to
+  `jac!` at `src/mna/solve.jl` calling `SparseArrays.setindex!`'s scalar path
+- Targeted diagnostic script replaying `CedarUICOp`'s warmup loop with a
+  DC-residual printout per step, showing zero movement across 300 steps
+- Diagnostic run of `tran!` with `CedarDCOp()` in place of `CedarUICOp()`,
+  reaching `retcode=Success`
