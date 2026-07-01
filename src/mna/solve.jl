@@ -1703,13 +1703,27 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         return nothing
     end
 
-    # Jacobian using EvalWorkspace (zero-allocation for dense matrices)
+    # Jacobian using EvalWorkspace (zero-allocation)
     function jac!(J, u, p, t)
         fast_rebuild!(p, u, real_time(t))
         G = p.structure.G
-        # Avoid -G allocation: element-wise negate into J
-        @inbounds for i in eachindex(J, G)
-            J[i] = -G[i]
+        # Avoid -G allocation: element-wise negate into J.
+        # For SparseMatrixCSC, `eachindex(J, G)` is CartesianIndices over the
+        # full n^2 index space (SparseMatrixCSC's IndexStyle is IndexCartesian),
+        # not the nnz entries -- iterating and scalar-setindex!-ing that is
+        # O(n^2) and inserts explicit zeros outside the pattern. J and G share
+        # the same sparsity pattern (both derived from the unified jac_pattern
+        # in compile_structure), so walk the stored nzval arrays directly.
+        if J isa SparseArrays.SparseMatrixCSC
+            Jnz = SparseArrays.nonzeros(J)
+            Gnz = SparseArrays.nonzeros(G)
+            @inbounds for i in eachindex(Jnz, Gnz)
+                Jnz[i] = -Gnz[i]
+            end
+        else
+            @inbounds for i in eachindex(J, G)
+                J[i] = -G[i]
+            end
         end
         return nothing
     end
