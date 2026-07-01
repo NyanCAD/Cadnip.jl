@@ -21,7 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.11'
           - '1.12'
 
     steps:
@@ -68,4 +67,45 @@ jobs:
             benchmark_results.md
             vacask_reference.md
             vacask_reference.tsv
+          retention-days: 30
+
+  # Work-precision diagrams: accuracy-per-runtime (adaptive tolerance sweep),
+  # Cadnip solver families vs the real VACASK. The report embeds inline ASCII
+  # plots, so it renders directly in the job summary.
+  work-precision:
+    name: Work-Precision Diagrams
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+
+      - uses: julia-actions/cache@v3
+
+      - name: Install dependencies
+        run: |
+          julia --project=benchmarks -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Fetch VACASK release
+        run: benchmarks/vacask/fetch_vacask.sh
+
+      - name: Run work-precision benchmark
+        run: julia --project=benchmarks benchmarks/vacask/wpd/run_wpd.jl
+
+      - name: Publish work-precision report
+        run: cat benchmarks/vacask/wpd/out/wpd_results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload work-precision report
+        uses: actions/upload-artifact@v7
+        with:
+          name: work-precision-report
+          path: benchmarks/vacask/wpd/out/wpd_results.md
           retention-days: 30

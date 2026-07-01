@@ -35,38 +35,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-VACASK_URL="${VACASK_URL:-https://github.com/pepijndevos/VACASK/releases/download/_0.3.3-dev/vacask_0.3.3-dev_linux-x86_64.tar.gz}"
-CACHE_DIR="${CACHE_DIR:-$HOME/.cache/cadnip-vacask}"
 RUNS="${RUNS:-5}"
 CASES="${CASES:-rc graetz mul ring c6288}"
 OUT="${1:-}"
 
 #------------------------------------------------------------------------------#
-# Locate (or fetch) the VACASK release
+# Locate (or fetch) the VACASK release (shared with the work-precision CI job)
 #------------------------------------------------------------------------------#
-locate_vacask() {
-    if [[ -n "${VACASK_DIR:-}" && -x "$VACASK_DIR/simulator/vacask" ]]; then
-        echo "$VACASK_DIR"
-        return
-    fi
-    mkdir -p "$CACHE_DIR"
-    local extracted="$CACHE_DIR/vacask"
-    if [[ ! -x "$extracted/simulator/vacask" ]]; then
-        local tarball="$CACHE_DIR/vacask.tar.gz"
-        if [[ ! -f "$tarball" ]]; then
-            echo "Downloading VACASK release..." >&2
-            curl -fsSL -o "$tarball" "$VACASK_URL"
-        fi
-        echo "Extracting VACASK release..." >&2
-        rm -rf "$extracted"
-        mkdir -p "$extracted"
-        tar xzf "$tarball" -C "$extracted" --strip-components=1
-    fi
-    chmod +x "$extracted/simulator/vacask" "$extracted/simulator/openvaf-r" 2>/dev/null || true
-    echo "$extracted"
-}
-
-VC="$(locate_vacask)"
+VC="$(bash "$HERE/fetch_vacask.sh")"
 BIN="$VC/simulator/vacask"
 export LD_LIBRARY_PATH="$VC/simulator/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

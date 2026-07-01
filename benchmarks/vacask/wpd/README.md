@@ -2,9 +2,8 @@
 
 The other benchmarks under `benchmarks/vacask/` measure **throughput**: they pin a
 tiny fixed `dtmax` and relaxed tolerances and time the result. That bypasses the
-adaptive local-truncation-error control entirely, so it rewards whichever solver
-has the cheapest per-step cost and tells you nothing about *accuracy per unit of
-work*.
+adaptive local-truncation-error control entirely, so it rewards whichever solver has
+the cheapest per-step cost and says nothing about *accuracy per unit of work*.
 
 This benchmark is the complement. Each solver runs **adaptively** across a sweep of
 tolerances, and we plot **error vs. runtime** (log-log) — a work-precision diagram,
@@ -13,110 +12,88 @@ methodology. A higher-order BDF/Rosenbrock method that takes big accurate steps
 should sit *below* a simple low-order method at tight tolerance; that separation is
 exactly what the throughput benchmark hides.
 
-It is pure Julia: Cadnip runs in-process, VACASK is shelled out to (its SPICE3 raw
-output is parsed directly), and plotting is done with Plots.jl. No Python.
-
-## Pipeline (three stages)
+## Running
 
 ```bash
-# (sandbox: use ~/.juliaup/bin/julia, Julia 1.11)
-
-# 0. one-time: fetch the VACASK binary (downloads the pinned release into the cache)
-CASES="" benchmarks/vacask/run_vacask.sh        # or set $VACASK_COMMAND yourself
-
-# 1. Cadnip sweep -> out/cadnip_*.csv (waveforms) + out/cadnip_<case>.csv (timing)
-julia --project=benchmarks benchmarks/vacask/wpd/cadnip_wpd.jl
-
-# 2. VACASK sweep + golden -> out/vacask_*.csv, out/ref_<case>.csv
-julia --project=benchmarks benchmarks/vacask/wpd/vacask_wpd.jl
-
-# 3. errors + diagrams -> plots/<case>.png/.svg, out/wpd_results.md
-julia --project=benchmarks benchmarks/vacask/wpd/plot_wpd.jl
+# one command: Cadnip sweep + VACASK sweep + report with inline ASCII plots
+julia --project=benchmarks benchmarks/vacask/wpd/run_wpd.jl          # all cases
+julia --project=benchmarks benchmarks/vacask/wpd/run_wpd.jl rc graetz # a subset
 ```
 
-Pass case names to any stage to restrict it, e.g. `... cadnip_wpd.jl filter`.
+It writes `out/wpd_results.md` — per-case tables plus inline **ASCII work-precision
+diagrams** (UnicodePlots), so it renders directly in a terminal or a GitHub Actions
+job summary (no image hosting needed). The CI `work-precision` job
+(`.github/workflows/benchmark.yml`) runs this and publishes the report to the job
+summary + an artifact.
 
-## Precision / golden reference
-
-Per case, the golden reference is the most accurate one available:
-
-- **Analytic** closed-form solution when the circuit has one (the linear filter).
-  Exact, so it never floors the tightest runs.
-- Otherwise a **tight VACASK run** (the more mature simulator), using a moderately
-  tight `reltol` with a *fine* `maxstep` so the trajectory is accurate without
-  tripping VACASK's min-timestep abort. When both an analytic and a VACASK golden
-  exist they are cross-checked against each other (printed as `analytic vs
-  VACASK-tight`).
-
-Error is the relative L2 (RMS) norm of the output node (SciML `error_estimate =
-:l2`), evaluated at **each run's own output timepoints** against the *dense*
-reference (analytic: 200k pts; VACASK-tight: ~100k pts). Measuring at native points
-matters: a high-order solver takes large steps and emits few points, so
-interpolating *its* output onto a fixed grid would penalise it for the
-interpolation rather than its real accuracy. Interpolating the dense reference onto
-the run's points instead is accurate and fair.
-
-**VACASK is run at its best, not its default.** VACASK defaults to trapezoidal
-(2nd order); the benchmark sets `tran_method="gear" tran_maxord=5` so it uses its
-variable-order Gear/BDF (up to 5th order) — configurable via `vacask_tran_method` /
-`vacask_tran_maxord` in `config.json`.
+VACASK is located via `$VACASK_COMMAND` or the cache populated by
+`benchmarks/vacask/fetch_vacask.sh` (also used by `run_vacask.sh`); run that once, or
+let CI do it. Without VACASK, the Cadnip curves and analytic goldens still work.
 
 ## Circuits
 
-Chosen to be **driven and dissipative** with a stable forced response, so error
-degrades gracefully with tolerance. Autonomous/digital circuits (ring oscillator,
-digital multiplier) are deliberately avoided: their phase error accumulates without
-bound, so the WPD curve saturates at O(1) and "falls off a cliff".
+Driven, dissipative circuits with a stable forced response, so error degrades
+gracefully with tolerance. Autonomous/digital circuits (ring oscillator, digital
+multiplier) are deliberately avoided: their phase error accumulates without bound, so
+the WPD curve saturates at O(1) and "falls off a cliff".
 
-| Case     | What                                     | Reference | Status |
-|----------|------------------------------------------|-----------|--------|
-| `filter` | 3rd-order Butterworth LC ladder (linear) | analytic  | active |
-| `rc`     | RC single-pulse step response (linear)   | VACASK    | active |
-| `graetz` | Graetz bridge full-wave rectifier        | VACASK    | disabled — see below |
+| Case     | What                                       | Golden |
+|----------|--------------------------------------------|--------|
+| `filter` | 3rd-order Butterworth LC ladder (linear)   | analytic (exact) |
+| `rc`     | RC network driven by a pulse train (linear)| analytic (exact) |
+| `graetz` | Graetz bridge full-wave rectifier (diodes) | VACASK (tight) |
+| `mul`    | Diode voltage multiplier (stiff, diodes)   | Cadnip IDA (tight) |
 
-`filter` is a smooth drive; `rc` adds two sharp source edges, so the adaptive
-controller must catch the discontinuities (it is given `tstops` at the pulse edges,
-mirroring how SPICE engines break at source breakpoints internally).
+`filter` is a smooth drive; `rc` adds sharp source edges (Cadnip gets `tstops` at the
+pulse breakpoints, as SPICE engines break at source breakpoints internally); `graetz`
+and `mul` add the diode nonlinearity, `mul` being markedly stiffer.
 
-### Cadnip bugs this benchmark surfaced
+## Precision / golden reference
 
-Checking *output values* (which the throughput benchmarks never do) exposed two
-latent Cadnip bugs:
+Error is the relative L2 (RMS) norm of the output node (SciML `error_estimate=:l2`),
+evaluated at **each run's own output timepoints** against a *dense* reference
+(analytic: 200k pts; VACASK/Cadnip-tight: dense). Measuring at native points matters:
+a high-order solver takes large steps and emits few points, so interpolating *its*
+output onto a fixed grid would penalise it for the interpolation rather than its real
+accuracy — interpolating the dense reference onto the run's points is fair.
 
-1. **SPICE diode does not conduct.** Via the `.model … d` netlist path the diode is
-   an open circuit (`5 V` through `1 kΩ` into a diode to ground stays at `5 V`; the
-   graetz bridge output is identically `0`). Root cause: the SPICE path passes the
-   instance default `area = 0` to `sp_diode`, which scales the current by area, so
-   `sp_diode(area=0.0)` is open while `sp_diode()` / `sp_diode(area=1.0)` conduct.
-   The direct `stamp!(sp_diode(), …)` API works and is tested; the netlist path is
-   untested. This **disables `graetz`** (kept in `config.json`'s `_disabled_cases`).
-   The diode voltage multiplier is also excluded — it additionally trips VACASK's
-   own min-timestep abort below `reltol ~ 1e-5`.
+The golden is **pinned per case** in `config.json` (`golden: analytic|vacask|cadnip`),
+chosen by what actually converges — `run_wpd.jl` uses exactly that and errors if it
+fails (no silent substitution):
 
-2. **PULSE source does not repeat.** Cadnip's pulse fires once then stays at `val0`
-   (the `period` parameter is ignored); VACASK repeats correctly. So `rc` is
-   **windowed to a single pulse** (`tspan = [0, 2 ms]`), where Cadnip and VACASK
-   agree. Widen once the pulse-repetition bug is fixed.
+- `filter`, `rc`: **exact analytic** closed form (also avoids any "VACASK vs its own
+  golden" ambiguity).
+- `graetz`: tight VACASK run (fine `maxstep`); it completes and is cross-checked.
+- `mul`: **Cadnip IDA** tight run — VACASK's multiplier golden aborts (see below).
 
-Both bugs surface only when comparing waveforms against a reference — exactly what
-this work-precision benchmark does. Re-enable `graetz` by moving its entry from
-`_disabled_cases` back into `cases` once the diode model is fixed.
+**VACASK runs at its best, not its default:** VACASK defaults to trapezoidal (2nd
+order); the benchmark sets `tran_method="gear" tran_maxord=5` (variable-order
+Gear/BDF), configurable via `vacask_tran_method` / `vacask_tran_maxord` in
+`config.json`.
 
-## Outputs
+## Findings about VACASK
 
-- `out/cadnip_<case>_<solver>_<reltol>.csv` — Cadnip output waveform per run.
-- `out/cadnip_<case>.csv` — per-run timing / accepted-steps / rejects / NR iters.
-- `out/vacask_<case>_<reltol>.csv`, `out/vacask_<case>.csv` — VACASK waveforms/timing.
-- `out/ref_<case>.csv` — VACASK tight golden on the grid; `out/analytic_<case>.csv`
-  — closed-form waveform (linear cases).
-- `out/wpd_results.md` — error/runtime table per circuit.
-- `plots/<case>.png` / `.svg` — the work-precision diagrams.
+- **`mul` aborts at small steps.** VACASK hits "Timestep too small" on the voltage
+  multiplier below `reltol ≈ 1e-5` (its fine-`maxstep` golden aborts too), so `mul`
+  uses a Cadnip golden and VACASK contributes only its loose-tolerance points — a
+  direct illustration of Cadnip covering a range VACASK can't on a stiff diode network.
+- **Adaptive stepping plateaus.** With `reltol` alone (no forced fine `maxstep`),
+  VACASK's error stops improving past a point (e.g. the pulse-train `rc`): its LTE
+  controller settles at a step count well short of the accuracy its fine-`maxstep`
+  golden reaches. Cadnip's solvers keep converging.
 
-`out/` and `plots/` are git-ignored (regenerated by the scripts).
+## History
 
-## Configuration
+The `graetz`/`mul` (diode) and full pulse-train `rc` cases were previously blocked by
+two Cadnip bugs — the SPICE diode didn't conduct and the PULSE source didn't repeat —
+now fixed on `main` (#197, #196). This benchmark surfaced both by checking output
+*values*, which the throughput benchmarks never do.
 
-`config.json` is the single source of truth shared by all three stages: the
-tolerance sweep (`reltols`), the golden tolerances (`ref_reltol`/`ref_abstol`) and
-its fine-maxstep factor (`ref_maxstep_factor`), the grid size (`n_grid`), and the
-per-case `tspan` / `output` node(s).
+## Files
+- `run_wpd.jl` — single entry point (Cadnip sweep, VACASK sweep, error, ASCII plots,
+  markdown report).
+- `wpd_common.jl` — shared helpers (config, CSV/raw IO, interpolation, error metric,
+  VACASK discovery).
+- `config.json` — sweep, per-case `tspan`/`output`/`golden`, VACASK integration order.
+- `filter.sp` — the linear filter netlist (the others reuse `../<case>/cedarsim/`).
+- `out/` — generated report + intermediate CSVs (git-ignored).
