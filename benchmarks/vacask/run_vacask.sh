@@ -3,7 +3,12 @@
 # VACASK reference benchmark runner
 #
 # Runs the *real* VACASK simulator on every benchmark case using the official
-# upstream methodology (benchmark.py: 1 warmup run + N timed runs, averaged).
+# upstream run-count methodology (benchmark.py: 1 warmup run + N timed runs).
+# The reported time is VACASK's own solve-only "Elapsed time" (parsed from its
+# stdout), not benchmark.py's wall-clock around the whole subprocess - the
+# latter also includes process spawn, netlist parse, and OSDI model load,
+# which would unfairly inflate VACASK's numbers next to Cadnip's solve-only
+# @benchmark timing in run_benchmarks.jl.
 #
 # This gives apples-to-apples reference numbers on the same machine that runs
 # the Cadnip benchmarks (benchmarks/vacask/run_benchmarks.jl), instead of the
@@ -35,38 +40,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-VACASK_URL="${VACASK_URL:-https://github.com/pepijndevos/VACASK/releases/download/_0.3.3-dev/vacask_0.3.3-dev_linux-x86_64.tar.gz}"
-CACHE_DIR="${CACHE_DIR:-$HOME/.cache/cadnip-vacask}"
 RUNS="${RUNS:-5}"
 CASES="${CASES:-rc graetz mul ring c6288}"
 OUT="${1:-}"
 
 #------------------------------------------------------------------------------#
-# Locate (or fetch) the VACASK release
+# Locate (or fetch) the VACASK release (shared with the work-precision CI job)
 #------------------------------------------------------------------------------#
-locate_vacask() {
-    if [[ -n "${VACASK_DIR:-}" && -x "$VACASK_DIR/simulator/vacask" ]]; then
-        echo "$VACASK_DIR"
-        return
-    fi
-    mkdir -p "$CACHE_DIR"
-    local extracted="$CACHE_DIR/vacask"
-    if [[ ! -x "$extracted/simulator/vacask" ]]; then
-        local tarball="$CACHE_DIR/vacask.tar.gz"
-        if [[ ! -f "$tarball" ]]; then
-            echo "Downloading VACASK release..." >&2
-            curl -fsSL -o "$tarball" "$VACASK_URL"
-        fi
-        echo "Extracting VACASK release..." >&2
-        rm -rf "$extracted"
-        mkdir -p "$extracted"
-        tar xzf "$tarball" -C "$extracted" --strip-components=1
-    fi
-    chmod +x "$extracted/simulator/vacask" "$extracted/simulator/openvaf-r" 2>/dev/null || true
-    echo "$extracted"
-}
-
-VC="$(locate_vacask)"
+VC="$(bash "$HERE/fetch_vacask.sh")"
 BIN="$VC/simulator/vacask"
 export LD_LIBRARY_PATH="$VC/simulator/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -94,7 +75,7 @@ tsv() { [[ -n "$TSV" ]] && printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5
 
 emit "# VACASK reference benchmark results"
 emit ""
-emit "Measured with the upstream methodology (\`benchmark.py\`: 1 warmup + $RUNS timed runs, averaged)."
+emit "Measured with the upstream run-count methodology (\`benchmark.py\`: 1 warmup + $RUNS timed runs). Time is VACASK's own solve-only elapsed time (not process/parse overhead), averaged over the $RUNS timed runs."
 emit ""
 emit "- Simulator: \`$VERSION\`"
 emit "- CPU: $CPU"
@@ -118,8 +99,24 @@ for c in $CASES; do
     python3 "$HERE/benchmark.py" -n "$RUNS" -nd 1 "$HERE/$c/vacask" "$BIN" >"$log" 2>&1 || {
         echo "  FAILED (see below)" >&2; tail -20 "$log" >&2; emit "| ${NAMES[$c]:-$c} | FAILED | - | - | - | - |"; rm -f "$log"; continue;
     }
-    avg="$(grep -E 'Average runtime|Runtime:' "$log" | tail -1 | grep -oE '[0-9.]+')"
-    rel="$(grep -E 'relative:' "$log" | tail -1 | grep -oE '[0-9.]+' || echo '')"
+    # VACASK prints its own solve-only "Elapsed time: X" after each tran
+    # analysis, unconditionally - independent of benchmark.py's own wall-clock
+    # timer (grep target above, now unused), which also includes process
+    # spawn, netlist parse, and OSDI model load. This is the same
+    # solve-vs-binary-runtime distinction fixed in the work-precision
+    # benchmark (benchmarks/vacask/wpd/), applied here too so Cadnip-vs-VACASK
+    # timing is apples-to-apples. benchmark.py runs 1 warmup ("-nd 1") + $RUNS
+    # timed invocations in order (each case has exactly one `analysis` in its
+    # .sim, so exactly one Elapsed-time line per invocation): skip the first
+    # (warmup) reading and average the remaining $RUNS.
+    read -r avg rel <<<"$(grep -oE 'Elapsed time:[[:space:]]*[0-9.eE+-]+' "$log" \
+        | grep -oE '[0-9.eE+-]+$' | tail -n +2 \
+        | awk '{a[NR]=$1; s+=$1} END{
+            if (NR==0) { print "nan nan"; exit }
+            m=s/NR
+            if (NR>1) { for(i=1;i<=NR;i++) ss+=(a[i]-m)^2; r=sqrt(ss/(NR-1))/m } else r=""
+            printf "%.6f %s\n", m, r
+        }')"
     tp="$(grep -E 'Accepted timepoints:' "$log" | tail -1 | grep -oE '[0-9]+')"
     rej="$(grep -E 'Rejected timepoints:' "$log" | tail -1 | grep -oE '[0-9]+')"
     it="$(grep -E 'NR solver iterations:' "$log" | tail -1 | grep -oE '[0-9]+')"

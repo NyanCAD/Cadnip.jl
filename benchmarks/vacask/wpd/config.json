@@ -1,0 +1,46 @@
+{
+  "_comment": "Shared work-precision-diagram config, read by wpd_common.jl / run_wpd.jl. Keep tspan/sweep identical across simulators so error is compared consistently against the same golden.",
+
+  "reltols": [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9],
+  "abstol_scale": 1.0,
+
+  "_ref_comment": "The VACASK golden uses ref_reltol with a fine maxstep (tspan/(n_grid*ref_maxstep_factor)) so the trajectory is accurate without tripping VACASK's min-timestep abort. ref_abstol is used as VACASK's vntol.",
+  "ref_reltol": 1e-7,
+  "ref_abstol": 1e-7,
+  "ref_maxstep_factor": 50,
+
+  "_vacask_integration_comment": "VACASK defaults to trapezoidal (2nd order). Use its variable-order Gear/BDF (up to 5th order) so it is benchmarked at its best.",
+  "vacask_tran_method": "gear",
+  "vacask_tran_maxord": 5,
+
+  "n_grid": 2000,
+
+  "_golden_comment": "golden pins the reference per case (analytic|vacask|cadnip), chosen by what actually converges: filter/rc have exact closed forms; graetz's tight VACASK run completes; mul's VACASK golden aborts (min-timestep) so it uses a tight Cadnip IDA reference. run_wpd.jl errors if the pinned golden fails - it never silently substitutes.",
+
+  "cases": {
+    "filter": {
+      "title": "3rd-order Butterworth LC filter (linear)",
+      "tspan": [0.0, 100.0],
+      "output": ["vout"],
+      "golden": "analytic"
+    },
+    "rc": {
+      "title": "RC circuit driven by a pulse train (linear)",
+      "tspan": [0.0, 0.02],
+      "output": ["2"],
+      "golden": "analytic"
+    },
+    "graetz": {
+      "title": "Graetz bridge full-wave rectifier (nonlinear diode)",
+      "tspan": [0.0, 0.1],
+      "output": ["outp", "outn"],
+      "golden": "vacask"
+    },
+    "mul": {
+      "title": "Diode voltage multiplier (nonlinear, stiff)",
+      "tspan": [0.0, 5e-4],
+      "output": ["20"],
+      "golden": "cadnip"
+    }
+  }
+}
