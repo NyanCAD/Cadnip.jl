@@ -202,3 +202,84 @@ Key tests performed:
 - GMIN regularization (enables linear solve)
 - LevenbergMarquardt solver (successfully finds pseudo-equilibrium)
 - CI testing of solver/tolerance/dtmax combinations (found winning config)
+
+## Bottleneck Decomposition: RHS Evaluation vs. Linear Solve vs. Iteration Count (2026-07)
+
+Follow-up question: is the PSP103 ring oscillator slow because each residual/
+Jacobian *evaluation* is expensive (RHS eval), because the *linear solve* is
+expensive, or because the solver needs far *more Newton iterations/timesteps*?
+And would swapping in a simpler MOSFET model (mos6, BSIM3, BSIM4) actually
+solve in a more reasonable time?
+
+`benchmarks/vacask/ring/cedarsim/bottleneck_probe.jl` isolates these three
+costs for a given model level (`mos1`, `mos6`, `bsim3`, `bsim4`, `psp103`):
+per-call RHS/stamp evaluation, per-call analytic Jacobian fill, a from-scratch
+sparse LU factorize+solve (an upper bound on linear-solve cost — real KLU
+solves reuse the symbolic factorization across iterations, so this
+over-estimates), and a real `tran!` run to get the actual per-iteration wall
+time and NR-iteration count. `psp103` reuses the real `runme.sp` topology and
+VACASKModels' precompiled builder; `mos1`/`mos6`/`bsim3`/`bsim4` build the
+same 9-stage inverter chain via `VADistillerModels`' `ModelRegistry` with
+small explicit 10fF load caps (these models lack PSP103's internal ~1fF
+parasitics to self-oscillate against without them).
+
+### Results
+
+| Model  | Unknowns | Build+JIT | RHS eval | Jac fill | Naive LU (upper bound) | Actual cost/iter | NR iters | Sim span | Wall (steady-state) | ms / simulated ns |
+|--------|---------:|----------:|---------:|---------:|------------------------:|------------------:|---------:|---------:|---------------------:|-------------------:|
+| mos1   |       11 |     3.6 s |  36.5 us |  27.8 us |                  281 us |            49.5 us|      104 |   100 ns |               0.005 s|               0.05 |
+| mos6   |       47 |     3.6 s |  38.5 us |  82.9 us |                  413 us |            54.8 us|      104 |   100 ns |               0.006 s|               0.06 |
+| bsim4  |      191 |    18.1 s | 278.4 us |1338.8 us|                 2610 us|           793.3 us|      104 |   100 ns |               0.083 s|               0.83 |
+| bsim3  |       83 |     5.0 s | 128.2 us | 315.8 us|                  695 us|         15296 us **|     107 |   100 ns |               1.637 s|               16.4 |
+| psp103 |      371 |     8.4 s | 366.8 us|4098.5 us|                18579 us|          2073.6 us|     4510 |    20 ns |               9.35 s |              467.6 |
+
+(** bsim3's per-iteration cost is a reproducible anomaly — see below.)
+
+For reference, VACASK's own compiled-C/OSDI PSP103 (same no-cap 9-stage
+topology, full 1us span) does 81875 NR iterations in 1.18s = **14.4 us/iter**.
+
+### What actually dominates
+
+1. **Per-call RHS-eval cost scales mildly with model complexity** (36.5 us →
+   366.8 us, mos1 to psp103, ~10x) — real, but far too small on its own to
+   explain the >100x blowup in total wall time.
+2. **The naive from-scratch linear solve is *not* what's paid per iteration.**
+   Actual per-iteration cost is always well below the naive-LU upper bound
+   (e.g. bsim4: 793 us actual vs. 2610 us naive; psp103: 2074 us actual vs.
+   18579 us naive), confirming KLU's incremental/symbolic-reuse solve is much
+   cheaper than a cold factorization, and that linear algebra is not the
+   primary bottleneck either.
+3. **The dominant multiplier is the number of Newton iterations/timesteps
+   needed per unit of simulated time.** mos1/mos6/bsim4 need ~1.0 iter/step
+   and converge the 100ns span in 104-107 iterations. PSP103 needs 5.26
+   iter/step *and* only covers 20ns in 4510 iterations — roughly **40-50x
+   more Newton iterations per simulated ns** than the SPICE-level models.
+   This reflects genuine physical stiffness: PSP103's femtofarad-scale
+   internal parasitics and richer surface-potential formulation force much
+   smaller stable steps, independent of how fast any single stamp call is.
+4. Combining (1) and (3): Cadnip's PSP103 pays ~144x more wall-clock per NR
+   iteration than VACASK's compiled-C/OSDI PSP103 (2074 us vs. 14.4 us) — so
+   there is real headroom in per-call performance too — but the iteration-
+   count blowup is the larger factor in the overall benchmark being slow.
+
+### Would mos6/BSIM3/BSIM4 solve faster?
+
+Yes, dramatically — **BSIM4 is ~560x faster wall-clock-per-simulated-ns than
+PSP103** (0.83 vs 467.6 ms/ns) while still being an industry-realistic model
+(unlike mos1, a toy level-1 model), and its build+JIT time (18s) is trivial
+compared to what indirection-laden PSP103 has historically required. mos6 is
+faster still but is a much more dated/simplistic model electrically.
+**BSIM3 is not currently a safe substitute**: despite having a *smaller*
+system (83 vs 191 unknowns) and *cheaper* isolated RHS/Jacobian/linsolve costs
+than BSIM4, its real `tran!` run reproducibly costs ~15.3 ms/iteration —
+roughly 20x worse than BSIM4's 793 us/iteration, with no rejected steps or
+other stat anomaly visible in `sol.stats` to explain it. This looks like a
+BSIM3-specific inefficiency in the DAE (`IDA`) residual/Jacobian path
+specifically (as opposed to the ODE mass-matrix path, which was what was
+isolated-benchmarked above) and needs its own follow-up investigation before
+BSIM3 is used as a "cheap" reference model.
+
+**Recommendation:** use BSIM4 (`level=14`) for a CI-friendly ring oscillator
+benchmark/test alongside the existing PSP103 one. For PSP103 itself, the
+highest-leverage optimization is reducing the required Newton-iteration count
+(larger stable steps) rather than further micro-optimizing the stamp code.
