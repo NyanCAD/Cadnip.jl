@@ -71,6 +71,32 @@ order); the benchmark sets `tran_method="gear" tran_maxord=5` (variable-order
 Gear/BDF), configurable via `vacask_tran_method` / `vacask_tran_maxord` in
 `config.json`.
 
+## Solver families per case
+
+Not a blanket linear/nonlinear split — viability was checked empirically per case
+(`run_wpd.jl`'s `SOLVERS` dict), and a run that bails out early (retcode other than
+`Success`, or one that doesn't reach `t1`) is excluded rather than plotted as a false
+data point:
+
+| Case     | Solvers                        |
+|----------|---------------------------------|
+| `filter`, `rc` | IDA, FBDF, Rodas5P, **Kvaerno5** (5th-order L-stable SDIRK) |
+| `graetz` | IDA, FBDF, Rodas5P |
+| `mul`    | IDA, FBDF |
+
+- **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
+  alternative to backward Euler; both get stuck in the diode's stiff turn-on
+  transient on `graetz` and `mul` (thousands of steps without leaving `t≈0`), so no
+  SDIRK method is used on the diode cases — only on the linear `filter`/`rc`, where
+  Kvaerno5 works well and converges cleanly.
+- **Rodas5P works on `graetz` but not `mul`.** On `graetz` it gives the best
+  accuracy-per-runtime of any Cadnip solver (converges to ~3e-8), degrading
+  gracefully to `:Unstable` only at the tightest `reltol=1e-9` (excluded by the
+  retcode filter). On `mul` — whose 100kHz cascaded-diode switching is far
+  stiffer — it hangs even at the loosest `reltol=1e-3`, so it's excluded there.
+- **IDA and FBDF are robust everywhere**, though FBDF also loses individual
+  tolerance points to `:Unstable` on the diode circuits at times.
+
 ## Findings about VACASK
 
 - **`mul` aborts at small steps.** VACASK hits "Timestep too small" on the voltage
