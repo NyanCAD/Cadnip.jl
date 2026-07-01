@@ -206,7 +206,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=NewtonRaphson(autodiff=nothing)))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -256,7 +256,12 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
 
     # ShampineCollocationInit takes a small step to find consistent state.
     # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+    # Pass an explicit nlsolve: the default (nlsolve=nothing) falls back to
+    # FastShortcutNonlinearPolyalg, which leads with dense QuasiNewton methods
+    # (Broyden/Klement) that allocate an n^2 dense matrix regardless of our
+    # sparse jac/jac_prototype -- OOMs instantly on large circuits (c6288,
+    # n=212228 -> ~360GB). NewtonRaphson uses our supplied sparse jac directly.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=NewtonRaphson(autodiff=nothing)))
 end
 
 #==============================================================================#
@@ -370,7 +375,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         # Good for oscillators where we need to refine the approximated derivatives
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=NewtonRaphson(autodiff=nothing)))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -402,5 +407,8 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
 
     # ShampineCollocationInit takes a small step and adjusts both u and du.
     # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+    # Pass an explicit nlsolve: see comment in the CedarDCOp/CedarTranOp
+    # ODEIntegrator branch above -- the default falls back to a dense
+    # QuasiNewton polyalgorithm that OOMs on large circuits.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=NewtonRaphson(autodiff=nothing)))
 end
