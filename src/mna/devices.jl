@@ -70,11 +70,43 @@ and infinitely steep segments (same time, different values).
     end
 end
 
+"""
+    pulse_at_time(v1, v2, td, tr, tf, pw, per, t) -> value
+
+Evaluate a SPICE PULSE source at time `t`.
+
+- Before the delay `td`, holds the initial value `v1`.
+- From `td` onward the waveform repeats with period `per`: a linear rise from
+  `v1` to `v2` over `tr`, a flat top at `v2` for `pw`, a linear fall back to
+  `v1` over `tf`, then a flat bottom at `v1` for the rest of the period.
+
+A non-positive `per` produces a single (non-repeating) pulse.
+"""
+@inline function pulse_at_time(v1, v2, td, tr, tf, pw, per, t)
+    type_stable_time = 0.0 * t  # Preserves type (e.g. ForwardDiff.Dual)
+    if t < td
+        return v1 + type_stable_time
+    end
+    # Phase within the current period; a single pulse when per <= 0.
+    phase = per > 0 ? mod(t - td, per) : (t - td)
+    if phase < tr
+        # Rising edge (instantaneous if tr == 0)
+        return tr > 0 ? v1 + (v2 - v1) * (phase / tr) : v2 + type_stable_time
+    elseif phase < tr + pw
+        return v2 + type_stable_time
+    elseif phase < tr + pw + tf
+        # Falling edge (instantaneous if tf == 0)
+        return tf > 0 ? v2 + (v1 - v2) * ((phase - tr - pw) / tf) : v1 + type_stable_time
+    else
+        return v1 + type_stable_time
+    end
+end
+
 export stamp!
 export Resistor, Capacitor, Inductor
 export VoltageSource, CurrentSource
 export VCVS, VCCS, CCVS, CCCS
-export pwl_at_time
+export pwl_at_time, pulse_at_time
 
 #==============================================================================#
 # Device Type Hierarchy

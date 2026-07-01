@@ -2498,7 +2498,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
         elseif fname == :pulse
             # PULSE source: pulse(v1 v2 td tr tf pw period)
-            # Implement as PWL approximation
+            # Periodic: repeats with period `per` from `td` onward (see pulse_at_time).
             vals = [cg_expr!(state, v) for v in tran_source.values]
             n_vals = length(vals)
 
@@ -2510,63 +2510,23 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             pw_expr = n_vals >= 6 ? vals[6] : 1e-3
             per_expr = n_vals >= 7 ? vals[7] : 2e-3
 
-            # Check if all parameters are numeric constants (for zero-allocation StaticPWL)
-            all_constant = all(x -> x isa Number, [v1_expr, v2_expr, td_expr, tr_expr, tf_expr, pw_expr, per_expr])
+            # DC value: use explicit dc= if specified, otherwise use v1 (initial pulse value)
+            dc_expr = dc_val !== nothing ? dc_val : v1_expr
 
-            if all_constant
-                # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
-                v1, v2 = Float64(v1_expr), Float64(v2_expr)
-                td, tr, tf, pw, per = Float64(td_expr), Float64(tr_expr), Float64(tf_expr), Float64(pw_expr), Float64(per_expr)
-
-                # Compute PWL times and values for one period
-                t0, t1, t2, t3, t4, t5 = 0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per
-                v_1, v_2, v_3, v_4, v_5, v_6 = v1, v1, v2, v2, v1, v1
-
-                # DC value: use explicit dc= if specified, otherwise use v1 (initial pulse value)
-                dc_value = dc_val !== nothing ? dc_val : v1
-
-                if is_voltage
-                    return quote
-                        let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
-                            dc = $dc_value
-                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
-                    end
-                else
-                    return quote
-                        let ts = $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
-                            ys = $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6),
-                            dc = $dc_value
-                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
+            if is_voltage
+                return quote
+                    let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
+                        $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pulse_at_time(v1, v2, td, tr, tf, pw, per, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
-                # FALLBACK PATH: Dynamic arrays
-                # DC value: use explicit dc= if specified, otherwise use v1/i1 (initial pulse value)
-                dc_expr = dc_val !== nothing ? dc_val : v1_expr
-                if is_voltage
-                    return quote
-                        let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
-                            times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
-                            values = [v1, v1, v2, v2, v1, v1]
-                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
-                    end
-                else
-                    return quote
-                        let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
-                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
-                            times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
-                            values = [i1, i1, i2, i2, i1, i1]
-                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
+                return quote
+                    let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
+                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
+                        $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pulse_at_time(i1, i2, td, tr, tf, pw, per, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             end
