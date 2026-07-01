@@ -213,6 +213,21 @@ end
 
 const VACASK_BIN, VACASK_LIB = locate_vacask()
 
+"""
+Parse VACASK's self-reported analysis time from stdout: it prints
+`  Elapsed time: <seconds>` right after `Running analysis 'tran1'.`,
+unconditionally (no `print stats` needed). This is the transient analysis's own
+wall time - it excludes process spawn, netlist parsing, and OSDI model loading,
+which is what an external wall-clock around the whole subprocess would include.
+Cadnip's timing (via @benchmark on a pre-built circuit) is the equivalent
+solve-only figure, so this is the fair, apples-to-apples number to compare.
+"""
+function parse_vacask_elapsed(stdout_text::AbstractString)
+    m = match(r"Elapsed time:\s*([0-9.eE+-]+)", stdout_text)
+    m === nothing && error("could not find 'Elapsed time:' in VACASK output")
+    return parse(Float64, m.captures[1])
+end
+
 "Run VACASK once; return (t, signal, timepoints, runtime_s) or throw on failure."
 function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2])
     step = (tspan[2] - tspan[1]) / Int(CFG["n_grid"])
@@ -232,9 +247,9 @@ function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2]
     cmd = Cmd(`$VACASK_BIN --skip-embed --skip-postprocess runme.sim`; dir=workdir, env=env)
     best = Inf; local names, M
     for _ in 1:VACASK_REPEATS
-        t0 = time()
-        run(pipeline(cmd; stdout=devnull, stderr=devnull))
-        best = min(best, time() - t0)
+        out = IOBuffer()
+        run(pipeline(cmd; stdout=out, stderr=devnull))
+        best = min(best, parse_vacask_elapsed(String(take!(out))))
         names, M = read_rawfile(joinpath(workdir, "tran1.raw"))
     end
     rm(workdir; recursive=true, force=true)
@@ -423,22 +438,49 @@ function analyze(case, spec)
     return gsrc, curves, table, xcheck
 end
 
+"""
+Distinct pure-ASCII markers, one per series, so curves stay distinguishable even
+without color (color support in GITHUB_STEP_SUMMARY is unconfirmed, so it's kept
+off - see README). `canvas=AsciiCanvas`/`border=:ascii` are used for the same
+reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
+have known cross-font/cross-renderer width bugs that misalign the plot; plain
+ASCII (0-127) is guaranteed single-column in any monospace font.
+"""
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@"]
+
 function ascii_plot(title, curves)
+    labels = sort(collect(keys(curves)))
+    filter!(l -> !isempty(curves[l]), labels)
+    isempty(labels) && return "(no data)"
+
+    # scatterplot!'s axis range is fixed by the FIRST series plotted (it does not
+    # auto-rescale for later series), so points from other series outside that
+    # range are silently dropped. Compute the range across ALL series up front,
+    # with margin - points exactly at the raw extrema are also clipped - and pass
+    # it explicitly to the first scatterplot() call.
+    allx = Float64[]; ally = Float64[]
+    for l in labels, (e, t) in curves[l]
+        push!(allx, e); push!(ally, t)
+    end
+    xlim = (minimum(allx) / 2, maximum(allx) * 2)
+    ylim = (minimum(ally) / 2, maximum(ally) * 2)
+
     plt = nothing
-    for label in sort(collect(keys(curves)))
-        pts = sort(curves[label]); isempty(pts) && continue
+    for (i, label) in enumerate(labels)
+        pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
+        marker = ASCII_MARKERS[mod1(i, length(ASCII_MARKERS))]
         if plt === nothing
-            plt = lineplot(x, y; name=label, xlabel="rel-L2 error", ylabel="runtime s",
-                           title=title, xscale=:log10, yscale=:log10,
-                           width=64, height=16, canvas=DotCanvas)
+            plt = scatterplot(x, y; name=label, xlabel="rel-L2 error", ylabel="runtime s",
+                              title=title, xscale=:log10, yscale=:log10,
+                              width=64, height=16, canvas=AsciiCanvas, border=:ascii,
+                              marker=marker, xlim=xlim, ylim=ylim)
         else
-            lineplot!(plt, x, y; name=label)
+            scatterplot!(plt, x, y; name=label, marker=marker)
         end
     end
-    plt === nothing && return "(no data)"
     io = IOBuffer()
-    show(IOContext(io, :color => false), plt)
+    show(IOContext(io, :color => true), plt)
     return String(take!(io))
 end
 
@@ -453,7 +495,11 @@ function report(results)
         println(io, "## $(spec["title"])\n")
         println(io, "Golden reference: **$gsrc**.", isempty(xcheck) ? "" : " ($xcheck)", "\n")
         if !isempty(curves)
-            println(io, "```")
+            # GitHub renders ANSI SGR color codes inside ```ansi fences (confirmed
+            # for issues/PRs/READMEs; unconfirmed for GITHUB_STEP_SUMMARY - if it
+            # doesn't render here, the plain ASCII markers still keep series
+            # distinguishable, so fall back to a plain ``` fence).
+            println(io, "```ansi")
             println(io, ascii_plot(String(case), curves))
             println(io, "```\n")
         end
