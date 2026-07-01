@@ -1711,15 +1711,18 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         # For SparseMatrixCSC, `eachindex(J, G)` is CartesianIndices over the
         # full n^2 index space (SparseMatrixCSC's IndexStyle is IndexCartesian),
         # not the nnz entries -- iterating and scalar-setindex!-ing that is
-        # O(n^2) and inserts explicit zeros outside the pattern. J and G share
-        # the same sparsity pattern (both derived from the unified jac_pattern
-        # in compile_structure), so walk the stored nzval arrays directly.
+        # O(n^2) and inserts explicit zeros outside the pattern.
+        #
+        # J is not guaranteed to share G's exact sparsity pattern: callers
+        # like ShampineCollocationInit's internal NonlinearSolve machinery may
+        # hand us a J whose structure was derived/simplified independently
+        # (observed nnz mismatch on c6288: J had 677700 stored entries vs.
+        # G's 2452148). copyto! between SparseMatrixCSCs reallocates dest's
+        # structure to match src (verified: handles differing nnz correctly),
+        # so use it instead of assuming identical nzval layouts.
         if J isa SparseArrays.SparseMatrixCSC
-            Jnz = SparseArrays.nonzeros(J)
-            Gnz = SparseArrays.nonzeros(G)
-            @inbounds for i in eachindex(Jnz, Gnz)
-                Jnz[i] = -Gnz[i]
-            end
+            copyto!(J, G)
+            SparseArrays.nonzeros(J) .*= -1
         else
             @inbounds for i in eachindex(J, G)
                 J[i] = -G[i]
