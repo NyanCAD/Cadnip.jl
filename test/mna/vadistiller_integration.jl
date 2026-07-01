@@ -77,6 +77,32 @@ Q2 q2_coll q2_base 0 npn1
 .END
 """i
 
+# Diode resistor-divider defined via the SPICE API: `.model <name> d` card +
+# `D` instance. This resolves to VADistillerModels.sp_diode via ModelRegistry
+# (Tier 1). Regression guard: a missing `cg_mna_instance!` method for SP.Diode
+# silently dropped the instance (open circuit => zero current). See the
+# "Diode via SPICE API" testset below.
+const sp_diode_divider = sp"""
+* diode current limiter
+.model diode_a d is=1e-14 rs=0
+V1 vcc 0 DC 1.0
+R1 vcc da 1k
+D1 da 0 diode_a
+.END
+"""i
+
+# Same topology with a 100x larger saturation current. Confirms that model-card
+# parameters actually reach the device: larger `is` => smaller forward drop.
+# A distinct model name avoids colliding with `sp_diode_divider` above.
+const sp_diode_divider_bigis = sp"""
+* diode current limiter, large is
+.model diode_b d is=1e-12 rs=0
+V1 vcc 0 DC 1.0
+R1 vcc da 1k
+D1 da 0 diode_b
+.END
+"""i
+
 @testset "VADistiller Integration Tests" begin
 
     #==========================================================================#
@@ -206,6 +232,31 @@ Q2 q2_coll q2_base 0 npn1
                 drop_reasonable = (v_diode_a - v_a_int) < 0.01
 
                 @test has_internal_node && junction_ok && drop_ok && drop_reasonable
+            end
+
+            @testset "Diode via SPICE API (parameter passing)" begin
+                # Regression test: before SP.Diode had an MNA codegen method, the
+                # `D1` instance was silently dropped (the .model parameters were
+                # computed but never passed to a stamp! call), leaving the diode
+                # an open circuit. The node `da` floated up to V(vcc) and no
+                # current flowed.
+                circuit = MNACircuit(sp_diode_divider)
+                sol = dc!(circuit)
+
+                v_vcc = sol[:vcc]
+                v_da = sol[:da]
+                i_r1 = (v_vcc - v_da) / 1000.0  # current through R1 == diode current
+
+                @test isapprox(v_vcc, 1.0; atol=1e-9)
+                # The diode must conduct: forward drop in the diode region and a
+                # clearly non-zero current (the bug produced exactly 0 A).
+                @test 0.4 < v_da < 0.75
+                @test i_r1 > 1e-5
+
+                # Model-card parameters must reach the device: a 100x larger
+                # saturation current lowers the forward drop at the same current.
+                sol_big = dc!(MNACircuit(sp_diode_divider_bigis))
+                @test sol_big[:da] < v_da
             end
         end
 

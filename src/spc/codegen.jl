@@ -2140,6 +2140,85 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
 end
 
 """
+    cg_mna_instance!(state, instance::SNode{SP.Diode})
+
+Generate MNA builder code for diode instances (D elements).
+
+A diode resolves through its `.model <name> d ...` card to a VA-generated
+device (e.g. `sp_diode` from VADistillerModels, registered via ModelRegistry
+Tier 1). The model card supplies the device parameters via the model variable
+generated in `codegen_mna!`; instance parameters (`area`, `temp`, …) are passed
+as keyword arguments and override/augment the model.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
+    nets = sema_nets(instance)
+    pos = cg_net_name!(state, nets[1])
+    neg = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Reference the model variable generated for the .model card
+    model_name = cg_model_name!(state, instance.model)
+    model_sym = LSymbol(instance.model)
+
+    # Build a case-insensitive instance-parameter lookup against the model's
+    # field names (SPICE is case-insensitive; VA field names may be mixed case).
+    case_insensitive = Dict{Symbol,Symbol}()
+    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
+        (_, def) = last(state.sema.models[model_sym])
+        model_globalref = def.val[2]
+        if model_globalref isa GlobalRef
+            T = getglobal(model_globalref.mod, model_globalref.name)
+            if T isa DataType && T <: Cadnip.ParsedModel
+                T = T.parameters[1]
+            end
+            case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
+        end
+    end
+
+    is_large_model = is_large_va_model(state, model_sym)
+
+    # Build instance parameter kwargs with case-insensitive lookup
+    param_kwargs = Expr[]
+    for p in instance.params
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        lname = Symbol(lowercase(String(param_name)))
+        rname = get(case_insensitive, lname, param_name)
+        push!(param_kwargs, Expr(:kw, rname, param_val))
+    end
+
+    # Create the device instance via spicecall + setproperties, matching the
+    # pattern used by MOSFET/BJT/OSDI handlers.
+    device_expr = if isempty(param_kwargs)
+        :($(spicecall)($model_name).device)
+    else
+        :($(spicecall)($model_name; $(param_kwargs...)).device)
+    end
+
+    local_name = QuoteNode(Symbol(name))
+
+    if is_large_model
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                Base.invokelatest($(MNA).stamp!, dev, ctx, $pos, $neg;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+            end
+        end
+    else
+        return quote
+            let dev = $device_expr
+                local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
+                $(MNA).stamp!(dev, ctx, $pos, $neg;
+                    _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+            end
+        end
+    end
+end
+
+"""
     cg_mna_instance!(state, instance::SNode{SP.OSDIDevice})
 
 Generate MNA builder code for OSDI device instances (N elements).
