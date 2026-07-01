@@ -1,8 +1,8 @@
 # Shared helpers for the work-precision-diagram benchmark (run_wpd.jl).
 #
 # Pure, lightweight utilities: config loading, CSV/raw IO, interpolation, the
-# error metric, and VACASK binary discovery. No heavy deps (Cadnip / UnicodePlots
-# are loaded by run_wpd.jl itself).
+# error metric, and VACASK binary discovery. No heavy deps (Cadnip / UnicodePlots /
+# Plots are loaded by run_wpd.jl itself).
 
 using Printf
 
@@ -16,6 +16,7 @@ end
 const HERE = @__DIR__
 const VACASK_DIR = normpath(joinpath(HERE, ".."))   # benchmarks/vacask
 const OUT = joinpath(HERE, "out")
+const PLOTS_DIR = joinpath(OUT, "plots")
 
 const CFG = JSON.parsefile(joinpath(HERE, "config.json"))
 

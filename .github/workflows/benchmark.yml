@@ -107,5 +107,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: work-precision-report
-          path: benchmarks/vacask/wpd/out/wpd_results.md
+          # wpd_results.md (tables + inline ASCII plots, same as the job summary)
+          # plus higher-quality PNG/SVG plots (not embedded in the summary - see
+          # run_wpd.jl's save_plot).
+          path: |
+            benchmarks/vacask/wpd/out/wpd_results.md
+            benchmarks/vacask/wpd/out/plots/*.png
+            benchmarks/vacask/wpd/out/plots/*.svg
           retention-days: 30

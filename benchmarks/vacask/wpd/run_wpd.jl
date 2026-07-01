@@ -10,7 +10,9 @@
 #   3. sweeps the real VACASK (high-order Gear/BDF),
 #   4. computes each run's relative-L2 error at its OWN timepoints vs the dense
 #      golden, and writes out/wpd_results.md with per-case tables and inline
-#      ASCII (UnicodePlots) work-precision diagrams.
+#      ASCII (UnicodePlots) work-precision diagrams, plus higher-quality
+#      PNG/SVG plots (Plots.jl/GR) under out/plots/ for the CI artifact - the
+#      job summary only renders the ASCII version.
 #
 # Usage:
 #   julia --project=benchmarks benchmarks/vacask/wpd/run_wpd.jl [case ...]
@@ -19,6 +21,11 @@
 
 using Pkg
 Pkg.instantiate()
+
+# Must be set before Plots/GR initializes: renders to file with no display
+# server (CI has none). File output only - no markdown embedding, so none of
+# the earlier headless-rendering complications apply here.
+ENV["GKSwstype"] = "100"
 
 include(joinpath(@__DIR__, "wpd_common.jl"))
 
@@ -35,8 +42,11 @@ using Statistics
 using SciMLBase: ReturnCode
 using VADistillerModels     # registers the SPICE diode model
 using UnicodePlots
+using Plots
+gr()
 
 mkpath(OUT)
+mkpath(PLOTS_DIR)
 
 #------------------------------------------------------------------------------#
 # Circuit builders (top level so dispatch to the freshly-defined builders is OK)
@@ -488,6 +498,34 @@ function ascii_plot(title, curves)
     return String(take!(io))
 end
 
+"""
+High-quality PNG/SVG work-precision plot (real color, proper fonts, vector
+curves) for the downloaded artifact - complements the plain-ASCII plot
+embedded in the job summary (`ascii_plot`), which is legible without
+downloading anything but is inherently coarser. Written to
+`PLOTS_DIR/<case>.{png,svg}`; same underlying (error, runtime) data as the
+ASCII plot and the per-case table.
+"""
+function save_plot(case, title, curves)
+    labels = sort(collect(keys(curves)))
+    filter!(l -> !isempty(curves[l]), labels)
+    isempty(labels) && return
+
+    plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
+                      ylabel="runtime (s)", title="Work-precision: $title",
+                      legend=:outertopright, size=(900, 600), dpi=150)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5)
+    for (i, label) in enumerate(labels)
+        pts = sort(curves[label])
+        x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
+        Plots.plot!(plt, x, y; label=label, marker=markers[mod1(i, length(markers))],
+                    markersize=6, linewidth=2)
+    end
+    for ext in ("png", "svg")
+        Plots.savefig(plt, joinpath(PLOTS_DIR, "$(case).$(ext)"))
+    end
+end
+
 function report(results)
     io = IOBuffer()
     println(io, "# Work-Precision Diagram Results\n")
@@ -506,6 +544,7 @@ function report(results)
             println(io, "```")
             println(io, ascii_plot(String(case), curves))
             println(io, "```\n")
+            save_plot(String(case), spec["title"], curves)
         end
         println(io, "| Simulator | reltol | rel-L2 error | runtime (s) |")
         println(io, "|-----------|--------|--------------|-------------|")

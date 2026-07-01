@@ -22,9 +22,13 @@ julia --project=benchmarks benchmarks/vacask/wpd/run_wpd.jl rc graetz # a subset
 
 It writes `out/wpd_results.md` — per-case tables plus inline **ASCII work-precision
 diagrams** (UnicodePlots), so it renders directly in a terminal or a GitHub Actions
-job summary (no image hosting needed). The CI `work-precision` job
+job summary (no image hosting needed). It also writes higher-quality **PNG/SVG plots**
+(Plots.jl/GR, real color and vector curves) to `out/plots/<case>.{png,svg}` — these are
+*not* embedded in the summary (Markdown there can't reference local files), only
+uploaded in the CI artifact, so the job summary stays ASCII while the download gets
+proper images of the same data. The CI `work-precision` job
 (`.github/workflows/benchmark.yml`) runs this and publishes the report to the job
-summary + an artifact.
+summary, and both the report and the PNG/SVG plots to the artifact.
 
 VACASK is located via `$VACASK_COMMAND` or the cache populated by
 `benchmarks/vacask/fetch_vacask.sh` (also used by `run_vacask.sh`); run that once, or
@@ -116,10 +120,10 @@ now fixed on `main` (#197, #196). This benchmark surfaced both by checking outpu
 *values*, which the throughput benchmarks never do.
 
 ## Files
-- `run_wpd.jl` — single entry point (Cadnip sweep, VACASK sweep, error, ASCII plots,
-  markdown report).
+- `run_wpd.jl` — single entry point (Cadnip sweep, VACASK sweep, error, ASCII + PNG/SVG
+  plots, markdown report).
 - `wpd_common.jl` — shared helpers (config, CSV/raw IO, interpolation, error metric,
   VACASK discovery).
 - `config.json` — sweep, per-case `tspan`/`output`/`golden`, VACASK integration order.
 - `filter.sp` — the linear filter netlist (the others reuse `../<case>/cedarsim/`).
-- `out/` — generated report + intermediate CSVs (git-ignored).
+- `out/` — generated report + intermediate CSVs + `plots/*.{png,svg}` (git-ignored).

@@ -22,7 +22,6 @@ using SciMLBase: ReturnCode
 using Sundials: IDA
 using OrdinaryDiffEqBDF: ABDF2, FBDF
 using OrdinaryDiffEqRosenbrock: Rodas3
-using OrdinaryDiffEqSDIRK: ImplicitEuler
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 
@@ -34,14 +33,17 @@ const BENCHMARK_DIR = @__DIR__
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
 const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
-const SOLVER_IMPLICIT_EULER = ("ImplicitEuler", () -> ImplicitEuler(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
 # Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
 const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 
 # Per-benchmark solver configurations
-# RC Circuit (linear): ImplicitEuler 2.6x faster than IDA (1.0s vs 2.6s)
-const SOLVERS_RC = [SOLVER_IMPLICIT_EULER, SOLVER_ABDF2, SOLVER_RODAS3]
+# RC Circuit (linear). ImplicitEuler is excluded: now that Cadnip's PULSE source
+# actually repeats (previously it fired once then went flat), the circuit has
+# ~500 real edges over the 1s sweep instead of 1, and ImplicitEuler's forced
+# dtmax=1e-6 with heavy step-rejection near each edge exhausts its maxiters
+# budget before reaching the end.
+const SOLVERS_RC = [SOLVER_ABDF2, SOLVER_RODAS3]
 # Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
 const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
@@ -278,7 +280,7 @@ function main()
         end
     end
 
-    # RC Circuit - linear circuit, ImplicitEuler is 3x faster
+    # RC Circuit - linear circuit
     add_benchmark!("RC Circuit",
         joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl"),
         SOLVERS_RC)
