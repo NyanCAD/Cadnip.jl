@@ -283,3 +283,53 @@ BSIM3 is used as a "cheap" reference model.
 benchmark/test alongside the existing PSP103 one. For PSP103 itself, the
 highest-leverage optimization is reducing the required Newton-iteration count
 (larger stable steps) rather than further micro-optimizing the stamp code.
+
+### Correction: verify against the real full-length run, not a short slice
+
+The PSP103 numbers above (`9.35 s`, `467.6 ms/ns`, and the "~144x slower than
+VACASK" comparison) came from a `tspan` cut to 20ns instead of the real
+benchmark's 1us, extrapolated for turnaround speed during the investigation —
+and the VACASK comparison used the upstream README table (measured on a
+Threadripper 7970), not this machine. Both of those are worth being honest
+about, so here are the real, non-extrapolated, same-machine numbers:
+
+```
+# Real VACASK binary, same machine, official benchmark.py methodology
+CASES="ring" RUNS=3 bash benchmarks/vacask/run_vacask.sh
+→ 2.28 s, 26040 timepoints, 1 rejected, 81949 iterations   (full 1us span)
+
+# Real, unmodified benchmarks/vacask/ring/cedarsim/runme.jl, same machine
+→ 333.5 s median (327-337 s range), 43968 timepoints, 242293 NR iterations,
+  5.51 iter/step, 63.50 GiB allocated, 21.47M allocations   (full 1us span)
+```
+
+Corrected ratios:
+
+| | Cadnip | VACASK | Ratio |
+|---|---:|---:|---:|
+| Wall time | 333.5 s | 2.28 s | **146x** |
+| NR iterations | 242,293 | 81,949 | **2.96x** |
+| Iter/step | 5.51 | 3.15 | 1.75x |
+| Wall time / iteration | 1376 us | 27.8 us | **49.5x** |
+
+So the 146x total slowdown factors as **~3x more Newton iterations × ~50x
+higher cost per iteration** — not one dominant cause. The iteration-count
+multiplier (2.96x, full run) is consistent with what the 20ns slice suggested
+(iter/step 5.51 vs 5.26), so the slice was a reasonable proxy for *local*
+dynamics — just not for extrapolating total wall time, and definitely not a
+substitute for measuring the real VACASK binary on the same hardware. The
+507-refactorizations-≈-total-time hypothesis (linear solve not benefiting
+from warm/cached KLU reuse) was derived from the 20ns slice's `sol.stats` and
+has **not** been re-confirmed against the real full-length run — treat it as
+a lead, not a conclusion.
+
+The real run's own numbers point to an additional, concrete, unexplained
+lead: **63.50 GiB allocated / 21.47M allocations for one run** (~88
+allocations per Newton iteration) in what's supposed to be a zero-allocation
+`DirectStampContext` hot path. GC time itself is only ~2.4% of wall time, so
+this isn't directly GC-pause-bound, but it's a large, measurable, and much
+more tractable target for a `Profile.Allocs` pass than anything above.
+
+This also means the earlier BSIM4-vs-PSP103 "~560x faster" figure should be
+revised down using the real PSP103 number: 333.5 ms/ns vs BSIM4's 0.83 ms/ns
+(itself measured directly, not extrapolated) is **~400x**, not 560x.
