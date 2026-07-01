@@ -2028,8 +2028,8 @@ end
 function (to_julia::MNAScope)(ip::VANode{SystemIdentifier})
     id = Symbol(ip)
     if id == Symbol("\$mfactor")
-        # Device multiplicity - default to 1.0
-        return :(hasproperty(_mna_spec_, :mfactor) ? _mna_spec_.mfactor : 1.0)
+        # Device multiplicity, threaded through from the instance's `m=` parameter
+        return :(_mna_mfactor_)
     elseif id == Symbol("\$temperature")
         return :(_mna_spec_.temp + 273.15)
     elseif id == Symbol("\$abstime")
@@ -2905,8 +2905,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # See detect_or_cached! in contrib.jl for the new approach.
 
         branch_stamp = quote
-            # Evaluate the branch current
-            I_branch = $sum_expr
+            # Evaluate the branch current. Per the Verilog-A LRM, $mfactor scales
+            # *all* of a module's contributions (I()<+ and Q()<+ alike); models
+            # only reference $mfactor explicitly for terms that must NOT scale
+            # with multiplicity (e.g. gmin blending). Scaling the combined dual
+            # here (rather than each contribution site) covers both the
+            # resistive and reactive (ddt) parts, since real-scalar * Dual
+            # distributes over value and partials recursively.
+            I_branch = _mna_mfactor_ * ($sum_expr)
 
             if I_branch isa ForwardDiff.Dual{Cadnip.MNA.ContributionTag}
                 # Has ddt: ContributionTag wraps JacobianTag duals
@@ -3477,7 +3483,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                                  _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Cadnip.MNA.ZERO_VECTOR,
                                  _mna_spec_::Cadnip.MNA.MNASpec=Cadnip.MNA.MNASpec(),
                                  _mna_instance_::Symbol=Symbol(""),
-                                 _mna_h_=nothing, _mna_h_p_=nothing)
+                                 _mna_h_=nothing, _mna_h_p_=nothing, _mna_mfactor_::Real=1.0)
         $stamp_body
     end)
 

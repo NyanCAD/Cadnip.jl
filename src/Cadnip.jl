@@ -44,21 +44,6 @@ const sim_mode = ScopedValue{Symbol}(:dcop)
 # Minimal types previously in simulate_ir.jl (used by spectre.jl)
 # These are stubs for backward compatibility - MNA uses different types
 
-# ParallelInstances for device multiplicity
-struct ParallelInstances
-    device
-    multiplier::Float64
-
-    function ParallelInstances(device, multiplier::Float64)
-        if multiplier < 0.0
-            cedarthrow(ArgumentError("Cannot construct a ParallelInstances with non-positive multiplier '$(multiplier)'"))
-        end
-        return new(device, multiplier)
-    end
-end
-ParallelInstances(device, multiplier::Number) = ParallelInstances(device, Float64(multiplier))
-ParallelInstances(device, multiplier::DefaultOr) = ParallelInstances(device, undefault(multiplier))
-
 # Base types for circuit elements and simulation (stubs)
 abstract type CircuitElement end
 abstract type AbstractSim{C} end

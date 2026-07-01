@@ -2026,21 +2026,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     model_sym = LSymbol(instance.model)
     is_large_model = is_large_va_model(state, model_sym)
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.parameters
         param_name = LSymbol(p.name)
+        param_name === :m && continue
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2054,7 +2059,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, $d, $g, $s, $b;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     else
@@ -2064,7 +2070,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2096,21 +2103,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     model_sym = LSymbol(instance.model)
     is_large_model = is_large_va_model(state, model_sym)
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.params
         param_name = LSymbol(p.name)
+        param_name === :m && continue
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2123,7 +2135,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, $c, $b, $e, $s;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     else
@@ -2133,7 +2146,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2177,12 +2191,20 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
 
     is_large_model = is_large_va_model(state, model_sym)
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. It is handled
+    # separately from the case-insensitive model-field lookup below: on a diode
+    # *instance* line "m" always means multiplicity (never the model-card-only
+    # "m" grading-coefficient parameter aliased to mj).
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
     for p in instance.params
         param_name = LSymbol(p.name)
-        param_val = cg_expr!(state, p.val)
         lname = Symbol(lowercase(String(param_name)))
+        lname === :m && continue
+        param_val = cg_expr!(state, p.val)
         rname = get(case_insensitive, lname, param_name)
         push!(param_kwargs, Expr(:kw, rname, param_val))
     end
@@ -2190,9 +2212,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     # Create the device instance via spicecall + setproperties, matching the
     # pattern used by MOSFET/BJT/OSDI handlers.
     device_expr = if isempty(param_kwargs)
-        :($(spicecall)($model_name).device)
+        :($(spicecall)($model_name))
     else
-        :($(spicecall)($model_name; $(param_kwargs...)).device)
+        :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     local_name = QuoteNode(Symbol(name))
@@ -2203,7 +2225,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, $pos, $neg;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     else
@@ -2212,7 +2235,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $pos, $neg;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2271,24 +2295,29 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # Check if this is a large model that needs invokelatest
     is_large_model = is_large_va_model(state, model_sym)
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
     for p in instance.parameters
         param_name = LSymbol(p.name)
+        lname = Symbol(lowercase(String(param_name)))
+        lname === :m && continue
         param_val = cg_expr!(state, p.val)
         # Use case-insensitive lookup to find correct parameter name
-        lname = Symbol(lowercase(String(param_name)))
         rname = get(case_insensitive, lname, param_name)
         push!(param_kwargs, Expr(:kw, rname, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # Generate stamp! call with variable number of node arguments
@@ -2306,7 +2335,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 Base.invokelatest($(MNA).stamp!, dev, ctx, nodes...;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     else
@@ -2317,7 +2347,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, nodes...;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
