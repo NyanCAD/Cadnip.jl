@@ -28,9 +28,6 @@ using Printf
 
 # Import pre-parsed PSP103 model from PSPModels package
 using PSPModels
-
-# Alias for compatibility with existing code
-const PSP103VA_module = sp_psp103va_module
 println("PSP103VA loaded from PSPModels package")
 
 # Parse SPICE file, inject PSP103VA module as Tier-2 scope so `.model` cards

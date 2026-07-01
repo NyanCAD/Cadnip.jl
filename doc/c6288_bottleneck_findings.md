@@ -299,9 +299,67 @@ instances. C6288: largest enclosing subckt has 2419 instances. The growth
 isn't 18 → 10000 (ratio 555×); it's 18 → 2419 (ratio 134×). And it hits a
 non-linearity in LLVM's register allocator at that size.
 
+## Update: with `-O0`, what's the *next* blocker?
+
+Verified by actually running `julia -O0 --project=benchmarks
+benchmarks/vacask/c6288/cedarsim/runme.jl Rodas5P` end to end (not just the
+profiler). Two things:
+
+**Fixed en route:** `runme.jl` itself was broken independent of `-O0` — it
+referenced `sp_psp103va_module`, which doesn't exist in `PSPModels`
+(`PSP103VA_module` is the exported name). This threw `UndefVarError` before
+anything else ran. Fixed by dropping the stale alias.
+
+**Real next blocker, confirmed live via gdb:** once the script actually gets
+past setup (`build_with_detection`/`compile_structure`/first `fast_rebuild!`
+all complete in the ~75-90s the profiler predicted — `-O0` genuinely clears
+RAGreedy), the process hangs again, this time at runtime, not JIT. Repeated
+`gdb -p <pid> -batch -ex 'thread apply all bt'` snapshots over 10+ minutes
+all show the same stack:
+
+```
+_insert! () at .../SparseArrays/src/sparsematrix.jl:3218
+julia__setindex_scalar!_... () at .../SparseArrays/src/sparsematrix.jl:3206-3207
+insert! () at array.jl:1746
+julia__growat!_... () at array.jl:1162
+memmove () at cmem.jl:28
+```
+
+i.e. `SparseArrays.setindex!` falling into its scalar insertion path
+(`_insert!`, which shifts `colptr`/`rowval`/`nzval` to make room for one new
+stored entry at a time) over and over, for a 212,228×212,228 matrix with
+~2.45M final nnz. Each such insertion is `O(current nnz)`, so building up
+the structure entry-by-entry this way is `O(n²)`-ish — consistent with the
+process still running (and still making progress, not deadlocked) after 10
+minutes before it was killed.
+
+This is exactly item 3 from the "what to do about it" list above:
+`CedarUICOp`'s pseudo-transient warmup (`SciMLBase.initialize_dae!(...,
+::CedarUICOp)` in `src/mna/dcop.jl:310-389`) runs `ImplicitEuler(autodiff=
+ADTypes.AutoFiniteDiff())` for `warmup_steps` fixed timesteps. The main
+`tran!` path does wire `jac_prototype` through for the outer solver
+(`src/mna/solve.jl:1721-1725`, `1611-1615`), but `AutoFiniteDiff()` with no
+declared sparsity/coloring makes OrdinaryDiffEq's Jacobian machinery
+(`calc_J`/`calc_W` in `OrdinaryDiffEqDifferentiation`) build/refresh the
+Jacobian without exploiting the shared sparsity pattern — degenerating into
+scalar writes that repeatedly grow the sparse structure instead of reusing
+existing storage.
+
+**Net effect:** clearing the LLVM RAGreedy hang with `-O0` does not make
+c6288 runnable end-to-end. It trades a ~10-minute-plus JIT hang for a
+different runtime hang of the same order (or worse, given `O(n²)` scaling),
+inside the `CedarUICOp` warmup's finite-difference Jacobian handling. Fixing
+this requires giving the warmup's `ImplicitEuler` a proper sparse
+`jac_prototype`/coloring (or an analytic `jac=`) instead of relying on
+`AutoFiniteDiff()` to rediscover the 2.45M-entry sparsity pattern column by
+column at runtime.
+
 ## References
 
 - `benchmarks/vacask/c6288/cedarsim/profile_c6288.jl` — phase-by-phase
   profiler that produced the table above
 - gdb backtrace from `pid` of stuck `julia` process during build_with_detection
   — RAGreedy::calcGapWeights confirms the LLVM register-allocator hypothesis
+- gdb backtraces from `pid` of stuck `julia -O0` process during the
+  `CedarUICOp` warmup — `SparseArrays._insert!`/`setindex_scalar!` confirms
+  the scalar-sparse-insertion hypothesis above
