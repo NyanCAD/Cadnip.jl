@@ -480,7 +480,7 @@ function ascii_plot(title, curves)
         end
     end
     io = IOBuffer()
-    show(IOContext(io, :color => true), plt)
+    show(IOContext(io, :color => false), plt)
     return String(take!(io))
 end
 
@@ -495,11 +495,11 @@ function report(results)
         println(io, "## $(spec["title"])\n")
         println(io, "Golden reference: **$gsrc**.", isempty(xcheck) ? "" : " ($xcheck)", "\n")
         if !isempty(curves)
-            # GitHub renders ANSI SGR color codes inside ```ansi fences (confirmed
-            # for issues/PRs/READMEs; unconfirmed for GITHUB_STEP_SUMMARY - if it
-            # doesn't render here, the plain ASCII markers still keep series
-            # distinguishable, so fall back to a plain ``` fence).
-            println(io, "```ansi")
+            # GitHub renders ANSI SGR color codes in ```ansi fences for
+            # issues/PRs/READMEs, but confirmed NOT in GITHUB_STEP_SUMMARY (shows
+            # raw escape-code garbage there instead) - use a plain fence and rely
+            # on the distinct ASCII markers (o/x/+/*) to keep series legible.
+            println(io, "```")
             println(io, ascii_plot(String(case), curves))
             println(io, "```\n")
         end
