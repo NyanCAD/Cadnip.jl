@@ -251,7 +251,7 @@ function run_cadnip_sweep(case, spec)
     for (sname, sfn, min_rel) in solvers_for(case), r in reltols
         r < min_rel && continue
         a = r * ascale
-        @printf("  cadnip %-14s reltol=%.0e ... ", sname, r)
+        @printf("  cadnip %-14s reltol=%.0e ... ", sname, r); flush(stdout)
         try
             c = setup(builder)
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
@@ -271,7 +271,7 @@ function run_cadnip_sweep(case, spec)
             println(summary, "$sname,$r,NaN,0,0,0,failed")
             println("FAILED: ", first(sprint(showerror, e), 120))
         end
-        flush(summary)
+        flush(summary); flush(stdout)
     end
     close(summary)
 end
@@ -299,16 +299,16 @@ function run_vacask_sweep(case, spec, want_golden)
 
     if want_golden
         ms = (t1 - t0) / (Int(CFG["n_grid"]) * ref_factor)
-        @printf("  vacask golden reltol=%.0e maxstep=%.1e ... ", ref_reltol, ms)
+        @printf("  vacask golden reltol=%.0e maxstep=%.1e ... ", ref_reltol, ms); flush(stdout)
         ti, sig, tp, rt = run_vacask_once(case, ref_reltol, ref_abstol, (t0, t1), out_nodes; maxstep=ms)
         write_wave(joinpath(OUT, "ref_$(case).csv"), ti, sig)
-        @printf("%.3fs %d pts\n", rt, tp)
+        @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
     end
 
     summary = open(joinpath(OUT, "vacask_$(case).csv"), "w")
     println(summary, "reltol,time_s,timepoints")
     for r in reltols
-        @printf("  vacask reltol=%.0e ... ", r)
+        @printf("  vacask reltol=%.0e ... ", r); flush(stdout)
         try
             ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes)
             write_wave(joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv"), ti, sig)
@@ -318,7 +318,7 @@ function run_vacask_sweep(case, spec, want_golden)
             println(summary, "$r,NaN,0")
             println("ABORT/skip")
         end
-        flush(summary)
+        flush(summary); flush(stdout)
     end
     close(summary)
 end
