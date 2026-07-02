@@ -130,11 +130,26 @@ data point:
   `MaxIters` at every tolerance), but on `mul` KenCarp4 succeeds at the two
   loosest tolerances (`1e-3`, `1e-5`) with accuracy on par with IDA, and
   Rodas6P matches that same two-point coverage with its own accuracy
-  profile, before both hit the 100kHz cascaded-diode switching wall.
-  Rodas5P/Rodas4P/Rodas4P2/
-  Rodas5Pr, by contrast, only ever reach the single loosest tolerance point
-  on `mul` — Rodas6P is a genuine (if narrow) improvement over the rest of
-  its own family specifically on this circuit, not just noise.
+  profile. Rodas5P/Rodas4P/Rodas4P2/Rodas5Pr, by contrast, only ever reach
+  the single loosest tolerance point on `mul` — Rodas6P is a genuine (if
+  narrow) improvement over the rest of its own family specifically on this
+  circuit, not just noise.
+- **Rodas6P on `mul` doesn't fail cleanly below `reltol=1e-5` — it degrades
+  catastrophically instead, and that only showed up in real CI, not the
+  exploration sweep.** The exploration script bounded `maxiters` to 50,000
+  to keep the survey itself tractable, so a solver grinding through the
+  diode's stiffest switching region would hit that cap and report a clean
+  `MaxIters` failure in a couple of seconds — that's what made Rodas6P look
+  like it simply stopped working past `1e-5` on `mul`. With production's
+  real `maxiters=50,000,000`, it instead actually grinds: `reltol=1e-6`
+  *succeeded* but took 451s and 6.4M steps (vs. KenCarp4's 2.2s/43,775
+  steps at the same tolerance on the same run), and `reltol=1e-7` never
+  finished at all, running until CI's 60-minute job timeout killed it. The
+  `SOLVERS` entry for `mul` sets `min_reltol=1e-5` for Rodas6P specifically
+  to avoid this — a bounded `maxiters` in a quick survey is a useful filter
+  for "does this basically work" but isn't a substitute for sweeping the
+  full tolerance range at the real budget before trusting a solver's
+  behavior past where the survey stopped looking.
 - **IDA and FBDF are robust everywhere**, though FBDF also loses individual
   tolerance points to `:Unstable` on the diode circuits at times.
 

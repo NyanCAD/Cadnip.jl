@@ -147,11 +147,19 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     `:Unstable` at nearly every tolerance on both diode circuits, doing
 #     *worse* than KenCarp4's partial success on `mul` - not added anywhere.
 #   - IDA and FBDF are robust on every case.
+#   - Rodas6P on `mul` degrades catastrophically (not just fails) below
+#     reltol=1e-5: it took 451s/6.4M steps to *finish* reltol=1e-6 (vs
+#     KenCarp4's 2.2s/43775 steps at the same tolerance) and then hung
+#     entirely at reltol=1e-7 until CI's 60-minute job timeout killed it -
+#     it doesn't cleanly error like the exploration sweep (bounded by a
+#     much lower maxiters) suggested. min_reltol=1e-5 keeps it to the
+#     tolerances it's actually fast at; it's still redundant with KenCarp4
+#     there, but the two together are more informative than either alone.
 const SOLVERS = Dict(
     "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
-    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 0.0)],
+    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
 )
 solvers_for(case) = SOLVERS[case]
 
