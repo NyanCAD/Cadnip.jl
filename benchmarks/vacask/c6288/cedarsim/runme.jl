@@ -30,6 +30,8 @@ using Cadnip.MNA: CedarDCOp
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P
+using ADTypes: AutoFiniteDiff
+using LinearSolve: KLUFactorization
 using BenchmarkTools
 using Printf
 
@@ -93,9 +95,19 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     solver_name = length(ARGS) >= 1 ? ARGS[1] : "Rodas5P"
     solver = if solver_name == "IDA"
-        IDA(max_nonlinear_iters=100, max_error_test_failures=20)
+        # linear_solver=:KLU is required at this scale: Sundials' own default
+        # dense solver allocates an n x n matrix (n=212228 -> ~360GB), which
+        # doesn't raise a catchable OutOfMemoryError -- it segfaults inside
+        # SUNMatZero_Dense.
+        IDA(linear_solver=:KLU, max_nonlinear_iters=100, max_error_test_failures=20)
     elseif solver_name == "FBDF"
-        FBDF()
+        # autodiff=AutoFiniteDiff() is required: FBDF's own default resolves
+        # to AutoSparse{AutoForwardDiff, KnownJacobianSparsityDetector,
+        # GreedyColoringAlgorithm}, which ignores the analytic jac= we supply
+        # and rebuilds/colors its own Jacobian -- whose combination with the
+        # mass matrix in jacobian2W! OOMs at this scale. Matches
+        # SOLVER_FBDF_RING in benchmarks/vacask/run_benchmarks.jl.
+        FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
     elseif solver_name == "Rodas5P"
         Rodas5P()
     else

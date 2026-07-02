@@ -438,6 +438,31 @@ therefore runs the Cadnip c6288 benchmark as its own `julia -O0` step,
 separate from `run_benchmarks.jl` (which runs the other circuits at
 default optimization) — see `.github/workflows/benchmark.yml`.
 
+### IDA and FBDF needed their own solver-option fixes
+
+Once CI started exercising all three solvers `runme.jl` supports (not just
+Rodas5P), two more scale-specific issues surfaced -- both in solver
+*options* `runme.jl` was passing, not in Cadnip's own code:
+
+- **`IDA(max_nonlinear_iters=100, max_error_test_failures=20)` segfaulted**
+  inside `SUNMatZero_Dense`. Sundials' own default linear solver is dense;
+  at `n=212228` that's a ~360GB allocation, which manifests as a segfault
+  rather than a catchable `OutOfMemoryError` (C-level malloc failure, not
+  a Julia allocation). Fixed by adding `linear_solver=:KLU`, matching
+  `SOLVER_IDA` in `run_benchmarks.jl`.
+- **bare `FBDF()` threw `OutOfMemoryError` inside `jacobian2W!`**
+  (`OrdinaryDiffEqDifferentiation`). FBDF's own default `autodiff` resolves
+  to `AutoSparse{AutoForwardDiff, KnownJacobianSparsityDetector,
+  GreedyColoringAlgorithm}` -- it ignores the analytic `jac=` we supply and
+  reconstructs its own (colored, autodiff-based) Jacobian instead. Combining
+  that with the mass matrix inside `jacobian2W!`'s generic sparse broadcast
+  triggers the same class of scalar-sparse-growth blowup documented above,
+  just inside library code we don't control. Fixed by adding
+  `autodiff=AutoFiniteDiff()` (and `linsolve=KLUFactorization()`), matching
+  `SOLVER_FBDF_RING` in `run_benchmarks.jl` -- forcing FBDF to reuse our
+  supplied Jacobian's sparsity pattern via finite differencing instead of
+  rebuilding its own via coloring.
+
 ## References
 
 - `benchmarks/vacask/c6288/cedarsim/profile_c6288.jl` — phase-by-phase
