@@ -34,7 +34,8 @@ using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P
-using OrdinaryDiffEqSDIRK: Kvaerno5
+using OrdinaryDiffEqSDIRK: Kvaerno5, KenCarp4
+using OrdinaryDiffEqFIRK: RadauIIA5
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 using BenchmarkTools
@@ -100,13 +101,17 @@ const ANALYTIC = Dict("filter" => filter_analytic, "rc" => rc_analytic)
 #------------------------------------------------------------------------------#
 # Solver families
 #------------------------------------------------------------------------------#
-mk_ida()     = IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=100)
-mk_fbdf()    = FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
-mk_rodas5p() = Rodas5P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_ida()      = IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=100)
+mk_fbdf()     = FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_rodas5p()  = Rodas5P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_kvaerno5() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_radau()    = RadauIIA5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 
 # (name, constructor, min_reltol) per case. Not a blanket linear/nonlinear split -
-# solver viability varies by circuit, confirmed empirically:
+# solver viability varies by circuit, confirmed empirically (see
+# ../wpd/README.md "Solver survey" for the full 4-case x 12-candidate sweep this
+# was drawn from):
 #   - Kvaerno3/Kvaerno5 (SDIRK) get stuck in the diode's stiff turn-on transient on
 #     BOTH diode circuits (thousands of steps without leaving t~0) - used only on
 #     the linear cases.
@@ -114,12 +119,20 @@ mk_kvaerno5() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     :Unstable only at the tightest 1e-9, already excluded by the retcode filter)
 #     but hangs on `mul` (its faster 100kHz cascaded-diode switching is far
 #     stiffer) even at the loosest reltol=1e-3 - excluded there.
+#   - RadauIIA5 (5th-order FIRK) matches or beats Rodas5P's accuracy-per-step on
+#     the linear cases and on `graetz` at loose/medium reltol, going :Unstable
+#     only past reltol=1e-5 there - added to filter/rc/graetz. Like Kvaerno5 it
+#     is not viable on `mul` (:Unstable at every reltol) - excluded there.
+#   - KenCarp4 (ESDIRK) fails everywhere on `graetz` but is the only non-DAE
+#     solver besides Rodas5P/FBDF to produce any correct points on `mul`
+#     (reltol 1e-3/1e-5, accuracy on par with IDA) before it too hits the
+#     100kHz switching wall - added to `mul` alone for that partial coverage.
 #   - IDA and FBDF are robust on every case.
 const SOLVERS = Dict(
-    "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0)],
-    "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0)],
-    "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0)],
-    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0)],
+    "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
+    "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
+    "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
+    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0)],
 )
 solvers_for(case) = SOLVERS[case]
 

@@ -84,9 +84,9 @@ data point:
 
 | Case     | Solvers                        |
 |----------|---------------------------------|
-| `filter`, `rc` | IDA, FBDF, Rodas5P, **Kvaerno5** (5th-order L-stable SDIRK) |
-| `graetz` | IDA, FBDF, Rodas5P |
-| `mul`    | IDA, FBDF |
+| `filter`, `rc` | IDA, FBDF, Rodas5P, Kvaerno5 (5th-order L-stable SDIRK), **RadauIIA5** (5th-order FIRK) |
+| `graetz` | IDA, FBDF, Rodas5P, **RadauIIA5** |
+| `mul`    | IDA, FBDF, **KenCarp4** (4th-order ESDIRK) |
 
 - **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
   alternative to backward Euler; both get stuck in the diode's stiff turn-on
@@ -98,8 +98,70 @@ data point:
   gracefully to `:Unstable` only at the tightest `reltol=1e-9` (excluded by the
   retcode filter). On `mul` — whose 100kHz cascaded-diode switching is far
   stiffer — it hangs even at the loosest `reltol=1e-3`, so it's excluded there.
+- **RadauIIA5 matches Rodas5P's accuracy on the linear cases and on `graetz`
+  at loose/medium tolerance.** It's the only new addition that's competitive
+  wherever Rodas5P is (both are A/L-stable, high-order, constant-mass-matrix
+  friendly), and unlike Rodas5P it also tolerates a general (non-diagonal)
+  mass matrix in principle — but empirically it still goes `:Unstable` past
+  `reltol≈1e-5` on `graetz` and everywhere on `mul`, so it's added to
+  `filter`/`rc`/`graetz` but not `mul`.
+- **KenCarp4 is the one ESDIRK method that gets *any* correct points on `mul`.**
+  It fails outright on `graetz` (`:Unstable` at every tolerance), but on `mul`
+  it succeeds at the two loosest tolerances (`1e-3`, `1e-5`) with accuracy on
+  par with IDA before it too hits the 100kHz cascaded-diode switching wall —
+  added to `mul` alone for that partial coverage.
 - **IDA and FBDF are robust everywhere**, though FBDF also loses individual
   tolerance points to `:Unstable` on the diode circuits at times.
+
+## Solver survey
+
+A broader one-off sweep (12 candidates × 4 tolerances × all 4 cases, using a
+Cadnip-tight-IDA reference in place of VACASK where the real VACASK binary
+wasn't available) was run to decide what belongs in the `SOLVERS` dict above
+and what's outright unsuitable for Cadnip's MNA formulation (singular/
+non-diagonal mass matrix, index-1 semi-explicit DAE — see
+`doc/mna_design.md` and `doc/Sciml charge formulation.md`). Findings beyond
+what's already folded into the table above:
+
+- **Rosenbrock23 is architecturally incompatible, not just inefficient.**
+  It threw `ArgumentError: Rosenbrock23 only works with diagonal mass
+  matrices` immediately on every case — its W-method implementation assumes
+  a diagonal `M`, which MNA's coupled-node capacitance matrix essentially
+  never is. Discard it (and by the same low-order-W-method family,
+  Rosenbrock32) for MNA circuits entirely; it's not a tolerance/tuning issue.
+- **ABDF2 converges but is quietly wrong.** Across every case it reaches
+  `t1` with retcode `Success`, but its relative-L2 error against the golden
+  sits at 10%-1400% *regardless of how tight the tolerance is set* (e.g.
+  `rc`: 0.16-8.3 at `reltol` from `1e-9` to `1e-3`; `mul`: 0.09-0.31) —
+  its embedded error estimator isn't controlling accuracy for this
+  formulation. It's still used in the *throughput* benchmark
+  (`run_benchmarks.jl`), which is fine since that benchmark only times
+  raw step cost and never checks output values, but it should not be
+  trusted for anything accuracy-sensitive and isn't a WPD candidate.
+- **DFBDF (the Julia-native, GPU-friendly BDF for `DAEProblem`) only works
+  on the linear cases.** It converges cleanly on `filter`/`rc`, but on both
+  `graetz` and `mul` it aborts with `dt forced below floating point epsilon`
+  or outright `:Unstable` at every tolerance tried — consistent with the
+  upstream note that DFBDF "still needs more optimization" (see
+  `doc/Sciml charge formulation.md`). Not yet a viable IDA alternative for
+  nonlinear circuits.
+- **TRBDF2 and QNDF were tried and dropped as redundant, not unsuitable.**
+  TRBDF2 converges on `filter`/`rc` (competitive with Kvaerno5 at loose
+  tolerance) but fails everywhere on both diode circuits like Kvaerno5/
+  KenCarp4's turn-on stall; QNDF tracks FBDF closely on every case (same
+  family, same failure modes on the diode circuits) but never beats it.
+  Neither adds a case where it's uniquely useful, so neither was added to
+  keep the per-case solver count (and the 6-marker ASCII plot legend)
+  legible.
+- **Takeaway:** no single "best" solver — IDA (DAE, explicit analytic
+  Jacobian) is the reliable floor everywhere; Rodas5P/RadauIIA5 (high-order,
+  constant/general mass matrix) win on accuracy-per-step whenever the
+  circuit's turn-on transient lets them get started at all; and the
+  stiffest, fastest-switching circuit (`mul`) narrows the viable set down
+  to IDA, FBDF, and (partially) KenCarp4 — every ODE-mass-matrix solver
+  with real stage-derivative coupling (Rosenbrock, SDIRK/ESDIRK, FIRK)
+  either stalls in the diode's stiff turn-on or goes unstable once the
+  100kHz switching kicks in.
 
 ## Findings about VACASK
 
