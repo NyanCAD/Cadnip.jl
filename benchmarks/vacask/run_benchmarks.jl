@@ -20,32 +20,77 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEqBDF: ABDF2, FBDF
+using OrdinaryDiffEqBDF: QNDF, QBDF, FBDF
 using OrdinaryDiffEqRosenbrock: Rodas3
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
-# Solver definitions - one from each family
-# Based on benchmarks: ABDF2 is fastest BDF, Rodas3 is fastest Rosenbrock
-# All use KLU sparse solver (3-4x faster than dense LU for these circuits)
+# Solver definitions, confirmed by full-scale @benchmark runs (not just a
+# pass/fail screen) - all use KLU sparse solver (3-4x faster than dense LU
+# for these circuits).
+#
+# ABDF2 was the previous pick here (fastest raw wall-clock) but is deliberately
+# excluded now: on the RC circuit it silently returns a solution with rel-L2
+# error 1.6e-3 against the exact analytic solution, vs 7e-12-3e-8 for every
+# other solver at the SAME abstol=1e-10/reltol=1e-8 - about 5-6 orders of
+# magnitude worse, most likely because `smooth_est=true` (its default) damps
+# the embedded error estimate enough to make its accept/reject decision too
+# lenient. It isn't even fast on the nonlinear cases either (18s on graetz vs
+# IDA's 4.7s, 7.9s on mul vs IDA's 2.2s), so nothing is traded away by
+# dropping it.
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
-const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_QBDF = ("QBDF", () -> QBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
 # Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
 const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 
-# Per-benchmark solver configurations
-# RC Circuit (linear). ImplicitEuler is excluded: now that Cadnip's PULSE source
-# actually repeats (previously it fired once then went flat), the circuit has
-# ~500 real edges over the 1s sweep instead of 1, and ImplicitEuler's forced
-# dtmax=1e-6 with heavy step-rejection near each edge exhausts its maxiters
-# budget before reaching the end.
-const SOLVERS_RC = [SOLVER_ABDF2, SOLVER_RODAS3]
-# Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
+# Per-benchmark solver configurations: top 3 by real median @benchmark time
+# among solvers that both (a) reach the end and (b) respect the requested
+# tolerance, at full production scale - see the accuracy-vs-throughput
+# rationale above for why that's not the same as "top 3 by raw wall clock".
+#
+# RC Circuit (linear). QNDF (0.83s) < IDA (1.83s) < Rodas3 (2.04s), all with
+# tight rel-L2 error against the exact analytic solution (<3e-8, Rodas3
+# <1e-11). ImplicitEuler/DImplicitEuler stay excluded per the existing
+# rationale (heavy rejection near every pulse edge). FBDF/DFBDF/Trapezoid/
+# TRBDF2 are also excluded: even with `tstops` at every pulse edge (see
+# rc/cedarsim/runme.jl's `pulse_tstops`) they still fail to reach t=1,
+# grinding to `maxiters` or underflowing `dt` partway through the
+# 500-period sweep.
+const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
+# Graetz/Mul (nonlinear diodes): IDA and FBDF are the fastest solvers that
+# are robust on BOTH circuits (Graetz: IDA 4.4s, FBDF 6.2s. Mul: IDA 2.4s,
+# FBDF 3.3s - all timed on Julia 1.12, matching CI). Plain QNDF was tried
+# here too but is EXCLUDED: it looked fine in local Julia 1.11 testing but
+# failed for real in CI on Graetz Bridge (`Unstable`, dt underflow at
+# t=0.27 - exactly a diode current zero-crossing - after only 272658 of the
+# expected ~1000001 steps). That reproduces deterministically on Julia 1.12
+# with the SAME resolved package versions that succeeded on 1.11, so it's a
+# genuine solver/compiler-codegen interaction, not stale local testing or a
+# different package resolution.
+#
+# Root cause: QNDF's default `kappa` correction coefficients (the
+# Shampine-Reichelt stability/accuracy correction for the quasi-constant-step
+# formulation) interact badly with the derivative kink at the diode
+# zero-crossing. Zeroing `kappa` removes the failure entirely - which is
+# exactly what the `QBDF` algorithm is (`QNDF` with `kappa` all zeros).
+# `QNDF2` (a distinct fixed-2nd-order implementation, not just "QNDF capped
+# at order 2" - that still fails) also survives, but neither tuning
+# `extrapolant` nor just lowering `max_order` helps, and `QNDF1` fails even
+# earlier than the default - so this isn't a generic "be more conservative"
+# fix, it's specifically the kappa term. QBDF fills the third slot: robust
+# on both circuits (validated on Julia 1.12), and 5x faster than Rodas3 on
+# graetz (8.9s vs 46.1s) and 8x faster on mul (2.7s vs 22.8s, also Julia
+# 1.12 timings). Rodas5P/RadauIIA5 are also robust (0 rejects) but slower
+# still; every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2,
+# KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails
+# outright or is markedly slower.
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_QBDF]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
