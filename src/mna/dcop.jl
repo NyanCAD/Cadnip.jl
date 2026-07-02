@@ -150,21 +150,6 @@ end
 CedarUICOp(; warmup_steps::Int=10, dt::Float64=1e-12, use_shampine::Bool=false) =
     CedarUICOp(warmup_steps, dt, use_shampine)
 
-# ShampineCollocationInit's default nlsolve (nlsolve=nothing ->
-# FastShortcutNonlinearPolyalg) leads with dense QuasiNewton methods
-# (Broyden/Klement). Those OOM at large scale (c6288, n=212228 -> ~360GB
-# dense allocation) but are, per the VADistiller sp_bjt monostable
-# integration test, sometimes genuinely *needed* for convergence on small
-# circuits with awkward Jacobians (BJT excess-phase internal nodes) --
-# neither CedarShampineNLSolve() (Newton-only) nor CedarRobustNLSolve()
-# (TrustRegion's JVP breaks on Dual through this closure, see
-# CedarShampineNLSolve's docstring) reproduce that. So only override the
-# default for circuits large enough that the dense QuasiNewton path would
-# actually be a problem; small/awkward circuits keep exactly the prior
-# (nlsolve=nothing) behavior.
-const _SHAMPINE_LARGE_N_THRESHOLD = 10_000
-_shampine_nlsolve(n::Int) = n > _SHAMPINE_LARGE_N_THRESHOLD ? CedarShampineNLSolve() : nothing
-
 #==============================================================================#
 # Sundials Integration
 #
@@ -221,7 +206,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=_shampine_nlsolve(length(integrator.u))))
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -271,9 +256,9 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
 
     # ShampineCollocationInit takes a small step to find consistent state.
     # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
-    # _shampine_nlsolve only overrides the default for large circuits, where
-    # it's needed to avoid an OOM -- see its definition above.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=_shampine_nlsolve(length(integrator.u))))
+    # See CedarShampineNLSolve()'s docstring for why it, not the default or
+    # CedarRobustNLSolve(), is the right nlsolve here.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
 end
 
 #==============================================================================#
@@ -387,7 +372,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         # Good for oscillators where we need to refine the approximated derivatives
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=_shampine_nlsolve(length(integrator.u))))
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -422,5 +407,5 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     # Pass an explicit nlsolve: see comment in the CedarDCOp/CedarTranOp
     # ODEIntegrator branch above -- the default falls back to a dense
     # QuasiNewton polyalgorithm that OOMs on large circuits.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=_shampine_nlsolve(length(integrator.u))))
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
 end

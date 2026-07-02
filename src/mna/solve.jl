@@ -345,29 +345,49 @@ export CedarRobustNLSolve
 
 Nonlinear solver for `ShampineCollocationInit`'s internal consistency solve
 (used by `CedarDCOp`/`CedarTranOp`/`CedarUICOp`'s ODE-integrator branches in
-`dcop.jl`). Deliberately narrower than `CedarRobustNLSolve()`: it only
-combines `NewtonRaphson` variants (no `TrustRegion`, `LevenbergMarquardt`, or
-`PseudoTransient`).
+`dcop.jl`). Used for every circuit size -- unlike an earlier version of this
+function, there is no large-circuit/small-circuit split here; investigation
+showed a single `NewtonRaphson -> LevenbergMarquardt` chain covers both.
 
-Those excluded algorithms need a Jacobian-vector product for their
-trust-region-radius/geodesic-acceleration machinery, which falls back to
-`AutoForwardDiff()` even when the top-level `autodiff` is set to `nothing`
-(that only disables autodiff for the *materialized* Jacobian, not JVPs).
-Running that autodiff through `ShampineCollocationInit`'s auto-generated
-residual closure -- which itself calls back into our stamped circuit
-evaluation -- produced `MethodError: no method matching Float64(::Dual)`
-on the VADistiller sp_bjt monostable multivibrator integration test. A
-bare `NewtonRaphson(autodiff=nothing)` sidesteps that (only ever needs the
-full analytic Jacobian we supply) but isn't robust enough alone to converge
-that same circuit (it has BJT excess-phase internal nodes that don't reach
-consistency in one Newton attempt). Two `NewtonRaphson` variants with
-different linesearches gets the extra fallback attempt without ever
-touching the JVP/autodiff path.
+Background: `ShampineCollocationInit`'s default (`nlsolve=nothing`) resolves
+to `FastShortcutNonlinearPolyalg`, which leads with dense QuasiNewton methods
+(Broyden/Klement) that allocate an `n x n` dense structure -- fine for small
+circuits, an instant OOM at c6288's scale (n=212228, ~360GB). The natural
+alternative, `CedarRobustNLSolve()` (already used elsewhere for DC solves),
+crashes instead: its second algorithm (`TrustRegion` with the `Bastin`
+radius-update scheme) needs a Jacobian-vector product that falls back to
+`AutoForwardDiff()` regardless of `autodiff=nothing` (that flag only disables
+autodiff for the *materialized* Jacobian, not JVPs), and running that through
+`ShampineCollocationInit`'s auto-generated residual closure -- which calls
+back into our stamped circuit evaluation -- throws `MethodError: no method
+matching Float64(::Dual)`. Since `NonlinearSolvePolyAlgorithm` aborts on a
+thrown exception rather than treating it as "this member failed, try the
+next one", that crash pre-empts every algorithm after it in the chain,
+including the ones (`LevenbergMarquardt`) that could have solved the problem.
+
+To find a fix, several algorithms from `FastShortcutNonlinearPolyalg`'s and
+`CedarRobustNLSolve()`'s chains were benchmarked individually (each as the
+sole `nlsolve`, in its own fresh process to avoid cross-run contamination)
+against the VADistiller sp_bjt monostable multivibrator integration test --
+the case that first exposed all of this, whose BJT excess-phase internal
+nodes don't reach `abstol=1e-6` from a single `NewtonRaphson` step. Result:
+`NewtonRaphson` (plain and with `BackTracking` linesearch), `Broyden`,
+`Klement`, `TrustRegion` (`Simple` scheme), and `PseudoTransient` all leave
+the residual unchanged from the pre-Shampine DC-solve state (~9.6e-4,
+`InitialFailure`) when tried alone -- none of them make any real progress on
+this problem by themselves. `TrustRegion` with the `Bastin` scheme crashes
+the same way it does inside `CedarRobustNLSolve()`. Only
+`LevenbergMarquardt(autodiff=nothing)` alone converges, reaching the *exact*
+residual (3.692e-10) that the full default QuasiNewton-led chain does --
+i.e. LM's damping was doing the real work in that chain, not QuasiNewton.
+`NewtonRaphson` is kept as a cheap first attempt (it already suffices for
+c6288, converging before LM is ever tried), with LM as the fallback that
+actually handles awkward Jacobians like the BJT one.
 """
 function CedarShampineNLSolve()
     return NonlinearSolvePolyAlgorithm((
         NewtonRaphson(autodiff=nothing),
-        NewtonRaphson(autodiff=nothing, linesearch=BackTracking()),
+        LevenbergMarquardt(autodiff=nothing),
     ))
 end
 
