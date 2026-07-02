@@ -33,7 +33,7 @@ using Cadnip
 using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
-using OrdinaryDiffEqRosenbrock: Rodas5P
+using OrdinaryDiffEqRosenbrock: Rodas5P, Rodas6P
 using OrdinaryDiffEqSDIRK: Kvaerno5, KenCarp4
 using OrdinaryDiffEqFIRK: RadauIIA5
 using ADTypes: AutoFiniteDiff
@@ -104,6 +104,7 @@ const ANALYTIC = Dict("filter" => filter_analytic, "rc" => rc_analytic)
 mk_ida()      = IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=100)
 mk_fbdf()     = FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_rodas5p()  = Rodas5P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+mk_rodas6p()  = Rodas6P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_kvaerno5() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_radau()    = RadauIIA5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
@@ -123,16 +124,29 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     the linear cases and on `graetz` at loose/medium reltol, going :Unstable
 #     only past reltol=1e-5 there - added to filter/rc/graetz. Like Kvaerno5 it
 #     is not viable on `mul` (:Unstable at every reltol) - excluded there.
-#   - KenCarp4 (ESDIRK) fails everywhere on `graetz` but is the only non-DAE
-#     solver besides Rodas5P/FBDF to produce any correct points on `mul`
-#     (reltol 1e-3/1e-5, accuracy on par with IDA) before it too hits the
-#     100kHz switching wall - added to `mul` alone for that partial coverage.
+#   - KenCarp4 (ESDIRK) fails everywhere on `graetz` but is one of two
+#     non-DAE solvers to produce any correct points on `mul` (reltol
+#     1e-3/1e-5, accuracy on par with IDA) before it too hits the 100kHz
+#     switching wall - added to `mul` alone for that partial coverage.
+#   - Rodas6P (6th-order Rosenbrock, newest of the Rodas family) is
+#     statistically identical to Rodas5P on `filter`/`rc`/`graetz` (no
+#     reason to run both there), but on `mul` it uniquely reaches one more
+#     tolerance point (reltol 1e-5) than every other Rosenbrock/SDIRK/FIRK
+#     variant tried besides IDA/FBDF/KenCarp4 - added to `mul` alongside
+#     KenCarp4 for that.
+#   - True (implicit-first-stage) SDIRK - SDIRK2, Cash4, Hairer4, Hairer42 -
+#     were tried on `graetz`/`mul` on the theory that PLECS (which defaults
+#     to (E)SDIRK for MNA circuits and notes "SDIRK is typically more
+#     stable" than ESDIRK) might handle the diode turn-on better than the
+#     ESDIRK family (Kvaerno5/KenCarp4/TRBDF2). They don't: all four go
+#     `:Unstable` at nearly every tolerance on both diode circuits, doing
+#     *worse* than KenCarp4's partial success on `mul` - not added anywhere.
 #   - IDA and FBDF are robust on every case.
 const SOLVERS = Dict(
     "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
-    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0)],
+    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 0.0)],
 )
 solvers_for(case) = SOLVERS[case]
 

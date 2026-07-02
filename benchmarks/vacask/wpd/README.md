@@ -84,9 +84,9 @@ data point:
 
 | Case     | Solvers                        |
 |----------|---------------------------------|
-| `filter`, `rc` | IDA, FBDF, Rodas5P, Kvaerno5 (5th-order L-stable SDIRK), **RadauIIA5** (5th-order FIRK) |
-| `graetz` | IDA, FBDF, Rodas5P, **RadauIIA5** |
-| `mul`    | IDA, FBDF, **KenCarp4** (4th-order ESDIRK) |
+| `filter`, `rc` | IDA, FBDF, Rodas5P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
+| `graetz` | IDA, FBDF, Rodas5P, RadauIIA5 |
+| `mul`    | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P (6th-order Rosenbrock) |
 
 - **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
   alternative to backward Euler; both get stuck in the diode's stiff turn-on
@@ -105,11 +105,16 @@ data point:
   mass matrix in principle — but empirically it still goes `:Unstable` past
   `reltol≈1e-5` on `graetz` and everywhere on `mul`, so it's added to
   `filter`/`rc`/`graetz` but not `mul`.
-- **KenCarp4 is the one ESDIRK method that gets *any* correct points on `mul`.**
-  It fails outright on `graetz` (`:Unstable` at every tolerance), but on `mul`
-  it succeeds at the two loosest tolerances (`1e-3`, `1e-5`) with accuracy on
-  par with IDA before it too hits the 100kHz cascaded-diode switching wall —
-  added to `mul` alone for that partial coverage.
+- **KenCarp4 and Rodas6P are the two solvers that get *any* correct points on
+  `mul` beyond IDA/FBDF.** Both fail outright on `graetz` (`:Unstable`/
+  `MaxIters` at every tolerance), but on `mul` KenCarp4 succeeds at the two
+  loosest tolerances (`1e-3`, `1e-5`) with accuracy on par with IDA, and
+  Rodas6P — the newest, highest-order member of the Rodas family — matches
+  that same two-point coverage with its own accuracy profile, before both
+  hit the 100kHz cascaded-diode switching wall. Rodas5P/Rodas4P/Rodas4P2/
+  Rodas5Pr, by contrast, only ever reach the single loosest tolerance point
+  on `mul` — Rodas6P is a genuine (if narrow) improvement over the rest of
+  its own family specifically on this circuit, not just noise.
 - **IDA and FBDF are robust everywhere**, though FBDF also loses individual
   tolerance points to `:Unstable` on the diode circuits at times.
 
@@ -123,12 +128,37 @@ non-diagonal mass matrix, index-1 semi-explicit DAE — see
 `doc/mna_design.md` and `doc/Sciml charge formulation.md`). Findings beyond
 what's already folded into the table above:
 
-- **Rosenbrock23 is architecturally incompatible, not just inefficient.**
-  It threw `ArgumentError: Rosenbrock23 only works with diagonal mass
-  matrices` immediately on every case — its W-method implementation assumes
-  a diagonal `M`, which MNA's coupled-node capacitance matrix essentially
-  never is. Discard it (and by the same low-order-W-method family,
-  Rosenbrock32) for MNA circuits entirely; it's not a tolerance/tuning issue.
+- **Only Rosenbrock23/Rosenbrock32 require a diagonal mass matrix — every
+  other Rosenbrock variant in `OrdinaryDiffEqRosenbrock` is fine.** Checked
+  directly against the package source
+  (`OrdinaryDiffEqRosenbrock/src/alg_utils.jl`):
+  `only_diagonal_mass_matrix(alg::Union{Rosenbrock23, Rosenbrock32}) = true`
+  is the *only* override in the file: the ~30 other exports (Rodas3, Rodas4,
+  Rodas4P, Rodas4P2, Rodas5, Rodas5P, Rodas5Pe, Rodas5Pr, Rodas6P, ROS3P,
+  RosShamp4, GRK4T/GRK4A, ROS34PW*, etc.) all accept general mass matrices —
+  confirmed empirically here too, since Rodas4P2/Rodas5Pr/Rodas6P (tested as
+  a follow-up alongside Rodas5P) ran without error on every case. The
+  ArgumentError is specific to the two low-order W-methods, not a general
+  Rosenbrock limitation — see "KenCarp4 and Rodas6P" above for where the
+  extra Rodas variants actually pay off (`mul`); Rodas4P2/Rodas5Pr added
+  nothing over Rodas5P anywhere tested, so weren't added to `SOLVERS`.
+  Rosenbrock23/32 themselves are still a hard discard for MNA circuits —
+  it's architectural (W-method internals assume diagonal `M`), not a
+  tolerance/tuning issue.
+- **True (implicit-first-stage) SDIRK does not beat ESDIRK on the diode
+  turn-on transient — if anything it's worse.** PLECS's solver docs note it
+  defaults to (E)SDIRK when a circuit needs MNA, and that "SDIRK is
+  typically more stable" than ESDIRK, which reads like implicit-first-stage
+  should handle a hard diode turn-on better than ESDIRK's explicit
+  Euler-like first stage. Tested directly: `SDIRK2` (A-B-L stable, 2nd
+  order), `Cash4` and `Hairer4`/`Hairer42` (all A-L stable, 4th order) — the
+  genuine fully-implicit SDIRK methods in `OrdinaryDiffEqSDIRK`, as opposed
+  to Kvaerno/KenCarp/TRBDF2 which are ESDIRK (Kennedy-Carpenter/Kvaerno
+  tableaus have an explicit first stage by construction). All four go
+  `:Unstable` at *every* tolerance on both `graetz` and `mul` — worse than
+  KenCarp4's partial success on `mul`. Whatever's driving the diode-turn-on
+  failures for the ESDIRK family in Cadnip's formulation isn't specific to
+  the explicit first stage; true SDIRK isn't a fix here. Not added anywhere.
 - **ABDF2 converges but is quietly wrong.** Across every case it reaches
   `t1` with retcode `Success`, but its relative-L2 error against the golden
   sits at 10%-1400% *regardless of how tight the tolerance is set* (e.g.
