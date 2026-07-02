@@ -58,7 +58,7 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(solver; reltol=1e-3, abstol=1e-6, maxiters=10_000_000)
+function run_benchmark(solver; reltol=1e-3, abstol=1e-6, maxiters=10_000_000, extra_kwargs=NamedTuple())
     tspan = (0.0, 2e-9)  # 2ns simulation (same as ngspice)
     solver_name = nameof(typeof(solver))
 
@@ -73,31 +73,33 @@ function run_benchmark(solver; reltol=1e-3, abstol=1e-6, maxiters=10_000_000)
     # single step. See doc/c6288_bottleneck_findings.md.
     init = CedarDCOp()
 
-    # abstol/force_dtmin/unstable_check match the settings proven for the
-    # ring oscillator benchmark (benchmarks/vacask/ring/cedarsim/runme.jl),
-    # another PSP103-heavy no-easy-DC-point circuit. Without a loosened
-    # abstol, tran!'s default (1e-10) is unreachable for a 212k-variable
-    # digital circuit and drives dt down toward the femtosecond scale --
-    # IDA gives up with a hmin corrector-convergence failure, and FBDF's
-    # per-step Jacobian/mass-matrix recombination (see
-    # doc/c6288_bottleneck_findings.md) OOMs from sheer step count before
-    # ever reaching t=2ns. force_dtmin=true lets a solver push through a
-    # step that doesn't fully converge rather than aborting outright, and
-    # unstable_check is disabled because this digital circuit's large but
-    # legitimate voltage swings would otherwise trip the default heuristic.
+    # abstol=1e-6 (looser than tran!'s default of 1e-10, which is unreachable
+    # for a 212k-variable circuit and was driving dt down toward the
+    # femtosecond scale) applies to every solver -- it's a universal SciML
+    # kwarg and directly explained IDA's original hmin corrector-convergence
+    # failure. force_dtmin/unstable_check, by contrast, are passed only via
+    # extra_kwargs per solver below: IDA/Sundials doesn't recognize them at
+    # all, and unlike the ring oscillator benchmark (which genuinely needs to
+    # push through switching transitions with no valid intermediate DC point,
+    # via CedarTranOp's homotopy), c6288 uses CedarDCOp -- a proper DC
+    # operating point solve -- so forcing through non-converged steps here
+    # isn't pushing through a known-hard-but-tractable region the way it does
+    # for ring; it just burns CPU time on steps that aren't really
+    # converging. See doc/c6288_bottleneck_findings.md.
     println("\nBenchmarking transient analysis with $solver_name (reltol=$reltol, abstol=$abstol)...")
     bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, abstol=$abstol,
                               maxiters=$maxiters, initializealg=$init, dense=false,
-                              force_dtmin=true, unstable_check=(dt,u,p,t)->false) samples=3 evals=1 seconds=300
+                              extra_kwargs...) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
     sol = tran!(circuit, tspan; solver=solver, reltol=reltol, abstol=abstol, maxiters=maxiters,
-                initializealg=init, dense=false, force_dtmin=true, unstable_check=(dt,u,p,t)->false)
+                initializealg=init, dense=false, extra_kwargs...)
 
     println("\n=== Results ($solver_name) ===")
     println("Status:     $(sol.retcode)")
     @printf("Timepoints: %d\n", length(sol.t))
+    @printf("Final time: %.3e s (target %.3e s)\n", sol.t[end], tspan[2])
     @printf("NR iters:   %d\n", sol.stats.nnonliniter)
     @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
@@ -109,24 +111,35 @@ end
 # Run if executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
     solver_name = length(ARGS) >= 1 ? ARGS[1] : "Rodas5P"
-    solver = if solver_name == "IDA"
+    solver, extra_kwargs = if solver_name == "IDA"
         # linear_solver=:KLU is required at this scale: Sundials' own default
         # dense solver allocates an n x n matrix (n=212228 -> ~360GB), which
         # doesn't raise a catchable OutOfMemoryError -- it segfaults inside
-        # SUNMatZero_Dense.
-        IDA(linear_solver=:KLU, max_nonlinear_iters=100, max_error_test_failures=20)
+        # SUNMatZero_Dense. force_dtmin/unstable_check are OrdinaryDiffEq
+        # concepts Sundials.jl's common interface doesn't recognize.
+        IDA(linear_solver=:KLU, max_nonlinear_iters=100, max_error_test_failures=20), NamedTuple()
     elseif solver_name == "FBDF"
         # autodiff=AutoFiniteDiff() is required: FBDF's own default resolves
         # to AutoSparse{AutoForwardDiff, KnownJacobianSparsityDetector,
         # GreedyColoringAlgorithm}, which ignores the analytic jac= we supply
         # and rebuilds/colors its own Jacobian -- whose combination with the
         # mass matrix in jacobian2W! OOMs at this scale. Matches
-        # SOLVER_FBDF_RING in benchmarks/vacask/run_benchmarks.jl.
-        FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+        # SOLVER_FBDF_RING in benchmarks/vacask/run_benchmarks.jl. That
+        # benchmark also needs force_dtmin/unstable_check to push through
+        # switching transitions with no valid intermediate DC point; give
+        # FBDF the same latitude here since it's the most failure-prone of
+        # the three solvers at this scale.
+        FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()),
+            (force_dtmin=true, unstable_check=(dt,u,p,t)->false)
     elseif solver_name == "Rodas5P"
-        Rodas5P()
+        # No extra_kwargs: already succeeds as-is. Whether its ~18 accepted
+        # steps over the 2ns window represent a faithful simulation of the
+        # multiplier's switching activity, or a reltol=1e-3 adaptive step
+        # size coarse enough to step past logic transitions, is an open
+        # question -- not one force_dtmin/unstable_check would answer.
+        Rodas5P(), NamedTuple()
     else
         error("Unknown solver: $solver_name. Use IDA, FBDF, or Rodas5P")
     end
-    run_benchmark(solver)
+    run_benchmark(solver; extra_kwargs)
 end
