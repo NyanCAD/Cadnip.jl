@@ -60,18 +60,16 @@ jobs:
         # sharing the process the other circuits benchmark in above. See
         # doc/c6288_bottleneck_findings.md.
         #
-        # All three solvers runme.jl supports: IDA (DAE path, Sundials),
-        # FBDF and Rodas5P (both ODE/mass-matrix path). Looped with an
-        # inline fallback so one solver failing doesn't stop the others --
-        # the -O0 pkgimage cache is shared across invocations in this job,
-        # so only the first pays full JIT.
+        # runme.jl's default mode (no solver arg) runs every solver in
+        # SOLVERS_C6288 (IDA, Rodas5P -- FBDF is excluded, see runme.jl's
+        # header comment for why it OOMs at this scale) in a single process
+        # and writes the same markdown table format run_benchmarks.jl uses,
+        # folding in the VACASK reference row via $VACASK_REFERENCE_TSV.
         continue-on-error: true
+        env:
+          VACASK_REFERENCE_TSV: vacask_reference.tsv
         run: |
-          for solver in IDA FBDF Rodas5P; do
-            echo "=== $solver ===" | tee -a c6288_cadnip.log
-            julia -O0 --project=benchmarks benchmarks/vacask/c6288/cedarsim/runme.jl "$solver" 2>&1 | tee -a c6288_cadnip.log \
-              || echo "($solver FAILED, continuing to next solver)" | tee -a c6288_cadnip.log
-          done
+          julia -O0 --project=benchmarks benchmarks/vacask/c6288/cedarsim/runme.jl c6288_results.md
 
       - name: Publish benchmark results
         if: always()
@@ -80,10 +78,7 @@ jobs:
           echo >> $GITHUB_STEP_SUMMARY
           cat vacask_reference.md >> $GITHUB_STEP_SUMMARY
           echo >> $GITHUB_STEP_SUMMARY
-          echo '## C6288 Multiplier (Cadnip, `-O0`, IDA/FBDF/Rodas5P)' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat c6288_cadnip.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(no output captured)" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat c6288_results.md >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(no c6288 output captured)" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark results
         if: always()
@@ -94,7 +89,7 @@ jobs:
             benchmark_results.md
             vacask_reference.md
             vacask_reference.tsv
-            c6288_cadnip.log
+            c6288_results.md
           retention-days: 30
 
   # Work-precision diagrams: accuracy-per-runtime (adaptive tolerance sweep),
