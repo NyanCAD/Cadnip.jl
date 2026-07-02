@@ -20,32 +20,55 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEqBDF: ABDF2, FBDF
+using OrdinaryDiffEqBDF: QNDF, FBDF
 using OrdinaryDiffEqRosenbrock: Rodas3
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 
 const BENCHMARK_DIR = @__DIR__
 
-# Solver definitions - one from each family
-# Based on benchmarks: ABDF2 is fastest BDF, Rodas3 is fastest Rosenbrock
-# All use KLU sparse solver (3-4x faster than dense LU for these circuits)
+# Solver definitions, confirmed by full-scale @benchmark runs (not just a
+# pass/fail screen) - all use KLU sparse solver (3-4x faster than dense LU
+# for these circuits).
+#
+# ABDF2 was the previous pick here (fastest raw wall-clock) but is deliberately
+# excluded now: on the RC circuit it silently returns a solution with rel-L2
+# error 1.6e-3 against the exact analytic solution, vs 7e-12-3e-8 for every
+# other solver at the SAME abstol=1e-10/reltol=1e-8 - about 5-6 orders of
+# magnitude worse, most likely because `smooth_est=true` (its default) damps
+# the embedded error estimate enough to make its accept/reject decision too
+# lenient. It isn't even fast on the nonlinear cases either (18s on graetz vs
+# IDA's 4.7s, 7.9s on mul vs IDA's 2.2s), so nothing is traded away by
+# dropping it.
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
-const SOLVER_ABDF2 = ("ABDF2", () -> ABDF2(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
+const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
 # Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
 const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 
-# Per-benchmark solver configurations
-# RC Circuit (linear). ImplicitEuler is excluded: now that Cadnip's PULSE source
-# actually repeats (previously it fired once then went flat), the circuit has
-# ~500 real edges over the 1s sweep instead of 1, and ImplicitEuler's forced
-# dtmax=1e-6 with heavy step-rejection near each edge exhausts its maxiters
-# budget before reaching the end.
-const SOLVERS_RC = [SOLVER_ABDF2, SOLVER_RODAS3]
-# Graetz/Mul (nonlinear): ABDF2 1.7x faster than IDA (3.0s vs 5.0s)
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_ABDF2, SOLVER_RODAS3]
+# Per-benchmark solver configurations: top 3 by real median @benchmark time
+# among solvers that both (a) reach the end and (b) respect the requested
+# tolerance, at full production scale - see the accuracy-vs-throughput
+# rationale above for why that's not the same as "top 3 by raw wall clock".
+#
+# RC Circuit (linear). QNDF (0.83s) < IDA (1.83s) < Rodas3 (2.04s), all with
+# tight rel-L2 error against the exact analytic solution (<3e-8, Rodas3
+# <1e-11). ImplicitEuler/DImplicitEuler stay excluded per the existing
+# rationale (heavy rejection near every pulse edge). FBDF/DFBDF/Trapezoid/
+# TRBDF2 are also excluded: even with `tstops` at every pulse edge (see
+# rc/cedarsim/runme.jl's `pulse_tstops`) they still fail to reach t=1,
+# grinding to `maxiters` or underflowing `dt` partway through the
+# 500-period sweep.
+const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
+# Graetz/Mul (nonlinear diodes): the same top 3 win on both circuits by real
+# median time. Graetz: QNDF 3.3s < FBDF 4.2s < IDA 4.7s. Mul: IDA 2.2s <
+# QNDF 2.9s < FBDF 3.1s. Rodas3/Rodas5P/RadauIIA5 are robust (0 rejects) but
+# 3-10x slower here; every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2,
+# KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails
+# outright or is markedly slower.
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_QNDF, SOLVER_FBDF]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
