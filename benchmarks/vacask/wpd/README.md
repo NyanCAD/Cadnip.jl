@@ -84,34 +84,54 @@ data point:
 
 | Case     | Solvers                        |
 |----------|---------------------------------|
-| `filter`, `rc` | IDA, FBDF, Rodas5P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
+| `filter` | IDA, FBDF, Rodas6P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
+| `rc`     | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
 | `graetz` | IDA, FBDF, Rodas5P, RadauIIA5 |
-| `mul`    | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P (6th-order Rosenbrock) |
+| `mul`    | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P |
 
 - **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
   alternative to backward Euler; both get stuck in the diode's stiff turn-on
   transient on `graetz` and `mul` (thousands of steps without leaving `t≈0`), so no
   SDIRK method is used on the diode cases — only on the linear `filter`/`rc`, where
   Kvaerno5 works well and converges cleanly.
-- **Rodas5P works on `graetz` but not `mul`.** On `graetz` it gives the best
-  accuracy-per-runtime of any Cadnip solver (converges to ~3e-8), degrading
-  gracefully to `:Unstable` only at the tightest `reltol=1e-9` (excluded by the
-  retcode filter). On `mul` — whose 100kHz cascaded-diode switching is far
-  stiffer — it hangs even at the loosest `reltol=1e-3`, so it's excluded there.
-- **RadauIIA5 matches Rodas5P's accuracy on the linear cases and on `graetz`
-  at loose/medium tolerance.** It's the only new addition that's competitive
-  wherever Rodas5P is (both are A/L-stable, high-order, constant-mass-matrix
-  friendly), and unlike Rodas5P it also tolerates a general (non-diagonal)
-  mass matrix in principle — but empirically it still goes `:Unstable` past
-  `reltol≈1e-5` on `graetz` and everywhere on `mul`, so it's added to
-  `filter`/`rc`/`graetz` but not `mul`.
+- **The best single Rosenbrock variant is genuinely case-dependent — no
+  strict order.** Head-to-head at matching tolerances:
+  - `rc`: Rodas5P is more accurate at all 4 tolerances tested (e.g.
+    `reltol=1e-9`: 3.18e-7 vs 3.59e-7), though Rodas6P takes fewer steps
+    each time (282 vs 363 at `1e-9`) — an accuracy-per-step tradeoff, not a
+    clean win. Rodas5P used.
+  - `filter`: Rodas6P *strictly* dominates — lower error **and** fewer
+    steps at every tolerance (e.g. `reltol=1e-3`: 1.1e-4 error/80 steps vs
+    5.6e-4 error/88 steps). Rodas6P used instead of Rodas5P.
+  - `graetz`: they cross over — Rodas5P wins at the loosest tolerance
+    (`1e-3`: 7.0e-6 vs 9.4e-6), Rodas6P wins at medium (`1e-5`: 7.1e-7 vs
+    10.0e-7), they're tied by `1e-7`. Rodas5P kept since the crossover
+    favors it at the more commonly-used loose end, and it's already the
+    established choice there.
+  - `mul`: Rodas6P is both more accurate and reaches one more tolerance
+    point than Rodas5P (which only clears the loosest point at all).
+    Rodas6P used instead of Rodas5P.
+
+  This tracks with theory, not just noise: a 6th-order method's larger
+  error constant only pays off once the step size is small enough for the
+  asymptotic convergence order to dominate — at loose tolerances a
+  lower-order method can have the smaller *practical* error. Each case
+  keeps whichever one wins there, never both (one Rosenbrock representative
+  per case, per the "don't clutter the plot with a whole family" rule).
+- **RadauIIA5 matches the chosen Rodas variant's accuracy on the linear cases
+  and on `graetz` at loose/medium tolerance.** It's the only new addition
+  that's competitive wherever Rodas5P/Rodas6P is (all are A/L-stable,
+  high-order, constant-mass-matrix friendly), and unlike the Rodas family it
+  also tolerates a general (non-diagonal) mass matrix in principle — but
+  empirically it still goes `:Unstable` past `reltol≈1e-5` on `graetz` and
+  everywhere on `mul`, so it's added to `filter`/`rc`/`graetz` but not `mul`.
 - **KenCarp4 and Rodas6P are the two solvers that get *any* correct points on
   `mul` beyond IDA/FBDF.** Both fail outright on `graetz` (`:Unstable`/
   `MaxIters` at every tolerance), but on `mul` KenCarp4 succeeds at the two
   loosest tolerances (`1e-3`, `1e-5`) with accuracy on par with IDA, and
-  Rodas6P — the newest, highest-order member of the Rodas family — matches
-  that same two-point coverage with its own accuracy profile, before both
-  hit the 100kHz cascaded-diode switching wall. Rodas5P/Rodas4P/Rodas4P2/
+  Rodas6P matches that same two-point coverage with its own accuracy
+  profile, before both hit the 100kHz cascaded-diode switching wall.
+  Rodas5P/Rodas4P/Rodas4P2/
   Rodas5Pr, by contrast, only ever reach the single loosest tolerance point
   on `mul` — Rodas6P is a genuine (if narrow) improvement over the rest of
   its own family specifically on this circuit, not just noise.
@@ -137,11 +157,14 @@ what's already folded into the table above:
   Rodas4P, Rodas4P2, Rodas5, Rodas5P, Rodas5Pe, Rodas5Pr, Rodas6P, ROS3P,
   RosShamp4, GRK4T/GRK4A, ROS34PW*, etc.) all accept general mass matrices —
   confirmed empirically here too, since Rodas4P2/Rodas5Pr/Rodas6P (tested as
-  a follow-up alongside Rodas5P) ran without error on every case. The
-  ArgumentError is specific to the two low-order W-methods, not a general
-  Rosenbrock limitation — see "KenCarp4 and Rodas6P" above for where the
-  extra Rodas variants actually pay off (`mul`); Rodas4P2/Rodas5Pr added
-  nothing over Rodas5P anywhere tested, so weren't added to `SOLVERS`.
+  a follow-up alongside Rodas5P on `graetz`/`mul`) ran without error on
+  every case. The ArgumentError is specific to the two low-order W-methods,
+  not a general Rosenbrock limitation. Rodas4P2/Rodas5Pr tracked Rodas5P
+  closely wherever tested and added nothing over it, so weren't added to
+  `SOLVERS`; Rodas5P vs Rodas6P themselves turned out *not* to be
+  interchangeable — see "The best single Rosenbrock variant is genuinely
+  case-dependent" above, where a later head-to-head on all 4 cases (not
+  just `graetz`/`mul`) found Rodas6P actually wins outright on `filter`.
   Rosenbrock23/32 themselves are still a hard discard for MNA circuits —
   it's architectural (W-method internals assume diagonal `M`), not a
   tolerance/tuning issue.

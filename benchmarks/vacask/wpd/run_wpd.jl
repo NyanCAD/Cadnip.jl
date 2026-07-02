@@ -128,12 +128,17 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     non-DAE solvers to produce any correct points on `mul` (reltol
 #     1e-3/1e-5, accuracy on par with IDA) before it too hits the 100kHz
 #     switching wall - added to `mul` alone for that partial coverage.
-#   - Rodas6P (6th-order Rosenbrock, newest of the Rodas family) is
-#     statistically identical to Rodas5P on `filter`/`rc`/`graetz` (no
-#     reason to run both there), but on `mul` it uniquely reaches one more
-#     tolerance point (reltol 1e-5) than every other Rosenbrock/SDIRK/FIRK
-#     variant tried besides IDA/FBDF/KenCarp4 - added to `mul` alongside
-#     KenCarp4 for that.
+#   - Rodas5P vs Rodas6P (6th-order, newest of the Rodas family) is
+#     genuinely case-dependent, not a strict order: Rodas5P is more
+#     accurate at every reltol on `rc` (though Rodas6P takes fewer steps
+#     there); on `filter` Rodas6P strictly dominates (lower error *and*
+#     fewer steps at every reltol) - used there instead of Rodas5P; on
+#     `graetz` they cross over (Rodas5P wins loose reltol, Rodas6P wins
+#     medium, tied at 1e-7) - Rodas5P kept since the crossover favors it at
+#     the more commonly-used loose end; on `mul` Rodas6P is more accurate
+#     and reaches one more tolerance point - used there instead of Rodas5P.
+#     Net: each case gets whichever one wins there, never both (one
+#     Rosenbrock representative per case).
 #   - True (implicit-first-stage) SDIRK - SDIRK2, Cash4, Hairer4, Hairer42 -
 #     were tried on `graetz`/`mul` on the theory that PLECS (which defaults
 #     to (E)SDIRK for MNA circuits and notes "SDIRK is typically more
@@ -143,7 +148,7 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     *worse* than KenCarp4's partial success on `mul` - not added anywhere.
 #   - IDA and FBDF are robust on every case.
 const SOLVERS = Dict(
-    "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
+    "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 0.0)],
