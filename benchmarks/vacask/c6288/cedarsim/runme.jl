@@ -58,7 +58,7 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(solver; reltol=1e-3, maxiters=10_000_000)
+function run_benchmark(solver; reltol=1e-3, abstol=1e-6, maxiters=10_000_000)
     tspan = (0.0, 2e-9)  # 2ns simulation (same as ngspice)
     solver_name = nameof(typeof(solver))
 
@@ -73,15 +73,30 @@ function run_benchmark(solver; reltol=1e-3, maxiters=10_000_000)
     # single step. See doc/c6288_bottleneck_findings.md.
     init = CedarDCOp()
 
-    # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with $solver_name (reltol=$reltol)...")
-    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, maxiters=$maxiters, initializealg=$init, dense=false) samples=3 evals=1 seconds=300
+    # abstol/force_dtmin/unstable_check match the settings proven for the
+    # ring oscillator benchmark (benchmarks/vacask/ring/cedarsim/runme.jl),
+    # another PSP103-heavy no-easy-DC-point circuit. Without a loosened
+    # abstol, tran!'s default (1e-10) is unreachable for a 212k-variable
+    # digital circuit and drives dt down toward the femtosecond scale --
+    # IDA gives up with a hmin corrector-convergence failure, and FBDF's
+    # per-step Jacobian/mass-matrix recombination (see
+    # doc/c6288_bottleneck_findings.md) OOMs from sheer step count before
+    # ever reaching t=2ns. force_dtmin=true lets a solver push through a
+    # step that doesn't fully converge rather than aborting outright, and
+    # unstable_check is disabled because this digital circuit's large but
+    # legitimate voltage swings would otherwise trip the default heuristic.
+    println("\nBenchmarking transient analysis with $solver_name (reltol=$reltol, abstol=$abstol)...")
+    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, abstol=$abstol,
+                              maxiters=$maxiters, initializealg=$init, dense=false,
+                              force_dtmin=true, unstable_check=(dt,u,p,t)->false) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; solver=solver, reltol=reltol, maxiters=maxiters, initializealg=init, dense=false)
+    sol = tran!(circuit, tspan; solver=solver, reltol=reltol, abstol=abstol, maxiters=maxiters,
+                initializealg=init, dense=false, force_dtmin=true, unstable_check=(dt,u,p,t)->false)
 
     println("\n=== Results ($solver_name) ===")
+    println("Status:     $(sol.retcode)")
     @printf("Timepoints: %d\n", length(sol.t))
     @printf("NR iters:   %d\n", sol.stats.nnonliniter)
     @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))

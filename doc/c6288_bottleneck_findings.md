@@ -457,11 +457,44 @@ Rodas5P), two more scale-specific issues surfaced -- both in solver
   reconstructs its own (colored, autodiff-based) Jacobian instead. Combining
   that with the mass matrix inside `jacobian2W!`'s generic sparse broadcast
   triggers the same class of scalar-sparse-growth blowup documented above,
-  just inside library code we don't control. Fixed by adding
-  `autodiff=AutoFiniteDiff()` (and `linsolve=KLUFactorization()`), matching
-  `SOLVER_FBDF_RING` in `run_benchmarks.jl` -- forcing FBDF to reuse our
-  supplied Jacobian's sparsity pattern via finite differencing instead of
-  rebuilding its own via coloring.
+  just inside library code we don't control.
+
+  Adding `autodiff=AutoFiniteDiff()` (matching `SOLVER_FBDF_RING` in
+  `run_benchmarks.jl`) did **not** fix this -- it only changes which autodiff
+  backend gets wrapped: the resulting type is
+  `AutoSparse{AutoFiniteDiff, KnownJacobianSparsityDetector,
+  GreedyColoringAlgorithm}`, still going through the same coloring
+  reconstruction, still OOMing in the same place. FBDF apparently always
+  wraps whatever `autodiff` it's given in `AutoSparse` + coloring when the
+  problem has a sparse `jac_prototype`, regardless of whether an analytic
+  `jac=` is also supplied -- unlike Rodas5P's Rosenbrock `calc_J`/`calc_J!`
+  path, which calls `f.jac` directly when `has_jac(f)` is true. The real
+  fix (see below) turned out to be `abstol`/`force_dtmin`, which reduces how
+  many times this expensive (and apparently leaky at c6288's scale)
+  reconstruction has to run, rather than avoiding it entirely.
+
+### The actual root cause: `tran!`'s default `abstol` is unreachable here
+
+Comparing against `benchmarks/vacask/ring/cedarsim/runme.jl` (another
+PSP103-heavy, no-easy-DC-point circuit that's proven to work with IDA/FBDF)
+turned up the real gap: ring's `run_benchmark` passes `abstol=1e-4`,
+`force_dtmin=true`, and `unstable_check=(dt,u,p,t)->false`; c6288's did not
+override any of them, leaving `abstol` at `tran!`'s default of `1e-10`.
+
+An absolute tolerance of `1e-10` is essentially unreachable for a
+212,228-variable digital circuit -- the corrector has to resolve every
+node's residual to 10 decimal places, which drives `dt` down toward the
+femtosecond/attosecond scale chasing an unreachable target. That
+directly explains IDA's failure (`h = 8.33e-19`, then `IDAHandleFailure`
+with "corrector convergence failed repeatedly or with |h| = hmin") and is
+the most likely reason FBDF's per-step Jacobian/mass-matrix
+recombination (above) OOMs: far more steps means far more `jacobian2W!`
+calls before ever reaching `t=2ns`. Rodas5P happened to tolerate the tight
+`abstol` well enough to still finish in ~18 steps; IDA and FBDF did not.
+
+Fixed by giving c6288's `run_benchmark` the same `abstol=1e-6`,
+`force_dtmin=true`, and `unstable_check=(dt,u,p,t)->false` settings ring
+uses (see `runme.jl`).
 
 ## References
 
