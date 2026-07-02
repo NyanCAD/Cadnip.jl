@@ -1,6 +1,16 @@
 # C6288 Benchmark Bottleneck — Investigation
 
-**Status:** identified. The c6288 (16x16 multiplier, ~10k PSP103 MOSFETs)
+**Status:** RESOLVED. `benchmarks/vacask/c6288/cedarsim/runme.jl` now runs
+end to end under `julia -O0` with `CedarDCOp` initialization: setup
+completes in ~90s, DC solve finds an operating point via GMIN/source
+stepping, and the transient reaches `retcode=Success` (17 accepted / 5
+rejected steps over the 2ns window in one validation run). See "Resolution"
+near the end of this document for the fixes and the remaining `-O0`
+requirement. The section below is kept as the original investigation log.
+
+---
+
+The c6288 (16x16 multiplier, ~10k PSP103 MOSFETs)
 benchmark blocks for ≥10 minutes inside Julia's first-call JIT and never
 reaches the solver. The profile run was killed at 7+ minutes still inside
 `build_with_detection`'s first `circuit.builder(...)` call — this is the
@@ -299,9 +309,217 @@ instances. C6288: largest enclosing subckt has 2419 instances. The growth
 isn't 18 → 10000 (ratio 555×); it's 18 → 2419 (ratio 134×). And it hits a
 non-linearity in LLVM's register allocator at that size.
 
+## Update: with `-O0`, what's the *next* blocker?
+
+Verified by actually running `julia -O0 --project=benchmarks
+benchmarks/vacask/c6288/cedarsim/runme.jl Rodas5P` end to end (not just the
+profiler). Two things:
+
+**Fixed en route:** `runme.jl` itself was broken independent of `-O0` — it
+referenced `sp_psp103va_module`, which doesn't exist in `PSPModels`
+(`PSP103VA_module` is the exported name). This threw `UndefVarError` before
+anything else ran. Fixed by dropping the stale alias.
+
+**Real next blocker, confirmed live via gdb:** once the script actually gets
+past setup (`build_with_detection`/`compile_structure`/first `fast_rebuild!`
+all complete in the ~75-90s the profiler predicted — `-O0` genuinely clears
+RAGreedy), the process hangs again, this time at runtime, not JIT. Repeated
+`gdb -p <pid> -batch -ex 'thread apply all bt'` snapshots over 10+ minutes
+all show the same stack:
+
+```
+_insert! () at .../SparseArrays/src/sparsematrix.jl:3218
+julia__setindex_scalar!_... () at .../SparseArrays/src/sparsematrix.jl:3206-3207
+insert! () at array.jl:1746
+julia__growat!_... () at array.jl:1162
+memmove () at cmem.jl:28
+```
+
+i.e. `SparseArrays.setindex!` falling into its scalar insertion path
+(`_insert!`, which shifts `colptr`/`rowval`/`nzval` to make room for one new
+stored entry at a time) over and over, for a 212,228×212,228 matrix with
+~2.45M final nnz. Each such insertion is `O(current nnz)`, so building up
+the structure entry-by-entry this way is `O(n²)`-ish — consistent with the
+process still running (and still making progress, not deadlocked) after 10
+minutes before it was killed.
+
+This is exactly item 3 from the "what to do about it" list above:
+`CedarUICOp`'s pseudo-transient warmup (`SciMLBase.initialize_dae!(...,
+::CedarUICOp)` in `src/mna/dcop.jl:310-389`) runs `ImplicitEuler(autodiff=
+ADTypes.AutoFiniteDiff())` for `warmup_steps` fixed timesteps. The main
+`tran!` path does wire `jac_prototype` through for the outer solver
+(`src/mna/solve.jl:1721-1725`, `1611-1615`), but `AutoFiniteDiff()` with no
+declared sparsity/coloring makes OrdinaryDiffEq's Jacobian machinery
+(`calc_J`/`calc_W` in `OrdinaryDiffEqDifferentiation`) build/refresh the
+Jacobian without exploiting the shared sparsity pattern — degenerating into
+scalar writes that repeatedly grow the sparse structure instead of reusing
+existing storage.
+
+**Net effect:** clearing the LLVM RAGreedy hang with `-O0` does not make
+c6288 runnable end-to-end. It trades a ~10-minute-plus JIT hang for a
+different runtime hang of the same order (or worse, given `O(n²)` scaling),
+inside the `CedarUICOp` warmup's finite-difference Jacobian handling. Fixing
+this requires giving the warmup's `ImplicitEuler` a proper sparse
+`jac_prototype`/coloring (or an analytic `jac=`) instead of relying on
+`AutoFiniteDiff()` to rediscover the 2.45M-entry sparsity pattern column by
+column at runtime.
+
+## Resolution
+
+Four real bugs, found and fixed by actually running the benchmark end to
+end (not just profiling setup) and reading gdb/Julia stack traces off the
+stuck process, plus one initialization-algorithm swap:
+
+1. **`runme.jl` itself was broken**, independent of everything else below:
+   it referenced `sp_psp103va_module`, which doesn't exist in `PSPModels`
+   (the export is `PSP103VA_module`). Fixed by dropping the stale alias.
+
+2. **`CedarUICOp`'s DAE (IDA) warmup had no Jacobian at all**
+   (`src/mna/dcop.jl`) — `ODEFunction(warmup_rhs!; mass_matrix=cs.C)` with no
+   `jac`/`jac_prototype`, forcing `ImplicitEuler` to rediscover the
+   Jacobian via autodiff/finite-diff. Fixed by adding an analytic
+   `warmup_jac!` (`d(du)/du = -G`) with `jac_prototype=copy(cs.G)`.
+
+3. **The main ODE `jac!` was `O(n²)` on sparse circuits, not zero-alloc**
+   (`src/mna/solve.jl`) — it looped `for i in eachindex(J, G); J[i] = -G[i]; end`.
+   For `SparseMatrixCSC`, `eachindex` over two sparse matrices is
+   `IndexCartesian`, i.e. `CartesianIndices` over the *full* `n²` index
+   space, not the ~nnz stored entries. At c6288's `n=212228` that's
+   ~4.5e10 iterations, each a scalar sparse write that can insert a new
+   structural entry (`O(current nnz)` per insert). This is what was
+   actually hanging after fix (2) — confirmed by sending `SIGINT` to the
+   stuck process and reading the resulting Julia stack trace, which pinned
+   it to `jac!` calling into `SparseArrays.setindex!`'s scalar path.
+   First fix attempt walked `nonzeros(J)`/`nonzeros(G)` directly (assuming
+   matching patterns); a follow-up (`0540661`) switched to `copyto!`
+   after that assumption broke under (4) below (see next point).
+
+4. **`ShampineCollocationInit`'s default `nlsolve` OOMs on large sparse
+   circuits** (`src/mna/dcop.jl`, all four call sites) — with no `nlsolve`
+   specified, `OrdinaryDiffEqNonlinearSolve.default_nlsolve` picks
+   `FastShortcutNonlinearPolyalg`, whose leading algorithms are dense
+   QuasiNewton methods (Broyden/Klement) that allocate an `n×n` dense
+   approximate-Jacobian regardless of the sparse `jac`/`jac_prototype`
+   already threaded through. At c6288's scale that's a ~360GB allocation →
+   instant `OutOfMemoryError`. Fixed by passing
+   `nlsolve=NewtonRaphson(autodiff=nothing)` explicitly, so it uses the
+   supplied sparse Jacobian directly. This changed `J`'s provenance (now
+   built by `NonlinearSolveBase.JacobianCache` rather than a straight
+   `deepcopy` of `jac_prototype`), which is what broke the `nonzeros`-based
+   fix in (3) — `J` and `G` no longer reliably shared identical stored-entry
+   counts (observed: 677700 vs. 2452148), hence the `copyto!`-based fix.
+
+With all four in place, `runme.jl` reaches the solver: no more JIT hang, no
+OOM, no dimension mismatch — but `retcode=InitialFailure` with only the
+`t=0` point saved. `CedarUICOp`'s warmup (fixed `dt=1e-12`, `adaptive=false`,
+10 steps by default) turned out to make **zero progress**: `|Δu|=0.0` and
+the DC-style residual `‖G(u)u - b(u)‖` identical to six decimal places
+across 300 steps in a targeted diagnostic — Newton fails identically on the
+very first attempted step and never moves `u` away from zero. Because
+`adaptive=false`, `force_dtmin=true` has nothing to act on: there is no
+dt-shrinking retry loop the way ngspice's real `uic` transient stepper has
+(ngspice's `.control ... tran 2p 2n uic` skips DC op entirely and leans on
+its own per-step Newton-with-timestep-halving; SciML's initialization
+framework instead requires a consistent `t=0` state up front). More warmup
+steps at a fixed `dt` would not have helped — the fixed-dt, no-retry
+approach itself is the wrong tool here, not an insufficient step count.
+
+**Swapping `CedarUICOp` for `CedarDCOp`** (which already implements a
+GMIN-stepping/source-stepping homotopy chain in
+`_dc_solve_with_fallbacks` — the same class of technique vacask/ngspice use
+to find an operating point for exactly this kind of circuit) resolves it:
+a validation run reached `retcode=Success` with 17 accepted / 5 rejected
+steps over the full 2ns window. `runme.jl` now uses `CedarDCOp()`.
+
+**The `-O0` requirement remains and is not expected to go away** without
+the deeper codegen work in "What to do about it" item 1/2 above (chunking
+the generated builder so LLVM's register allocator stays linear-time). CI
+therefore runs the Cadnip c6288 benchmark as its own `julia -O0` step,
+separate from `run_benchmarks.jl` (which runs the other circuits at
+default optimization) — see `.github/workflows/benchmark.yml`.
+
+### IDA and FBDF needed their own solver-option fixes
+
+Once CI started exercising all three solvers `runme.jl` supports (not just
+Rodas5P), two more scale-specific issues surfaced -- both in solver
+*options* `runme.jl` was passing, not in Cadnip's own code:
+
+- **`IDA(max_nonlinear_iters=100, max_error_test_failures=20)` segfaulted**
+  inside `SUNMatZero_Dense`. Sundials' own default linear solver is dense;
+  at `n=212228` that's a ~360GB allocation, which manifests as a segfault
+  rather than a catchable `OutOfMemoryError` (C-level malloc failure, not
+  a Julia allocation). Fixed by adding `linear_solver=:KLU`, matching
+  `SOLVER_IDA` in `run_benchmarks.jl`.
+- **bare `FBDF()` threw `OutOfMemoryError` inside `jacobian2W!`**
+  (`OrdinaryDiffEqDifferentiation`). FBDF's own default `autodiff` resolves
+  to `AutoSparse{AutoForwardDiff, KnownJacobianSparsityDetector,
+  GreedyColoringAlgorithm}` -- it ignores the analytic `jac=` we supply and
+  reconstructs its own (colored, autodiff-based) Jacobian instead. Combining
+  that with the mass matrix inside `jacobian2W!`'s generic sparse broadcast
+  triggers the same class of scalar-sparse-growth blowup documented above,
+  just inside library code we don't control.
+
+  Adding `autodiff=AutoFiniteDiff()` (matching `SOLVER_FBDF_RING` in
+  `run_benchmarks.jl`) did **not** fix this -- it only changes which autodiff
+  backend gets wrapped: the resulting type is
+  `AutoSparse{AutoFiniteDiff, KnownJacobianSparsityDetector,
+  GreedyColoringAlgorithm}`, still going through the same coloring
+  reconstruction, still OOMing in the same place. FBDF apparently always
+  wraps whatever `autodiff` it's given in `AutoSparse` + coloring when the
+  problem has a sparse `jac_prototype`, regardless of whether an analytic
+  `jac=` is also supplied -- unlike Rodas5P's Rosenbrock `calc_J`/`calc_J!`
+  path, which calls `f.jac` directly when `has_jac(f)` is true. The real
+  fix (see below) turned out to be `abstol`/`force_dtmin`, which reduces how
+  many times this expensive (and apparently leaky at c6288's scale)
+  reconstruction has to run, rather than avoiding it entirely.
+
+### The actual root cause: `tran!`'s default `abstol` is unreachable here
+
+Comparing against `benchmarks/vacask/ring/cedarsim/runme.jl` (another
+PSP103-heavy, no-easy-DC-point circuit that's proven to work with IDA/FBDF)
+turned up the real gap: ring's `run_benchmark` passes `abstol=1e-4`,
+`force_dtmin=true`, and `unstable_check=(dt,u,p,t)->false`; c6288's did not
+override any of them, leaving `abstol` at `tran!`'s default of `1e-10`.
+
+An absolute tolerance of `1e-10` is essentially unreachable for a
+212,228-variable digital circuit -- the corrector has to resolve every
+node's residual to 10 decimal places, which drives `dt` down toward the
+femtosecond/attosecond scale chasing an unreachable target. That
+directly explains IDA's failure (`h = 8.33e-19`, then `IDAHandleFailure`
+with "corrector convergence failed repeatedly or with |h| = hmin") and is
+the most likely reason FBDF's per-step Jacobian/mass-matrix
+recombination (above) OOMs: far more steps means far more `jacobian2W!`
+calls before ever reaching `t=2ns`. Rodas5P happened to tolerate the tight
+`abstol` well enough to still finish in ~18 steps; IDA and FBDF did not.
+
+Fixed by giving c6288's `run_benchmark` a looser `abstol=1e-6` for every
+solver (a universal SciML kwarg, and the direct fix for IDA's `hmin`
+failure). `force_dtmin=true`/`unstable_check=(dt,u,p,t)->false` are
+deliberately **not** used at all, unlike the ring oscillator benchmark.
+Ring genuinely needs to push through switching transitions with no valid
+intermediate DC point (it uses `CedarTranOp`, a homotopy warmup, not a real
+DC solve); c6288 uses `CedarDCOp` -- a proper GMIN/source-stepping DC
+operating point solve. Forcing through non-converged steps after a
+legitimate DC start isn't crossing a known-hard-but-tractable region the
+way it does for ring; empirically it just burned CPU time for hours
+(across all three solvers, not just IDA) without reaching `t=2ns`. Whether
+Rodas5P's ~18 accepted steps over the 2ns window represent a faithful
+simulation of
+the multiplier's switching activity, or `reltol=1e-3` letting it step past
+logic transitions, remains an open question.
+
 ## References
 
 - `benchmarks/vacask/c6288/cedarsim/profile_c6288.jl` — phase-by-phase
   profiler that produced the table above
 - gdb backtrace from `pid` of stuck `julia` process during build_with_detection
   — RAGreedy::calcGapWeights confirms the LLVM register-allocator hypothesis
+- gdb backtraces from `pid` of stuck `julia -O0` process during the
+  `CedarUICOp` warmup — `SparseArrays._insert!`/`setindex_scalar!` confirms
+  the scalar-sparse-insertion hypothesis above
+- `SIGINT`-induced Julia stack trace pinning the post-fix hang to
+  `jac!` at `src/mna/solve.jl` calling `SparseArrays.setindex!`'s scalar path
+- Targeted diagnostic script replaying `CedarUICOp`'s warmup loop with a
+  DC-residual printout per step, showing zero movement across 300 steps
+- Diagnostic run of `tran!` with `CedarDCOp()` in place of `CedarUICOp()`,
+  reaching `retcode=Success`

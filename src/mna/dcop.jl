@@ -22,7 +22,6 @@ using NonlinearSolve
 using SciMLBase
 using SciMLBase: ReturnCode
 using DiffEqBase
-using ADTypes
 using Sundials
 
 export CedarDCOp, CedarTranOp, CedarUICOp
@@ -207,7 +206,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     if alg.use_shampine
         # ShampineCollocationInit takes a small step to find consistent state
         # Good for oscillators where DC solve gets close but doesn't fully converge
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -257,7 +256,9 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
 
     # ShampineCollocationInit takes a small step to find consistent state.
     # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+    # See CedarShampineNLSolve()'s docstring for why it, not the default or
+    # CedarRobustNLSolve(), is the right nlsolve here.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
 end
 
 #==============================================================================#
@@ -328,14 +329,30 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
         return nothing
     end
 
-    # Create ODE function with mass matrix (no explicit Jacobian - use autodiff)
-    warmup_f = SciMLBase.ODEFunction(warmup_rhs!; mass_matrix=cs.C)
+    # Analytic Jacobian: d(du)/du = -G. Without this, ImplicitEuler falls back
+    # to (auto/finite-)diff rediscovery of the sparsity pattern via scalar
+    # sparse writes, which is O(n) per write / O(n^2) overall on large
+    # circuits (see doc/c6288_bottleneck_findings.md).
+    function warmup_jac!(J, u, p, t)
+        fast_rebuild!(p, u, real_time(t))
+        G = p.structure.G
+        @inbounds for i in eachindex(J, G)
+            J[i] = -G[i]
+        end
+        return nothing
+    end
+
+    # Create ODE function with mass matrix and explicit Jacobian sharing G's
+    # sparsity pattern (same pattern as the mass matrix cs.C, both padded to
+    # the unified jac_pattern in compile_structure).
+    warmup_f = SciMLBase.ODEFunction(warmup_rhs!; mass_matrix=cs.C,
+                                      jac=warmup_jac!, jac_prototype=copy(cs.G))
     warmup_prob = SciMLBase.ODEProblem(warmup_f, prob.u0, warmup_tspan, ws)
 
     # Use ImplicitEuler for warmup (backward Euler for relaxation)
     # force_dtmin=true lets it march through even if Newton struggles
     # NoInit skips initialization - we start from zeros intentionally
-    warmup_int = init(warmup_prob, ImplicitEuler(autodiff=ADTypes.AutoFiniteDiff());
+    warmup_int = init(warmup_prob, ImplicitEuler();
                       adaptive=false, dt=alg.dt, force_dtmin=true,
                       initializealg=NoInit())
 
@@ -355,7 +372,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     if alg.use_shampine
         # ShampineCollocationInit takes a small step and adjusts both u and du
         # Good for oscillators where we need to refine the approximated derivatives
-        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+        return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
     else
         return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
     end
@@ -368,11 +385,13 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     warmup_tspan = (0.0, alg.warmup_steps * alg.dt * 2)  # Finite tspan
     warmup_prob = remake(prob; tspan=warmup_tspan)
 
-    # ImplicitEuler with mass matrix for ODE warmup
+    # ImplicitEuler with mass matrix for ODE warmup. `prob.f` already carries
+    # the analytic jac/jac_prototype set up in `ODEProblem(circuit, tspan)`
+    # (src/mna/solve.jl), so `remake` inherits it and no autodiff is needed.
     # Use NoInit for the warmup phase - we're intentionally starting from
     # potentially inconsistent initial conditions and letting the solver relax them
     # force_dtmin=true lets it march through even if Newton struggles
-    warmup_int = init(warmup_prob, ImplicitEuler(autodiff=ADTypes.AutoFiniteDiff());
+    warmup_int = init(warmup_prob, ImplicitEuler();
                       adaptive=false, dt=alg.dt, force_dtmin=true,
                       initializealg=NoInit())
 
@@ -385,5 +404,8 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
 
     # ShampineCollocationInit takes a small step and adjusts both u and du.
     # BrownFullBasicInit broke for mass-matrix ODEs in OrdinaryDiffEq v7.
-    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit())
+    # Pass an explicit nlsolve: see comment in the CedarDCOp/CedarTranOp
+    # ODEIntegrator branch above -- the default falls back to a dense
+    # QuasiNewton polyalgorithm that OOMs on large circuits.
+    return SciMLBase.initialize_dae!(integrator, ShampineCollocationInit(nlsolve=CedarShampineNLSolve()))
 end
