@@ -494,17 +494,17 @@ calls before ever reaching `t=2ns`. Rodas5P happened to tolerate the tight
 
 Fixed by giving c6288's `run_benchmark` a looser `abstol=1e-6` for every
 solver (a universal SciML kwarg, and the direct fix for IDA's `hmin`
-failure). `force_dtmin=true`/`unstable_check=(dt,u,p,t)->false`, by
-contrast, are applied to **FBDF only**, not IDA (Sundials' common interface
-doesn't recognize either kwarg) or Rodas5P (already succeeds without them).
-Unlike the ring oscillator, which genuinely needs to push through switching
-transitions with no valid intermediate DC point (it uses `CedarTranOp`, a
-homotopy warmup, not a real DC solve), c6288 uses `CedarDCOp` -- a proper
-GMIN/source-stepping DC operating point solve. Forcing through
-non-converged steps after a legitimate DC start isn't crossing a
-known-hard-but-tractable region the way it does for ring; empirically it
-just burned CPU time for hours without reaching `t=2ns`. Whether Rodas5P's
-~18 accepted steps over the 2ns window represent a faithful simulation of
+failure). `force_dtmin=true`/`unstable_check=(dt,u,p,t)->false` are
+deliberately **not** used at all, unlike the ring oscillator benchmark.
+Ring genuinely needs to push through switching transitions with no valid
+intermediate DC point (it uses `CedarTranOp`, a homotopy warmup, not a real
+DC solve); c6288 uses `CedarDCOp` -- a proper GMIN/source-stepping DC
+operating point solve. Forcing through non-converged steps after a
+legitimate DC start isn't crossing a known-hard-but-tractable region the
+way it does for ring; empirically it just burned CPU time for hours
+(across all three solvers, not just IDA) without reaching `t=2ns`. Whether
+Rodas5P's ~18 accepted steps over the 2ns window represent a faithful
+simulation of
 the multiplier's switching activity, or `reltol=1e-3` letting it step past
 logic transitions, remains an open question.
 
