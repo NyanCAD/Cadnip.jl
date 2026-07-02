@@ -62,13 +62,22 @@ const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 # grinding to `maxiters` or underflowing `dt` partway through the
 # 500-period sweep.
 const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
-# Graetz/Mul (nonlinear diodes): the same top 3 win on both circuits by real
-# median time. Graetz: QNDF 3.3s < FBDF 4.2s < IDA 4.7s. Mul: IDA 2.2s <
-# QNDF 2.9s < FBDF 3.1s. Rodas3/Rodas5P/RadauIIA5 are robust (0 rejects) but
-# 3-10x slower here; every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2,
-# KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails
-# outright or is markedly slower.
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_QNDF, SOLVER_FBDF]
+# Graetz/Mul (nonlinear diodes): IDA and FBDF are the fastest solvers that
+# are robust on BOTH circuits (Graetz: FBDF 4.2s, IDA 4.7s. Mul: IDA 2.2s,
+# FBDF 3.1s). QNDF was tried here too (2.9-3.3s, faster than both) but is
+# EXCLUDED: it looked fine in local testing but failed for real in CI on
+# Graetz Bridge (`Unstable`, dt underflow at t=0.27 - exactly a diode
+# current zero-crossing - after only 272658 of the expected ~1000001 steps).
+# That failure did not reproduce locally and only showed up on Julia 1.12 in
+# CI, which is reason enough to not trust it as a shared pick for both
+# nonlinear circuits. Rodas3 fills the third slot instead: 0 rejects on both
+# circuits in testing and already cross-validated in CI via the RC case,
+# at the cost of being 3-6x slower than IDA/FBDF here (Graetz 26.3s, Mul
+# 13.8s). Rodas5P/RadauIIA5 are also robust (0 rejects) but slower still;
+# every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2, KenCarp3/4/5/47/58,
+# Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails outright or is
+# markedly slower.
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS3]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
