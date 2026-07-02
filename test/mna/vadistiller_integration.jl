@@ -103,6 +103,20 @@ D1 da 0 diode_b
 .END
 """i
 
+# Same topology with instance-level `m=` (SPICE parallel multiplicity). `m`
+# diodes in parallel conduct `m` times the current of one at the same
+# voltage - physically equivalent to an m-times-larger saturation current.
+# Exercises $mfactor threading through spicecall/stamp! (see removal of the
+# dead ParallelInstances wrapper).
+const sp_diode_divider_m5 = sp"""
+* diode current limiter, m=5 parallel diodes
+.model diode_a d is=1e-14 rs=0
+V1 vcc 0 DC 1.0
+R1 vcc da 1k
+D1 da 0 diode_a m=5
+.END
+"""i
+
 @testset "VADistiller Integration Tests" begin
 
     #==========================================================================#
@@ -257,6 +271,20 @@ D1 da 0 diode_b
                 # saturation current lowers the forward drop at the same current.
                 sol_big = dc!(MNACircuit(sp_diode_divider_bigis))
                 @test sol_big[:da] < v_da
+
+                # Instance-level m= (parallel multiplicity) must reach $mfactor:
+                # 5 parallel diodes conduct ~5x the current at the same voltage,
+                # so for the same series-resistor current, the forward drop drops.
+                sol_m5 = dc!(MNACircuit(sp_diode_divider_m5))
+                @test sol_m5[:da] < v_da
+                # Quantitatively: at fixed current I, V = Vt*ln(I/(m*Is)), so
+                # 5 diodes in parallel should reproduce the same operating point
+                # as 1 diode with is scaled up by 5 (both are is*m = 5e-14).
+                i_m5 = (v_vcc - sol_m5[:da]) / 1000.0
+                is_effective = 1e-14 * 5
+                vt = 8.617333262e-5 * (27 + 273.15)  # k*T/q at default 27C
+                v_predicted = vt * log(i_m5 / is_effective)
+                @test isapprox(sol_m5[:da], v_predicted; atol=1e-3)
             end
         end
 

@@ -252,8 +252,6 @@ function ntfromstruct(x::T) where {T}
      values = fieldvalues(x)
      return NamedTuple{names}(values)
 end
-ntfromstruct(x::Cadnip.ParallelInstances) = (; m=x.multiplier, ntfromstruct(x.device)...)
-
 function modelparams(m)
     args = m.params
     t = m.type
@@ -438,8 +436,8 @@ function (bm::BinnedModel)(; l, w, kwargs...)
 end
 
 "Instantiate a model using SPICE case insensitive semantics"
-function spicecall(model; m=1.0, kwargs...)
-    ParallelInstances(model(;kwargs...), m)
+function spicecall(model; kwargs...)
+    model(;kwargs...)
 end
 
 @Base.assume_effects :foldable function mknondefault_nt(nt::NamedTuple)
@@ -468,10 +466,9 @@ end
 # @noinline prevents aggressive inlining/SROA that causes OOM with large VA models
 # (e.g., 782-field PSP103VA struct). The setproperties call can generate huge IR
 # if inlined into the circuit builder function.
-@noinline function spicecall(pm::ParsedModel{T}; m=1, kwargs...) where T
+@noinline function spicecall(pm::ParsedModel{T}; kwargs...) where T
     instkwargs = case_adjust_kwargs(T, mknondefault_nt(values(kwargs)))::ParsedNT
-    inst = setproperties(pm.model, instkwargs)
-    ParallelInstances(inst, m)
+    setproperties(pm.model, instkwargs)
 end
 
 function spicecall(bm::BinnedModel; l, w, kwargs...)

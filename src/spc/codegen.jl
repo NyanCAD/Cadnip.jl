@@ -746,12 +746,15 @@ function va_stamp_call(dev_expr, device_type::Union{DataType,Nothing}, ctx_expr,
 end
 
 """
-    va_stamp_kwargs(instance_name_expr)
+    va_stamp_kwargs(instance_name_expr, mfactor_expr=1.0)
 
 The standard `_mna_*_` keyword arguments passed to every generated `stamp!`
 call (see `generate_mna_stamp_method_nterm`'s function signature).
+`mfactor_expr` is the device's `\$mfactor` value (SPICE instance multiplicity
+`m=`); call sites that don't extract an instance-level `m=` (VA modules
+instantiated via subcircuit-call syntax) get the default of 1.0.
 """
-va_stamp_kwargs(instance_name_expr) = Expr[
+va_stamp_kwargs(instance_name_expr, mfactor_expr=1.0) = Expr[
     Expr(:kw, :_mna_t_, :t),
     Expr(:kw, :_mna_mode_, :(spec.mode)),
     Expr(:kw, :_mna_x_, :x),
@@ -759,6 +762,7 @@ va_stamp_kwargs(instance_name_expr) = Expr[
     Expr(:kw, :_mna_instance_, instance_name_expr),
     Expr(:kw, :_mna_h_, :_mna_h_),
     Expr(:kw, :_mna_h_p_, :_mna_h_p_),
+    Expr(:kw, :_mna_mfactor_, mfactor_expr),
 ]
 
 """
@@ -2075,21 +2079,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     device_type = va_device_type(state, model_sym)
     is_large_model = device_type !== nothing && fieldcount(device_type) >= 200
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.parameters
         param_name = LSymbol(p.name)
+        param_name === :m && continue
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2098,7 +2107,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
 
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
-        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [d, g, s, b], va_stamp_kwargs(:full_instance_name))
+        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [d, g, s, b], va_stamp_kwargs(:full_instance_name, m_expr))
         return quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -2112,7 +2121,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2145,21 +2155,26 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     device_type = va_device_type(state, model_sym)
     is_large_model = device_type !== nothing && fieldcount(device_type) >= 200
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+
     # Build instance parameter kwargs
     param_kwargs = Expr[]
     for p in instance.params
         param_name = LSymbol(p.name)
+        param_name === :m && continue
         param_val = cg_expr!(state, p.val)
         push!(param_kwargs, Expr(:kw, param_name, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -2167,7 +2182,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
 
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
-        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [c, b, e, s], va_stamp_kwargs(:full_instance_name))
+        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [c, b, e, s], va_stamp_kwargs(:full_instance_name, m_expr))
         return quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -2181,7 +2196,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2226,12 +2242,20 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     device_type = va_device_type(state, model_sym)
     is_large_model = device_type !== nothing && fieldcount(device_type) >= 200
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. It is handled
+    # separately from the case-insensitive model-field lookup below: on a diode
+    # *instance* line "m" always means multiplicity (never the model-card-only
+    # "m" grading-coefficient parameter aliased to mj).
+    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
     for p in instance.params
         param_name = LSymbol(p.name)
-        param_val = cg_expr!(state, p.val)
         lname = Symbol(lowercase(String(param_name)))
+        lname === :m && continue
+        param_val = cg_expr!(state, p.val)
         rname = get(case_insensitive, lname, param_name)
         push!(param_kwargs, Expr(:kw, rname, param_val))
     end
@@ -2239,15 +2263,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     # Create the device instance via spicecall + setproperties, matching the
     # pattern used by MOSFET/BJT/OSDI handlers.
     device_expr = if isempty(param_kwargs)
-        :($(spicecall)($model_name).device)
+        :($(spicecall)($model_name))
     else
-        :($(spicecall)($model_name; $(param_kwargs...)).device)
+        :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     local_name = QuoteNode(Symbol(name))
 
     if is_large_model
-        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [pos, neg], va_stamp_kwargs(:full_instance_name))
+        stamp_expr = va_stamp_call(:dev, device_type, :ctx, [pos, neg], va_stamp_kwargs(:full_instance_name, m_expr))
         return quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -2260,7 +2284,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $pos, $neg;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2320,24 +2345,29 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     device_type = va_device_type(state, model_sym)
     is_large_model = device_type !== nothing && fieldcount(device_type) >= 200
 
+    # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
+    # field - the VA model reads it back via the $mfactor builtin. Pull it out
+    # of the kwargs headed for spicecall/setproperties.
+    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
     for p in instance.parameters
         param_name = LSymbol(p.name)
+        lname = Symbol(lowercase(String(param_name)))
+        lname === :m && continue
         param_val = cg_expr!(state, p.val)
         # Use case-insensitive lookup to find correct parameter name
-        lname = Symbol(lowercase(String(param_name)))
         rname = get(case_insensitive, lname, param_name)
         push!(param_kwargs, Expr(:kw, rname, param_val))
     end
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
-    # spicecall returns ParallelInstances, extract .device for stamping
     if isempty(param_kwargs)
-        device_expr = :($(spicecall)($model_name).device)
+        device_expr = :($(spicecall)($model_name))
     else
-        device_expr = :($(spicecall)($model_name; $(param_kwargs...)).device)
+        device_expr = :($(spicecall)($model_name; $(param_kwargs...)))
     end
 
     # Generate stamp! call with variable number of node arguments
@@ -2349,7 +2379,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # This ensures unique internal node names across subcircuit instances
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
-        stamp_expr = va_stamp_call(:dev, device_type, :ctx, node_exprs, va_stamp_kwargs(:full_instance_name))
+        stamp_expr = va_stamp_call(:dev, device_type, :ctx, node_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
         return quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -2364,7 +2394,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, nodes...;
                     _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                    _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                    _mna_mfactor_ = $m_expr)
             end
         end
     end
@@ -2651,7 +2682,7 @@ function codegen_toplevel_models!(state::CodegenState)
                     end
                 end
                 model_var = cg_model_name!(state, model_name)
-                push!(model_defs, :($model_var = ($(model_params...),)))
+                push!(model_defs, :(const $model_var = ($(model_params...),)))
             elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
                 # VA model from imported HDL module or external package
                 # Get the model type to build case-insensitive parameter lookup
@@ -2699,7 +2730,15 @@ function codegen_toplevel_models!(state::CodegenState)
                 model_var = cg_model_name!(state, model_name)
                 # Use Cadnip pattern: pass params as NamedTuple to spicecall
                 # This avoids embedding 200 kwargs in the generated code
-                push!(model_defs, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
+                #
+                # const is essential here, not cosmetic: these bindings are
+                # captured by the circuit builder function as module globals
+                # (not locals/arguments), and a plain `=` global is always
+                # ::Any at use sites regardless of what's assigned to it. That
+                # made every `spicecall(model_var; ...)` call in the builder
+                # infer to Any, forcing the device struct to be heap-boxed on
+                # every stamp!() call (every Newton iteration).
+                push!(model_defs, :(const $model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
             end
         end
     end
