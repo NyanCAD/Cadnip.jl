@@ -173,6 +173,9 @@ function output_signal(sol, out_nodes)
     return Vector{Float64}(sol[Symbol(out_nodes[1])]) .- Vector{Float64}(sol[Symbol(out_nodes[2])])
 end
 
+"Filename-safe tag for a probe label (config.json's `vacask_probes[].label`)."
+safe_label(s) = replace(s, r"[^A-Za-z0-9]" => "_")
+
 "Pulse-edge breakpoints so adaptive solvers don't step over the sharp source edges."
 function case_tstops(case, tspan)
     case == "rc" || return Float64[]
@@ -279,13 +282,14 @@ function parse_vacask_elapsed(stdout_text::AbstractString)
 end
 
 "Run VACASK once; return (t, signal, timepoints, runtime_s) or throw on failure."
-function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2])
+function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2],
+                          method=nothing, maxord=nothing, extra_opts="")
     step = (tspan[2] - tspan[1]) / Int(CFG["n_grid"])
-    method = String(get(CFG, "vacask_tran_method", "gear"))
-    maxord = Int(get(CFG, "vacask_tran_maxord", 5))
+    m = method === nothing ? String(get(CFG, "vacask_tran_method", "gear")) : method
+    mo = maxord === nothing ? Int(get(CFG, "vacask_tran_maxord", 5)) : maxord
     sim = sim_body(case) * """
     control
-      options reltol=$(reltol) vntol=$(vntol) tran_method="$(method)" tran_maxord=$(maxord)
+      options reltol=$(reltol) vntol=$(vntol) tran_method="$(m)" tran_maxord=$(mo) $(extra_opts)
       analysis tran1 tran step=$(step) stop=$(tspan[2]) maxstep=$(maxstep)
     endc
     """
@@ -428,29 +432,36 @@ function run_vacask_sweep(case, spec, want_golden)
     end
     close(summary)
 
-    # Optional: re-run the same reltol sweep with VACASK's step bounded to a
-    # case-specific dtmax (config.json's `vacask_maxstep`) instead of left
-    # unbounded. This isolates whether a plateaued/aborting reltol-only sweep
-    # is a missing-breakpoint/controller issue rather than an accuracy
-    # ceiling - see config.json's per-case `_vacask_maxstep_comment`.
-    if haskey(spec, "vacask_maxstep")
-        bounded_ms = Float64(spec["vacask_maxstep"])
-        bsummary = open(joinpath(OUT, "vacask_bounded_$(case).csv"), "w")
-        println(bsummary, "reltol,time_s,timepoints")
+    # Optional: re-run the same reltol sweep under one or more case-specific
+    # probe configurations (config.json's `vacask_probes` - each can override
+    # maxstep/method/maxord/extra_opts) instead of left unbounded. Used to
+    # isolate whether a plateaued/aborting reltol-only sweep is a
+    # missing-breakpoint/controller-tuning issue rather than an accuracy
+    # ceiling - see config.json's per-case `_vacask_probes_comment`.
+    for probe in get(spec, "vacask_probes", [])
+        label = String(probe["label"])
+        pms = Float64(probe["maxstep"])
+        pmethod = haskey(probe, "method") ? String(probe["method"]) : nothing
+        pmaxord = haskey(probe, "maxord") ? Int(probe["maxord"]) : nothing
+        pextra = String(get(probe, "extra_opts", ""))
+        tag = safe_label(label)
+        psummary = open(joinpath(OUT, "vacask_probe_$(case)_$(tag).csv"), "w")
+        println(psummary, "reltol,time_s,timepoints")
         for r in reltols
-            @printf("  vacask(maxstep=%.1e) reltol=%.0e ... ", bounded_ms, r); flush(stdout)
+            @printf("  vacask[%s] reltol=%.0e ... ", label, r); flush(stdout)
             try
-                ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes; maxstep=bounded_ms)
-                write_wave(joinpath(OUT, "vacask_bounded_$(case)_$(reltol_tag(r)).csv"), ti, sig)
-                println(bsummary, "$r,$rt,$tp")
+                ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes;
+                                                   maxstep=pms, method=pmethod, maxord=pmaxord, extra_opts=pextra)
+                write_wave(joinpath(OUT, "vacask_probe_$(case)_$(tag)_$(reltol_tag(r)).csv"), ti, sig)
+                println(psummary, "$r,$rt,$tp")
                 @printf("%.3fs %d pts\n", rt, tp)
             catch e
-                println(bsummary, "$r,NaN,0")
+                println(psummary, "$r,NaN,0")
                 println("ABORT/skip")
             end
-            flush(bsummary); flush(stdout)
+            flush(psummary); flush(stdout)
         end
-        close(bsummary)
+        close(psummary)
     end
 end
 
@@ -502,12 +513,14 @@ function analyze(case, spec)
         end
     end
 
-    bpath = joinpath(OUT, "vacask_bounded_$(case).csv")
-    if isfile(bpath)
-        blabel = "VACASK maxstep=" * @sprintf("%.0e", Float64(spec["vacask_maxstep"]))
+    for probe in get(spec, "vacask_probes", [])
+        label = String(probe["label"]); tag = safe_label(label)
+        blabel = "VACASK " * label
+        bpath = joinpath(OUT, "vacask_probe_$(case)_$(tag).csv")
+        isfile(bpath) || continue
         for row in first(read_table(bpath))
             r = parse(Float64, row["reltol"]); t = tryparse(Float64, get(row, "time_s", "NaN"))
-            wp = joinpath(OUT, "vacask_bounded_$(case)_$(reltol_tag(r)).csv")
+            wp = joinpath(OUT, "vacask_probe_$(case)_$(tag)_$(reltol_tag(r)).csv")
             isfile(wp) || continue
             tw, vw = read_wave(wp)
             err = run_error(tw, vw, gt, gv)
@@ -536,7 +549,7 @@ reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
 have known cross-font/cross-renderer width bugs that misalign the plot; plain
 ASCII (0-127) is guaranteed single-column in any monospace font.
 """
-const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%"]
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%", "&"]
 
 function ascii_plot(title, curves)
     labels = sort(collect(keys(curves)))
@@ -594,7 +607,7 @@ function save_plot(case, title, curves)
     plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
                       ylabel="runtime (s)", title="Work-precision: $title",
                       legend=:outertopright, size=(900, 600), dpi=150)
-    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon, :hexagon)
     for (i, label) in enumerate(labels)
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
