@@ -341,6 +341,15 @@ it the same way stamp overflow is guarded.
 end
 
 """
+    _mark_condition_vdep!(::DirectStampContext, idx::Int, lhs, rhs)
+
+No-op. Voltage-dependence detection is finalized during `MNAContext`
+structure discovery (`build_with_detection`) before a `DirectStampContext`
+ever exists; the hot restamping path doesn't need to (re)detect it.
+"""
+@inline _mark_condition_vdep!(::DirectStampContext, idx::Int, lhs, rhs) = nothing
+
+"""
     stamp_G!(dctx::DirectStampContext, i, j, val)
 
 Stamp G matrix value DIRECTLY to sparse nzval using precomputed mapping.

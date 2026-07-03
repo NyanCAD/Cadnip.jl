@@ -2015,14 +2015,21 @@ end
 """
     va_event_callback(ws::EvalWorkspace; interp_points::Int=10)
 
-Build a `VectorContinuousCallback` that roots-find every VA voltage-dependent
+Build a `VectorContinuousCallback` that roots-find every voltage-dependent VA
 comparison condition (see va_events.jl) to an exact crossing time, forcing
 the integrator to land exactly on region-switch boundaries in BSIM/PSP-style
 compact models instead of silently stepping over them.
 
-Returns `nothing` when the circuit has no condition slots (`ws.structure.n_conditions == 0`)
-- so wiring this in unconditionally when `va_events=true` is free for circuits
-that don't need it.
+Only comparisons observed with a `ForwardDiff.Dual` operand during discovery
+(`ws.structure.condition_is_vdep`) get a root function - a compact model's
+analog block is full of comparisons that aren't physically meaningful
+discontinuities (parameter validation like `if (L <= 0)`, junction-diode and
+capacitance-model region checks), and watching all of them, including ones
+that toggle every few picoseconds in a fast circuit, was found to disrupt the
+adaptive step schedule badly enough to change simulated trajectories, not
+just slow them down. Returns `nothing` when there are no voltage-dependent
+slots, so wiring this in unconditionally when `va_events=true` is free for
+circuits that don't need it.
 
 `affect!` is a no-op and never touches `u`: since every residual/Jacobian
 evaluation is a full rebuild from `(u,t)`, stamps update automatically once
@@ -2035,19 +2042,23 @@ traps. `save_positions=(true,true)` captures the kink in the saved solution.
 10) controls how many dense-output points per step are checked for a sign
 change; each one is a full circuit rebuild (`fast_rebuild!`), so this is the
 knob for trading event-detection accuracy against overhead on circuits with
-many condition slots.
+many voltage-dependent condition slots.
 
 Works uniformly across IDA (DAE), and OrdinaryDiffEq/DelayDiffEq (ODE/DDE)
 integrators - confirmed via the B0 solver-support spike that all three
 correctly land the root time in `sol.t`.
 """
 function va_event_callback(ws::EvalWorkspace; interp_points::Int=10)
-    n = ws.structure.n_conditions
+    vdep_indices = findall(ws.structure.condition_is_vdep)
+    n = length(vdep_indices)
     n == 0 && return nothing
 
     function condition!(out, u, t, integrator)
         fast_rebuild!(integrator.p, u, real_time(t))
-        copyto!(out, integrator.p.dctx.condition_values)
+        cv = integrator.p.dctx.condition_values
+        @inbounds for i in eachindex(vdep_indices)
+            out[i] = cv[vdep_indices[i]]
+        end
         return nothing
     end
     affect!(integrator, idx) = nothing

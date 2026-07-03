@@ -220,6 +220,22 @@ mutable struct MNAContext
     n_conditions::Int
     condition_values::Vector{Float64}
 
+    # Cache for voltage-dependent condition detection (mirrors charge_is_vdep):
+    # va_cmp_* marks a slot true the first time either operand is a
+    # ForwardDiff.Dual. Node-derived quantities are always wrapped in a Dual
+    # by dual_creation regardless of which discovery pass produced them, so
+    # (unlike charge_is_vdep's Q/V-ratio comparison) a single observation is
+    # enough - no multi-pass random-operating-point detection needed. A
+    # comparison that's provably parameter-only (e.g. `if (L <= 0)`) never
+    # gets marked, and va_event_callback excludes it from the
+    # VectorContinuousCallback dimension entirely: compact models pack in far
+    # more comparisons than just the physical region-selection ones (parameter
+    # validation, junction-diode/capacitance-region checks), and watching all
+    # of them - including ones that toggle every few picoseconds and aren't
+    # physically meaningful - was found to disrupt the adaptive step schedule
+    # badly enough to change simulated trajectories, not just slow them down.
+    condition_is_vdep::Vector{Bool}
+
     # Track if system has been finalized
     finalized::Bool
 
@@ -258,6 +274,7 @@ function MNAContext()
         BreakpointSpec[],   # breakpoints (recomputed every build)
         0,                  # n_conditions
         Float64[],          # condition_values
+        Bool[],             # condition_is_vdep (detection cache)
         false,              # finalized
     )
 end
@@ -989,6 +1006,16 @@ function alloc_conditions!(ctx::MNAContext, n::Int)::Int
     @inbounds for i in base+1:ctx.n_conditions
         ctx.condition_values[i] = 1.0
     end
+    # condition_is_vdep is a persistent detection cache (like charge_is_vdep) -
+    # only grow it, never reset existing entries, so a `true` observed on an
+    # earlier discovery pass survives reset_for_restamping!.
+    if length(ctx.condition_is_vdep) < ctx.n_conditions
+        old_len = length(ctx.condition_is_vdep)
+        resize!(ctx.condition_is_vdep, ctx.n_conditions)
+        @inbounds for i in old_len+1:ctx.n_conditions
+            ctx.condition_is_vdep[i] = false
+        end
+    end
     return base
 end
 
@@ -1003,6 +1030,22 @@ Write condition value `d` at 1-based index `idx`. On `MNAContext`,
 """
 @inline function _store_condition!(ctx::MNAContext, idx::Int, d::Float64)
     @inbounds ctx.condition_values[idx] = d
+    return nothing
+end
+
+"""
+    _mark_condition_vdep!(ctx::MNAContext, idx::Int, lhs, rhs)
+
+Mark condition slot `idx` (1-based) as voltage-dependent if either operand is
+a `ForwardDiff.Dual` - node-derived quantities are always Dual-wrapped by
+`dual_creation`, so this reliably distinguishes genuine voltage-dependent
+comparisons from parameter-only ones (`if (L <= 0)`) in a single observation.
+Sticky: never un-marks a slot already known to be voltage-dependent.
+"""
+@inline function _mark_condition_vdep!(ctx::MNAContext, idx::Int, lhs, rhs)
+    if !ctx.condition_is_vdep[idx] && (lhs isa ForwardDiff.Dual || rhs isa ForwardDiff.Dual)
+        ctx.condition_is_vdep[idx] = true
+    end
     return nothing
 end
 
@@ -1050,6 +1093,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.breakpoints)
     ctx.n_conditions = 0
     empty!(ctx.condition_values)
+    empty!(ctx.condition_is_vdep)
     ctx.finalized = false
     return nothing
 end

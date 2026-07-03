@@ -75,6 +75,7 @@ using LinearSolve: KLUFactorization
 
         ctx = build_with_detection(circuit)
         @test ctx.n_conditions == 1
+        @test ctx.condition_is_vdep == [true]  # vin is V(p,n)-derived, genuinely voltage-dependent
 
         # SinWave(vo=0.5,va=0.5,freq=0.5,phase=-90): vsrc(t) = 0.5 - 0.5*cos(pi*t),
         # crosses vth=0.5 at t=0.5 (quarter period); vp tracks vsrc within the
@@ -114,6 +115,7 @@ using LinearSolve: KLUFactorization
         end
         ctx = build_with_detection(MNACircuit(two_instance))
         @test ctx.n_conditions == 2
+        @test ctx.condition_is_vdep == [true, true]
     end
 
     #==========================================================================#
@@ -161,6 +163,7 @@ using LinearSolve: KLUFactorization
         circuit = MNACircuit(nested_circuit; vin=2.0)
         ctx = build_with_detection(circuit)
         @test ctx.n_conditions == 2
+        @test ctx.condition_is_vdep == [true, true]
 
         # Region selection sanity check (not a precision test - see the
         # inline devices.jl comment on n-terminal branch stamping for why
@@ -217,9 +220,17 @@ using LinearSolve: KLUFactorization
 
         ctx = build_with_detection(MNACircuit(param_only_circuit))
         @test ctx.n_conditions == 1  # slot exists even though it never toggles at runtime
+        @test ctx.condition_is_vdep == [false]  # mode_sel is a parameter, never a Dual
 
         sol = dc!(MNACircuit(param_only_circuit))
         @test isapprox(sol[:vout], 1.0; atol=1e-6)  # 0.5 * 2.0
+
+        # va_event_callback excludes the non-voltage-dependent slot entirely
+        cs = MNA.compile_structure(MNACircuit(param_only_circuit).builder,
+                                    MNACircuit(param_only_circuit).params,
+                                    MNACircuit(param_only_circuit).spec; ctx=ctx)
+        ws = MNA.create_workspace(cs; ctx=ctx)
+        @test MNA.va_event_callback(ws) === nothing
     end
 
 end
