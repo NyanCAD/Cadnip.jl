@@ -125,6 +125,19 @@ data point:
   also tolerates a general (non-diagonal) mass matrix in principle — but
   empirically it still goes `:Unstable` past `reltol≈1e-5` on `graetz` and
   everywhere on `mul`, so it's added to `filter`/`rc`/`graetz` but not `mul`.
+- **RadauIIA5 has a one-tolerance outlier on `rc`, reproduced and localized.**
+  At `reltol=1e-7` (only) its error jumps to 5.5e-3 — four orders of magnitude
+  worse than its neighbors (`1e-6`: 4.6e-7, `1e-8`: 4.1e-7) despite `retcode`
+  reporting `Success`. Reproduced standalone (no VACASK involved) and traced to
+  a single bad step: `t=1.0020ms → 1.0030ms`, the pulse's falling edge, which
+  is bounded on both sides by explicit `tstops` exactly 1us apart (the fall
+  duration). It's the *only* step in that run with a recorded LTE rejection
+  (`rejects=1`); every other tolerance has zero rejects. The true solution
+  barely moves over that 1us window (τ=1ms), but the accepted step reports a
+  drop ~100x too large. Looks like an `OrdinaryDiffEqFIRK` step-size-selection
+  edge case with a forced step sandwiched between two closely-spaced `tstops`,
+  not a Cadnip stamping bug — not chased further here since it's upstream of
+  Cadnip and affects one point out of 35 RadauIIA5 runs across all cases.
 - **KenCarp4 and Rodas6P are the two solvers that get *any* correct points on
   `mul` beyond IDA/FBDF.** Both fail outright on `graetz` (`:Unstable`/
   `MaxIters` at every tolerance), but on `mul` KenCarp4 succeeds at the two
@@ -241,15 +254,32 @@ what's already folded into the table above:
   VACASK's error stops improving past a point (e.g. the pulse-train `rc`): its LTE
   controller settles at a step count well short of the accuracy its fine-`maxstep`
   golden reaches. Cadnip's solvers keep converging.
-- **Bounding VACASK's step to the throughput benchmark's own `dtmax` isolates the
-  cause.** `rc` and `mul` each optionally get a second VACASK sweep
+- **Bounding VACASK's step to the throughput benchmark's own `dtmax` confirms
+  it's a controller gap, not an engine ceiling — but the two circuits fail for
+  different reasons.** `rc` and `mul` each get a second VACASK sweep
   (`config.json`'s `vacask_maxstep`, plotted as an extra `VACASK maxstep=...`
   series) that reruns the same `reltol` sweep with `maxstep` fixed to whatever
   `rc/vacask/runme.sim` / `mul/vacask/runme.sim` (the real throughput benchmark)
-  already use — 1us and 0.01us respectively. If that series converges/survives
-  where the unbounded one plateaus/aborts, the unbounded sweep's failure is a
-  step-selection/breakpoint-detection gap in VACASK's `reltol`-only controller on
-  these two circuits, not an accuracy ceiling in the engine itself.
+  already use — 1us and 0.01us respectively:
+  - `rc`: bounding the step drops the error from a 1.5-7% plateau (unbounded,
+    every `reltol` from `1e-3` to `1e-9`) to 2.3e-5-7.1e-5 — a ~1000x
+    improvement — confirming the unbounded plateau is specifically a
+    breakpoint/step-selection gap: `reltol` alone never resolves the 1us pulse
+    edges, and bounding the step (without giving VACASK explicit edge
+    breakpoints the way Cadnip gets via `tstops`) fixes it. The tradeoff: with
+    `maxstep` fixed, runtime is ~66ms regardless of `reltol` (the forced step
+    count dominates, ~20,000 steps either way) — `reltol` stops mattering once
+    it's not the binding constraint.
+  - `mul`: bounding the step similarly drops the error from 3.6-3.7e-2
+    (unbounded, `reltol=1e-3`/`1e-4`) to ~1.0e-4 — a ~350x improvement — so the
+    engine is capable of much better accuracy here too. But unlike `rc`, the
+    bounded sweep still can't reach past `reltol=1e-4` (aborts one tolerance
+    point *earlier* than the unbounded sweep, which reached `1e-5`). `mul`'s
+    source is a smooth sine, not a sharp pulse, so there's no edge for a
+    `maxstep` bound to help resolve — the abort here is a genuine
+    Newton/LTE-convergence limitation on the diode's stiff switching at tight
+    tolerance, not a missing-breakpoint problem, and fine-stepping alone
+    doesn't fix it.
 
 ## History
 
