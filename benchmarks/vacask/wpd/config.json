@@ -28,7 +28,9 @@
       "title": "RC circuit driven by a pulse train (linear)",
       "tspan": [0.0, 0.02],
       "output": ["2"],
-      "golden": "analytic"
+      "golden": "analytic",
+      "_vacask_maxstep_comment": "VACASK's reltol-only sweep plateaus at ~1-7% error here regardless of tolerance (never resolving the 1us pulse edges). This bounds its step to the same dtmax=1us used in the real throughput benchmark (rc/vacask/runme.sim) to test whether the plateau is a missing-breakpoint issue rather than an accuracy ceiling.",
+      "vacask_maxstep": 1e-6
     },
     "graetz": {
       "title": "Graetz bridge full-wave rectifier (nonlinear diode)",
@@ -40,7 +42,9 @@
       "title": "Diode voltage multiplier (nonlinear, stiff)",
       "tspan": [0.0, 5e-4],
       "output": ["20"],
-      "golden": "cadnip"
+      "golden": "cadnip",
+      "_vacask_maxstep_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. This bounds its step to the same dtmax=0.01us used in the real throughput benchmark (mul/vacask/runme.sim) to see whether the engine can reach Cadnip-competitive accuracy when its own adaptive controller isn't driving step selection.",
+      "vacask_maxstep": 1e-8
     }
   }
 }

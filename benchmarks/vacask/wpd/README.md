@@ -241,6 +241,15 @@ what's already folded into the table above:
   VACASK's error stops improving past a point (e.g. the pulse-train `rc`): its LTE
   controller settles at a step count well short of the accuracy its fine-`maxstep`
   golden reaches. Cadnip's solvers keep converging.
+- **Bounding VACASK's step to the throughput benchmark's own `dtmax` isolates the
+  cause.** `rc` and `mul` each optionally get a second VACASK sweep
+  (`config.json`'s `vacask_maxstep`, plotted as an extra `VACASK maxstep=...`
+  series) that reruns the same `reltol` sweep with `maxstep` fixed to whatever
+  `rc/vacask/runme.sim` / `mul/vacask/runme.sim` (the real throughput benchmark)
+  already use — 1us and 0.01us respectively. If that series converges/survives
+  where the unbounded one plateaus/aborts, the unbounded sweep's failure is a
+  step-selection/breakpoint-detection gap in VACASK's `reltol`-only controller on
+  these two circuits, not an accuracy ceiling in the engine itself.
 
 ## History
 

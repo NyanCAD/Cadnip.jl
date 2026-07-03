@@ -427,6 +427,31 @@ function run_vacask_sweep(case, spec, want_golden)
         flush(summary); flush(stdout)
     end
     close(summary)
+
+    # Optional: re-run the same reltol sweep with VACASK's step bounded to a
+    # case-specific dtmax (config.json's `vacask_maxstep`) instead of left
+    # unbounded. This isolates whether a plateaued/aborting reltol-only sweep
+    # is a missing-breakpoint/controller issue rather than an accuracy
+    # ceiling - see config.json's per-case `_vacask_maxstep_comment`.
+    if haskey(spec, "vacask_maxstep")
+        bounded_ms = Float64(spec["vacask_maxstep"])
+        bsummary = open(joinpath(OUT, "vacask_bounded_$(case).csv"), "w")
+        println(bsummary, "reltol,time_s,timepoints")
+        for r in reltols
+            @printf("  vacask(maxstep=%.1e) reltol=%.0e ... ", bounded_ms, r); flush(stdout)
+            try
+                ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes; maxstep=bounded_ms)
+                write_wave(joinpath(OUT, "vacask_bounded_$(case)_$(reltol_tag(r)).csv"), ti, sig)
+                println(bsummary, "$r,$rt,$tp")
+                @printf("%.3fs %d pts\n", rt, tp)
+            catch e
+                println(bsummary, "$r,NaN,0")
+                println("ABORT/skip")
+            end
+            flush(bsummary); flush(stdout)
+        end
+        close(bsummary)
+    end
 end
 
 #------------------------------------------------------------------------------#
@@ -477,6 +502,21 @@ function analyze(case, spec)
         end
     end
 
+    bpath = joinpath(OUT, "vacask_bounded_$(case).csv")
+    if isfile(bpath)
+        blabel = "VACASK maxstep=" * @sprintf("%.0e", Float64(spec["vacask_maxstep"]))
+        for row in first(read_table(bpath))
+            r = parse(Float64, row["reltol"]); t = tryparse(Float64, get(row, "time_s", "NaN"))
+            wp = joinpath(OUT, "vacask_bounded_$(case)_$(reltol_tag(r)).csv")
+            isfile(wp) || continue
+            tw, vw = read_wave(wp)
+            err = run_error(tw, vw, gt, gv)
+            isfinite(err) && t !== nothing && isfinite(t) &&
+                push!(get!(curves, blabel, Tuple{Float64,Float64}[]), (err, t))
+            push!(table, (blabel, r, err, something(t, NaN)))
+        end
+    end
+
     # cross-check: if both analytic and a VACASK ref exist, report their agreement
     ap = joinpath(OUT, "analytic_$(case).csv"); rp = joinpath(OUT, "ref_$(case).csv")
     xcheck = ""
@@ -496,7 +536,7 @@ reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
 have known cross-font/cross-renderer width bugs that misalign the plot; plain
 ASCII (0-127) is guaranteed single-column in any monospace font.
 """
-const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@"]
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%"]
 
 function ascii_plot(title, curves)
     labels = sort(collect(keys(curves)))
@@ -554,7 +594,7 @@ function save_plot(case, title, curves)
     plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
                       ylabel="runtime (s)", title="Work-precision: $title",
                       legend=:outertopright, size=(900, 600), dpi=150)
-    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon)
     for (i, label) in enumerate(labels)
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
