@@ -1837,7 +1837,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             return quote
                 let wave = $wave_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
-                    $(MNA).stamp!(VoltageSource(ys[1]; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                    $(MNA).stamp!(VoltageSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
@@ -1848,7 +1848,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             freq = hasparam(instance.params, "freq") ? cg_expr!(state, getparam(instance.params, "freq")) : 1e3
             return quote
                 let vo = $vo, va = $va, freq = $freq
-                    $(MNA).stamp!(VoltageSource(vo; tran=_t -> vo + va * sin(2π * freq * _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                    $(MNA).stamp!(VoltageSource(vo; tran=$(MNA).SinWave(vo, va, freq), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
@@ -1881,7 +1881,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             return quote
                 let wave = $wave_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
-                    $(MNA).stamp!(CurrentSource(ys[1]; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                    $(MNA).stamp!(CurrentSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
             end
@@ -2482,7 +2482,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
                             dc = $dc_value
-                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=$(MNA).PWLWave(ts, ys), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2491,7 +2491,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
                             dc = $dc_value
-                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(ts, ys, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=$(MNA).PWLWave(ts, ys), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2506,7 +2506,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             dc = $dc_expr
-                            $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                            $(MNA).stamp!(VoltageSource(dc; tran=$(MNA).PWLWave(times, values), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2516,7 +2516,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             dc = $dc_expr
-                            $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pwl_at_time(times, values, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                            $(MNA).stamp!(CurrentSource(dc; tran=$(MNA).PWLWave(times, values), name=$(_scoped_sym_expr(Symbol(name)))),
                                    ctx, $p, $n, t, spec.mode)
                         end
                     end
@@ -2540,20 +2540,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             # DC value: use explicit dc= if specified, otherwise use vo (the offset)
             dc_expr = dc_val !== nothing ? dc_val : vo_expr
 
-            # Create transient function with captured parameters
+            # SPICE SIN: vo + va * exp(-theta*(t-td)) * sin(2π*freq*(t-td) + phase_rad)
             if is_voltage
                 return quote
                     let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr
-                        # SPICE SIN: vo + va * exp(-theta*(t-td)) * sin(2π*freq*(t-td) + phase_rad)
-                        tran_fn = _t -> begin
-                            if _t < td
-                                vo + va * sind(phase)
-                            else
-                                vo + va * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
-                            end
-                        end
-                        $(MNA).stamp!(VoltageSource(dc; tran=tran_fn, name=$(_scoped_sym_expr(Symbol(name)))),
+                        $(MNA).stamp!(VoltageSource(dc; tran=$(MNA).SinWave(vo, va, freq, td, theta, phase), name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2561,14 +2553,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 return quote
                     let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr
-                        tran_fn = _t -> begin
-                            if _t < td
-                                io + ia * sind(phase)
-                            else
-                                io + ia * exp(-theta * (_t - td)) * sind(360 * freq * (_t - td) + phase)
-                            end
-                        end
-                        $(MNA).stamp!(CurrentSource(dc; tran=tran_fn, name=$(_scoped_sym_expr(Symbol(name)))),
+                        $(MNA).stamp!(CurrentSource(dc; tran=$(MNA).SinWave(io, ia, freq, td, theta, phase), name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2595,7 +2580,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 return quote
                     let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
                         tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
-                        $(MNA).stamp!(VoltageSource(dc; tran=_t -> $(MNA).pulse_at_time(v1, v2, td, tr, tf, pw, per, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                        $(MNA).stamp!(VoltageSource(dc; tran=$(MNA).PulseWave(v1, v2, td, tr, tf, pw, per), name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end
@@ -2603,7 +2588,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 return quote
                     let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
                         tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr
-                        $(MNA).stamp!(CurrentSource(dc; tran=_t -> $(MNA).pulse_at_time(i1, i2, td, tr, tf, pw, per, _t), name=$(_scoped_sym_expr(Symbol(name)))),
+                        $(MNA).stamp!(CurrentSource(dc; tran=$(MNA).PulseWave(i1, i2, td, tr, tf, pw, per), name=$(_scoped_sym_expr(Symbol(name)))),
                                ctx, $p, $n, t, spec.mode)
                     end
                 end

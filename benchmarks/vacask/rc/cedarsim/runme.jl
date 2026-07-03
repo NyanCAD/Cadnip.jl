@@ -41,47 +41,25 @@ end
 # `dtmax` (1e-6) equals the pulse rise/fall time, so an adaptive controller with
 # no knowledge of the discontinuity can get stuck trying to land a step exactly
 # on the edge (observed: FBDF/DFBDF/Trapezoid/TRBDF2 all eventually fail this way
-# on the full 1s/500-period run, each at a different period). Passing `tstops`
-# for every edge - delay start, rise end, width end, fall end, each period -
-# removes the ambiguity and gives every solver its best shot, matching what
-# `wpd/run_wpd.jl`'s `case_tstops` already does for the same circuit and what a
-# real SPICE engine does internally (breakpoints from source edges).
-#
-# TODO: hardcoding breakpoints here is a stopgap. The real fix is for Cadnip's
-# transient driver to derive `tstops` automatically from PULSE/SIN source
-# parameters (and VA `$bound_step`-style hints) so callers never have to do
-# this by hand - see the `wpd` duplication of this same logic as evidence it's
-# needed in more than one place already.
-function pulse_tstops(tspan; delay=1e-6, rise=1e-6, width=1e-3, fall=1e-6, period=2e-3)
-    bps = Float64[]
-    k = 0
-    while true
-        base = delay + k * period
-        base > tspan[2] && break
-        for off in (0.0, rise, rise + width, rise + width + fall)
-            e = base + off
-            tspan[1] <= e <= tspan[2] && push!(bps, e)
-        end
-        k += 1
-    end
-    return bps
-end
-
+# on the full 1s/500-period run, each at a different period). `tran!`'s
+# auto_tstops (on by default) derives every edge - delay start, rise end,
+# width end, fall end, each period - directly from the PULSE source's
+# breakpoints() (see src/mna/breakpoints.jl), removing the ambiguity and
+# giving every solver its best shot without a hand-built tstops list.
 function run_benchmark(solver; dt=1e-6, maxiters=10_000_000)
     tspan = (0.0, 1.0)  # 1 second simulation
     solver_name = nameof(typeof(solver))
-    tstops = pulse_tstops(tspan)
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (dtmax=$dt)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, maxiters=$maxiters, dense=false, tstops=$tstops) samples=3 evals=1 seconds=300
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, maxiters=$maxiters, dense=false) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, maxiters=maxiters, dense=false, tstops=tstops)
+    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, maxiters=maxiters, dense=false)
 
     println("\n=== Results ($solver_name) ===")
     @printf("Timepoints:  %d\n", length(sol.t))

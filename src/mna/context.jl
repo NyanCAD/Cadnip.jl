@@ -206,6 +206,20 @@ mutable struct MNAContext
     charge_V_values::Vector{Float64}  # Stored V_branch values for comparison
     charge_detection_pos::Int
 
+    # Breakpoint times collected from time-dependent sources (PWL/PULSE/SIN),
+    # expanded into solver tstops by the tran! constructors. Recomputed from
+    # scratch on every rebuild (not a detection cache like charge_is_vdep).
+    breakpoints::Vector{BreakpointSpec}
+
+    # Condition (event-detection) slots for VA voltage-dependent comparisons
+    # (see va_events.jl). Static-lexical slot numbering: each VA module's
+    # comparisons get compile-time offsets, and the per-instance base is
+    # allocated unconditionally at analog-block entry - only alloc_conditions!
+    # touches n_conditions, matching the discipline hoist_conditional_stamps
+    # uses for stamp slots.
+    n_conditions::Int
+    condition_values::Vector{Float64}
+
     # Track if system has been finalized
     finalized::Bool
 
@@ -241,6 +255,9 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
+        BreakpointSpec[],   # breakpoints (recomputed every build)
+        0,                  # n_conditions
+        Float64[],          # condition_values
         false,              # finalized
     )
 end
@@ -943,11 +960,63 @@ function reset_for_restamping!(ctx::MNAContext)
     # Reset charge detection counter for re-stamping (cache is preserved)
     ctx.charge_detection_pos = 1
 
+    # Breakpoints are recomputed from scratch every build (not a cache)
+    empty!(ctx.breakpoints)
+
+    # Condition slots are structurally fixed per VA module, so recomputed
+    # fresh every build just like n_nodes/n_currents.
+    ctx.n_conditions = 0
+    empty!(ctx.condition_values)
+
     ctx.finalized = false
     return nothing
 end
 
 export reset_for_restamping!
+
+"""
+    alloc_conditions!(ctx::MNAContext, n::Int) -> Int
+
+Allocate `n` condition (event-detection) slots, returning the 0-based base
+offset such that slot `k` (`1 <= k <= n`) lives at `ctx.condition_values[base+k]`.
+New slots are filled with `1.0` (inert - a value that never crosses zero on
+its own, so an unwritten slot doesn't register as a spurious event).
+"""
+function alloc_conditions!(ctx::MNAContext, n::Int)::Int
+    base = ctx.n_conditions
+    ctx.n_conditions += n
+    resize!(ctx.condition_values, ctx.n_conditions)
+    @inbounds for i in base+1:ctx.n_conditions
+        ctx.condition_values[i] = 1.0
+    end
+    return base
+end
+
+export alloc_conditions!
+
+"""
+    _store_condition!(ctx::MNAContext, idx::Int, d::Float64)
+
+Write condition value `d` at 1-based index `idx`. On `MNAContext`,
+`condition_values` is always sized exactly to `n_conditions` by
+`alloc_conditions!`, so this is an unchecked write.
+"""
+@inline function _store_condition!(ctx::MNAContext, idx::Int, d::Float64)
+    @inbounds ctx.condition_values[idx] = d
+    return nothing
+end
+
+"""
+    register_breakpoints!(ctx::MNAContext, wave)
+
+Push `wave`'s breakpoint spec (see [`breakpoints`](@ref)) onto `ctx.breakpoints`
+if it has one.
+"""
+function register_breakpoints!(ctx::MNAContext, wave)
+    bp = breakpoints(wave)
+    bp === nothing || push!(ctx.breakpoints, bp)
+    return nothing
+end
 
 """
     clear!(ctx::MNAContext)
@@ -978,6 +1047,9 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_Q_values)
     empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
+    empty!(ctx.breakpoints)
+    ctx.n_conditions = 0
+    empty!(ctx.condition_values)
     ctx.finalized = false
     return nothing
 end

@@ -68,11 +68,23 @@ function pwl_at_time(ts, ys, t)
     return ys[i-1] + (t - ts[i-1])*slope
 end
 
-# Stub for time_periodic_singularities! - was used by DAECompiler for event handling
-# MNA handles time-dependent sources differently
-@generated function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
-    # No-op in MNA backend - singularities are handled by adaptive time stepping
-    return :nothing
+# Was a DAECompiler event-handling intrinsic; on the MNA backend it instead
+# reports breakpoints for legacy behavioral pwl()/pulse() expressions (used
+# directly in B-source math, with no MNAContext in scope) through the
+# MNA.BREAKPOINT_COLLECTOR scoped collector set by MNA.build_with_detection.
+# A no-op whenever that collector isn't bound - in particular on the hot
+# DirectStampContext restamping path, where it's never bound.
+function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
+    collector = MNA.BREAKPOINT_COLLECTOR[]
+    collector === nothing && return nothing
+
+    times = MNA._collect_times(ts)
+    if count == 1 || !isfinite(period)
+        push!(collector, MNA.BreakpointSpec(times))
+    else
+        push!(collector, MNA.BreakpointSpec(times, Float64(period), Int(count)))
+    end
+    return nothing
 end
 
 baremodule SpectreEnvironment

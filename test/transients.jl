@@ -298,4 +298,91 @@ const ω_val = 1
     @test isapprox(rms(steady_state_vout2), 0.5; atol=0.15, rtol=0.15)
 end
 
+@testset "Auto tstops (breakpoint detection)" begin
+    using Cadnip.MNA: PulseWave, PWLWave, expand_breakpoints, BreakpointSpec
+
+    # PULSE edges: td, td+tr, td+tr+pw, td+tr+pw+tf, repeating every `per`.
+    function build_pulse_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        defaults = (td=1e-6, per=10e-6)
+        p = merge(defaults, params)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
+        vin = get_node!(ctx, :vin)
+        vout = get_node!(ctx, :vout)
+        wave = PulseWave(0.0, 1.0, p.td, 1e-6, 1e-6, 3e-6, p.per)
+        stamp!(VoltageSource(0.0; tran=wave, name=:V1), ctx, vin, 0, t, spec.mode)
+        stamp!(Resistor(1e3; name=:R), ctx, vin, vout)
+        stamp!(Capacitor(1e-9; name=:C), ctx, vout, 0)
+        return ctx
+    end
+
+    pulse_edges(td, per, tspan) = expand_breakpoints(
+        [BreakpointSpec([td, td + 1e-6, td + 4e-6, td + 5e-6], per, -1)], tspan)
+
+    tspan = (0.0, 30e-6)
+    circuit = MNACircuit(build_pulse_rc; td=1e-6, per=10e-6)
+    edges = pulse_edges(1e-6, 10e-6, tspan)
+    @test length(edges) == 12  # 4 edges/period × 3 periods within tspan
+
+    hits(sol, es) = all(e -> any(t -> abs(t - e) < 1e-15, sol.t), es)
+
+    # Default solver (IDA, DAE path): tstops only (no d_discontinuities - Sundials rejects it)
+    sol_ida = tran!(circuit, tspan)
+    @test hits(sol_ida, edges)
+
+    # ODE path (Rodas5P): tstops + d_discontinuities
+    sol_ode = tran!(circuit, tspan; solver=Rodas5P())
+    @test hits(sol_ode, edges)
+
+    prob = ODEProblem(circuit, tspan)
+    @test haskey(prob.kwargs, :tstops) && !isempty(prob.kwargs[:tstops])
+    @test haskey(prob.kwargs, :d_discontinuities) && !isempty(prob.kwargs[:d_discontinuities])
+
+    prob_dae = Base.invokelatest(SciMLBase.DAEProblem, circuit, tspan; explicit_jacobian=true)
+    @test haskey(prob_dae.kwargs, :tstops) && !isempty(prob_dae.kwargs[:tstops])
+    @test !haskey(prob_dae.kwargs, :d_discontinuities)  # Sundials/IDA rejects this kwarg
+
+    # auto_tstops=false: no breakpoints injected at all
+    prob_off = ODEProblem(circuit, tspan; auto_tstops=false)
+    @test !haskey(prob_off.kwargs, :tstops)
+    @test !haskey(prob_off.kwargs, :d_discontinuities)
+
+    # User-supplied tstops merge with (don't clobber) the auto-computed ones
+    user_t = 7.5e-6
+    sol_merged = tran!(circuit, tspan; tstops=[user_t])
+    @test any(t -> abs(t - user_t) < 1e-15, sol_merged.t)
+    @test hits(sol_merged, edges)
+
+    sol_merged_ode = tran!(circuit, tspan; solver=Rodas5P(), tstops=[user_t])
+    @test any(t -> abs(t - user_t) < 1e-15, sol_merged_ode.t)
+    @test hits(sol_merged_ode, edges)
+
+    # alter() recomputes edges from the new `td` parameter
+    circuit2 = Cadnip.MNA.alter(circuit; td=3e-6)
+    edges2 = pulse_edges(3e-6, 10e-6, tspan)
+    prob2 = ODEProblem(circuit2, tspan)
+    @test all(e -> any(t2 -> abs(t2 - e) < 1e-9, prob2.kwargs[:tstops]), edges2)
+    @test !any(t2 -> abs(t2 - 1e-6) < 1e-9, prob2.kwargs[:tstops])  # old td's edge is gone
+
+    # PWL vertex times land exactly in sol.t too (SPICE-parsed netlist path)
+    pwl_code = """
+    * PWL tstop test
+    i1 0 vout PWL(1e-6 0 5e-6 1 9e-6 0.5)
+    R1 vout 0 1e3
+    """
+    ast_pwl = NyanSpectreNetlistParser.parse(IOBuffer(pwl_code); start_lang=:spice, implicit_title=true)
+    code_pwl = Cadnip.make_mna_circuit(ast_pwl)
+    m_pwl = Module()
+    Base.eval(m_pwl, :(using Cadnip.MNA))
+    Base.eval(m_pwl, :(using Cadnip: ParamLens))
+    Base.eval(m_pwl, :(using Cadnip.SpectreEnvironment))
+    builder_pwl = Base.eval(m_pwl, code_pwl)
+    circuit_pwl = Base.invokelatest(MNACircuit, builder_pwl, (;), MNASpec(temp=27.0))
+    sol_pwl = tran!(circuit_pwl, (0.0, 10e-6))
+    @test hits(sol_pwl, [1e-6, 5e-6, 9e-6])
+end
+
 end # module transient_tests

@@ -40,11 +40,18 @@ module MNA
 using Printf
 using ForwardDiff
 
+# Breakpoint protocol (Wave, BreakpointSpec, breakpoints()) - needed by
+# context.jl's MNAContext field and devices.jl's wave structs
+include("breakpoints.jl")
+
 # Context and stamping primitives
 include("context.jl")
 
 # Value-only evaluation mode (zero-allocation rebuilding)
 include("value_only.jl")
+
+# VA voltage-dependent comparison interception (event detection condition slots)
+include("va_events.jl")
 
 # Sparse matrix assembly
 include("build.jl")

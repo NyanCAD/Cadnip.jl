@@ -170,4 +170,40 @@ C3 in1 0 10f
         @test normalized_corr < 0.5  # Not in phase
     end
 
+    @testset "va_events=true matches va_events=false (sp_mos1 region-selection regression)" begin
+        # mos1.va branches on region (cutoff/linear/saturation) based on
+        # voltage-dependent locals computed from node voltages - exactly the
+        # kind of comparison Part B intercepts. This is the real-vendored-model
+        # regression: va_events shouldn't change the physics, just where the
+        # solver places its steps, so period should match at loose tolerance.
+        circuit = MNACircuit(ring_oscillator)
+        tspan = (0.0, 200e-9)
+        common_kwargs = (; solver=Rodas5P(linsolve=KLUFactorization()),
+                           initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                           abstol=1e-9, reltol=1e-6, dtmax=1e-9)
+
+        function measure_period(sol)
+            sys = assemble!(circuit)
+            t_start, t_end, n_samples = 100e-9, 200e-9, 1000
+            times = range(t_start, t_end; length=n_samples)
+            V_out1 = [nameat(sol, :out1, t) for t in times]
+            midpoint = (maximum(V_out1) + minimum(V_out1)) / 2
+            crossings = count(i -> (V_out1[i-1] < midpoint) != (V_out1[i] < midpoint), 2:n_samples)
+            return 2 * (t_end - t_start) / crossings  # full period = 2x half-period spacing
+        end
+
+        sol_off = tran!(circuit, tspan; common_kwargs..., va_events=false)
+        ctx = MNA.build_with_detection(circuit)
+        @info "sp_mos1 ring oscillator condition slots" ctx.n_conditions
+        @test ctx.n_conditions > 0  # sp_mos1's region selection is genuinely intercepted
+
+        sol_on = tran!(circuit, tspan; common_kwargs..., va_events=true)
+        @test sol_on.retcode == SciMLBase.ReturnCode.Success
+
+        period_off = measure_period(sol_off)
+        period_on = measure_period(sol_on)
+        @info "Period comparison" period_off period_on
+        @test isapprox(period_on, period_off; rtol=0.2)  # loose tolerance
+    end
+
 end

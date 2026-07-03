@@ -1470,9 +1470,15 @@ function build_with_detection(circuit::MNACircuit)
     rng = Random.MersenneTwister(0xDEADBEEF)
 
     for pass in 1:N_DETECTION_PASSES
+        # Legacy SpectreEnvironment pwl()/pulse() behavioral expressions have
+        # no `ctx` in scope, so they report breakpoints through this scoped
+        # collector instead of register_breakpoints!() directly; merged into
+        # ctx.breakpoints below once ctx exists.
+        legacy_bp = BreakpointSpec[]
+
         if ctx === nothing
             # First pass: use ZERO_VECTOR to discover structure and get initial system size
-            ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+            ctx = @with BREAKPOINT_COLLECTOR => legacy_bp circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
             known_size = system_size(ctx)
         else
             # Save system size BEFORE reset
@@ -1485,11 +1491,124 @@ function build_with_detection(circuit::MNACircuit)
             x = (rand(rng, known_size) .- 0.5) .* 2.0
 
             # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
+            @with BREAKPOINT_COLLECTOR => legacy_bp circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
         end
+
+        append!(ctx.breakpoints, legacy_bp)
     end
 
     return ctx
+end
+
+"""
+    expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<:Real};
+                       max_points::Int=100_000) -> Vector{Float64}
+
+Expand breakpoint specs into a sorted, deduplicated list of times strictly
+inside `tspan`, suitable for use as solver `tstops`.
+
+Periodic specs (`period > 0`) are expanded as `times .+ k*period` for
+integer `k`, bounded by `count` when `count >= 0` (an unbounded periodic
+spec, `count == -1`, expands until it runs off the end of `tspan`).
+Aperiodic specs (`period <= 0`) contribute their `times` as-is.
+
+Coincident edges (e.g. `tr=0`/`tf=0` PULSE edges landing on the same time,
+or PWL vertices repeated across sources) are collapsed using a relative
+tolerance `tol = 1e-12*(t1-t0)`. If expansion would exceed `max_points`
+(guards a tiny period over a long tspan), the result is truncated and a
+warning is issued.
+"""
+function expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<:Real};
+                            max_points::Int=100_000)
+    t0, t1 = Float64(tspan[1]), Float64(tspan[2])
+    out = Float64[]
+    truncated = false
+
+    for spec in specs
+        isempty(spec.times) && continue
+        if spec.period <= 0
+            for t in spec.times
+                t0 < t < t1 && push!(out, t)
+            end
+        else
+            period = spec.period
+            tmin, tmax = extrema(spec.times)
+            k_start = max(0, floor(Int, (t0 - tmax) / period))
+            k_end = ceil(Int, (t1 - tmin) / period)
+            if spec.count >= 0
+                k_end = min(k_end, spec.count - 1)
+            end
+            k_end < k_start && continue
+            if (k_end - k_start + 1) > max_points
+                k_end = k_start + max_points - 1
+                truncated = true
+            end
+            for k in k_start:k_end
+                base = k * period
+                for t in spec.times
+                    tt = t + base
+                    t0 < tt < t1 && push!(out, tt)
+                end
+            end
+        end
+        if length(out) > max_points
+            truncated = true
+            break
+        end
+    end
+
+    if truncated
+        @warn "expand_breakpoints: breakpoint count exceeded max_points=$max_points; truncating (adaptive stepping still handles unmarked edges, just less precisely)"
+        length(out) > max_points && resize!(out, max_points)
+    end
+
+    isempty(out) && return out
+    sort!(out)
+    tol = 1e-12 * (t1 - t0)
+    dedup = Float64[out[1]]
+    for i in 2:length(out)
+        out[i] - dedup[end] > tol && push!(dedup, out[i])
+    end
+    return dedup
+end
+
+export expand_breakpoints
+
+"""
+    _merge_tstops(a, b) -> Union{Vector{Float64}, Nothing}
+
+Merge two possibly-`nothing` tstops collections into a sorted, deduplicated
+`Vector{Float64}`, or `nothing` if both are empty/`nothing`.
+"""
+function _merge_tstops(a, b)
+    va = a === nothing ? Float64[] : collect(Float64, a)
+    vb = b === nothing ? Float64[] : collect(Float64, b)
+    (isempty(va) && isempty(vb)) && return nothing
+    return sort!(unique!(vcat(va, vb)))
+end
+
+"""
+    _with_auto_tstops(kwargs, ctx, tspan, auto_tstops; with_d_discontinuities=false)
+
+Return `kwargs` (as a `NamedTuple`) with `tstops` (and, if requested,
+`d_discontinuities`) merged in from `ctx.breakpoints`, expanded over `tspan`.
+Respects any `tstops`/`d_discontinuities` the caller already supplied - the
+auto-computed breakpoints are merged in, not clobbered or clobbering.
+No-op (returns `kwargs` unchanged) when `auto_tstops` is `false` or there are
+no breakpoints to expand.
+"""
+function _with_auto_tstops(kwargs, ctx::MNAContext, tspan::Tuple{Float64,Float64},
+                           auto_tstops::Bool; with_d_discontinuities::Bool=false)
+    nt = NamedTuple(kwargs)
+    auto_tstops || return nt
+    auto_stops = expand_breakpoints(ctx.breakpoints, tspan)
+    isempty(auto_stops) && return nt
+
+    nt = merge(nt, (tstops = _merge_tstops(get(nt, :tstops, nothing), auto_stops),))
+    if with_d_discontinuities
+        nt = merge(nt, (d_discontinuities = _merge_tstops(get(nt, :d_discontinuities, nothing), auto_stops),))
+    end
+    return nt
 end
 
 """
@@ -1627,11 +1746,16 @@ sources with IDA), set `explicit_jacobian=false` to fall back to solver-internal
 finite differencing.
 """
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
+                               u0=nothing, du0=nothing, explicit_jacobian::Bool=true,
+                               auto_tstops::Bool=true, kwargs...)
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
+
+    # tstops from PWL/PULSE/SIN breakpoints (see breakpoints.jl). Not
+    # d_discontinuities - Sundials/IDA rejects that kwarg.
+    kwargs = _with_auto_tstops(kwargs, ctx, Float64.(tspan), auto_tstops)
 
     # Assemble once to get the MNAData used as SII `sys` on the resulting solution.
     sys = assemble!(ctx)
@@ -1720,7 +1844,8 @@ sol = solve(prob, Rodas5P())
 # See Also
 - `DAEProblem(circuit, tspan)` - Alternative using Sundials IDA
 """
-function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, dense=false, kwargs...)
+function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, dense=false,
+                              auto_tstops::Bool=true, kwargs...)
     builder = circuit.builder
     params = circuit.params
     base_spec = circuit.spec
@@ -1730,6 +1855,11 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
     n = system_size(ctx)
+
+    # tstops + d_discontinuities from PWL/PULSE/SIN breakpoints (see
+    # breakpoints.jl). d_discontinuities invalidates FSAL derivative reuse at
+    # the discontinuity - OrdinaryDiffEq-only, hence not on the DAE path.
+    kwargs = _with_auto_tstops(kwargs, ctx, Float64.(tspan), auto_tstops; with_d_discontinuities=true)
 
     # Compile circuit structure using the detection context
     # dense=true enables zero-allocation stepping with OrdinaryDiffEq
@@ -1830,7 +1960,8 @@ sol = solve(prob, MethodOfSteps(Rodas5P()))
 ```
 """
 function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, constant_lags=Float64[], kwargs...)
+                               u0=nothing, constant_lags=Float64[],
+                               auto_tstops::Bool=true, kwargs...)
     builder = circuit.builder
     params = circuit.params
     base_spec = circuit.spec
@@ -1838,6 +1969,9 @@ function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # First run multi-pass detection (same as ODEProblem)
     ctx = build_with_detection(circuit)
     n = system_size(ctx)
+
+    # tstops + d_discontinuities from PWL/PULSE/SIN breakpoints (see breakpoints.jl)
+    kwargs = _with_auto_tstops(kwargs, ctx, Float64.(tspan), auto_tstops; with_d_discontinuities=true)
 
     # Compile circuit structure
     cs = compile_structure(builder, params, base_spec; ctx=ctx)
@@ -1872,6 +2006,70 @@ function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     f = SciMLBase.DDEFunction(rhs!; mass_matrix=cs.C, sys=sys)
     return SciMLBase.DDEProblem(f, u0, h_init, Float64.(tspan), ws;
                                  constant_lags=constant_lags, kwargs...)
+end
+
+#==============================================================================#
+# VA Event Detection: VectorContinuousCallback assembly
+#==============================================================================#
+
+"""
+    va_event_callback(ws::EvalWorkspace; interp_points::Int=10)
+
+Build a `VectorContinuousCallback` that roots-find every VA voltage-dependent
+comparison condition (see va_events.jl) to an exact crossing time, forcing
+the integrator to land exactly on region-switch boundaries in BSIM/PSP-style
+compact models instead of silently stepping over them.
+
+Returns `nothing` when the circuit has no condition slots (`ws.structure.n_conditions == 0`)
+- so wiring this in unconditionally when `va_events=true` is free for circuits
+that don't need it.
+
+`affect!` is a no-op and never touches `u`: since every residual/Jacobian
+evaluation is a full rebuild from `(u,t)`, stamps update automatically once
+the integrator lands on the root and re-evaluates there. Leaving `u_modified`
+at its default forces FSAL/interpolant reinitialization after the root -
+exactly what an f-discontinuity needs - with no algebraic-variable reinit
+traps. `save_positions=(true,true)` captures the kink in the saved solution.
+
+`interp_points` (default matches `VectorContinuousCallback`'s own default of
+10) controls how many dense-output points per step are checked for a sign
+change; each one is a full circuit rebuild (`fast_rebuild!`), so this is the
+knob for trading event-detection accuracy against overhead on circuits with
+many condition slots.
+
+Works uniformly across IDA (DAE), and OrdinaryDiffEq/DelayDiffEq (ODE/DDE)
+integrators - confirmed via the B0 solver-support spike that all three
+correctly land the root time in `sol.t`.
+"""
+function va_event_callback(ws::EvalWorkspace; interp_points::Int=10)
+    n = ws.structure.n_conditions
+    n == 0 && return nothing
+
+    function condition!(out, u, t, integrator)
+        fast_rebuild!(integrator.p, u, real_time(t))
+        copyto!(out, integrator.p.dctx.condition_values)
+        return nothing
+    end
+    affect!(integrator, idx) = nothing
+
+    return SciMLBase.VectorContinuousCallback(condition!, affect!, n;
+                                               save_positions=(true, true),
+                                               interp_points=interp_points)
+end
+
+export va_event_callback
+
+"""
+    _merge_callback(user_cb, auto_cb)
+
+Combine a user-supplied `solve()` callback with an auto-generated one (e.g.
+from `va_event_callback`) into a `CallbackSet`, passing either through
+unchanged when the other is `nothing`.
+"""
+function _merge_callback(user_cb, auto_cb)
+    auto_cb === nothing && return user_cb
+    user_cb === nothing && return auto_cb
+    return SciMLBase.CallbackSet(user_cb, auto_cb)
 end
 
 # NOTE: make_nonlinear_dae_* removed - use MNACircuit + DAEProblem instead
