@@ -69,7 +69,6 @@ elseif RUN_CORE
     # VA integration tests (s-dual contribution stamping)
     @testset "Phase 5: MNA VA Integration" begin
         @testset "mna/va.jl" include("mna/va.jl")
-        @testset "mna/va_events.jl" include("mna/va_events.jl")
         @testset "ddx.jl" include("ddx.jl")
         @testset "varegress.jl" include("varegress.jl")
     end

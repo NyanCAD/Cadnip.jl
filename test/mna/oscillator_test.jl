@@ -170,48 +170,4 @@ C3 in1 0 10f
         @test normalized_corr < 0.5  # Not in phase
     end
 
-    @testset "va_events=true on sp_mos1 (region-selection interception + condition_is_vdep filter)" begin
-        # mos1.va branches on region (cutoff/linear/saturation) based on
-        # voltage-dependent locals computed from node voltages - exactly the
-        # kind of comparison Part B intercepts. But a "simple" Level-1 MOSFET
-        # model packs in far more comparisons than just that: parameter
-        # validation (`if (L <= 0)`), junction-diode and capacitance-model
-        # region checks, temperature clamps. condition_is_vdep (context.jl/
-        # va_events.jl) filters va_event_callback down to only the slots ever
-        # observed with a Dual operand (genuinely voltage-dependent) - this
-        # test checks that filter is real (materially fewer vdep slots than
-        # total slots) and that va_events=true still completes and oscillates.
-        #
-        # It deliberately does NOT assert period match against va_events=false:
-        # measured on this circuit, a free-running 3-stage ring oscillator
-        # switches all 6 transistors' regions on sub-nanosecond timescales -
-        # even after condition_is_vdep filtering (246 -> 89 slots here), the
-        # remaining slots are themselves genuinely high-frequency events, and
-        # watching 89 simultaneous roots via VectorContinuousCallback disrupts
-        # the adaptive step schedule enough to change the simulated trajectory
-        # (not just add overhead - confirmed via direct investigation: dtmax
-        # unchanged, but the solver takes ~240x more steps in the same 20ns
-        # window and the oscillation collapses). va_events remains opt-in for
-        # exactly this reason; this is a known characteristic of the current
-        # per-comparison-root design on fast, comparison-dense circuits, not a
-        # bug in the interception/filtering mechanism itself (which is
-        # validated bit-for-bit and structurally by the synthetic
-        # test/mna/va_events.jl tests and the va_events=false PSP103/
-        # VADistiller regressions).
-        circuit = MNACircuit(ring_oscillator)
-
-        ctx = MNA.build_with_detection(circuit)
-        n_vdep = count(ctx.condition_is_vdep)
-        @info "sp_mos1 ring oscillator condition slots" ctx.n_conditions n_vdep
-        @test ctx.n_conditions > 0       # sp_mos1's comparisons are genuinely intercepted
-        @test 0 < n_vdep < ctx.n_conditions  # filter is real: neither everything nor nothing is vdep
-
-        tspan = (0.0, 20e-9)  # short window - enough to exercise the mechanism without a long stiff solve
-        sol_on = tran!(circuit, tspan;
-                       solver=Rodas5P(linsolve=KLUFactorization()),
-                       initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
-                       abstol=1e-9, reltol=1e-6, dtmax=1e-9, va_events=true)
-        @test sol_on.retcode == SciMLBase.ReturnCode.Success
-    end
-
 end

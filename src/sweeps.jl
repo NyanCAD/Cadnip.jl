@@ -1,7 +1,6 @@
 using Accessors
 using AxisKeys
 using OrdinaryDiffEq, SciMLBase, Sundials, DelayDiffEq
-using LinearSolve: KLUFactorization
 using Base.Iterators
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
@@ -527,22 +526,6 @@ iteration, ensuring correct handling of nonlinear devices.
   the integrator lands exactly on source edges/onsets instead of discovering
   them via rejected steps. Merges with (doesn't clobber) a user-supplied
   `tstops`/`d_discontinuities`. Set `false` to disable.
-- `va_events::Bool=false`: Attach a `VectorContinuousCallback` (see
-  `va_event_callback`) that root-finds every VA voltage-dependent comparison
-  (region selection in BSIM/PSP-style compact models) to an exact crossing
-  time. Opt-in: costs `interp_points` full circuit rebuilds per accepted step
-  on models with condition slots, free (no callback attached) otherwise.
-  **Not supported with Sundials DAE solvers** (IDA/DFBDF) - a DAE
-  initialization incompatibility between `VectorContinuousCallback` and this
-  package's `CedarTranOp` initialization; when `solver` is left at its
-  default, `va_events=true` instead defaults to `Rodas5P(linsolve=KLUFactorization())`.
-  Passing an explicit Sundials solver together with `va_events=true` warns
-  once and continues with events disabled rather than erroring.
-- `interp_points::Int=10`: Dense-output points per step checked for a
-  condition sign change when `va_events=true` (passed to
-  `VectorContinuousCallback`); each is a full rebuild, so this trades
-  event-detection accuracy against overhead on circuits with many
-  condition slots.
 
 # Default IDA Configuration
 The default IDA solver is configured for circuit simulation with:
@@ -564,7 +547,7 @@ sol(1e-7)  # Get state at t=0.1μs
 """
 function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, auto_tstops::Bool=true,
-               va_events::Bool=false, interp_points::Int=10, kwargs...)
+               kwargs...)
     # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
     # Key settings:
     # - linear_solver=:KLU: Sparse direct solver. For long simulations with many timesteps,
@@ -573,29 +556,13 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
     # - max_error_test_failures=20: Allows more retries at difficult points (like t=0 with
     #   time-dependent sources). Default of 7 is often too low for circuits.
     # - max_nonlinear_iters=10: More Newton iterations for nonlinear devices
-    #
-    # va_events + Sundials IDA don't mix: attaching a VectorContinuousCallback
-    # breaks IDA's CheckInit consistency check under our CedarTranOp
-    # initialization (DAE initialization failure - a Sundials/SciML DAE-init
-    # incompatibility with callback attachment, not a bug in the condition
-    # detection itself, which is verified correct independent of the solver).
-    # Fall back to an ODE solver (event detection confirmed to work there) when
-    # no solver was explicitly requested; warn and disable events if the user
-    # explicitly chose a Sundials solver.
     if solver === nothing
-        solver = if va_events
-            Rodas5P(linsolve=KLUFactorization())
-        else
-            Sundials.IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=10)
-        end
-    elseif va_events && solver isa Sundials.SundialsDAEAlgorithm
-        @warn "va_events=true is not supported with Sundials DAE solvers ($(nameof(typeof(solver)))) - continuing without VA event detection. Use an OrdinaryDiffEq solver (e.g. Rodas5P()) for va_events." maxlog=1
-        va_events = false
+        solver = Sundials.IDA(linear_solver=:KLU, max_error_test_failures=20, max_nonlinear_iters=10)
     end
 
     # Dispatch based on solver type
     return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, auto_tstops=auto_tstops,
-                          va_events=va_events, interp_points=interp_points, kwargs...)
+                          kwargs...)
 end
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
@@ -612,7 +579,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
                         initializealg=MNA.CedarTranOp(), auto_tstops::Bool=true, tstops=nothing,
-                        va_events::Bool=false, interp_points::Int=10, callback=nothing, kwargs...)
+                        kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
     if explicit_jacobian === nothing
@@ -625,11 +592,8 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
     # solve()'s kwarg splat would otherwise silently let one clobber the other.
     tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
     tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
-    auto_cb = va_events ? MNA.va_event_callback(prob.p; interp_points=interp_points) : nothing
-    callback = MNA._merge_callback(callback, auto_cb)
-    cb_kwargs = callback === nothing ? (;) : (; callback=callback)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., cb_kwargs..., kwargs...)
+                           tstops_kwargs..., kwargs...)
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
@@ -639,17 +603,14 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
                         abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(),
                         auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
-                        va_events::Bool=false, interp_points::Int=10, callback=nothing, kwargs...)
+                        kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan; auto_tstops=auto_tstops)
     tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
     d_discontinuities = MNA._merge_tstops(d_discontinuities, get(prob.kwargs, :d_discontinuities, nothing))
     tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
     dd_kwargs = d_discontinuities === nothing ? (;) : (; d_discontinuities=d_discontinuities)
-    auto_cb = va_events ? MNA.va_event_callback(prob.p; interp_points=interp_points) : nothing
-    callback = MNA._merge_callback(callback, auto_cb)
-    cb_kwargs = callback === nothing ? (;) : (; callback=callback)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., dd_kwargs..., cb_kwargs..., kwargs...)
+                           tstops_kwargs..., dd_kwargs..., kwargs...)
 end
 
 # DDE solver dispatch (MethodOfSteps) - for circuits with absdelay
@@ -659,17 +620,14 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         abstol=1e-10, reltol=1e-8, constant_lags=Float64[],
                         initializealg=MNA.CedarTranOp(),
                         auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
-                        va_events::Bool=false, interp_points::Int=10, callback=nothing, kwargs...)
+                        kwargs...)
     prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags, auto_tstops=auto_tstops)
     tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
     d_discontinuities = MNA._merge_tstops(d_discontinuities, get(prob.kwargs, :d_discontinuities, nothing))
     tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
     dd_kwargs = d_discontinuities === nothing ? (;) : (; d_discontinuities=d_discontinuities)
-    auto_cb = va_events ? MNA.va_event_callback(prob.p; interp_points=interp_points) : nothing
-    callback = MNA._merge_callback(callback, auto_cb)
-    cb_kwargs = callback === nothing ? (;) : (; callback=callback)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., dd_kwargs..., cb_kwargs..., kwargs...)
+                           tstops_kwargs..., dd_kwargs..., kwargs...)
 end
 
 """

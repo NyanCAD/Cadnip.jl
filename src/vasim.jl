@@ -200,8 +200,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
         Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
-        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
-        nothing)  # cond_slot_counter: parameter defaults are never analog-block comparisons
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -320,8 +319,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         named_branches, nothing,
         array_nodes, access_map,
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
-        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
-        Ref(0))  # cond_slot_counter: analog-block scope, ctx is in scope here
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -574,11 +572,6 @@ struct MNAScope
     extra_module_stmts::Vector{Expr}
     table_itp_consts::Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}
     table_files::Dict{String, Any}  # abspath -> parsed _TableData{D}
-    # Lexical counter for VA voltage-dependent comparison interception (see
-    # va_events.jl). `nothing` disables interception for this scope - used
-    # for AnalogFunctionDeclaration bodies, which compile to plain Julia
-    # functions with no `ctx` parameter to route va_cmp_* calls through.
-    cond_slot_counter::Union{Ref{Int}, Nothing}
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -587,7 +580,7 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
     s.ddx_order, s.named_branches, delay_jl,
     s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes,
-    s.extra_module_stmts, s.table_itp_consts, s.table_files, s.cond_slot_counter)
+    s.extra_module_stmts, s.table_itp_consts, s.table_files)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -681,21 +674,6 @@ function (to_julia::MNAScope)(cs::VANode{BinaryExpression})
         # Note: ^ is NOT power in Verilog-A! Power is **
         # We pass through to the VA environment's ^ which is Base.:(⊻)
         return Expr(:call, :^, to_julia(cs.lhs), to_julia(cs.rhs))
-    elseif op in (:(>), :(<), :(>=), :(<=)) && to_julia.cond_slot_counter !== nothing
-        # VA voltage-dependent comparison interception (see mna/va_events.jl):
-        # every atomic comparison in analog-block scope gets its own lexical
-        # condition slot, allocated unconditionally at analog-block entry
-        # (alloc_conditions! emitted in generate_mna_stamp_method_nterm).
-        # Dispatch is on argument types only (ForwardDiff.value strips Dual
-        # vs. plain identically), so this is a pure side channel - the Bool
-        # result and G/C stamps are bit-identical to plain `>`/`<`/`>=`/`<=`.
-        # ==/!= are NOT intercepted (degenerate roots).
-        k = (to_julia.cond_slot_counter[] += 1)
-        cmp_fn = op === :(>)  ? :va_cmp_gt :
-                 op === :(<)  ? :va_cmp_lt :
-                 op === :(>=) ? :va_cmp_ge : :va_cmp_le
-        return Expr(:call, GlobalRef(Cadnip.MNA, cmp_fn), :ctx, :_mna_cond_base_, k,
-                    to_julia(cs.lhs), to_julia(cs.rhs))
     else
         return Expr(:call, op, to_julia(cs.lhs), to_julia(cs.rhs))
     end
@@ -2393,8 +2371,7 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.named_branches, nothing,
         to_julia.array_nodes, to_julia.access_map,
         to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes,
-        to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files,
-        nothing)  # cond_slot_counter: function bodies compile with no `ctx` param, so no interception
+        to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -3432,24 +3409,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # to prevent LLVM SROA from blowing up. By default, stamp! is inlineable for performance.
     use_noinline = noinline === true
 
-    # VA voltage-dependent comparison interception (see mna/va_events.jl):
-    # n_cond is the final lexical comparison count from the to_julia traversal
-    # that already produced local_var_decls/contributions/etc above. Zero
-    # overhead when n_cond == 0 (no condition_base allocation emitted at all).
-    n_cond = to_julia.cond_slot_counter === nothing ? 0 : to_julia.cond_slot_counter[]
-    cond_base_alloc = n_cond > 0 ? :(_mna_cond_base_ = Cadnip.MNA.alloc_conditions!(ctx, $n_cond)) : :()
-
     # Build the function body
     stamp_body = quote
         # Convert empty vectors to ZERO_VECTOR for safe indexing
         _mna_x_ = isempty(_mna_x_) ? Cadnip.MNA.ZERO_VECTOR : _mna_x_
         $(params_to_locals...)
         $(function_defs...)
-
-        # Allocate VA comparison condition slots (see mna/va_events.jl) -
-        # unconditional, before any comparisons in local_var_init can reference
-        # _mna_cond_base_.
-        $cond_base_alloc
 
         # Initialize local variables FIRST (before internal node allocation)
         # This is needed because short-circuit conditions may reference these variables

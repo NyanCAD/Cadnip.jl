@@ -50,9 +50,6 @@ include("context.jl")
 # Value-only evaluation mode (zero-allocation rebuilding)
 include("value_only.jl")
 
-# VA voltage-dependent comparison interception (event detection condition slots)
-include("va_events.jl")
-
 # Sparse matrix assembly
 include("build.jl")
 

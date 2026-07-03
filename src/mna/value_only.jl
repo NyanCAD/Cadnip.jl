@@ -84,18 +84,6 @@ mutable struct DirectStampContext
     warned_C_overflow::Bool
     warned_b_overflow::Bool
 
-    # Condition (event-detection) slots for VA voltage-dependent comparisons
-    # (see va_events.jl). Sized from MNAContext.n_conditions; condition_pos
-    # tracks bulk allocations (one alloc_conditions! call per analog-block
-    # entry), not per-scalar like G_pos/C_pos. Values are NOT cleared in
-    # reset_direct_stamp! (stale-slot policy: a comparison in a not-taken
-    # branch keeps its last-written value rather than resetting to the inert
-    # 1.0, which would risk manufacturing a spurious zero-crossing).
-    condition_values::Vector{Float64}
-    condition_pos::Int
-    n_conditions::Int
-    warned_condition_overflow::Bool
-
 end
 
 """
@@ -137,10 +125,6 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
-        fill(1.0, ctx.n_conditions),  # condition_values (inert default, matches alloc_conditions!)
-        1,                            # condition_pos
-        ctx.n_conditions,
-        false,                        # warned_condition_overflow
     )
 end
 
@@ -193,9 +177,6 @@ Reset counters and zero sparse matrix values for a new iteration.
     dctx.charge_pos = 1
     dctx.charge_detection_pos = 1
     dctx.internal_node_pos = 1
-    dctx.condition_pos = 1
-    # condition_values intentionally NOT cleared here - stale-slot policy,
-    # see the DirectStampContext struct doc.
 
     # Reset overflow warning flags (warn once per solve, not once per iteration)
     # Don't reset these here - we want to warn only once per solve
@@ -304,50 +285,6 @@ For DirectStampContext, names are ignored - uses counter-based access.
     dctx.charge_pos = pos + 1
     return ChargeIndex(pos)
 end
-
-"""
-    alloc_conditions!(dctx::DirectStampContext, n::Int) -> Int
-
-Bulk-allocate `n` condition slots (one call per analog-block entry, unlike
-the per-scalar `alloc_current!`/`alloc_charge!`). Returns the 0-based base
-offset such that slot `k` (`1 <= k <= n`) lives at `dctx.condition_values[base+k]`.
-Matches `alloc_conditions!(ctx::MNAContext, n)`'s indexing convention.
-"""
-@inline function alloc_conditions!(dctx::DirectStampContext, n::Int)::Int
-    base = dctx.condition_pos - 1
-    dctx.condition_pos += n
-    return base
-end
-
-"""
-    _store_condition!(dctx::DirectStampContext, idx::Int, d::Float64)
-
-Write condition value `d` at 1-based index `idx`, skipping (with a one-time
-warning) if `idx` exceeds the slots detected during structure discovery -
-mirrors `stamp_G!`'s overflow handling. Structurally this should never
-happen (condition slot counts are fixed per VA module), but guards against
-it the same way stamp overflow is guarded.
-"""
-@inline function _store_condition!(dctx::DirectStampContext, idx::Int, d::Float64)
-    if idx > length(dctx.condition_values)
-        if !dctx.warned_condition_overflow
-            @warn "DirectStampContext: more condition slots than detected (idx=$idx, expected=$(length(dctx.condition_values))). Extra condition ignored."
-            dctx.warned_condition_overflow = true
-        end
-        return nothing
-    end
-    @inbounds dctx.condition_values[idx] = d
-    return nothing
-end
-
-"""
-    _mark_condition_vdep!(::DirectStampContext, idx::Int, lhs, rhs)
-
-No-op. Voltage-dependence detection is finalized during `MNAContext`
-structure discovery (`build_with_detection`) before a `DirectStampContext`
-ever exists; the hot restamping path doesn't need to (re)detect it.
-"""
-@inline _mark_condition_vdep!(::DirectStampContext, idx::Int, lhs, rhs) = nothing
 
 """
     stamp_G!(dctx::DirectStampContext, i, j, val)

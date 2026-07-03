@@ -115,19 +115,6 @@ struct CompiledStructure{F,P,S,M<:AbstractMatrix{Float64}}
     # For sparse: index into G.nzval
     # For dense: linear index (i + (i-1)*n)
     G_diag_idx::Vector{Int}
-
-    # Number of VA voltage-dependent comparison condition slots (see
-    # va_events.jl). Exposed here (not just on the workspace's DirectStampContext)
-    # so va_event_callback (solve.jl) can size its VectorContinuousCallback
-    # from `ws.structure.n_conditions` without touching ctx directly.
-    n_conditions::Int
-
-    # Per-slot detection cache (mirrors ctx.condition_is_vdep): true only for
-    # slots observed with a Dual-typed operand during discovery, i.e. genuine
-    # voltage-dependent comparisons. va_event_callback watches only these -
-    # parameter-only comparisons (validation checks, etc.) are excluded from
-    # the VectorContinuousCallback entirely rather than merely inert.
-    condition_is_vdep::Vector{Bool}
 end
 
 """
@@ -340,9 +327,7 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices
             G_empty, C_empty,
             Int[], 0,
-            Int[],
-            0,
-            Bool[]
+            Int[]
         )
     end
 
@@ -408,9 +393,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G_I_resolved, G_J_resolved, C_I_resolved, C_J_resolved,
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx,
-            ctx0.n_conditions,
-            copy(ctx0.condition_is_vdep)
+            G_diag_idx
         )
     else
         # Sparse matrix compilation (original path)
@@ -443,9 +426,7 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices for sparse
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx,
-            ctx0.n_conditions,
-            copy(ctx0.condition_is_vdep)
+            G_diag_idx
         )
     end
 end
