@@ -173,9 +173,6 @@ function output_signal(sol, out_nodes)
     return Vector{Float64}(sol[Symbol(out_nodes[1])]) .- Vector{Float64}(sol[Symbol(out_nodes[2])])
 end
 
-"Filename-safe tag for a probe label (config.json's `vacask_probes[].label`)."
-safe_label(s) = replace(s, r"[^A-Za-z0-9]" => "_")
-
 "Pulse-edge breakpoints so adaptive solvers don't step over the sharp source edges."
 function case_tstops(case, tspan)
     case == "rc" || return Float64[]
@@ -415,12 +412,26 @@ function run_vacask_sweep(case, spec, want_golden)
         @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
     end
 
+    # A case can override VACASK's default (unbounded maxstep, benchmark's
+    # standard tran_method=gear/tran_maxord=5, no extra options) via
+    # config.json's `vacask_override` - see per-case `_vacask_override_comment`
+    # for why. This is the ONE VACASK run plotted for the case, not an extra
+    # series alongside the raw default - a case either needs a fair override
+    # or it doesn't, there's no value in also showing the version we already
+    # know is unrepresentative.
+    ov = get(spec, "vacask_override", Dict{String,Any}())
+    oms = haskey(ov, "maxstep") ? Float64(ov["maxstep"]) : t1
+    omethod = haskey(ov, "method") ? String(ov["method"]) : nothing
+    omaxord = haskey(ov, "maxord") ? Int(ov["maxord"]) : nothing
+    oextra = String(get(ov, "extra_opts", ""))
+
     summary = open(joinpath(OUT, "vacask_$(case).csv"), "w")
     println(summary, "reltol,time_s,timepoints")
     for r in reltols
         @printf("  vacask reltol=%.0e ... ", r); flush(stdout)
         try
-            ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes)
+            ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes;
+                                               maxstep=oms, method=omethod, maxord=omaxord, extra_opts=oextra)
             write_wave(joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv"), ti, sig)
             println(summary, "$r,$rt,$tp")
             @printf("%.3fs %d pts\n", rt, tp)
@@ -431,38 +442,6 @@ function run_vacask_sweep(case, spec, want_golden)
         flush(summary); flush(stdout)
     end
     close(summary)
-
-    # Optional: re-run the same reltol sweep under one or more case-specific
-    # probe configurations (config.json's `vacask_probes` - each can override
-    # maxstep/method/maxord/extra_opts) instead of left unbounded. Used to
-    # isolate whether a plateaued/aborting reltol-only sweep is a
-    # missing-breakpoint/controller-tuning issue rather than an accuracy
-    # ceiling - see config.json's per-case `_vacask_probes_comment`.
-    for probe in get(spec, "vacask_probes", [])
-        label = String(probe["label"])
-        pms = haskey(probe, "maxstep") ? Float64(probe["maxstep"]) : t1
-        pmethod = haskey(probe, "method") ? String(probe["method"]) : nothing
-        pmaxord = haskey(probe, "maxord") ? Int(probe["maxord"]) : nothing
-        pextra = String(get(probe, "extra_opts", ""))
-        tag = safe_label(label)
-        psummary = open(joinpath(OUT, "vacask_probe_$(case)_$(tag).csv"), "w")
-        println(psummary, "reltol,time_s,timepoints")
-        for r in reltols
-            @printf("  vacask[%s] reltol=%.0e ... ", label, r); flush(stdout)
-            try
-                ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes;
-                                                   maxstep=pms, method=pmethod, maxord=pmaxord, extra_opts=pextra)
-                write_wave(joinpath(OUT, "vacask_probe_$(case)_$(tag)_$(reltol_tag(r)).csv"), ti, sig)
-                println(psummary, "$r,$rt,$tp")
-                @printf("%.3fs %d pts\n", rt, tp)
-            catch e
-                println(psummary, "$r,NaN,0")
-                println("ABORT/skip")
-            end
-            flush(psummary); flush(stdout)
-        end
-        close(psummary)
-    end
 end
 
 #------------------------------------------------------------------------------#
@@ -513,22 +492,6 @@ function analyze(case, spec)
         end
     end
 
-    for probe in get(spec, "vacask_probes", [])
-        label = String(probe["label"]); tag = safe_label(label)
-        blabel = "VACASK " * label
-        bpath = joinpath(OUT, "vacask_probe_$(case)_$(tag).csv")
-        isfile(bpath) || continue
-        for row in first(read_table(bpath))
-            r = parse(Float64, row["reltol"]); t = tryparse(Float64, get(row, "time_s", "NaN"))
-            wp = joinpath(OUT, "vacask_probe_$(case)_$(tag)_$(reltol_tag(r)).csv")
-            isfile(wp) || continue
-            tw, vw = read_wave(wp)
-            err = run_error(tw, vw, gt, gv)
-            isfinite(err) && t !== nothing && isfinite(t) &&
-                push!(get!(curves, blabel, Tuple{Float64,Float64}[]), (err, t))
-            push!(table, (blabel, r, err, something(t, NaN)))
-        end
-    end
 
     # cross-check: if both analytic and a VACASK ref exist, report their agreement
     ap = joinpath(OUT, "analytic_$(case).csv"); rp = joinpath(OUT, "ref_$(case).csv")
@@ -549,7 +512,7 @@ reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
 have known cross-font/cross-renderer width bugs that misalign the plot; plain
 ASCII (0-127) is guaranteed single-column in any monospace font.
 """
-const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%", "&"]
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@"]
 
 function ascii_plot(title, curves)
     labels = sort(collect(keys(curves)))
@@ -607,7 +570,7 @@ function save_plot(case, title, curves)
     plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
                       ylabel="runtime (s)", title="Work-precision: $title",
                       legend=:outertopright, size=(900, 600), dpi=150)
-    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon, :hexagon)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5)
     for (i, label) in enumerate(labels)
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]

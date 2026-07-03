@@ -260,8 +260,11 @@ what's already folded into the table above:
   only exposes one scalar `maxstep` applied to every step of the whole run —
   there's no separate breakpoints-only directive in anything this repo's
   `.sim` files use, so tightening it enough to catch a sharp source edge also
-  caps every other step in the run, uniformly. `rc` and `mul` each get one
-  extra "fair" VACASK sweep (`config.json`'s `vacask_probes`) built from that
+  caps every other step in the run, uniformly. `rc` and `mul` each override
+  the plain reltol-only sweep with a fair configuration (`config.json`'s
+  `vacask_override`) instead of also plotting the raw default alongside it —
+  there's no value in showing a version already known to be unrepresentative,
+  so each case gets exactly one VACASK curve, built from that maxstep
   tradeoff plus (for `mul`) the real throughput sim's own NR/LTE tuning:
   - `rc`: `maxstep=1us` (the real throughput benchmark's `dtmax`) confirmed
     fixing the 1.5-7% unbounded plateau (~1000x error drop, to ~2-7e-5) — the
