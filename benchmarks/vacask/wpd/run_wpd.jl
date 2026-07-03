@@ -440,7 +440,7 @@ function run_vacask_sweep(case, spec, want_golden)
     # ceiling - see config.json's per-case `_vacask_probes_comment`.
     for probe in get(spec, "vacask_probes", [])
         label = String(probe["label"])
-        pms = Float64(probe["maxstep"])
+        pms = haskey(probe, "maxstep") ? Float64(probe["maxstep"]) : t1
         pmethod = haskey(probe, "method") ? String(probe["method"]) : nothing
         pmaxord = haskey(probe, "maxord") ? Int(probe["maxord"]) : nothing
         pextra = String(get(probe, "extra_opts", ""))
