@@ -29,10 +29,9 @@
       "tspan": [0.0, 0.02],
       "output": ["2"],
       "golden": "analytic",
-      "_vacask_probes_comment": "VACASK's reltol-only sweep plateaus at ~1-7% error regardless of tolerance (never resolving the 1us pulse edges). maxstep=1us (the real throughput benchmark's dtmax, rc/vacask/runme.sim) confirmed fixing it (~1000x error drop) but pins runtime flat since maxstep is a single global cap, not an edge-only breakpoint - reltol stops driving step size once maxstep is the binding constraint everywhere. This sweeps looser maxstep values to find how loose the cap can get before it starts missing the edge again.",
+      "_vacask_probes_comment": "VACASK's reltol-only sweep plateaus at ~1-7% error regardless of tolerance (never resolving the 1us pulse edges - a single global maxstep can't be edge-only, so reltol stops driving step size once maxstep binds everywhere). Tested maxstep=1us (real throughput benchmark's dtmax): ~1000x error drop. Tested 5x looser (5us): same accuracy, 5x cheaper - real headroom, not a knife-edge value. 'fair' below is that looser, still-confirmed-good value: VACASK's best reasonable shot at this circuit, not its worst-case default nor an artificially golden-tight one.",
       "vacask_probes": [
-        {"label": "maxstep=1e-06", "maxstep": 1e-6},
-        {"label": "maxstep=5e-06", "maxstep": 5e-6}
+        {"label": "fair (maxstep=5e-06)", "maxstep": 5e-6}
       ]
     },
     "graetz": {
@@ -46,10 +45,9 @@
       "tspan": [0.0, 5e-4],
       "output": ["20"],
       "golden": "cadnip",
-      "_vacask_probes_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. Bounding maxstep to 0.01us (the throughput benchmark's dtmax) confirmed the engine can be far more accurate (~350x error drop) but it still aborts past reltol=1e-4 - mul's source is smooth (no edge to miss), so this isn't a step-resolution problem. The real throughput sim (mul/vacask/runme.sim) also tunes tran_method=gear2 and NR/LTE options (nr_residualcheck, tran_lteratio, tran_itl) that the reltol sweep never tries - a second probe isolates whether that tuning, not the step bound, is what lets it converge further.",
+      "_vacask_probes_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. Bounding maxstep to 0.01us (throughput benchmark's dtmax) alone fixes accuracy (~350x error drop) but NOT the abort (mul's source is smooth - no edge to miss, so this isn't a step-resolution problem). Also replicating the real throughput sim's tran_method=gear2 and NR/LTE tuning (nr_residualcheck, tran_lteratio, tran_itl from mul/vacask/runme.sim, never exercised by the plain reltol sweep) fixes the abort too: 'fair' below is maxstep+that full tuning together - VACASK's best reasonable shot at this circuit, matching what its own throughput config already proves works here.",
       "vacask_probes": [
-        {"label": "maxstep=1e-08", "maxstep": 1e-8},
-        {"label": "maxstep=1e-08+prod-opts", "maxstep": 1e-8, "method": "gear2", "maxord": 2, "extra_opts": "nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50"}
+        {"label": "fair (maxstep=1e-08,gear2,nr-tuned)", "maxstep": 1e-8, "method": "gear2", "maxord": 2, "extra_opts": "nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50"}
       ]
     }
   }
