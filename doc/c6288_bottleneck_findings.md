@@ -502,11 +502,52 @@ DC solve); c6288 uses `CedarDCOp` -- a proper GMIN/source-stepping DC
 operating point solve. Forcing through non-converged steps after a
 legitimate DC start isn't crossing a known-hard-but-tractable region the
 way it does for ring; empirically it just burned CPU time for hours
-(across all three solvers, not just IDA) without reaching `t=2ns`. Whether
-Rodas5P's ~18 accepted steps over the 2ns window represent a faithful
-simulation of
-the multiplier's switching activity, or `reltol=1e-3` letting it step past
-logic transitions, remains an open question.
+(across all three solvers, not just IDA) without reaching `t=2ns`.
+
+## Follow-up: reltol tuning and "are we skipping switching activity?"
+
+With the fixes above, IDA and Rodas5P both reach `t=2ns` in a dozen-ish
+accepted steps at the original `reltol=1e-3` default -- three orders of
+magnitude fewer than VACASK/ngspice/xyce's ~1000-1024 accepted timepoints
+over the same 2ns window (`benchmarks/vacask/README.md`'s c6288 table). That
+gap raises an obvious question: is Cadnip's adaptive stepper genuinely
+resolving the multiplier's switching activity, or is a loose `reltol`
+letting it hop past logic transitions to something that merely *looks*
+stable at `t=2ns`?
+
+Answered empirically by sweeping `reltol` from `1e-3` to `1e-6` for IDA
+(56 / 70 / 118 / 139 accepted steps respectively) and separately running
+Rodas5P at `reltol=1e-5` (140 steps, converging via an entirely different
+step-size-control algorithm). Result: **the converged output at `t=2ns` is
+bit-for-bit identical (to mV precision) across all four reltol values and
+both solver families.** If the coarse `reltol=1e-3` trajectory were
+skipping real switching dynamics, tightening the tolerance by 1000x would
+have moved the answer; it didn't. So the "dozen steps" result is not an
+artifact of an under-resolved integration -- it's the solver's genuine
+converged answer at every tolerance tested.
+
+Separately, that converged answer only matches 16 of the 32 expected output
+bits (`p0`-`p16` read high instead of the expected `0xFFFE0001` pattern for
+`0xFFFF*0xFFFF`). That is *not* evidence of a bug: 2ns is short relative to
+this multiplier's full carry-chain propagation depth (2419 gates across the
+16x16 array), and VACASK/ngspice/xyce are run over the exact same 2ns window
+in `benchmarks/vacask/README.md` -- none of them claim a fully-settled
+output at that timescale either; the benchmark measures switching-transient
+performance, not steady-state correctness.
+
+Given reltol tightening changes step *count* but not the converged answer,
+and three orders of magnitude of tightening (`1e-3` -> `1e-6`) only bought
+~2.5x more accepted steps for IDA (56 -> 139), chasing exact 1000-step
+parity with VACASK via `reltol` alone is impractical at this scale/cost.
+`benchmarks/vacask/c6288/cedarsim/runme.jl` now defaults to `reltol=1e-5`
+as a point of diminishing returns -- roughly doubling resolution over the
+old default while keeping wall-clock reasonable for CI.
+
+`FBDF` has also been dropped from the solver list `runme.jl` offers: it
+throws `OutOfMemoryError` inside `jacobian2W!` at this scale regardless of
+`autodiff` backend (see "IDA and FBDF needed their own solver-option fixes"
+above) -- it is not a viable third option here, just a benchmark step that
+reliably fails.
 
 ## References
 
