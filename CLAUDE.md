@@ -26,6 +26,19 @@ When running in gVisor-sandboxed environment (check with `uname -r` showing `run
 - **Memory limited** - large VA model compilations (PSP103VA with 200+ params) may OOM
 - **Precompilation issues** - may need to disable compile workloads
 
+### Other Cloud/Remote Environments (Claude Code Remote, non-gVisor)
+
+Some cloud sessions (e.g. Claude Code Remote containers) are *not* the gVisor
+sandbox above - `uname -r` shows a real kernel version (not `runsc`/`4.4.0`).
+Julia is also typically not pre-installed here, so use the same juliaup
+install steps as the gVisor case. But treat these like "Local Development
+(Native)" for the version choice: **Julia 1.12 works fine** - confirmed in a
+session on a real (non-runsc) kernel where `Pkg.instantiate()`/precompile and
+a full c6288 (212k-variable, PSP103-heavy) circuit build under 1.12 completed
+with no segfaults. The 1.12 threading/segfault issue documented above is
+specific to the actual gVisor/runsc sandbox, not to cloud environments in
+general - don't downgrade to 1.11 just because you're in a container.
+
 **Fix for precompilation segfaults:** Create `test/LocalPreferences.toml`:
 
 ```toml
