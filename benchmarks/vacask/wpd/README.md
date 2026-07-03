@@ -274,20 +274,30 @@ what's already folded into the table above:
     method's local truncation error on the ramp itself, not a tolerance-driven
     quantity — no single global `maxstep` gets both "resolves the edge" and
     "`reltol` still matters everywhere else".
-  - `mul`: `maxstep=0.01us` alone drops the error from 3.6-3.7% to ~1.0e-4 (a
-    ~350x improvement) but still aborts past `reltol=1e-4` — `mul`'s source is
-    a smooth sine, not a sharp pulse, so there's no edge for a step bound to
-    help resolve; the abort is a Newton/LTE-convergence limitation on the
-    diode's stiff switching, and fine-stepping alone doesn't touch it.
-    Replicating the real throughput sim's full control block instead
-    (`mul/vacask/runme.sim`: `tran_method=gear2`, `nr_residualcheck=0`,
-    `tran_lteratio=3.5`, `tran_itl=50` — none of which the plain `reltol`
-    sweep ever tries) on top of the same `maxstep` fixes *both*: same
-    ~1.0-1.4e-4 accuracy, but now completes cleanly through `reltol=1e-9`
-    with no abort at all. That combination is "fair" for `mul`. Even at its
-    best, though, VACASK stays ~25x less accurate than Cadnip IDA at matched
-    runtime here (1.0e-4 vs 3.8e-6 error, both ~0.17s at `reltol=1e-4`) — a
-    real accuracy gap on this circuit, not a benchmark-config artifact.
+  - `mul`: unlike `rc`, its source is a smooth sine, not a pulse — there's no
+    edge to resolve, so forcing `maxstep` here would just be a crutch masking
+    whether `reltol`-driven stepping actually works, not a fair test of the
+    engine. "fair" for `mul` leaves `maxstep` unbounded and only replicates
+    the real throughput sim's control block (`mul/vacask/runme.sim`:
+    `tran_method=gear2`, `nr_residualcheck=0`, `tran_lteratio=3.5`,
+    `tran_itl=50` — none of which the plain `reltol` sweep ever tries). That
+    alone is enough: no abort anywhere in the sweep, and unlike the
+    maxstep-forced version tried first (which flatlined at ~1.0e-4 from the
+    start, `reltol` no longer doing anything), error now genuinely tracks
+    `reltol` — 4.1e-2 → 1.2e-2 → 2.1e-3 → 1.7e-4 — before flattening at
+    `reltol≈1e-6` and staying at ~1.4e-4 through `1e-9`. So the abort really
+    was the NR/LTE-tuning gap, not a step-resolution problem, confirming the
+    `maxstep`-based fix was masking the wrong variable. Head-to-head with
+    Cadnip IDA: within the accuracy band VACASK can actually reach, it's
+    competitive-to-faster (VACASK's cheapest run at its own floor, `1e-6`:
+    1.7e-4 error/0.073s, vs Cadnip's *loosest, cheapest* setting, `1e-3`:
+    already-better 1.1e-4 error/0.126s — so even there Cadnip's floor point
+    alone is both more accurate and not much slower). But VACASK has a hard
+    accuracy ceiling around 1.4e-4 that ten more orders of `reltol` tightening
+    (`1e-6` through `1e-9`, 0.073s → 0.789s) never breaks through, while
+    Cadnip keeps converging to ~3e-6 — an accuracy range VACASK simply cannot
+    reach on this circuit at any cost, a real engine-level gap rather than a
+    benchmark-config artifact.
 
 ## History
 
