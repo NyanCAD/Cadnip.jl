@@ -103,11 +103,14 @@ using Cadnip.MNA: PWLWave, SinWave, PulseWave
 
     @testset "expand_breakpoints: coincident-edge dedupe" begin
         # tr=0/tf=0 PulseWave produces duplicate times; also merge across two specs.
-        # tol = 1e-12*(t1-t0) = 1e-12*1e-5 = 1e-17 here, so an offset of 1e-18 is
-        # within tolerance (dedupes) while 1e-15 is not (stays distinct).
+        # Tolerance is scaled to the ULP of the compared values (~1e-6 here), not
+        # to the tspan width - a few ULP (~1e-22) is within tolerance (dedupes)
+        # while 1e-15 (many orders of magnitude larger than eps(1e-6)) is not
+        # (stays distinct). This is deliberately independent of tspan width: the
+        # same offsets behave the same regardless of how long/short (0.0, 1e-5) is.
         specs = [
             BreakpointSpec([1e-6, 1e-6, 5e-6, 5e-6]),
-            BreakpointSpec([1e-6 + 1e-18, 3e-6]),  # within tolerance of 1e-6
+            BreakpointSpec([1e-6 + 1e-22, 3e-6]),  # within a few ULP of 1e-6
         ]
         out = expand_breakpoints(specs, (0.0, 1e-5))
         @test out == [1e-6, 3e-6, 5e-6]
@@ -133,6 +136,35 @@ using Cadnip.MNA: PWLWave, SinWave, PulseWave
             out = expand_breakpoints(specs, (0.0, 1e-3); max_points=100)
         end
         @test length(out) <= 100
+    end
+
+    @testset "expand_breakpoints: astronomically tiny period doesn't overflow k-range" begin
+        # (t1-tmin)/period can vastly exceed typemax(Int) for a pathological
+        # period; the k-range must be clamped in Float64 before converting to
+        # Int rather than throwing InexactError.
+        specs = [BreakpointSpec([0.0], 1e-300, -1)]
+        local out
+        @test_logs (:warn, r"max_points") begin
+            out = expand_breakpoints(specs, (0.0, 1.0); max_points=100)
+        end
+        @test length(out) <= 100
+    end
+
+    @testset "expand_breakpoints: sort-before-truncate keeps globally earliest points" begin
+        # specA has many points clustered LATE in the tspan; specB (processed
+        # second) has a single, chronologically much earlier point. Truncating
+        # mid-accumulation (in spec order) would drop specB's point entirely
+        # since specA alone already exceeds max_points; truncating only after
+        # a global sort keeps the earliest points regardless of spec order.
+        specA = BreakpointSpec(collect(5.0:0.001:5.2))  # 201 points, late in tspan
+        specB = BreakpointSpec([0.0001])                 # one point, very early
+        local out
+        @test_logs (:warn, r"max_points") begin
+            out = expand_breakpoints([specA, specB], (0.0, 10.0); max_points=100)
+        end
+        @test 0.0001 in out
+        @test issorted(out)
+        @test length(out) == 100
     end
 
     #==========================================================================#

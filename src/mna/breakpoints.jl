@@ -8,8 +8,6 @@
 # them via rejected steps.
 #==============================================================================#
 
-using Base.ScopedValues: ScopedValue, @with
-
 """
     Wave
 
@@ -84,19 +82,3 @@ never needs to touch them.
 function register_breakpoints! end
 
 export register_breakpoints!
-
-"""
-    BREAKPOINT_COLLECTOR
-
-Scoped collector for breakpoints discovered by legacy `SpectreEnvironment`
-behavioral expressions (`pwl(...)`/`pulse(...)` used directly in a B-source
-math expression, not the SPICE-parser-driven `PWLWave`/`PulseWave` structs
-stamped via `register_breakpoints!`) which have no `MNAContext` directly in
-scope. `build_with_detection` binds this to a fresh collection vector for
-the duration of each builder call; `Cadnip.time_periodic_singularities!`
-pushes into it when bound, and no-ops otherwise (e.g. during the hot
-`DirectStampContext` restamping path, where this is never bound).
-"""
-const BREAKPOINT_COLLECTOR = ScopedValue{Union{Nothing,Vector{BreakpointSpec}}}(nothing)
-
-export BREAKPOINT_COLLECTOR

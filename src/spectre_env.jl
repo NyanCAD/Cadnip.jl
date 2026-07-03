@@ -68,25 +68,6 @@ function pwl_at_time(ts, ys, t)
     return ys[i-1] + (t - ts[i-1])*slope
 end
 
-# Was a DAECompiler event-handling intrinsic; on the MNA backend it instead
-# reports breakpoints for legacy behavioral pwl()/pulse() expressions (used
-# directly in B-source math, with no MNAContext in scope) through the
-# MNA.BREAKPOINT_COLLECTOR scoped collector set by MNA.build_with_detection.
-# A no-op whenever that collector isn't bound - in particular on the hot
-# DirectStampContext restamping path, where it's never bound.
-function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
-    collector = MNA.BREAKPOINT_COLLECTOR[]
-    collector === nothing && return nothing
-
-    times = MNA._collect_times(ts)
-    if count == 1 || !isfinite(period)
-        push!(collector, MNA.BreakpointSpec(times))
-    else
-        push!(collector, MNA.BreakpointSpec(times, Float64(period), Int(count)))
-    end
-    return nothing
-end
-
 baremodule SpectreEnvironment
 
 import ..Base
@@ -106,7 +87,7 @@ import Base:
     zero, atan,
     floor, ceil, trunc
 import Base.Experimental: @overlay
-import ..rem_right_semi, ..time_periodic_singularities!, ..pwl_at_time, ..wave_split
+import ..rem_right_semi, ..pwl_at_time, ..wave_split
 
 const arctan = atan
 const ln = log
@@ -131,10 +112,6 @@ const M_1_PI = 1/Base.pi
 
 function pwl(wave)
     ts, ys = wave_split(wave)
-    # Notify singularities at each of our timepoints (no-op in MNA)
-    time_periodic_singularities!(ts)
-
-    # Actually calculate the value to return
     return pwl_at_time(ts, ys, var"$time"())
 end
 
@@ -145,9 +122,6 @@ function pulse(v1, v2, td, tr, tf, pw=Base.Inf, period=Base.Inf, count=-1)
     ys = StaticArrays.@SVector[
         v1, v2, v2, v1,
     ]
-    # Notify singularities at each of our timepoints (no-op in MNA)
-    time_periodic_singularities!(ts, period, count)
-
     # Calculate value modulo our period
     t = rem_right_semi(Cadnip.spec[].time, period)
     return pwl_at_time(ts, ys, t)

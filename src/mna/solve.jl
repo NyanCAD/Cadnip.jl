@@ -1470,15 +1470,9 @@ function build_with_detection(circuit::MNACircuit)
     rng = Random.MersenneTwister(0xDEADBEEF)
 
     for pass in 1:N_DETECTION_PASSES
-        # Legacy SpectreEnvironment pwl()/pulse() behavioral expressions have
-        # no `ctx` in scope, so they report breakpoints through this scoped
-        # collector instead of register_breakpoints!() directly; merged into
-        # ctx.breakpoints below once ctx exists.
-        legacy_bp = BreakpointSpec[]
-
         if ctx === nothing
             # First pass: use ZERO_VECTOR to discover structure and get initial system size
-            ctx = @with BREAKPOINT_COLLECTOR => legacy_bp circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+            ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
             known_size = system_size(ctx)
         else
             # Save system size BEFORE reset
@@ -1491,10 +1485,8 @@ function build_with_detection(circuit::MNACircuit)
             x = (rand(rng, known_size) .- 0.5) .* 2.0
 
             # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
-            @with BREAKPOINT_COLLECTOR => legacy_bp circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
         end
-
-        append!(ctx.breakpoints, legacy_bp)
     end
 
     return ctx
@@ -1513,9 +1505,14 @@ spec, `count == -1`, expands until it runs off the end of `tspan`).
 Aperiodic specs (`period <= 0`) contribute their `times` as-is.
 
 Coincident edges (e.g. `tr=0`/`tf=0` PULSE edges landing on the same time,
-or PWL vertices repeated across sources) are collapsed using a relative
-tolerance `tol = 1e-12*(t1-t0)`. If expansion would exceed `max_points`
-(guards a tiny period over a long tspan), the result is truncated and a
+or PWL vertices repeated across sources) are collapsed using a tolerance
+scaled to the ULP of the values being compared (robust to `tspan` being
+very large or very small - a tolerance scaled to `t1-t0` instead would
+either wrongly merge legitimately close-but-distinct edges in a long
+simulation, or fail to merge genuine floating-point duplicates in a short
+one). If expansion would exceed `max_points` (guards a tiny period over a
+long tspan; enforced per-spec during expansion and again globally after
+sorting), the result is truncated to the earliest `max_points` times and a
 warning is issued.
 """
 function expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<:Real};
@@ -1533,12 +1530,27 @@ function expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<
         else
             period = spec.period
             tmin, tmax = extrema(spec.times)
-            k_start = max(0, floor(Int, (t0 - tmax) / period))
-            k_end = ceil(Int, (t1 - tmin) / period)
+            # Compute the k-range in Float64 and clamp before converting to
+            # Int: for a tiny period over a normal tspan, (t1-tmin)/period
+            # can exceed typemax(Int), and floor/ceil(Int, x) throws
+            # InexactError once x is outside Int64's range. Clamp to a bound
+            # far below typemax(Int) itself, not just below it: Float64
+            # can't represent typemax(Int) exactly (it rounds up to 2^63),
+            # so clamping to Float64(typemax(Int)) can still overflow on
+            # conversion. 1e15 is exact in Float64 (< 2^53) and already far
+            # more periods than any real max_points budget could ever use.
+            k_bound = 1e15
+            k_start_f = clamp(floor((t0 - tmax) / period), 0.0, k_bound)
+            k_end_f = clamp(ceil((t1 - tmin) / period), -1.0, k_bound)
+            k_start = Int(k_start_f)
+            k_end = Int(k_end_f)
             if spec.count >= 0
                 k_end = min(k_end, spec.count - 1)
             end
             k_end < k_start && continue
+            # Per-spec budget: bounds how many points a single (possibly
+            # misconfigured, e.g. tiny period) spec can contribute before
+            # the global sort+truncate below gets a chance to run.
             if (k_end - k_start + 1) > max_points
                 k_end = k_start + max_points - 1
                 truncated = true
@@ -1551,22 +1563,26 @@ function expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<
                 end
             end
         end
-        if length(out) > max_points
-            truncated = true
-            break
-        end
-    end
-
-    if truncated
-        @warn "expand_breakpoints: breakpoint count exceeded max_points=$max_points; truncating (adaptive stepping still handles unmarked edges, just less precisely)"
-        length(out) > max_points && resize!(out, max_points)
     end
 
     isempty(out) && return out
+    # Sort before truncating: accumulating per-spec and cutting off as soon
+    # as the running total exceeds max_points (as opposed to this) would
+    # arbitrarily favor whichever specs happen to be processed first,
+    # discarding a later spec's early (and likely more relevant) breakpoints
+    # purely because of iteration order. Sorting first and keeping the
+    # earliest max_points times instead makes the kept subset the globally
+    # earliest breakpoints across all specs.
     sort!(out)
-    tol = 1e-12 * (t1 - t0)
+    if length(out) > max_points
+        truncated = true
+        resize!(out, max_points)
+    end
+    truncated && @warn "expand_breakpoints: breakpoint count exceeded max_points=$max_points; truncating (adaptive stepping still handles unmarked edges, just less precisely)"
+
     dedup = Float64[out[1]]
     for i in 2:length(out)
+        tol = 4 * max(eps(dedup[end]), eps(out[i]))
         out[i] - dedup[end] > tol && push!(dedup, out[i])
     end
     return dedup
