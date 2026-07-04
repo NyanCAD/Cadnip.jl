@@ -61,14 +61,24 @@ a high-order solver takes large steps and emits few points, so interpolating *it
 output onto a fixed grid would penalise it for the interpolation rather than its real
 accuracy — interpolating the dense reference onto the run's points is fair.
 
-The golden is **pinned per case** in `config.json` (`golden: analytic|vacask|cadnip`),
-chosen by what actually converges — `run_wpd.jl` uses exactly that and errors if it
-fails (no silent substitution):
+The golden is **pinned per case** in `config.json`
+(`golden: analytic|vacask|cadnip|self`), chosen by what actually converges —
+`run_wpd.jl` uses exactly that and errors if it fails (no silent substitution):
 
 - `filter`, `rc`: **exact analytic** closed form (also avoids any "VACASK vs its own
   golden" ambiguity).
 - `graetz`: tight VACASK run (fine `maxstep`); it completes and is cross-checked.
-- `mul`: **Cadnip IDA** tight run — VACASK's multiplier golden aborts (see below).
+  (A tight Cadnip golden was tried too, for consistency with `mul`'s `self` mode
+  below, but Cadnip's own IDA fallback ladder doesn't converge on this circuit at
+  any tolerance from `1e-7` to `1e-11` - so `graetz` stays on the single VACASK
+  golden, which has always worked fine here.)
+- `mul`: **`self`** — Cadnip's curves are scored against a tight Cadnip IDA
+  golden, VACASK's curve against its own tight VACASK golden, *not* a shared
+  cross-simulator reference. See "Findings about VACASK" below for why: scoring
+  VACASK against Cadnip's golden here previously produced a misleading "VACASK
+  can't get more accurate than 1.3e-4" reading that turned out to be almost
+  entirely the two simulators' independently-converged answers disagreeing with
+  *each other*, not either one failing to converge.
 
 **VACASK runs at its best, not its default — and "best" is picked per case, not
 assumed.** VACASK defaults to trapezoidal (2nd order); the benchmark's global
@@ -305,15 +315,51 @@ the items below reflect the maintainer's diagnosis, not just ours.
   is to disable it — which is exactly what `mul`'s `vacask_override.extra_opts`
   already does (`nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50`, carried
   over from the real throughput sim's own tuning). With that applied: no abort
-  anywhere in the sweep, and error genuinely tracks `reltol` — 1.3e-1 → 2.1e-2
-  → 1.2e-2 → 2.3e-3 → 1.8e-4 → 1.4e-4 → 1.3e-4 (`1e-3` through `1e-9`) —
-  before flattening at a hard ~1.3e-4 floor. Head-to-head with Cadnip IDA:
-  even VACASK's *best-ever* run (`reltol=1e-9`: 1.3e-4 error, 0.157s) is both
-  less accurate *and* slower than Cadnip IDA's *loosest, cheapest* setting
-  (`reltol=1e-3`: 1.1e-4 error, 0.126s) — Cadnip's floor point alone beats
-  VACASK's ceiling on both axes. Cadnip keeps converging past that, down to
-  ~3e-6 — an accuracy range VACASK simply cannot reach on this circuit at any
-  cost, a real engine-level gap rather than a benchmark-config artifact.
+  anywhere in the sweep.
+- **The "1.3e-4 floor" this produced against Cadnip's golden was never a
+  VACASK accuracy problem — it was scoring VACASK against the wrong
+  reference.** With the fix above applied, checked VACASK's *self*-consistency
+  at `reltol=1e-9` directly: comparing `tran_maxord=2/4/5`, `tran_lteratio`
+  tightened/loosened, and `abstol` down to `1e-18` against each other all
+  agree to ~1e-6–1e-7 - i.e. VACASK is converging cleanly, two full orders of
+  magnitude tighter than the ~1.3e-4 gap it showed against Cadnip's golden.
+  That gap is VACASK's and Cadnip's independently-converged answers
+  disagreeing with *each other* by a small, roughly tolerance-independent
+  amount — most likely the two simulators' separately-compiled diode OSDI/VA
+  models not being bit-identical (both use nominally the same
+  `is/rs/cjo/m/n`, but VACASK's bundled `spice/sn/diode.osdi` and Cadnip's
+  VADistillerModels SPICE diode are different compiled sources) — not a
+  tolerance-tuning gap on either side. `mul`'s `golden` is now `"self"`
+  (`config.json`): Cadnip's curves score against a tight Cadnip golden,
+  VACASK's curve against its own tight VACASK golden, and the two goldens'
+  mutual disagreement is reported separately as the `xcheck` line
+  (currently **1.03e-4**, matching the old "floor" almost exactly - strong
+  confirmation this is exactly what was happening). With `self` scoring,
+  VACASK's own curve now properly converges to **4.27e-6 at `reltol=1e-9`**,
+  the same order of magnitude as Cadnip IDA's own **2.49e-6** there - not the
+  "VACASK simply cannot reach this accuracy, a real engine-level gap" this
+  doc previously claimed. That specific claim is retracted. Diffing the two
+  diode `.va` sources to find the actual ~1e-4 discrepancy is a real, open
+  item, not yet investigated here.
+- **`filter` and `rc` have a genuine, lever-immune accuracy floor even
+  against the *exact analytic* golden — unlike `mul`'s, this one is real,
+  and none of the maintainer's suggestions move it.** Checked on `filter`
+  at `reltol=1e-9`: `tran_maxord` 2/3/4/5 all land at 2.0-2.1e-5 (identical
+  within noise); `abstol=1e-15`, `tran_lteratio=1`, and `nr_residualcheck=0`
+  each leave it at 2.07e-5 (unchanged to 3 significant figures); the
+  `relrefsol/relrefres/relreflte="pointlocal"` or `"local"` reference-value
+  modes he described make it *worse* (immediate "Timestep too small" abort
+  instead of an improvement — consistent with his own caveat that these
+  modes can't establish a reference near a zero initial condition, which is
+  exactly `filter`'s starting point). Same story on `rc` post-`maxord=4`
+  fix: orders 2/3/4 all land at 3.2-3.8e-5 at `reltol=1e-9`, `abstol=1e-18`
+  and `tran_lteratio` sweeps change nothing. Every documented tuning knob
+  was tried; none of them touch it. This is a real, open item — likely a
+  fixed absolute-error contribution from somewhere other than the exposed
+  tolerance options (candidates not yet checked: DC operating-point
+  accuracy, order-restart cost after the initial breakpoint, or the "Clock
+  resolution" the simulator reports in its stats) — not yet root-caused
+  here.
 - **`vntol` tied numerically to `reltol` is a simplification, flagged as such
   by the maintainer, but checked here not to bias these specific results.**
   Both VACASK sweeps (`run_vacask_once` in `wpd_common.jl`) pass `vntol=reltol`

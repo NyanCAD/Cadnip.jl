@@ -15,7 +15,7 @@
 
   "n_grid": 2000,
 
-  "_golden_comment": "golden pins the reference per case (analytic|vacask|cadnip), chosen by what actually converges: filter/rc have exact closed forms; graetz's tight VACASK run completes; mul's VACASK golden aborts (min-timestep) so it uses a tight Cadnip IDA reference. run_wpd.jl errors if the pinned golden fails - it never silently substitutes.",
+  "_golden_comment": "golden pins the reference per case (analytic|vacask|cadnip|self), chosen by what actually converges: filter/rc have exact closed forms, so both simulators are honestly comparable against ground truth. graetz/mul have no closed form, and using one simulator's tight run as a shared cross-simulator golden for the other conflates real solver-accuracy error with the two simulators' own small mutual disagreement (see issue #83 investigation in README - VACASK converges to well within 1e-6 of ITSELF on `mul` even where it looked ~1.3e-4 off from a Cadnip golden, meaning that gap was never a VACASK tolerance problem in the first place). `self` has each simulator scored against its OWN tight reference instead, with the two references' mutual disagreement reported separately as an explicit, open, not-yet-explained item (most likely a difference between the two simulators' independently-compiled diode OSDI/VA models) rather than folded into either curve's error. run_wpd.jl errors if a pinned/needed golden fails - it never silently substitutes.",
 
   "cases": {
     "filter": {
@@ -36,14 +36,16 @@
       "title": "Graetz bridge full-wave rectifier (nonlinear diode)",
       "tspan": [0.0, 0.1],
       "output": ["outp", "outn"],
-      "golden": "vacask"
+      "golden": "vacask",
+      "_golden_comment_graetz": "Considered 'self' for consistency with mul, but graetz's own Cadnip-tight golden (cadnip_golden's IDA ladder, 1e-11 down to 1e-7) does not converge on this circuit at all - IDA repeatedly hits 'corrector convergence failed... |h|=hmin' at every tolerance tried, unlike mul where the same ladder works fine. Kept as 'vacask': unlike mul there's no demonstrated Cadnip-vs-VACASK cross-simulator-golden problem here to fix (the historical cross-check has been small), so there's no reason to force a golden that doesn't actually converge."
     },
     "mul": {
       "title": "Diode voltage multiplier (nonlinear, stiff)",
       "tspan": [0.0, 5e-4],
       "output": ["20"],
-      "golden": "cadnip",
-      "_vacask_override_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. mul's source is a smooth sine (vs type=sine), not a pulse - there's no edge to resolve, so forcing a fixed maxstep the way rc needs it would just be a crutch masking whether reltol-driven stepping actually works, not a fair test of the engine. The override leaves maxstep unbounded (reltol/vntol alone drive step size) and method/maxord at the benchmark's standard tran_method=gear/tran_maxord=5 (VACASK's best, same as every other case - NOT the throughput sim's fixed-order gear2, which was chosen there for raw speed, not accuracy). It only adds the real throughput sim's NR/LTE tuning (nr_residualcheck, tran_lteratio, tran_itl from mul/vacask/runme.sim, never exercised by the plain reltol sweep) - legitimate robustness tuning, not artificial fine-stepping or a lower-order handicap.",
+      "golden": "self",
+      "_golden_self_comment": "Was 'cadnip' (VACASK scored against a foreign Cadnip golden, which is what produced the misleading '~1.3e-4 floor VACASK can't reach' framing - VACASK actually converges to within ~1e-6 of ITSELF at reltol=1e-9 across tran_maxord/tran_lteratio/abstol variations, so that gap was never a VACASK accuracy problem). 'self' now scores each simulator against its own tight run; the two goldens' mutual disagreement is reported as an explicit open item instead.",
+      "_vacask_override_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. mul's source is a smooth sine (vs type=sine), not a pulse - there's no edge to resolve, so forcing a fixed maxstep the way rc needs it would just be a crutch masking whether reltol-driven stepping actually works, not a fair test of the engine. The override leaves maxstep unbounded (reltol/vntol alone drive step size) and method/maxord at the benchmark's standard tran_method=gear/tran_maxord=5 (VACASK's best, same as every other case - NOT the throughput sim's fixed-order gear2, which was chosen there for raw speed, not accuracy). It only adds the real throughput sim's NR/LTE tuning (nr_residualcheck, tran_lteratio, tran_itl from mul/vacask/runme.sim, never exercised by the plain reltol sweep) - legitimate robustness tuning, not artificial fine-stepping or a lower-order handicap. Now also applied to mul's own VACASK golden (run_vacask_sweep passes it to the tight run too), since without it the golden aborts exactly like the sweep did.",
       "vacask_override": {"extra_opts": "nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50"}
     }
   }

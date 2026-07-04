@@ -387,26 +387,31 @@ function run_vacask_sweep(case, spec, want_golden)
     ref_reltol = Float64(CFG["ref_reltol"]); ref_abstol = Float64(CFG["ref_abstol"])
     ref_factor = Float64(get(CFG, "ref_maxstep_factor", 50))
 
-    if want_golden
-        ms = (t1 - t0) / (Int(CFG["n_grid"]) * ref_factor)
-        @printf("  vacask golden reltol=%.0e maxstep=%.1e ... ", ref_reltol, ms); flush(stdout)
-        ti, sig, tp, rt = run_vacask_once(case, ref_reltol, ref_abstol, (t0, t1), out_nodes; maxstep=ms)
-        write_wave(joinpath(OUT, "ref_$(case).csv"), ti, sig)
-        @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
-    end
-
     # A case can override VACASK's default (unbounded maxstep, benchmark's
     # standard tran_method=gear/tran_maxord=5, no extra options) via
     # config.json's `vacask_override` - see per-case `_vacask_override_comment`
     # for why. This is the ONE VACASK run plotted for the case, not an extra
     # series alongside the raw default - a case either needs a fair override
     # or it doesn't, there's no value in also showing the version we already
-    # know is unrepresentative.
+    # know is unrepresentative. The golden (tight-maxstep) run below applies
+    # the same method/maxord/extra_opts (but keeps its own fine maxstep, not
+    # `oms`) - a circuit that needs e.g. nr_residualcheck=0 to avoid aborting
+    # in the reltol sweep needs it just as much for its own golden (mul's
+    # golden aborted before this was applied here).
     ov = get(spec, "vacask_override", Dict{String,Any}())
     oms = haskey(ov, "maxstep") ? Float64(ov["maxstep"]) : t1
     omethod = haskey(ov, "method") ? String(ov["method"]) : nothing
     omaxord = haskey(ov, "maxord") ? Int(ov["maxord"]) : nothing
     oextra = String(get(ov, "extra_opts", ""))
+
+    if want_golden
+        ms = (t1 - t0) / (Int(CFG["n_grid"]) * ref_factor)
+        @printf("  vacask golden reltol=%.0e maxstep=%.1e ... ", ref_reltol, ms); flush(stdout)
+        ti, sig, tp, rt = run_vacask_once(case, ref_reltol, ref_abstol, (t0, t1), out_nodes;
+                                           maxstep=ms, method=omethod, maxord=omaxord, extra_opts=oextra)
+        write_wave(joinpath(OUT, "ref_$(case).csv"), ti, sig)
+        @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
+    end
 
     summary = open(joinpath(OUT, "vacask_$(case).csv"), "w")
     println(summary, "reltol,time_s,timepoints")
@@ -430,21 +435,37 @@ end
 #------------------------------------------------------------------------------#
 # Golden selection + analysis + report
 #------------------------------------------------------------------------------#
-function load_golden(case, spec)
+"""
+`golden="self"` means each simulator is scored against its OWN tight
+reference rather than one shared cross-simulator golden - see README
+"Findings about VACASK" on `mul`: a Cadnip-vs-VACASK gap that looks like a
+tolerance-tuning floor turned out to be VACASK converging cleanly to an
+answer that just differs from Cadnip's by a small, fixed amount (most likely
+the two simulators' separately-compiled diode models, not a solver-accuracy
+problem on either side). Scoring each simulator against a foreign golden
+would silently fold that gap into "error", overstating whichever simulator
+doesn't own the shared golden. `sim` picks which tight reference applies to
+`self`; it's ignored for the other golden kinds since they're already
+simulator-agnostic (analytic) or already only exist for one simulator.
+"""
+function load_golden(case, spec, sim::Symbol)
     g = String(spec["golden"])
-    if g == "analytic"
+    eff = g == "self" ? (sim == :cadnip ? "cadnip" : "vacask") : g
+    if eff == "analytic"
         return read_wave(joinpath(OUT, "analytic_$(case).csv"))..., "analytic (exact)"
-    elseif g == "vacask"
+    elseif eff == "vacask"
         return read_wave(joinpath(OUT, "ref_$(case).csv"))..., "VACASK (tight)"
-    elseif g == "cadnip"
+    elseif eff == "cadnip"
         return read_wave(joinpath(OUT, "cadnip_ref_$(case).csv"))..., "Cadnip IDA (tight)"
     else
-        error("case $case: unknown golden '$g' (use analytic|vacask|cadnip)")
+        error("case $case: unknown golden '$g' (use analytic|vacask|cadnip|self)")
     end
 end
 
 function analyze(case, spec)
-    gt, gv, gsrc = load_golden(case, spec)
+    cgt, cgv, cgsrc = load_golden(case, spec, :cadnip)
+    vgt, vgv, vgsrc = load_golden(case, spec, :vacask)
+    gsrc = cgsrc == vgsrc ? cgsrc : "$cgsrc (Cadnip) / $vgsrc (VACASK) - each scored against its own"
     println("$case: golden = $gsrc")
     curves = Dict{String,Vector{Tuple{Float64,Float64}}}()
     table = Tuple{String,Float64,Float64,Float64}[]
@@ -455,7 +476,7 @@ function analyze(case, spec)
         wp = joinpath(OUT, "cadnip_$(case)_$(solver)_$(reltol_tag(r)).csv")
         isfile(wp) || continue
         tw, vw = read_wave(wp)
-        err = run_error(tw, vw, gt, gv)
+        err = run_error(tw, vw, cgt, cgv)
         isfinite(err) && t !== nothing && isfinite(t) &&
             push!(get!(curves, "Cadnip $solver", Tuple{Float64,Float64}[]), (err, t))
         push!(table, ("Cadnip $solver", r, err, something(t, NaN)))
@@ -468,20 +489,28 @@ function analyze(case, spec)
             wp = joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv")
             isfile(wp) || continue
             tw, vw = read_wave(wp)
-            err = run_error(tw, vw, gt, gv)
+            err = run_error(tw, vw, vgt, vgv)
             isfinite(err) && t !== nothing && isfinite(t) &&
                 push!(get!(curves, "VACASK", Tuple{Float64,Float64}[]), (err, t))
             push!(table, ("VACASK", r, err, something(t, NaN)))
         end
     end
 
-
-    # cross-check: if both analytic and a VACASK ref exist, report their agreement
+    # cross-check: whenever two independent tight references exist for this
+    # case (analytic+VACASK, or - under golden="self" - Cadnip-tight+VACASK-
+    # tight), report their mutual agreement. This is the number that matters
+    # for `self` cases: it's the open, unexplained gap between the two
+    # simulators' converged answers, kept separate from either curve's error.
     ap = joinpath(OUT, "analytic_$(case).csv"); rp = joinpath(OUT, "ref_$(case).csv")
+    cp = joinpath(OUT, "cadnip_ref_$(case).csv")
     xcheck = ""
     if isfile(ap) && isfile(rp)
         ta, va = read_wave(ap); tr, vr = read_wave(rp)
         xcheck = @sprintf("analytic vs VACASK-tight cross-check: rel-L2 = %.2e", run_error(tr, vr, ta, va))
+        println("  ", xcheck)
+    elseif isfile(cp) && isfile(rp)
+        tc, vc = read_wave(cp); tr, vr = read_wave(rp)
+        xcheck = @sprintf("Cadnip-tight vs VACASK-tight cross-check: rel-L2 = %.2e (open item, not a tolerance-tuning gap - see README)", run_error(tr, vr, tc, vc))
         println("  ", xcheck)
     end
     return gsrc, curves, table, xcheck
@@ -592,6 +621,11 @@ function report(results)
         spec = CFG["cases"][case]
         println(io, "## $(spec["title"])\n")
         println(io, "Golden reference: **$gsrc**.", isempty(xcheck) ? "" : " ($xcheck)", "\n")
+        if String(spec["golden"]) == "self"
+            println(io, "*Each simulator is scored against its own tight reference, not a shared*")
+            println(io, "*cross-simulator golden - the cross-check figure above is the open gap*")
+            println(io, "*between the two, not error attributable to either curve below.*\n")
+        end
         if !isempty(curves)
             # GitHub renders ANSI SGR color codes in ```ansi fences for
             # issues/PRs/READMEs, but confirmed NOT in GITHUB_STEP_SUMMARY (shows
@@ -634,14 +668,17 @@ function main()
             t0, t1 = Float64(spec["tspan"][1]), Float64(spec["tspan"][2])
             fine = collect(range(t0, t1; length=200_000))
             write_wave(joinpath(OUT, "analytic_$(case).csv"), fine, ANALYTIC[case].(fine))
-        elseif golden == "cadnip"
+        elseif golden == "cadnip" || golden == "self"
+            # "self" needs its own Cadnip-tight golden too - Cadnip's curves
+            # must never be scored against VACASK's answer or vice versa.
             cadnip_golden(case, spec)
         end
 
         # VACASK sweep always runs where it can; also produce the VACASK golden
-        # only when this case is pinned to it.
+        # when this case is pinned to it OR uses "self" (which needs both
+        # goldens, not just one).
         if VACASK_BIN !== nothing
-            run_vacask_sweep(case, spec, golden == "vacask")
+            run_vacask_sweep(case, spec, golden == "vacask" || golden == "self")
         elseif golden == "vacask"
             error("case $case pinned to VACASK golden but VACASK binary not found")
         end
