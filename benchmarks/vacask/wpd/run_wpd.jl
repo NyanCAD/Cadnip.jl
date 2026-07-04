@@ -586,7 +586,8 @@ function report(results)
     println(io, "# Work-Precision Diagram Results\n")
     println(io, "Each solver runs *adaptively* across a tolerance sweep (no forced timestep).")
     println(io, "Error = relative L2 of the output node at each run's own timepoints vs the")
-    println(io, "golden reference. VACASK uses high-order Gear/BDF (`tran_maxord=5`).\n")
+    println(io, "golden reference. VACASK uses Gear/BDF, order picked per case (see config.json)")
+    println(io, "since a fixed order isn't uniformly best across circuits (issue #83).\n")
     for (case, gsrc, curves, table, xcheck) in results
         spec = CFG["cases"][case]
         println(io, "## $(spec["title"])\n")

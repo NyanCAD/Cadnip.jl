@@ -70,10 +70,14 @@ fails (no silent substitution):
 - `graetz`: tight VACASK run (fine `maxstep`); it completes and is cross-checked.
 - `mul`: **Cadnip IDA** tight run — VACASK's multiplier golden aborts (see below).
 
-**VACASK runs at its best, not its default:** VACASK defaults to trapezoidal (2nd
-order); the benchmark sets `tran_method="gear" tran_maxord=5` (variable-order
-Gear/BDF), configurable via `vacask_tran_method` / `vacask_tran_maxord` in
-`config.json`.
+**VACASK runs at its best, not its default — and "best" is picked per case, not
+assumed.** VACASK defaults to trapezoidal (2nd order); the benchmark's global
+default is `tran_method="gear" tran_maxord=5` (variable-order Gear/BDF),
+configurable via `vacask_tran_method` / `vacask_tran_maxord` in `config.json`.
+`rc` overrides this down to `tran_maxord=4` (see "Findings about VACASK" below
+— order 5 has a confirmed controller bug on that specific circuit, reported
+upstream as [issue #83](https://codeberg.org/arpadbuermen/VACASK/issues/83));
+`filter`/`graetz`/`mul` keep the order-5 default, which is fine or best there.
 
 ## Solver families per case
 
@@ -246,58 +250,83 @@ what's already folded into the table above:
 
 ## Findings about VACASK
 
-- **`mul` aborts at small steps.** VACASK hits "Timestep too small" on the voltage
-  multiplier below `reltol ≈ 1e-5` (its fine-`maxstep` golden aborts too), so `mul`
-  uses a Cadnip golden and VACASK contributes only its loose-tolerance points — a
-  direct illustration of Cadnip covering a range VACASK can't on a stiff diode network.
-- **Adaptive stepping plateaus.** With `reltol` alone (no forced fine `maxstep`),
-  VACASK's error stops improving past a point (e.g. the pulse-train `rc`): its LTE
-  controller settles at a step count well short of the accuracy its fine-`maxstep`
-  golden reaches. Cadnip's solvers keep converging.
-- **Giving VACASK a fair, reasonable shot on `rc`/`mul` confirms the plateau/abort
-  is a controller/tuning gap, not an engine ceiling — and a single global
-  `maxstep` can't be "loose except at the edges".** VACASK's `analysis tran`
-  only exposes one scalar `maxstep` applied to every step of the whole run —
-  there's no separate breakpoints-only directive in anything this repo's
-  `.sim` files use, so tightening it enough to catch a sharp source edge also
-  caps every other step in the run, uniformly. `rc` and `mul` each override
-  the plain reltol-only sweep with a fair configuration (`config.json`'s
-  `vacask_override`) instead of also plotting the raw default alongside it —
-  there's no value in showing a version already known to be unrepresentative,
-  so each case gets exactly one VACASK curve, built from that maxstep
-  tradeoff plus (for `mul`) the real throughput sim's own NR/LTE tuning:
-  - `rc`: `maxstep=1us` (the real throughput benchmark's `dtmax`) confirmed
-    fixing the 1.5-7% unbounded plateau (~1000x error drop, to ~2-7e-5) — the
-    unbounded run never resolves the 1us pulse edges without a step bound.
-    Swept looser from there: `5us` (5x looser) gives the *same* accuracy at
-    *5x lower* runtime (0.011s vs 0.051s) — real headroom, not a knife-edge
-    value, so `5us` is what's plotted as "fair". Error still doesn't improve
-    with tighter `reltol` at either step size, though: once `maxstep` binds,
-    `reltol` stops driving step size, and the residual ~2-7e-5 is the gear
-    method's local truncation error on the ramp itself, not a tolerance-driven
-    quantity — no single global `maxstep` gets both "resolves the edge" and
-    "`reltol` still matters everywhere else".
-  - `mul`: unlike `rc`, its source is a smooth sine, not a pulse — there's no
-    edge to resolve, so forcing `maxstep` here would just be a crutch masking
-    whether `reltol`-driven stepping actually works, not a fair test of the
-    engine. `mul`'s override leaves `maxstep` unbounded *and* keeps
-    `tran_method=gear`/`tran_maxord=5` (VACASK's best, same as every other
-    case, not the throughput sim's fixed-order `gear2` — that choice was for
-    raw speed, not accuracy) — it only adds the real throughput sim's NR/LTE
-    tuning (`nr_residualcheck=0`, `tran_lteratio=3.5`, `tran_itl=50` from
-    `mul/vacask/runme.sim`, never exercised by the plain `reltol` sweep).
-    That tuning alone is enough: no abort anywhere in the sweep, and error
-    genuinely tracks `reltol` — 1.3e-1 → 2.1e-2 → 1.2e-2 → 2.3e-3 → 1.8e-4 →
-    1.4e-4 → 1.3e-4 (`1e-3` through `1e-9`) — before flattening at a hard
-    ~1.3e-4 floor. So the abort really was the NR/LTE-tuning gap, not a
-    step-resolution problem. Head-to-head with Cadnip IDA: even VACASK's
-    *best-ever* run (`reltol=1e-9`: 1.3e-4 error, 0.157s) is both less
-    accurate *and* slower than Cadnip IDA's *loosest, cheapest* setting
-    (`reltol=1e-3`: 1.1e-4 error, 0.126s) — Cadnip's floor point alone beats
-    VACASK's ceiling on both axes. Cadnip keeps converging past that, down to
-    ~3e-6 — an accuracy range VACASK simply cannot reach on this circuit at
-    any cost, a real engine-level gap rather than a benchmark-config
-    artifact.
+Reported upstream as [VACASK issue #83](https://codeberg.org/arpadbuermen/VACASK/issues/83);
+the items below reflect the maintainer's diagnosis, not just ours.
+
+- **`rc`'s plateau is a `tran_maxord=5` controller bug, not a breakpoint/edge
+  problem.** Earlier revisions of this doc guessed the pulse-train `rc` case's
+  ~1.5-7% error plateau (flat regardless of `reltol`) came from VACASK stepping
+  over the 1us pulse edges. That guess was wrong and has been retracted: dumping
+  `tran1.raw` shows 5-6 accepted points inside every rise/fall window at every
+  `reltol` tested — breakpoints are handled correctly. Isolated the real cause
+  by sweeping only `tran_maxord` at fixed `reltol=1e-6` (netlist in the issue):
+  orders 1-4 converge normally (points/error: 4449/6.5e-4, 891/1.0e-4,
+  551/1.2e-4, 550/6.3e-5) but order 5 alone jumps three orders of magnitude
+  worse (448/6.9e-2) while taking *fewer* steps — the step-size/LTE controller
+  is accepting steps that are far too large specifically at order 5 on this
+  circuit. It's circuit-specific, not a blanket "order 5 is broken": the same
+  sweep on `filter` (smooth sine, no discontinuities) has order 5 as the
+  *best* point (562 points/1.4e-4, beating every lower order), and on `graetz`
+  (diode, nonlinear) order 5 tracks a tight order-2 reference to ~2e-5 with no
+  anomaly. `config.json`'s `rc.vacask_override` now caps `tran_maxord` at 4
+  instead of clamping `maxstep` (see below) — the maintainer is looking into
+  the order-5 controller itself.
+- **The old `maxstep=5us` workaround is gone — capping the order was the real
+  fix.** The previous override forced `maxstep=5e-6` (a crutch: it bounds
+  *every* step in the run, not just the ones near the bug, and floors accuracy
+  at the gear method's own LTE on the ramp instead of letting `reltol` drive
+  it). Capping `tran_maxord` at 4 instead removes the need for any `maxstep`
+  bound at all — VACASK now gets genuine unbounded, `reltol`-driven adaptive
+  stepping on `rc`: 1.5e-4 error at `reltol=1e-3` down to ~3.8e-5 at
+  `reltol=1e-9`, monotonically improving, which the order-5 config never did
+  at any `maxstep`.
+- **On method order in general: VACASK's own design historically stays at
+  order ≤ 2 for A-stability, so "higher order = more accurate" (this
+  benchmark's original assumption for picking `tran_maxord=5` as "VACASK's
+  best") doesn't hold unconditionally.** Per the maintainer: methods of order
+  ≤ 2 (trapezoidal, `gear2`) are A-stable and never blow up for a stable
+  circuit regardless of step size; stability regions shrink as order grows, so
+  a higher-order method can need *smaller* steps on a stiff circuit to stay
+  stable, the opposite of the "bigger steps, same accuracy" benefit
+  higher order usually buys. That framing fits `graetz`/`filter` (order 5
+  is fine or best there) better than a strict "5 is broken" reading, but it
+  does mean this benchmark should keep picking `tran_maxord` per case by
+  what actually converges, the same empirical policy already used for
+  picking Cadnip's solver family per case, rather than assuming one order is
+  "VACASK's best" everywhere.
+- **`mul` aborts at small steps — confirmed to be VACASK's `nr_residualcheck`,
+  not a step-resolution problem.** `mul`'s source is a smooth sine, so unlike
+  `rc` there's no edge to resolve; VACASK hits "Timestep too small" below
+  `reltol ≈ 1e-5` regardless of `tran_maxord` (checked 1 through 5, all abort
+  identically after 2 accepted / 21 rejected points). Per the maintainer, this
+  is a known, acknowledged sensitivity in the residual check: it "cannot
+  establish a reference value for equations that have only one residual
+  contribution," and the recommended remedy for any circuit that triggers it
+  is to disable it — which is exactly what `mul`'s `vacask_override.extra_opts`
+  already does (`nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50`, carried
+  over from the real throughput sim's own tuning). With that applied: no abort
+  anywhere in the sweep, and error genuinely tracks `reltol` — 1.3e-1 → 2.1e-2
+  → 1.2e-2 → 2.3e-3 → 1.8e-4 → 1.4e-4 → 1.3e-4 (`1e-3` through `1e-9`) —
+  before flattening at a hard ~1.3e-4 floor. Head-to-head with Cadnip IDA:
+  even VACASK's *best-ever* run (`reltol=1e-9`: 1.3e-4 error, 0.157s) is both
+  less accurate *and* slower than Cadnip IDA's *loosest, cheapest* setting
+  (`reltol=1e-3`: 1.1e-4 error, 0.126s) — Cadnip's floor point alone beats
+  VACASK's ceiling on both axes. Cadnip keeps converging past that, down to
+  ~3e-6 — an accuracy range VACASK simply cannot reach on this circuit at any
+  cost, a real engine-level gap rather than a benchmark-config artifact.
+- **`vntol` tied numerically to `reltol` is a simplification, flagged as such
+  by the maintainer, but checked here not to bias these specific results.**
+  Both VACASK sweeps (`run_vacask_once` in `wpd_common.jl`) pass `vntol=reltol`
+  — conflating an absolute voltage tolerance with a dimensionless relative
+  one, which the maintainer correctly points out "lacks universal
+  applicability across circuits." Checked directly: re-running `rc` at
+  `tran_maxord=4` with `vntol` fixed at `1e-6` (decoupled from `reltol`)
+  instead of tied to it gives the same error to 3 significant figures at
+  every `reltol` tested (e.g. `reltol=1e-9`: 3.833e-5 tied vs. 3.833e-5
+  fixed) — because every case's node voltages sit in a similar O(0.1-50V)
+  band where the two happen to coincide numerically. Left as-is since it
+  doesn't change the numbers, but it's not a generally sound pattern to reuse
+  for a circuit with a very different voltage scale.
 
 ## History
 

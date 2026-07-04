@@ -29,8 +29,8 @@
       "tspan": [0.0, 0.02],
       "output": ["2"],
       "golden": "analytic",
-      "_vacask_override_comment": "VACASK's reltol-only sweep plateaus at ~1-7% error regardless of tolerance (never resolving the 1us pulse edges - a single global maxstep can't be edge-only, so reltol stops driving step size once maxstep binds everywhere). Tested maxstep=1us (real throughput benchmark's dtmax): ~1000x error drop. Tested 5x looser (5us): same accuracy, 5x cheaper - real headroom, not a knife-edge value, so that's the override used: VACASK's best reasonable shot at this circuit, not its worst-case default nor an artificially golden-tight one.",
-      "vacask_override": {"maxstep": 5e-6}
+      "_vacask_override_comment": "VACASK's reltol-only sweep at tran_maxord=5 plateaus at ~1.5-7% error regardless of tolerance - NOT a breakpoint/edge-skipping problem (verified: 5-6 points land inside every 1us edge at every reltol). Root cause, isolated by sweeping only tran_maxord at fixed reltol=1e-6: orders 1-4 converge normally (npoints/error: 4449/6.5e-4, 891/1.0e-4, 551/1.2e-4, 550/6.3e-5) but order 5 alone jumps 3 orders of magnitude worse (448/6.9e-2) while taking FEWER steps - a step-size/LTE-controller defect specific to order 5 on this circuit (filter/graetz do not show it at order 5 - see README). Reported upstream: https://codeberg.org/arpadbuermen/VACASK/issues/83. Fix: cap tran_maxord at 4 instead of the benchmark-wide default of 5 - this restores genuine reltol-driven adaptive convergence (1.5e-4 at reltol=1e-3 down to ~3.8e-5 at reltol=1e-9) with NO maxstep clamp needed at all, unlike the earlier maxstep=5e-6 workaround which capped every step in the run just to avoid the order-5 bug.",
+      "vacask_override": {"maxord": 4}
     },
     "graetz": {
       "title": "Graetz bridge full-wave rectifier (nonlinear diode)",
