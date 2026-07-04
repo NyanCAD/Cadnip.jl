@@ -379,7 +379,16 @@ function cadnip_golden(case, spec)
     error("case $case: Cadnip golden failed to converge at every tolerance tried")
 end
 
-function run_vacask_sweep(case, spec, want_golden)
+"""
+`tag`/`maxord_force` add a second, independent VACASK series without
+touching the primary one: pass `tag="_gear2", maxord_force=2` to sweep
+gear2 (2nd-order Gear/BDF, A-stable) instead of whatever order the case's
+`vacask_override`/`vacask_tran_maxord` picks. Output files are namespaced
+by `tag` so the two series never collide. `want_golden` is only ever true
+for the primary (tag="") call - the golden is independent of which
+comparison curves get plotted against it.
+"""
+function run_vacask_sweep(case, spec, want_golden; tag::String="", maxord_force=nothing)
     t0, t1 = Float64(spec["tspan"][1]), Float64(spec["tspan"][2])
     out_nodes = String.(spec["output"])
     reltols = Float64.(CFG["reltols"])
@@ -397,11 +406,15 @@ function run_vacask_sweep(case, spec, want_golden)
     # the same method/maxord/extra_opts (but keeps its own fine maxstep, not
     # `oms`) - a circuit that needs e.g. nr_residualcheck=0 to avoid aborting
     # in the reltol sweep needs it just as much for its own golden (mul's
-    # golden aborted before this was applied here).
+    # golden aborted before this was applied here). `maxord_force` (the
+    # gear2 comparison series) overrides the order only - any maxstep/
+    # extra_opts a case needs to avoid aborting still apply regardless of
+    # order (confirmed on `mul`: the residualcheck abort happens at every
+    # order 1-5 alike).
     ov = get(spec, "vacask_override", Dict{String,Any}())
     oms = haskey(ov, "maxstep") ? Float64(ov["maxstep"]) : t1
     omethod = haskey(ov, "method") ? String(ov["method"]) : nothing
-    omaxord = haskey(ov, "maxord") ? Int(ov["maxord"]) : nothing
+    omaxord = maxord_force !== nothing ? maxord_force : (haskey(ov, "maxord") ? Int(ov["maxord"]) : nothing)
     oextra = String(get(ov, "extra_opts", ""))
 
     if want_golden
@@ -413,14 +426,14 @@ function run_vacask_sweep(case, spec, want_golden)
         @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
     end
 
-    summary = open(joinpath(OUT, "vacask_$(case).csv"), "w")
+    summary = open(joinpath(OUT, "vacask$(tag)_$(case).csv"), "w")
     println(summary, "reltol,time_s,timepoints")
     for r in reltols
-        @printf("  vacask reltol=%.0e ... ", r); flush(stdout)
+        @printf("  vacask%s reltol=%.0e ... ", tag, r); flush(stdout)
         try
             ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes;
                                                maxstep=oms, method=omethod, maxord=omaxord, extra_opts=oextra)
-            write_wave(joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv"), ti, sig)
+            write_wave(joinpath(OUT, "vacask$(tag)_$(case)_$(reltol_tag(r)).csv"), ti, sig)
             println(summary, "$r,$rt,$tp")
             @printf("%.3fs %d pts\n", rt, tp)
         catch e
@@ -482,17 +495,24 @@ function analyze(case, spec)
         push!(table, ("Cadnip $solver", r, err, something(t, NaN)))
     end
 
-    vpath = joinpath(OUT, "vacask_$(case).csv")
-    if isfile(vpath)
+    # Two VACASK series: the primary (case's own picked order/overrides) and
+    # a fixed gear2 comparison (2nd-order Gear/BDF, A-stable - the order the
+    # maintainer says circuit simulators historically stick to). Both are
+    # scored against the SAME golden (vgt/vgv) - the question is how an
+    # A-stable low-order method scales against whatever order this case
+    # actually uses, not against a different truth.
+    for (label, tag) in (("VACASK", ""), ("VACASK gear2", "_gear2"))
+        vpath = joinpath(OUT, "vacask$(tag)_$(case).csv")
+        isfile(vpath) || continue
         for row in first(read_table(vpath))
             r = parse(Float64, row["reltol"]); t = tryparse(Float64, get(row, "time_s", "NaN"))
-            wp = joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv")
+            wp = joinpath(OUT, "vacask$(tag)_$(case)_$(reltol_tag(r)).csv")
             isfile(wp) || continue
             tw, vw = read_wave(wp)
             err = run_error(tw, vw, vgt, vgv)
             isfinite(err) && t !== nothing && isfinite(t) &&
-                push!(get!(curves, "VACASK", Tuple{Float64,Float64}[]), (err, t))
-            push!(table, ("VACASK", r, err, something(t, NaN)))
+                push!(get!(curves, label, Tuple{Float64,Float64}[]), (err, t))
+            push!(table, (label, r, err, something(t, NaN)))
         end
     end
 
@@ -527,7 +547,8 @@ free slot rather than erroring, so a new solver added to `SOLVERS` degrades
 gracefully instead of blowing up plotting.
 """
 const SERIES_ORDER = ["Cadnip IDA", "Cadnip FBDF", "Cadnip Rodas5P", "Cadnip Rodas6P",
-                       "Cadnip Kvaerno5", "Cadnip RadauIIA5", "Cadnip KenCarp4", "VACASK"]
+                       "Cadnip Kvaerno5", "Cadnip RadauIIA5", "Cadnip KenCarp4", "VACASK",
+                       "VACASK gear2"]
 series_style_index(label) = something(findfirst(==(label), SERIES_ORDER), length(SERIES_ORDER) + 1)
 
 """
@@ -538,7 +559,7 @@ reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
 have known cross-font/cross-renderer width bugs that misalign the plot; plain
 ASCII (0-127) is guaranteed single-column in any monospace font.
 """
-const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%", "&"]
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%", "&", "="]
 
 function ascii_plot(title, curves)
     labels = sort(collect(keys(curves)))
@@ -596,8 +617,8 @@ function save_plot(case, title, curves)
     plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
                       ylabel="runtime (s)", title="Work-precision: $title",
                       legend=:outertopright, size=(900, 600), dpi=150)
-    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon, :hexagon)
-    colors = (:dodgerblue, :orangered, :seagreen, :purple, :goldenrod, :teal, :magenta, :black)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon, :hexagon, :cross)
+    colors = (:dodgerblue, :orangered, :seagreen, :purple, :goldenrod, :teal, :magenta, :black, :brown)
     for label in labels
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
@@ -676,9 +697,11 @@ function main()
 
         # VACASK sweep always runs where it can; also produce the VACASK golden
         # when this case is pinned to it OR uses "self" (which needs both
-        # goldens, not just one).
+        # goldens, not just one). The gear2 comparison series never builds a
+        # golden of its own - it's scored against the same one as the primary.
         if VACASK_BIN !== nothing
             run_vacask_sweep(case, spec, golden == "vacask" || golden == "self")
+            run_vacask_sweep(case, spec, false; tag="_gear2", maxord_force=2)
         elseif golden == "vacask"
             error("case $case pinned to VACASK golden but VACASK binary not found")
         end
