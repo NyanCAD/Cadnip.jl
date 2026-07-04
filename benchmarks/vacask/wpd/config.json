@@ -28,7 +28,9 @@
       "title": "RC circuit driven by a pulse train (linear)",
       "tspan": [0.0, 0.02],
       "output": ["2"],
-      "golden": "analytic"
+      "golden": "analytic",
+      "_vacask_override_comment": "VACASK's reltol-only sweep plateaus at ~1-7% error regardless of tolerance (never resolving the 1us pulse edges - a single global maxstep can't be edge-only, so reltol stops driving step size once maxstep binds everywhere). Tested maxstep=1us (real throughput benchmark's dtmax): ~1000x error drop. Tested 5x looser (5us): same accuracy, 5x cheaper - real headroom, not a knife-edge value, so that's the override used: VACASK's best reasonable shot at this circuit, not its worst-case default nor an artificially golden-tight one.",
+      "vacask_override": {"maxstep": 5e-6}
     },
     "graetz": {
       "title": "Graetz bridge full-wave rectifier (nonlinear diode)",
@@ -40,7 +42,9 @@
       "title": "Diode voltage multiplier (nonlinear, stiff)",
       "tspan": [0.0, 5e-4],
       "output": ["20"],
-      "golden": "cadnip"
+      "golden": "cadnip",
+      "_vacask_override_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. mul's source is a smooth sine (vs type=sine), not a pulse - there's no edge to resolve, so forcing a fixed maxstep the way rc needs it would just be a crutch masking whether reltol-driven stepping actually works, not a fair test of the engine. The override leaves maxstep unbounded (reltol/vntol alone drive step size) and method/maxord at the benchmark's standard tran_method=gear/tran_maxord=5 (VACASK's best, same as every other case - NOT the throughput sim's fixed-order gear2, which was chosen there for raw speed, not accuracy). It only adds the real throughput sim's NR/LTE tuning (nr_residualcheck, tran_lteratio, tran_itl from mul/vacask/runme.sim, never exercised by the plain reltol sweep) - legitimate robustness tuning, not artificial fine-stepping or a lower-order handicap.",
+      "vacask_override": {"extra_opts": "nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50"}
     }
   }
 }

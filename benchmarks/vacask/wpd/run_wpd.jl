@@ -279,13 +279,14 @@ function parse_vacask_elapsed(stdout_text::AbstractString)
 end
 
 "Run VACASK once; return (t, signal, timepoints, runtime_s) or throw on failure."
-function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2])
+function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2],
+                          method=nothing, maxord=nothing, extra_opts="")
     step = (tspan[2] - tspan[1]) / Int(CFG["n_grid"])
-    method = String(get(CFG, "vacask_tran_method", "gear"))
-    maxord = Int(get(CFG, "vacask_tran_maxord", 5))
+    m = method === nothing ? String(get(CFG, "vacask_tran_method", "gear")) : method
+    mo = maxord === nothing ? Int(get(CFG, "vacask_tran_maxord", 5)) : maxord
     sim = sim_body(case) * """
     control
-      options reltol=$(reltol) vntol=$(vntol) tran_method="$(method)" tran_maxord=$(maxord)
+      options reltol=$(reltol) vntol=$(vntol) tran_method="$(m)" tran_maxord=$(mo) $(extra_opts)
       analysis tran1 tran step=$(step) stop=$(tspan[2]) maxstep=$(maxstep)
     endc
     """
@@ -411,12 +412,26 @@ function run_vacask_sweep(case, spec, want_golden)
         @printf("%.3fs %d pts\n", rt, tp); flush(stdout)
     end
 
+    # A case can override VACASK's default (unbounded maxstep, benchmark's
+    # standard tran_method=gear/tran_maxord=5, no extra options) via
+    # config.json's `vacask_override` - see per-case `_vacask_override_comment`
+    # for why. This is the ONE VACASK run plotted for the case, not an extra
+    # series alongside the raw default - a case either needs a fair override
+    # or it doesn't, there's no value in also showing the version we already
+    # know is unrepresentative.
+    ov = get(spec, "vacask_override", Dict{String,Any}())
+    oms = haskey(ov, "maxstep") ? Float64(ov["maxstep"]) : t1
+    omethod = haskey(ov, "method") ? String(ov["method"]) : nothing
+    omaxord = haskey(ov, "maxord") ? Int(ov["maxord"]) : nothing
+    oextra = String(get(ov, "extra_opts", ""))
+
     summary = open(joinpath(OUT, "vacask_$(case).csv"), "w")
     println(summary, "reltol,time_s,timepoints")
     for r in reltols
         @printf("  vacask reltol=%.0e ... ", r); flush(stdout)
         try
-            ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes)
+            ti, sig, tp, rt = run_vacask_once(case, r, r * ascale, (t0, t1), out_nodes;
+                                               maxstep=oms, method=omethod, maxord=omaxord, extra_opts=oextra)
             write_wave(joinpath(OUT, "vacask_$(case)_$(reltol_tag(r)).csv"), ti, sig)
             println(summary, "$r,$rt,$tp")
             @printf("%.3fs %d pts\n", rt, tp)
@@ -477,6 +492,7 @@ function analyze(case, spec)
         end
     end
 
+
     # cross-check: if both analytic and a VACASK ref exist, report their agreement
     ap = joinpath(OUT, "analytic_$(case).csv"); rp = joinpath(OUT, "ref_$(case).csv")
     xcheck = ""
@@ -489,6 +505,20 @@ function analyze(case, spec)
 end
 
 """
+Fixed label -> style-index mapping so the same solver (or VACASK) gets the
+same marker/color in every case's plot, not just a consistent position
+within whichever subset of solvers happens to run on that particular case
+(e.g. RadauIIA5 would otherwise shift slots between filter/rc, which also
+run Kvaerno5, and graetz, which doesn't). Covers every label `solvers_for`
+or the VACASK sweep can produce; unrecognized labels fall back to the next
+free slot rather than erroring, so a new solver added to `SOLVERS` degrades
+gracefully instead of blowing up plotting.
+"""
+const SERIES_ORDER = ["Cadnip IDA", "Cadnip FBDF", "Cadnip Rodas5P", "Cadnip Rodas6P",
+                       "Cadnip Kvaerno5", "Cadnip RadauIIA5", "Cadnip KenCarp4", "VACASK"]
+series_style_index(label) = something(findfirst(==(label), SERIES_ORDER), length(SERIES_ORDER) + 1)
+
+"""
 Distinct pure-ASCII markers, one per series, so curves stay distinguishable even
 without color (color support in GITHUB_STEP_SUMMARY is unconfirmed, so it's kept
 off - see README). `canvas=AsciiCanvas`/`border=:ascii` are used for the same
@@ -496,7 +526,7 @@ reason: named UnicodePlots markers/canvases (Braille dots, box-drawing borders)
 have known cross-font/cross-renderer width bugs that misalign the plot; plain
 ASCII (0-127) is guaranteed single-column in any monospace font.
 """
-const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@"]
+const ASCII_MARKERS = ["o", "x", "+", "*", "#", "@", "%", "&"]
 
 function ascii_plot(title, curves)
     labels = sort(collect(keys(curves)))
@@ -516,10 +546,10 @@ function ascii_plot(title, curves)
     ylim = (minimum(ally) / 2, maximum(ally) * 2)
 
     plt = nothing
-    for (i, label) in enumerate(labels)
+    for label in labels
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
-        marker = ASCII_MARKERS[mod1(i, length(ASCII_MARKERS))]
+        marker = ASCII_MARKERS[mod1(series_style_index(label), length(ASCII_MARKERS))]
         # Embed the marker in the legend text itself ("[o] Cadnip IDA") - the
         # legend otherwise lists only names, with no way to tell which marker
         # glyph belongs to which series once color is off.
@@ -554,11 +584,13 @@ function save_plot(case, title, curves)
     plt = Plots.plot(; xscale=:log10, yscale=:log10, xlabel="relative L2 error",
                       ylabel="runtime (s)", title="Work-precision: $title",
                       legend=:outertopright, size=(900, 600), dpi=150)
-    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5)
-    for (i, label) in enumerate(labels)
+    markers = (:circle, :xcross, :rect, :diamond, :utriangle, :star5, :pentagon, :hexagon)
+    colors = (:dodgerblue, :orangered, :seagreen, :purple, :goldenrod, :teal, :magenta, :black)
+    for label in labels
         pts = sort(curves[label])
         x = Float64[p[1] for p in pts]; y = Float64[p[2] for p in pts]
-        Plots.plot!(plt, x, y; label=label, marker=markers[mod1(i, length(markers))],
+        k = mod1(series_style_index(label), length(markers))
+        Plots.plot!(plt, x, y; label=label, marker=markers[k], color=colors[k],
                     markersize=6, linewidth=2)
     end
     for ext in ("png", "svg")

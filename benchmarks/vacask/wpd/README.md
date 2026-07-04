@@ -125,6 +125,19 @@ data point:
   also tolerates a general (non-diagonal) mass matrix in principle — but
   empirically it still goes `:Unstable` past `reltol≈1e-5` on `graetz` and
   everywhere on `mul`, so it's added to `filter`/`rc`/`graetz` but not `mul`.
+- **RadauIIA5 has a one-tolerance outlier on `rc`, reproduced and localized.**
+  At `reltol=1e-7` (only) its error jumps to 5.5e-3 — four orders of magnitude
+  worse than its neighbors (`1e-6`: 4.6e-7, `1e-8`: 4.1e-7) despite `retcode`
+  reporting `Success`. Reproduced standalone (no VACASK involved) and traced to
+  a single bad step: `t=1.0020ms → 1.0030ms`, the pulse's falling edge, which
+  is bounded on both sides by explicit `tstops` exactly 1us apart (the fall
+  duration). It's the *only* step in that run with a recorded LTE rejection
+  (`rejects=1`); every other tolerance has zero rejects. The true solution
+  barely moves over that 1us window (τ=1ms), but the accepted step reports a
+  drop ~100x too large. Looks like an `OrdinaryDiffEqFIRK` step-size-selection
+  edge case with a forced step sandwiched between two closely-spaced `tstops`,
+  not a Cadnip stamping bug — not chased further here since it's upstream of
+  Cadnip and affects one point out of 35 RadauIIA5 runs across all cases.
 - **KenCarp4 and Rodas6P are the two solvers that get *any* correct points on
   `mul` beyond IDA/FBDF.** Both fail outright on `graetz` (`:Unstable`/
   `MaxIters` at every tolerance), but on `mul` KenCarp4 succeeds at the two
@@ -241,6 +254,50 @@ what's already folded into the table above:
   VACASK's error stops improving past a point (e.g. the pulse-train `rc`): its LTE
   controller settles at a step count well short of the accuracy its fine-`maxstep`
   golden reaches. Cadnip's solvers keep converging.
+- **Giving VACASK a fair, reasonable shot on `rc`/`mul` confirms the plateau/abort
+  is a controller/tuning gap, not an engine ceiling — and a single global
+  `maxstep` can't be "loose except at the edges".** VACASK's `analysis tran`
+  only exposes one scalar `maxstep` applied to every step of the whole run —
+  there's no separate breakpoints-only directive in anything this repo's
+  `.sim` files use, so tightening it enough to catch a sharp source edge also
+  caps every other step in the run, uniformly. `rc` and `mul` each override
+  the plain reltol-only sweep with a fair configuration (`config.json`'s
+  `vacask_override`) instead of also plotting the raw default alongside it —
+  there's no value in showing a version already known to be unrepresentative,
+  so each case gets exactly one VACASK curve, built from that maxstep
+  tradeoff plus (for `mul`) the real throughput sim's own NR/LTE tuning:
+  - `rc`: `maxstep=1us` (the real throughput benchmark's `dtmax`) confirmed
+    fixing the 1.5-7% unbounded plateau (~1000x error drop, to ~2-7e-5) — the
+    unbounded run never resolves the 1us pulse edges without a step bound.
+    Swept looser from there: `5us` (5x looser) gives the *same* accuracy at
+    *5x lower* runtime (0.011s vs 0.051s) — real headroom, not a knife-edge
+    value, so `5us` is what's plotted as "fair". Error still doesn't improve
+    with tighter `reltol` at either step size, though: once `maxstep` binds,
+    `reltol` stops driving step size, and the residual ~2-7e-5 is the gear
+    method's local truncation error on the ramp itself, not a tolerance-driven
+    quantity — no single global `maxstep` gets both "resolves the edge" and
+    "`reltol` still matters everywhere else".
+  - `mul`: unlike `rc`, its source is a smooth sine, not a pulse — there's no
+    edge to resolve, so forcing `maxstep` here would just be a crutch masking
+    whether `reltol`-driven stepping actually works, not a fair test of the
+    engine. `mul`'s override leaves `maxstep` unbounded *and* keeps
+    `tran_method=gear`/`tran_maxord=5` (VACASK's best, same as every other
+    case, not the throughput sim's fixed-order `gear2` — that choice was for
+    raw speed, not accuracy) — it only adds the real throughput sim's NR/LTE
+    tuning (`nr_residualcheck=0`, `tran_lteratio=3.5`, `tran_itl=50` from
+    `mul/vacask/runme.sim`, never exercised by the plain `reltol` sweep).
+    That tuning alone is enough: no abort anywhere in the sweep, and error
+    genuinely tracks `reltol` — 1.3e-1 → 2.1e-2 → 1.2e-2 → 2.3e-3 → 1.8e-4 →
+    1.4e-4 → 1.3e-4 (`1e-3` through `1e-9`) — before flattening at a hard
+    ~1.3e-4 floor. So the abort really was the NR/LTE-tuning gap, not a
+    step-resolution problem. Head-to-head with Cadnip IDA: even VACASK's
+    *best-ever* run (`reltol=1e-9`: 1.3e-4 error, 0.157s) is both less
+    accurate *and* slower than Cadnip IDA's *loosest, cheapest* setting
+    (`reltol=1e-3`: 1.1e-4 error, 0.126s) — Cadnip's floor point alone beats
+    VACASK's ceiling on both axes. Cadnip keeps converging past that, down to
+    ~3e-6 — an accuracy range VACASK simply cannot reach on this circuit at
+    any cost, a real engine-level gap rather than a benchmark-config
+    artifact.
 
 ## History
 
