@@ -23,13 +23,12 @@ export Wave
 
 A set of breakpoint times for a single source.
 
-- `times`: explicit times. For an aperiodic spec (`period == 0.0`) these are
-  absolute times. For a periodic spec they are offsets within one period,
-  repeated at `times .+ k*period`.
-- `period`: `0.0` for aperiodic (times used as-is); otherwise the source
-  repeats every `period` seconds.
-- `count`: number of repetitions for a periodic spec, `-1` for unbounded
-  (repeat until the end of the simulation tspan). Ignored when `period <= 0`.
+- `times`: absolute times of each breakpoint's first occurrence. For a
+  periodic spec the whole set repeats at `times .+ k*period` for `k >= 0`.
+- `period`: `0.0` for aperiodic (times occur exactly once); otherwise the
+  source repeats every `period` seconds.
+- `count`: only read when `period > 0`: number of repetitions, `-1` for
+  unbounded (repeat until the end of the simulation tspan).
 """
 struct BreakpointSpec
     times::Vector{Float64}
@@ -37,7 +36,7 @@ struct BreakpointSpec
     count::Int
 end
 
-BreakpointSpec(times::Vector{Float64}) = BreakpointSpec(times, 0.0, 0)
+BreakpointSpec(times::Vector{Float64}) = BreakpointSpec(times, 0.0, -1)
 
 export BreakpointSpec
 

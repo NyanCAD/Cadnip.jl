@@ -1742,6 +1742,11 @@ Structure discovery happens once, then values are updated in-place each iteratio
 - `du0`: Initial derivatives (default: computed for consistency)
 - `explicit_jacobian`: Whether to provide explicit Jacobian to solver (default: true).
   Set to `false` if you encounter IDA initialization failures with time-dependent sources.
+- `auto_tstops`: Derive solver `tstops` from PWL/PULSE/SIN source breakpoints
+  and store them in `prob.kwargs` (default: true). Note: passing `tstops` to
+  `solve` directly overrides `prob.kwargs` (SciML kwarg precedence), silently
+  dropping the auto-derived stops — merge them yourself, or use `tran!`, which
+  merges for you.
 
 # Example
 ```julia
@@ -1838,6 +1843,11 @@ The circuit is automatically compiled for ~10x faster evaluation.
 
 # Keyword Arguments
 - `u0`: Initial state (default: computed by CedarDCOp during solve)
+- `auto_tstops`: Derive solver `tstops`/`d_discontinuities` from PWL/PULSE/SIN
+  source breakpoints and store them in `prob.kwargs` (default: true). Note:
+  passing `tstops` to `solve` directly overrides `prob.kwargs` (SciML kwarg
+  precedence), silently dropping the auto-derived stops — merge them yourself,
+  or use `tran!`, which merges for you.
 
 # Solver Recommendations
 - Use `Rodas5P()` - fast Rosenbrock method, handles singular mass matrices

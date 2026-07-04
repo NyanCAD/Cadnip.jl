@@ -130,8 +130,12 @@ end
 # don't pirate Base.sin
 function spsin(vo, va, freq, td=0, theta=0, phase=0, ncyles=Base.Inf)
     # see https://ltwiki.org/LTspiceHelp/LTspiceHelp/V_Voltage_Source.htm
-    if td < var"$time"() < ncyles/freq
-        vo+va*Base.exp(-(var"$time"()-td)*theta)*Base.sind(360*freq*(var"$time"()-td)+phase)
+    # The waveform itself lives in MNA.SinWave (shared with the SPICE SIN
+    # source path); this wrapper only adds the ncycles cutoff. SinWave's
+    # t < td branch returns the same vo + va*sind(phase) constant.
+    t = var"$time"()
+    if t < ncyles/freq
+        Cadnip.MNA.SinWave(vo, va, freq, td, theta, phase)(t)
     else
         vo + va*Base.sind(phase)
     end

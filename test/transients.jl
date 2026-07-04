@@ -299,7 +299,7 @@ const ω_val = 1
 end
 
 @testset "Auto tstops (breakpoint detection)" begin
-    using Cadnip.MNA: PulseWave, PWLWave, expand_breakpoints, BreakpointSpec
+    using Cadnip.MNA: PulseWave, PWLWave, expand_breakpoints, breakpoints
 
     # PULSE edges: td, td+tr, td+tr+pw, td+tr+pw+tf, repeating every `per`.
     function build_pulse_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
@@ -319,8 +319,11 @@ end
         return ctx
     end
 
+    # Expected edges derive from breakpoints() on the same wave the circuit
+    # stamps, so this testset exercises the real edge math rather than a
+    # hand-copied reimplementation of it.
     pulse_edges(td, per, tspan) = expand_breakpoints(
-        [BreakpointSpec([td, td + 1e-6, td + 4e-6, td + 5e-6], per, -1)], tspan)
+        [breakpoints(PulseWave(0.0, 1.0, td, 1e-6, 1e-6, 3e-6, per))], tspan)
 
     tspan = (0.0, 30e-6)
     circuit = MNACircuit(build_pulse_rc; td=1e-6, per=10e-6)

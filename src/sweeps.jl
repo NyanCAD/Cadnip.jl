@@ -565,6 +565,20 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                           kwargs...)
 end
 
+# Merge user-supplied tstops/d_discontinuities with the auto-computed ones the
+# problem constructors stash in prob.kwargs, then solve. solve()'s kwarg splat
+# would otherwise silently let one clobber the other. The DAE path never puts
+# d_discontinuities in prob.kwargs (Sundials rejects the kwarg), so this single
+# helper serves all three dispatchers.
+function _solve_merged(prob, solver; tstops=nothing, d_discontinuities=nothing, kwargs...)
+    tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
+    d_discontinuities = MNA._merge_tstops(d_discontinuities, get(prob.kwargs, :d_discontinuities, nothing))
+    extra = (;)
+    tstops === nothing || (extra = merge(extra, (; tstops)))
+    d_discontinuities === nothing || (extra = merge(extra, (; d_discontinuities)))
+    return SciMLBase.solve(prob, solver; extra..., kwargs...)
+end
+
 # DAE solver dispatch (IDA, DFBDF, etc.)
 # Note: explicit_jacobian defaults to true for Sundials solvers (IDA) for performance.
 # OrdinaryDiffEq DAE solvers (DFBDF, DABDF2, DImplicitEuler) need explicit_jacobian=false
@@ -578,7 +592,7 @@ end
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
-                        initializealg=MNA.CedarTranOp(), auto_tstops::Bool=true, tstops=nothing,
+                        initializealg=MNA.CedarTranOp(), auto_tstops::Bool=true,
                         kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
@@ -587,13 +601,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
     end
 
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian, auto_tstops=auto_tstops)
-    # prob.kwargs already carries the auto-computed tstops (if any, from
-    # auto_tstops above). Merge with a user-supplied tstops here explicitly -
-    # solve()'s kwarg splat would otherwise silently let one clobber the other.
-    tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
-    tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
-    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., kwargs...)
+    return _solve_merged(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
@@ -602,15 +610,10 @@ end
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
                         abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(),
-                        auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
+                        auto_tstops::Bool=true,
                         kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan; auto_tstops=auto_tstops)
-    tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
-    d_discontinuities = MNA._merge_tstops(d_discontinuities, get(prob.kwargs, :d_discontinuities, nothing))
-    tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
-    dd_kwargs = d_discontinuities === nothing ? (;) : (; d_discontinuities=d_discontinuities)
-    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., dd_kwargs..., kwargs...)
+    return _solve_merged(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
 # DDE solver dispatch (MethodOfSteps) - for circuits with absdelay
@@ -619,15 +622,10 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::DelayDiffEq.MethodOfSteps;
                         abstol=1e-10, reltol=1e-8, constant_lags=Float64[],
                         initializealg=MNA.CedarTranOp(),
-                        auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
+                        auto_tstops::Bool=true,
                         kwargs...)
     prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags, auto_tstops=auto_tstops)
-    tstops = MNA._merge_tstops(tstops, get(prob.kwargs, :tstops, nothing))
-    d_discontinuities = MNA._merge_tstops(d_discontinuities, get(prob.kwargs, :d_discontinuities, nothing))
-    tstops_kwargs = tstops === nothing ? (;) : (; tstops=tstops)
-    dd_kwargs = d_discontinuities === nothing ? (;) : (; d_discontinuities=d_discontinuities)
-    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg,
-                           tstops_kwargs..., dd_kwargs..., kwargs...)
+    return _solve_merged(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
 """
