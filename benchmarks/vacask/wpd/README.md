@@ -89,6 +89,13 @@ configurable via `vacask_tran_method` / `vacask_tran_maxord` in `config.json`.
 upstream as [issue #83](https://codeberg.org/arpadbuermen/VACASK/issues/83));
 `filter`/`graetz`/`mul` keep the order-5 default, which is fine or best there.
 
+Every plot also carries a second, fixed **`VACASK gear2`** series (2nd-order
+Gear/BDF) alongside the case's own best-order curve, regardless of what that
+case's default/override picks — per the maintainer, circuit simulators
+historically stick to order ≤ 2 for A-stability, so it's worth seeing that
+tradeoff directly rather than only ever plotting whichever order a case
+happens to use. Both series are scored against the same golden.
+
 ## Solver families per case
 
 Not a blanket linear/nonlinear split — viability was checked empirically per case
@@ -354,8 +361,22 @@ the items below reflect the maintainer's diagnosis, not just ours.
   exactly `filter`'s starting point). Same story on `rc` post-`maxord=4`
   fix: orders 2/3/4 all land at 3.2-3.8e-5 at `reltol=1e-9`, `abstol=1e-18`
   and `tran_lteratio` sweeps change nothing. Every documented tuning knob
-  was tried; none of them touch it. This is a real, open item — likely a
-  fixed absolute-error contribution from somewhere other than the exposed
+  was tried; none of them touch it.
+  **A gmin/leakage-conductance origin is ruled out, not just untested:**
+  `gmin` isn't exposed as a global option in this VACASK build (only
+  `gshunt` and `homotopy_*gmin*`, which are DC-operating-point homotopy
+  convergence aids, not something applied through transient - confirmed by
+  binary symbol names like `OpNRSolver::loadShunts`); explicitly forcing
+  `gshunt=0`/`1e-15` and `homotopy_startgmin=0 homotopy_maxgmin=0` on `rc`
+  at `reltol=1e-9` left the error completely unchanged (3.8330e-5 in every
+  variant, to 5 significant figures). More conclusively: a fixed leakage
+  conductance anywhere would make the relative error scale with circuit
+  impedance (a bigger `R` means the leak carries proportionally more
+  current), so `rc`'s `R`/`C` were rescaled 1Ω/1F down to 1MΩ/1nF (same
+  `τ=RC=1ms`, same pulse) — error stayed at 3.83-3.84e-5 across all 6
+  decades of impedance. No leakage-conductance mechanism, gmin or
+  otherwise, produces that. This is a real, open item — likely a fixed
+  absolute-error contribution from somewhere other than the exposed
   tolerance options (candidates not yet checked: DC operating-point
   accuracy, order-restart cost after the initial breakpoint, or the "Clock
   resolution" the simulator reports in its stats) — not yet root-caused
