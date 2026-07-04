@@ -173,23 +173,6 @@ function output_signal(sol, out_nodes)
     return Vector{Float64}(sol[Symbol(out_nodes[1])]) .- Vector{Float64}(sol[Symbol(out_nodes[2])])
 end
 
-"Pulse-edge breakpoints so adaptive solvers don't step over the sharp source edges."
-function case_tstops(case, tspan)
-    case == "rc" || return Float64[]
-    td, tr, pw, tf, per = 1e-6, 1e-6, 1e-3, 1e-6, 2e-3
-    bps = Float64[]; k = 0
-    while true
-        base = td + k * per
-        base > tspan[2] && break
-        for off in (0.0, tr, tr + pw, tr + pw + tf)
-            e = base + off
-            tspan[1] <= e <= tspan[2] && push!(bps, e)
-        end
-        k += 1
-    end
-    return bps
-end
-
 #------------------------------------------------------------------------------#
 # VACASK netlists (match the cedarsim/runme.sp circuits)
 #------------------------------------------------------------------------------#
@@ -320,7 +303,6 @@ function run_cadnip_sweep(case, spec)
     out_nodes = String.(spec["output"])
     reltols = Float64.(CFG["reltols"])
     ascale = Float64(CFG["abstol_scale"])
-    tstops = case_tstops(case, (t0, t1))
 
     summary = open(joinpath(OUT, "cadnip_$(case).csv"), "w")
     println(summary, "solver,reltol,median_time_s,steps,rejects,nniter,retcode")
@@ -330,8 +312,10 @@ function run_cadnip_sweep(case, spec)
         @printf("  cadnip %-14s reltol=%.0e ... ", sname, r); flush(stdout)
         try
             c = setup(builder)
+            # auto_tstops=true (tran!'s default) derives PULSE/PWL/SIN source
+            # breakpoints automatically - no more hand-derived case_tstops.
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
-                        tstops=tstops, dense=false, maxiters=50_000_000)
+                        dense=false, maxiters=50_000_000)
             # A solver can bail out early (e.g. retcode :Unstable) without
             # throwing. Only accept runs that actually reached t1 - otherwise
             # the truncated waveform is not comparable to the others and
@@ -350,7 +334,7 @@ function run_cadnip_sweep(case, spec)
                        sol.t, output_signal(sol, out_nodes))
             ct = setup(builder)
             bench = @benchmark tran!($ct, ($t0, $t1); abstol=$a, reltol=$r, solver=$(sfn()),
-                                     tstops=$tstops, dense=false, maxiters=50_000_000) samples=3 evals=1 seconds=120
+                                     dense=false, maxiters=50_000_000) samples=3 evals=1 seconds=120
             tmed = median(bench.times) / 1e9
             println(summary, "$sname,$r,$tmed,$steps,$rejects,$nniter,$(sol.retcode)")
             @printf("%.3fs steps=%d\n", tmed, steps)
@@ -376,13 +360,12 @@ function cadnip_golden(case, spec)
     t0, t1 = Float64(spec["tspan"][1]), Float64(spec["tspan"][2])
     out_nodes = String.(spec["output"])
     grid = collect(range(t0, t1; length=Int(CFG["n_grid"]) * 50))
-    tstops = case_tstops(case, (t0, t1))
     for reltol in (1e-11, 1e-10, 1e-9, 1e-8, 1e-7)
         @printf("  cadnip golden reltol=%.0e ... ", reltol); flush(stdout)
         try
             c = setup(builder)
             sol = tran!(c, (t0, t1); abstol=reltol, reltol=reltol, solver=mk_ida(),
-                        saveat=grid, tstops=tstops, maxiters=100_000_000)
+                        saveat=grid, maxiters=100_000_000)
             if sol.retcode == ReturnCode.Success && isapprox(sol.t[end], t1; rtol=1e-6)
                 write_wave(joinpath(OUT, "cadnip_ref_$(case).csv"), sol.t, output_signal(sol, out_nodes))
                 println("ok"); flush(stdout)

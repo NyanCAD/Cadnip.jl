@@ -40,6 +40,10 @@ module MNA
 using Printf
 using ForwardDiff
 
+# Breakpoint protocol (Wave, BreakpointSpec, breakpoints()) - needed by
+# context.jl's MNAContext field and devices.jl's wave structs
+include("breakpoints.jl")
+
 # Context and stamping primitives
 include("context.jl")
 

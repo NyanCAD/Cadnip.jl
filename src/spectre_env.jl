@@ -68,13 +68,6 @@ function pwl_at_time(ts, ys, t)
     return ys[i-1] + (t - ts[i-1])*slope
 end
 
-# Stub for time_periodic_singularities! - was used by DAECompiler for event handling
-# MNA handles time-dependent sources differently
-@generated function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
-    # No-op in MNA backend - singularities are handled by adaptive time stepping
-    return :nothing
-end
-
 baremodule SpectreEnvironment
 
 import ..Base
@@ -94,7 +87,7 @@ import Base:
     zero, atan,
     floor, ceil, trunc
 import Base.Experimental: @overlay
-import ..rem_right_semi, ..time_periodic_singularities!, ..pwl_at_time, ..wave_split
+import ..rem_right_semi, ..pwl_at_time, ..wave_split
 
 const arctan = atan
 const ln = log
@@ -119,10 +112,6 @@ const M_1_PI = 1/Base.pi
 
 function pwl(wave)
     ts, ys = wave_split(wave)
-    # Notify singularities at each of our timepoints (no-op in MNA)
-    time_periodic_singularities!(ts)
-
-    # Actually calculate the value to return
     return pwl_at_time(ts, ys, var"$time"())
 end
 
@@ -133,9 +122,6 @@ function pulse(v1, v2, td, tr, tf, pw=Base.Inf, period=Base.Inf, count=-1)
     ys = StaticArrays.@SVector[
         v1, v2, v2, v1,
     ]
-    # Notify singularities at each of our timepoints (no-op in MNA)
-    time_periodic_singularities!(ts, period, count)
-
     # Calculate value modulo our period
     t = rem_right_semi(Cadnip.spec[].time, period)
     return pwl_at_time(ts, ys, t)
@@ -144,8 +130,12 @@ end
 # don't pirate Base.sin
 function spsin(vo, va, freq, td=0, theta=0, phase=0, ncyles=Base.Inf)
     # see https://ltwiki.org/LTspiceHelp/LTspiceHelp/V_Voltage_Source.htm
-    if td < var"$time"() < ncyles/freq
-        vo+va*Base.exp(-(var"$time"()-td)*theta)*Base.sind(360*freq*(var"$time"()-td)+phase)
+    # The waveform itself lives in MNA.SinWave (shared with the SPICE SIN
+    # source path); this wrapper only adds the ncycles cutoff. SinWave's
+    # t < td branch returns the same vo + va*sind(phase) constant.
+    t = var"$time"()
+    if t < ncyles/freq
+        Cadnip.MNA.SinWave(vo, va, freq, td, theta, phase)(t)
     else
         vo + va*Base.sind(phase)
     end

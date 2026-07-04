@@ -129,6 +129,14 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
 end
 
 """
+    register_breakpoints!(::DirectStampContext, wave)
+
+No-op. Breakpoints are collected once during structure discovery on
+`MNAContext`; the zero-allocation restamping path never accumulates them.
+"""
+register_breakpoints!(::DirectStampContext, ::Any) = nothing
+
+"""
     get_current_idx(ctx::DirectStampContext, name::Symbol) -> CurrentIndex
 
 Get the index of a current variable by name in DirectStampContext (for CCVS/CCCS restamping).

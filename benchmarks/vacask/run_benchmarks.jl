@@ -60,10 +60,10 @@ const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
 # tight rel-L2 error against the exact analytic solution (<3e-8, Rodas3
 # <1e-11). ImplicitEuler/DImplicitEuler stay excluded per the existing
 # rationale (heavy rejection near every pulse edge). FBDF/DFBDF/Trapezoid/
-# TRBDF2 are also excluded: even with `tstops` at every pulse edge (see
-# rc/cedarsim/runme.jl's `pulse_tstops`) they still fail to reach t=1,
-# grinding to `maxiters` or underflowing `dt` partway through the
-# 500-period sweep.
+# TRBDF2 are also excluded: even with tstops at every pulse edge (tran!'s
+# auto_tstops derives these automatically from the PULSE source now - see
+# src/mna/breakpoints.jl) they still fail to reach t=1, grinding to
+# `maxiters` or underflowing `dt` partway through the 500-period sweep.
 const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 # Graetz/Mul (nonlinear diodes): IDA and FBDF are the fastest solvers that
 # are robust on BOTH circuits (Graetz: IDA 4.4s, FBDF 6.2s. Mul: IDA 2.4s,

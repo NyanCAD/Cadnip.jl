@@ -63,6 +63,7 @@ elseif RUN_CORE
     @testset "Phase 1: MNA Core" begin
         @testset "mna/core.jl" include("mna/core.jl")
         @testset "mna/precompile.jl" include("mna/precompile.jl")
+        @testset "mna/breakpoints.jl" include("mna/breakpoints.jl")
     end
 
     # VA integration tests (s-dual contribution stamping)

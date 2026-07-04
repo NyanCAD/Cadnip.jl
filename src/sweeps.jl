@@ -1,7 +1,6 @@
 using Accessors
 using AxisKeys
 using OrdinaryDiffEq, SciMLBase, Sundials, DelayDiffEq
-using LinearSolve: KLUFactorization
 using Base.Iterators
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
@@ -521,6 +520,12 @@ iteration, ensuring correct handling of nonlinear devices.
 - `solver`: Solver algorithm (default: IDA with tuned parameters for circuits)
 - `abstol`, `reltol`: Solver tolerances
 - `explicit_jacobian`: Use explicit Jacobian (default: true for performance)
+- `auto_tstops::Bool=true`: Automatically derive solver `tstops` (and, on the
+  ODE/DDE path, `d_discontinuities`) from PWL/PULSE/SIN source breakpoints
+  (see `expand_breakpoints`/`BreakpointSpec` in src/mna/breakpoints.jl), so
+  the integrator lands exactly on source edges/onsets instead of discovering
+  them via rejected steps. Merges with (doesn't clobber) a user-supplied
+  `tstops`/`d_discontinuities`. Set `false` to disable.
 
 # Default IDA Configuration
 The default IDA solver is configured for circuit simulation with:
@@ -541,7 +546,8 @@ sol(1e-7)  # Get state at t=0.1μs
 ```
 """
 function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
-               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+               solver=nothing, abstol=1e-10, reltol=1e-8, auto_tstops::Bool=true,
+               kwargs...)
     # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
     # Key settings:
     # - linear_solver=:KLU: Sparse direct solver. For long simulations with many timesteps,
@@ -555,8 +561,15 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
     end
 
     # Dispatch based on solver type
-    return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, kwargs...)
+    return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, auto_tstops=auto_tstops,
+                          kwargs...)
 end
+
+# The problem constructors own tstops/d_discontinuities: user-supplied values
+# are forwarded to the constructor, which merges them with the auto-derived
+# source breakpoints into prob.kwargs (see _with_auto_tstops). The dispatchers
+# below never pass them to solve() - solve's kwarg splat would clobber
+# prob.kwargs instead of merging.
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
 # Note: explicit_jacobian defaults to true for Sundials solvers (IDA) for performance.
@@ -571,14 +584,16 @@ end
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
-                        initializealg=MNA.CedarTranOp(), kwargs...)
+                        initializealg=MNA.CedarTranOp(), auto_tstops::Bool=true, tstops=nothing,
+                        kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
     if explicit_jacobian === nothing
         explicit_jacobian = solver isa Sundials.SundialsDAEAlgorithm
     end
 
-    prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
+    prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian,
+                                auto_tstops=auto_tstops, tstops=tstops)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
@@ -587,8 +602,11 @@ end
 # CedarTranOp evaluates transient sources at t=0, matching SPICE behavior.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(), kwargs...)
-    prob = SciMLBase.ODEProblem(circuit, tspan)
+                        abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(),
+                        auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
+                        kwargs...)
+    prob = SciMLBase.ODEProblem(circuit, tspan; auto_tstops=auto_tstops,
+                                tstops=tstops, d_discontinuities=d_discontinuities)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
@@ -597,8 +615,11 @@ end
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::DelayDiffEq.MethodOfSteps;
                         abstol=1e-10, reltol=1e-8, constant_lags=Float64[],
-                        initializealg=MNA.CedarTranOp(), kwargs...)
-    prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags)
+                        initializealg=MNA.CedarTranOp(),
+                        auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
+                        kwargs...)
+    prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags, auto_tstops=auto_tstops,
+                                tstops=tstops, d_discontinuities=d_discontinuities)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 

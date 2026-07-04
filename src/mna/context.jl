@@ -206,6 +206,11 @@ mutable struct MNAContext
     charge_V_values::Vector{Float64}  # Stored V_branch values for comparison
     charge_detection_pos::Int
 
+    # Breakpoint times collected from time-dependent sources (PWL/PULSE/SIN),
+    # expanded into solver tstops by the tran! constructors. Recomputed from
+    # scratch on every rebuild (not a detection cache like charge_is_vdep).
+    breakpoints::Vector{BreakpointSpec}
+
     # Track if system has been finalized
     finalized::Bool
 
@@ -241,6 +246,7 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
+        BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
     )
 end
@@ -943,11 +949,26 @@ function reset_for_restamping!(ctx::MNAContext)
     # Reset charge detection counter for re-stamping (cache is preserved)
     ctx.charge_detection_pos = 1
 
+    # Breakpoints are recomputed from scratch every build (not a cache)
+    empty!(ctx.breakpoints)
+
     ctx.finalized = false
     return nothing
 end
 
 export reset_for_restamping!
+
+"""
+    register_breakpoints!(ctx::MNAContext, wave)
+
+Push `wave`'s breakpoint spec (see [`breakpoints`](@ref)) onto `ctx.breakpoints`
+if it has one.
+"""
+function register_breakpoints!(ctx::MNAContext, wave)
+    bp = breakpoints(wave)
+    bp === nothing || push!(ctx.breakpoints, bp)
+    return nothing
+end
 
 """
     clear!(ctx::MNAContext)
@@ -978,6 +999,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_Q_values)
     empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
+    empty!(ctx.breakpoints)
     ctx.finalized = false
     return nothing
 end
