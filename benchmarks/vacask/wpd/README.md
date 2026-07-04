@@ -348,39 +348,60 @@ the items below reflect the maintainer's diagnosis, not just ours.
   doc previously claimed. That specific claim is retracted. Diffing the two
   diode `.va` sources to find the actual ~1e-4 discrepancy is a real, open
   item, not yet investigated here.
-- **`filter` and `rc` have a genuine, lever-immune accuracy floor even
-  against the *exact analytic* golden — unlike `mul`'s, this one is real,
-  and none of the maintainer's suggestions move it.** Checked on `filter`
-  at `reltol=1e-9`: `tran_maxord` 2/3/4/5 all land at 2.0-2.1e-5 (identical
-  within noise); `abstol=1e-15`, `tran_lteratio=1`, and `nr_residualcheck=0`
-  each leave it at 2.07e-5 (unchanged to 3 significant figures); the
-  `relrefsol/relrefres/relreflte="pointlocal"` or `"local"` reference-value
-  modes he described make it *worse* (immediate "Timestep too small" abort
-  instead of an improvement — consistent with his own caveat that these
-  modes can't establish a reference near a zero initial condition, which is
-  exactly `filter`'s starting point). Same story on `rc` post-`maxord=4`
-  fix: orders 2/3/4 all land at 3.2-3.8e-5 at `reltol=1e-9`, `abstol=1e-18`
-  and `tran_lteratio` sweeps change nothing. Every documented tuning knob
-  was tried; none of them touch it.
-  **A gmin/leakage-conductance origin is ruled out, not just untested:**
-  `gmin` isn't exposed as a global option in this VACASK build (only
-  `gshunt` and `homotopy_*gmin*`, which are DC-operating-point homotopy
-  convergence aids, not something applied through transient - confirmed by
-  binary symbol names like `OpNRSolver::loadShunts`); explicitly forcing
-  `gshunt=0`/`1e-15` and `homotopy_startgmin=0 homotopy_maxgmin=0` on `rc`
-  at `reltol=1e-9` left the error completely unchanged (3.8330e-5 in every
-  variant, to 5 significant figures). More conclusively: a fixed leakage
-  conductance anywhere would make the relative error scale with circuit
-  impedance (a bigger `R` means the leak carries proportionally more
-  current), so `rc`'s `R`/`C` were rescaled 1Ω/1F down to 1MΩ/1nF (same
-  `τ=RC=1ms`, same pulse) — error stayed at 3.83-3.84e-5 across all 6
-  decades of impedance. No leakage-conductance mechanism, gmin or
-  otherwise, produces that. This is a real, open item — likely a fixed
-  absolute-error contribution from somewhere other than the exposed
-  tolerance options (candidates not yet checked: DC operating-point
-  accuracy, order-restart cost after the initial breakpoint, or the "Clock
-  resolution" the simulator reports in its stats) — not yet root-caused
-  here.
+- **`filter`'s "lever-immune" floor turned out to be OUR benchmark's own bug:
+  the initial-timestep hint was far too coarse.** Checked `tran_maxord`
+  2/3/4/5 (identical 2.0-2.1e-5 at `reltol=1e-9`), `abstol=1e-15`,
+  `tran_lteratio`, and `nr_residualcheck=0` on `filter` - none moved it, and
+  the `relrefsol/relrefres/relreflte="pointlocal"/"local"` modes he
+  described made it *worse* (immediate "Timestep too small" abort,
+  consistent with his own caveat about establishing a reference near a
+  zero initial condition, exactly `filter`'s starting point). What actually
+  mattered, per his separate comment that "initial step selection lacks
+  sophistication - designers should specify sensible values per circuit":
+  the `analysis tran ... step=` argument. `wpd_common`/`run_wpd.jl` were
+  passing `tspan/n_grid` there (`100/2000 = 0.05` for `filter`) - reasonable
+  as an output-density hint, but that value **also sets VACASK's very first
+  internal timestep**, and forcing a first step of `0.05` on a circuit whose
+  natural period is `2π≈6.28` (and whose LC ladder is only lightly damped
+  by `R4=1`) injects a small error that never damps out over the rest of
+  the run, capping accuracy regardless of `reltol`. Confirmed directly:
+  forcing `step` down through `1e-6, 1e-9, 1e-12` at `reltol=1e-9` all land
+  within 0.01% of each other (~4.27e-7) - a **~50x** improvement over the
+  `0.05` floor - while total point counts barely change (1720 vs 1725),
+  showing it's specifically the *first* step's error that's fixed, not
+  overall resolution. `rc`/`graetz`/`mul` were essentially unaffected by the
+  same change (their `tspan/n_grid` was already fine enough relative to
+  their own dynamics) - confirmed by re-running all four cases end-to-end.
+  `run_vacask_once` now always requests `step=1e-12`, tspan-independent;
+  `filter`'s VACASK curve genuinely converges now (`4.11e-7` at
+  `reltol=1e-9`, no floor), and nothing else changed. This was never a
+  VACASK bug - it's exactly what the maintainer's own comment predicted:
+  a naive fixed initial-step choice in our own harness.
+- **`rc`'s floor is real, open, and NOT the same mechanism.** Unlike
+  `filter`, forcing `rc`'s initial `step` down to `1e-12` (from the same
+  `tspan/n_grid` origin) made *no* difference at all (3.8330e-5 either way,
+  full reltol sweep re-checked). `rc`'s floor also survives `tran_maxord`
+  2/3/4 (3.2-3.8e-5 at `reltol=1e-9`), `abstol` down to `1e-18`, and
+  `tran_lteratio` sweeps - every documented tuning knob was tried; none of
+  them touch it. **A gmin/leakage-conductance origin is ruled out, not just
+  untested:** `gmin` isn't exposed as a global option in this VACASK build
+  (only `gshunt` and `homotopy_*gmin*`, which are DC-operating-point
+  homotopy convergence aids, not something applied through transient -
+  confirmed by binary symbol names like `OpNRSolver::loadShunts`);
+  explicitly forcing `gshunt=0`/`1e-15` and
+  `homotopy_startgmin=0 homotopy_maxgmin=0` left the error completely
+  unchanged (3.8330e-5 in every variant, to 5 significant figures). More
+  conclusively: a fixed leakage conductance anywhere would make the
+  relative error scale with circuit impedance (a bigger `R` means the leak
+  carries proportionally more current), so `rc`'s `R`/`C` were rescaled
+  1Ω/1F down to 1MΩ/1nF (same `τ=RC=1ms`, same pulse) — error stayed at
+  3.83-3.84e-5 across all 6 decades of impedance. No leakage-conductance
+  mechanism, gmin or otherwise, produces that, and it isn't a startup-step
+  artifact either (see above). Current best guess: `rc`'s pulse train hits
+  a breakpoint (forced order-1 restart) roughly every 1ms, ~20 times over
+  the run, so unlike `filter`'s one-time startup cost this could be a small
+  error reintroduced at *every* breakpoint rather than damping away between
+  them - not yet confirmed, still an open item.
 - **`vntol` tied numerically to `reltol` is a simplification, flagged as such
   by the maintainer, but checked here not to bias these specific results.**
   Both VACASK sweeps (`run_vacask_once` in `wpd_common.jl`) pass `vntol=reltol`

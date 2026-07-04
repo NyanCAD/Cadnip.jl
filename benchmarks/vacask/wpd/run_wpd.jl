@@ -264,7 +264,17 @@ end
 "Run VACASK once; return (t, signal, timepoints, runtime_s) or throw on failure."
 function run_vacask_once(case, reltol, vntol, tspan, out_nodes; maxstep=tspan[2],
                           method=nothing, maxord=nothing, extra_opts="")
-    step = (tspan[2] - tspan[1]) / Int(CFG["n_grid"])
+    # `analysis tran ... step=` sets VACASK's INITIAL timestep, not just an
+    # output stride - confirmed empirically (see README "Findings about
+    # VACASK"): using tspan/n_grid here (previously) silently cost `filter`
+    # ~50x accuracy at tight reltol, because a too-coarse first step's error
+    # never damps out on that lightly-damped LC circuit, while `rc` was
+    # completely unaffected either way (its floor has a different cause).
+    # A tiny, tspan-independent initial step costs at most one or two
+    # negligibly cheap extra steps before the adaptive controller takes
+    # over - confirmed safe and fast on all 4 cases - so there's no
+    # accuracy/cost tradeoff to make: always start as fine as possible.
+    step = 1e-12
     m = method === nothing ? String(get(CFG, "vacask_tran_method", "gear")) : method
     mo = maxord === nothing ? Int(get(CFG, "vacask_tran_maxord", 5)) : maxord
     sim = sim_body(case) * """
