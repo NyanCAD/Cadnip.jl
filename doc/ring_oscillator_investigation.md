@@ -333,3 +333,61 @@ more tractable target for a `Profile.Allocs` pass than anything above.
 This also means the earlier BSIM4-vs-PSP103 "~560x faster" figure should be
 revised down using the real PSP103 number: 333.5 ms/ns vs BSIM4's 0.83 ms/ns
 (itself measured directly, not extrapolated) is **~400x**, not 560x.
+
+## Future Directions: What Would Actually Help the Ring Benchmark (Speculation, 2026-07)
+
+The measured facts so far: no explicit caps (dynamics are driven entirely by
+PSP103's internal fF parasitics), `C` rank 72/371 so 299 of 371 variables are
+algebraic, `cond(G) ≈ 6.6e18`, no stable DC operating point, sustained ~5.5
+Newton iterations/step throughout the run, and the current workaround is
+`force_dtmin=true, abstol=1e-4, reltol=1e-2`. None of this has been tested
+yet — it's ranked speculation for a follow-up investigation, ordered by
+expected payoff:
+
+1. **Unit-aware error control (vector `abstol`).** The state vector mixes
+   ~1V node voltages, µA-scale branch currents, and femto-scale charge
+   states in one vector, and a single scalar `abstol` makes the
+   tiniest-unit variables dominate the error test - chronic error-test
+   failure looks exactly like "needs `force_dtmin` + relaxed tolerances."
+   ngspice never uses one tolerance: it has `vntol` (1µV), `abstol` (1pA),
+   `chgtol` (10fC) per variable class. SciML's solvers accept
+   `abstol::Vector`, and `MNAContext` already knows each variable's class
+   (node/current/charge), so this is cheap to build and is the top suspect
+   for the actual binding constraint.
+2. **Exclude algebraic variables from the error test.** With 299/371
+   algebraic variables, LTE-testing them is a known cause of spurious step
+   rejections in DAEs. IDA has `suppressalg=true` (blocked on the known IDA
+   segfault on this circuit - see "Solver Behaviors" above); the FBDF-path
+   equivalent is folding this into the weight vector from item 1 (an
+   effectively-infinite `abstol` for algebraic entries excludes them from
+   the error norm the same way).
+3. **Always-on GMIN.** ngspice puts `GMIN=1e-12` across every junction
+   permanently, not just during homotopy init - this codebase appears to
+   only use a `gshunt`-style diagonal floor during DC/source stepping.
+   `cond(G) ≈ 6.6e18` means the linear solves deliver almost no correct
+   digits, which alone could explain sustained 5+ Newton iterations per
+   step. A permanent diagonal floor is standard SPICE practice and should
+   be a cheap, one-line experiment.
+4. **Asymmetric initialization.** A ring's symmetric operating point is
+   metastable with a near-singular Jacobian along the oscillation mode,
+   and Newton can hover there. This doc's own "LevenbergMarquardt Success"
+   section above already showed LM finds a pseudo-equilibrium; adding a
+   deliberate nodeset-style kick (bias one stage high) on top of
+   `CedarUICOp` would avoid fighting the singular direction and start the
+   oscillation cleanly instead of relying on `force_dtmin` to survive a
+   metastable start.
+5. **`$limit` implementation.** Helps the VADistiller model family a lot -
+   it's their designed-in convergence aid - but does nothing directly for
+   PSP103, which has no `$limit` call sites.
+
+For completeness, what's already been tried and empirically **doesn't**
+help this circuit: VA voltage-dependent event detection (`va_events`, see
+`doc/va_events_removal_findings.md` - increased Newton-iteration count and
+degraded fidelity on every real model tested, and PSP103's internal
+comparisons are numerical safety guards, not physical discontinuities),
+`$bound_step` (`dtmax` is already pinned to 0.05ns, tighter than any
+`$bound_step` value would realistically set), and `auto_tstops` (a
+free-running ring oscillator has no source edges to derive breakpoints
+from - it's autonomous). The ring's problem is conditioning and
+error-weighting across mismatched variable units, not missed
+discontinuities.
