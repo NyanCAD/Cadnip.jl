@@ -137,8 +137,12 @@ end
 """
 Breakpoints at every PWL vertex time - the integrator should land exactly on
 each vertex to resolve the kink in slope there.
+
+`Vector{Float64}(ts)` rather than `collect`/comprehension: StaticArrays makes
+those return a `SizedVector` for `SVector` input, while the Array constructor
+always yields a plain (freshly copied) `Vector{Float64}`.
 """
-breakpoints(w::PWLWave) = BreakpointSpec(_collect_times(w.ts))
+breakpoints(w::PWLWave) = BreakpointSpec(Vector{Float64}(w.ts))
 
 export PWLWave
 

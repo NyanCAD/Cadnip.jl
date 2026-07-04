@@ -353,8 +353,13 @@ end
     @test !haskey(prob_off.kwargs, :tstops)
     @test !haskey(prob_off.kwargs, :d_discontinuities)
 
-    # User-supplied tstops merge with (don't clobber) the auto-computed ones
+    # User-supplied tstops merge with (don't clobber) the auto-computed ones.
+    # tran! forwards tstops to the problem constructor, which owns the merge:
     user_t = 7.5e-6
+    prob_user = ODEProblem(circuit, tspan; tstops=[user_t])
+    @test user_t in prob_user.kwargs[:tstops]
+    @test all(e -> e in prob_user.kwargs[:tstops], edges)
+
     sol_merged = tran!(circuit, tspan; tstops=[user_t])
     @test any(t -> abs(t - user_t) < 1e-15, sol_merged.t)
     @test hits(sol_merged, edges)

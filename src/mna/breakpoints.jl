@@ -53,23 +53,6 @@ breakpoints(::Any) = nothing
 export breakpoints
 
 """
-    _collect_times(xs) -> Vector{Float64}
-
-Collect `xs` into a plain `Vector{Float64}`. Deliberately avoids
-`Float64[Float64(x) for x in xs]`: StaticArrays overrides comprehension
-`collect` for its container types, so that idiom returns a `SizedVector`
-(not a `Vector`) when `xs isa SVector` - `BreakpointSpec` requires a plain
-`Vector{Float64}`.
-"""
-function _collect_times(xs)::Vector{Float64}
-    out = Vector{Float64}(undef, length(xs))
-    @inbounds for i in eachindex(xs)
-        out[i] = Float64(xs[i])
-    end
-    return out
-end
-
-"""
     register_breakpoints!(ctx, wave)
 
 Push `wave`'s breakpoint spec onto `ctx.breakpoints` if it has one.

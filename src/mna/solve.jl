@@ -1608,22 +1608,25 @@ end
 
 Return `kwargs` (as a `NamedTuple`) with `tstops` (and, if requested,
 `d_discontinuities`) merged in from `ctx.breakpoints`, expanded over `tspan`.
-Respects any `tstops`/`d_discontinuities` the caller already supplied - the
-auto-computed breakpoints are merged in, not clobbered or clobbering.
-No-op (returns `kwargs` unchanged) when `auto_tstops` is `false` or there are
-no breakpoints to expand.
+
+This is the *single* merge point for breakpoints: the problem constructor
+owns `tstops` entirely. Any caller-supplied `tstops`/`d_discontinuities`
+(including ones `tran!` forwards from its own kwargs) are merged with the
+auto-computed breakpoints here and stored in `prob.kwargs`; `tran!` never
+passes them to `solve`, whose kwarg splat would clobber `prob.kwargs`.
+Keys whose merged value is empty are dropped so `solve` sees its defaults.
 """
 function _with_auto_tstops(kwargs, ctx::MNAContext, tspan::Tuple{Float64,Float64},
                            auto_tstops::Bool; with_d_discontinuities::Bool=false)
     nt = NamedTuple(kwargs)
-    auto_tstops || return nt
-    auto_stops = expand_breakpoints(ctx.breakpoints, tspan)
-    isempty(auto_stops) && return nt
-
-    nt = merge(nt, (tstops = _merge_tstops(get(nt, :tstops, nothing), auto_stops),))
-    if with_d_discontinuities
-        nt = merge(nt, (d_discontinuities = _merge_tstops(get(nt, :d_discontinuities, nothing), auto_stops),))
-    end
+    auto_stops = auto_tstops ? expand_breakpoints(ctx.breakpoints, tspan) : Float64[]
+    tstops = _merge_tstops(get(nt, :tstops, nothing), auto_stops)
+    d_discontinuities = with_d_discontinuities ?
+        _merge_tstops(get(nt, :d_discontinuities, nothing), auto_stops) :
+        get(nt, :d_discontinuities, nothing)
+    nt = Base.structdiff(nt, NamedTuple{(:tstops, :d_discontinuities)})
+    tstops === nothing || (nt = merge(nt, (; tstops)))
+    d_discontinuities === nothing || (nt = merge(nt, (; d_discontinuities)))
     return nt
 end
 
@@ -1743,10 +1746,11 @@ Structure discovery happens once, then values are updated in-place each iteratio
 - `explicit_jacobian`: Whether to provide explicit Jacobian to solver (default: true).
   Set to `false` if you encounter IDA initialization failures with time-dependent sources.
 - `auto_tstops`: Derive solver `tstops` from PWL/PULSE/SIN source breakpoints
-  and store them in `prob.kwargs` (default: true). Note: passing `tstops` to
-  `solve` directly overrides `prob.kwargs` (SciML kwarg precedence), silently
-  dropping the auto-derived stops — merge them yourself, or use `tran!`, which
-  merges for you.
+  and store them in `prob.kwargs` (default: true). A `tstops` kwarg passed to
+  this constructor is *merged* with the auto-derived stops. Note: passing
+  `tstops` to `solve` directly instead overrides `prob.kwargs` (SciML kwarg
+  precedence), silently dropping them — pass `tstops` here (or to `tran!`,
+  which forwards it here), not to `solve`.
 
 # Example
 ```julia
@@ -1844,10 +1848,12 @@ The circuit is automatically compiled for ~10x faster evaluation.
 # Keyword Arguments
 - `u0`: Initial state (default: computed by CedarDCOp during solve)
 - `auto_tstops`: Derive solver `tstops`/`d_discontinuities` from PWL/PULSE/SIN
-  source breakpoints and store them in `prob.kwargs` (default: true). Note:
-  passing `tstops` to `solve` directly overrides `prob.kwargs` (SciML kwarg
-  precedence), silently dropping the auto-derived stops — merge them yourself,
-  or use `tran!`, which merges for you.
+  source breakpoints and store them in `prob.kwargs` (default: true). A
+  `tstops`/`d_discontinuities` kwarg passed to this constructor is *merged*
+  with the auto-derived stops. Note: passing `tstops` to `solve` directly
+  instead overrides `prob.kwargs` (SciML kwarg precedence), silently dropping
+  them — pass `tstops` here (or to `tran!`, which forwards it here), not to
+  `solve`.
 
 # Solver Recommendations
 - Use `Rodas5P()` - fast Rosenbrock method, handles singular mass matrices
