@@ -220,6 +220,50 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test actual_I < 0.1  # Should be less than 100mA
         end
 
+        @testset "DC polish: weakly-conducting floating nodes" begin
+            # Regression for the VACASK `mul` WPD-benchmark cross-check gap
+            # (~1e-4 rel-L2 between the Cadnip and VACASK tight goldens): a
+            # diode chain hanging off a driven node carries zero DC current,
+            # so every chain node must sit at exactly the driven voltage. The
+            # junction conductance at vd=0 is only Is/(N*Vt) ≈ 2e-9 S, so a
+            # residual-norm-only Newton termination (abstol=1e-10 A) can stop
+            # with the chain nodes ~50 mV low; _dc_newton_polish! must pin
+            # them via its voltage-update criterion.
+            va"""
+            module ChainDiode(a, c);
+                parameter real Is = 76.9e-12;
+                parameter real N = 1.45;
+                inout a, c;
+                electrical a, c;
+                analog I(a,c) <+ Is*(limexp(V(a,c)/(N*0.02585)) - 1.0);
+            endmodule
+            """
+
+            function chain_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    Cadnip.MNA.reset_for_restamping!(ctx)
+                end
+                n1 = get_node!(ctx, :n1)
+                na = get_node!(ctx, :na)
+                nb = get_node!(ctx, :nb)
+                nc = get_node!(ctx, :nc)
+
+                stamp!(VoltageSource(50.0; name=:V1), ctx, n1, 0)
+                stamp!(ChainDiode(), ctx, n1, na; _mna_x_=x)
+                stamp!(ChainDiode(), ctx, na, nb; _mna_x_=x)
+                stamp!(ChainDiode(), ctx, nb, nc; _mna_x_=x)
+
+                return ctx
+            end
+
+            sol = solve_dc(chain_circuit, (;), MNASpec())
+            @test isapprox(sol[:na], 50.0; atol=1e-6)
+            @test isapprox(sol[:nb], 50.0; atol=1e-6)
+            @test isapprox(sol[:nc], 50.0; atol=1e-6)
+        end
+
     end
 
     #==========================================================================#
