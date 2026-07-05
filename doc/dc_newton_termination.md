@@ -3,7 +3,9 @@
 *Filed as a doc because GitHub issues are disabled for this repository. Found
 while debugging the VACASK `mul` WPD-benchmark cross-check gap (the ~1e-4
 "open item"); the dominant cause there was the internal-node gmin ground leak,
-fixed in `src/vasim.jl` (gmin anchor now goes to the device's first terminal).
+fixed in `src/vasim.jl` (the internal-node gmin anchor is removed entirely;
+models keep their internal nodes conductive via junction gmin, rs paths, and
+`V(int,ext) <+ 0` node collapse).
 The termination-criterion problem below is real, separate, measured, and
 should be resolved by the per-type abstol work rather than a bolt-on.*
 

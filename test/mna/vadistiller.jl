@@ -220,24 +220,24 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test actual_I < 0.1  # Should be less than 100mA
         end
 
-        @testset "Internal-node gmin anchor must not leak to ground" begin
+        @testset "Internal nodes must not carry artificial anchor currents" begin
             # Regression for the VACASK `mul` WPD-benchmark cross-check gap
             # (~1e-4 rel-L2 between the Cadnip and VACASK tight goldens): a
             # diode chain hanging off a driven node carries zero DC current,
             # so with the whole chain at exactly the driven 50 V, every KCL
-            # residual must be exactly zero. When each diode's internal node
-            # was anchored with gmin to GROUND, the anchor injected
+            # residual must be exactly zero. Codegen used to anchor each
+            # diode's internal node with gmin to GROUND, injecting
             # gmin*50V = 50 pA into each internal node's KCL row, which
             # (junction conductance at vd=0 being only Is/(N*Vt) ≈ 2e-9 S)
             # dragged the solved chain ~50 mV below the source - VACASK and
-            # ngspice both put it at exactly 50 V. The anchor now goes to
-            # the device's first terminal, whose potential equals the
-            # internal node's here, so the residual at the exact solution
-            # is zero. Checked at the stamped-equation level (residual at
-            # the hand-built exact operating point) because the DC solver's
-            # own residual-norm termination slack on this weakly-conducting
-            # circuit (mV scale, see the DC-Newton-termination issue notes)
-            # would otherwise mask or fake the leak.
+            # ngspice both put it at exactly 50 V. Internal nodes now get no
+            # artificial conductance at all, so the residual at the exact
+            # solution is zero. Checked at the stamped-equation level
+            # (residual at the hand-built exact operating point) because the
+            # DC solver's own residual-norm termination slack on this
+            # weakly-conducting circuit (mV scale, see
+            # doc/dc_newton_termination.md) would otherwise mask or fake
+            # the leak.
             va"""
             module ChainDiodeRs(a, c);
                 parameter real Is = 76.9e-12;

@@ -3123,30 +3123,20 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
     end
 
-    # Anchor internal nodes with GMIN (minimum conductance) to the device's
-    # FIRST TERMINAL - deliberately not to ground. The anchor exists to prevent
-    # singular matrices from floating internal nodes (especially noise-related
-    # nodes with no DC path), and tying to a terminal keeps the parasitic
-    # current inside the device: it scales with the (small) internal-to-terminal
-    # voltage difference instead of the node's absolute potential. A gmin
-    # anchor to ground leaks gmin*V per internal node, which measurably skews
-    # weakly-conducting circuits: on the VACASK `mul` benchmark (diode chain at
-    # 50 V, junction conductance ~2e-9 S) the 50 pA/node ground leak dropped
-    # the chain's DC operating point by ~50 mV, the dominant part of a ~1e-4
-    # rel-L2 disagreement with VACASK/ngspice, which have no such ground leak.
-    # Uses _mna_spec_.gmin (default 1e-12 S = 1 pS, standard SPICE minimum conductance)
-    gmin_stamp = Expr(:block)
-    anchor_param = node_params[1]
-    for int_param in internal_node_params
-        push!(gmin_stamp.args, quote
-            if $int_param != 0 && $int_param != $anchor_param
-                Cadnip.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
-                Cadnip.MNA.stamp_G!(ctx, $int_param, $anchor_param, -_mna_spec_.gmin)
-                Cadnip.MNA.stamp_G!(ctx, $anchor_param, $int_param, -_mna_spec_.gmin)
-                Cadnip.MNA.stamp_G!(ctx, $anchor_param, $anchor_param, _mna_spec_.gmin)
-            end
-        end)
-    end
+    # Internal nodes get NO artificial anchor conductance. An earlier version
+    # stamped gmin from every internal node to ground as singular-matrix
+    # insurance, but that injects a real gmin*V ground leak per internal node,
+    # which measurably skews weakly-conducting circuits: on the VACASK `mul`
+    # benchmark (diode chain at 50 V, junction conductance ~2e-9 S) the
+    # 50 pA/node leak dropped the chain's DC operating point by ~50 mV, the
+    # dominant part of a ~1e-4 rel-L2 disagreement with VACASK/ngspice,
+    # neither of which grounds internal nodes. Models keep their internal
+    # nodes conductive the same way they do in other simulators: junction
+    # gmin via $simparam("gmin"), rs paths, and V(int,ext) <+ 0 collapse
+    # (detect_short_circuits above). A genuinely floating internal node now
+    # produces a singular matrix - the same "no DC path" failure SPICE
+    # reports - instead of a silently-wrong answer; spec.gshunt remains the
+    # explicit opt-in crutch for such circuits.
 
     # Generate voltage extraction for all nodes (terminals + internal)
     # V_1..V_n_ports are for terminal nodes
@@ -3434,9 +3424,6 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Allocate internal nodes (idempotent - returns existing index if already allocated)
         $internal_node_alloc
-
-        # Add GMIN to ground for internal nodes (prevents floating nodes)
-        $gmin_stamp
 
         # Stamp child module instances (module instantiation)
         $instance_stamp_calls
