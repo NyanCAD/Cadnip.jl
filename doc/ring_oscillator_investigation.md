@@ -391,3 +391,85 @@ free-running ring oscillator has no source edges to derive breakpoints
 from - it's autonomous). The ring's problem is conditioning and
 error-weighting across mismatched variable units, not missed
 discontinuities.
+
+## Item 1 Tested and Refuted: Per-Class Vector `abstol` Makes Things Worse (2026-07)
+
+The top-ranked lead above — unit-aware error control via a vector `abstol`
+split by variable class (node voltage / branch current / charge) — was
+implemented and empirically tested on this exact circuit, per an explicit
+request to validate rather than just theorize. It was **not** a JUNCAP/PCNR
+side-quest that motivated this: a competing hypothesis (that PSP103's
+internal JUNCAP200 junction-diode submodel might implement its own
+NR-limiting, motivating a general Predictor/Corrector Newton-Raphson
+framework) was closed out by inspection first — JUNCAP does have a
+`VMAX`-based diode-current linearization functionally similar to ngspice's
+`pnjlim` (`models/PSPModels.jl/va/JUNCAP200_macrodefs.include:105-121,279-291`),
+but `SWJUNCAP` defaults to `0` and is never set in this benchmark's model
+card (`models/VACASKModels.jl/spice/models.inc`, loaded via `using
+VACASKModels`), so none of that code is active in the circuit that's failing
+to converge. PCNR itself remains pure proposal
+(`doc/compass_artifact_wf-c99b8a86-d31f-4e59-9c4f-6f69e4edd847_text_markdown.md`)
+with no code or precedent in the repo, and stays deferred.
+
+### What was implemented
+
+`MNA.state_abstol(sys::MNAData; vntol, iabstol, chgtol)` (`src/mna/build.jl`)
+builds a per-class tolerance vector from the node/current/charge index ranges
+`MNAData` already tracks. `tran!`'s `abstol` kwarg now accepts a
+`(vntol=, iabstol=, chgtol=)` NamedTuple, expanded via `state_abstol` using
+the `MNAData` the problem constructor attaches as `prob.f.sys`
+(`src/sweeps.jl`, `_resolve_abstol`). This works correctly end-to-end — a new
+`test/mna/oscillator_test.jl` testset confirms the small 3-stage inverter
+ring still converges and oscillates with the vector form. **The plumbing is
+not the problem; the numbers are.**
+
+### What happened on the real PSP103 ring (20ns slice, same methodology as
+### the Bottleneck Decomposition section above)
+
+| Configuration | Result |
+|---|---|
+| Baseline: scalar `abstol=1e-4, reltol=1e-2, force_dtmin=true` | **Success**, 842 timepoints, 5.30 iter/step, 39.9s |
+| Vector `(vntol=1e-6, iabstol=1e-12, chgtol=1e-14)`, `reltol=1e-2`, `force_dtmin=true` | **InitialFailure** — dies inside `CedarTranOp`'s consistency step (3 NR iters, 3.2s) |
+| Vector `(vntol=1e-6, iabstol=1e-12, chgtol=1e-14)`, `reltol=1e-3`, `force_dtmin=false` | **InitialFailure**, same as above (2.9s) |
+| Vector `(vntol=1e-4, iabstol=1e-9, chgtol=1e-12)` — vntol matched to baseline, currents/charges only "SPICE-realistic" | Init succeeds, but transient blows up: **MaxIters**, 66 timepoints (only reached 1.83ns of the 20ns span), **4,999,685 NR iterations = 74,622 iter/step** (14,000x worse than baseline's 5.3), 1628s wall |
+| Vector `(vntol=1e-5, ...)` | Killed after 27min+ of the same MaxIters trajectory as the row above — trend was already unambiguous |
+
+Two independent failure modes, both worse than the status quo:
+1. **Tightening `vntol` alone** (1e-6 vs. the baseline's blanket 1e-4) breaks
+   `CedarTranOp`'s DC/consistency initialization outright — the ring's
+   near-singular Jacobian (`cond(G) ≈ 6.6e18`) apparently can't reach a
+   node-voltage residual below 1e-6 during init, only below ~1e-4.
+2. **Tightening only the current/charge tolerances** to textbook SPICE
+   magnitudes (`1e-9` A / `1e-12` C) while leaving `vntol` at the baseline's
+   1e-4 causes a catastrophic ~14,000x blowup in Newton iterations per step
+   during the actual transient integration — the branch-current/charge
+   *magnitudes* this circuit's PSP103 stamping actually produces are
+   evidently far enough from `1e-9`/`1e-12` scale that demanding that level
+   of absolute accuracy on them is effectively demanding many more correct
+   digits than the ill-conditioned linear solves can deliver, so the
+   step-size controller thrashes instead of converging.
+
+### Conclusion
+
+**The "unit-aware error control" hypothesis, as formulated with
+SPICE-textbook-style default magnitudes, is refuted by direct measurement on
+this circuit — not just untested-but-plausible anymore.** The scalar
+`abstol=1e-4` "blunt workaround" isn't a symptom of a fixable unit mismatch;
+empirically it sits in the one narrow tolerance regime that actually works
+for this ill-conditioned system, and moving away from it in *either*
+direction (tighter node voltages, or tighter currents/charges while leaving
+node voltages alone) makes convergence dramatically worse, not better. This
+is consistent with `cond(G) ≈ 6.6e18` being the real, underlying constraint:
+no per-class reweighting fixes an 18-order-of-magnitude conditioning problem;
+it just changes where the error test starts failing. The next candidates
+from the ranked list above (item 3, always-on GMIN, or item 4, asymmetric
+initialization) target the conditioning/singularity directly rather than
+re-weighting the symptom, and are better-motivated next steps than any
+further tolerance tuning.
+
+**Disposition:** `MNA.state_abstol`/`tran!`'s NamedTuple `abstol` form is
+kept as a working, tested, general capability (it may be exactly right for
+circuits with real class-mismatched magnitudes that aren't this pathological)
+but is **not** adopted as the ring oscillator benchmark's default — the
+existing `force_dtmin=true, abstol=1e-4, reltol=1e-2` workaround remains the
+documented, working configuration for `benchmarks/vacask/ring/cedarsim/runme.jl`.
