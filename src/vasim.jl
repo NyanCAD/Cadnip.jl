@@ -3123,15 +3123,27 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
     end
 
-    # Add GMIN (minimum conductance) to ground for internal nodes
-    # This prevents floating nodes that can cause singular matrix issues
-    # Especially important for noise-related internal nodes that have no DC path
+    # Anchor internal nodes with GMIN (minimum conductance) to the device's
+    # FIRST TERMINAL - deliberately not to ground. The anchor exists to prevent
+    # singular matrices from floating internal nodes (especially noise-related
+    # nodes with no DC path), and tying to a terminal keeps the parasitic
+    # current inside the device: it scales with the (small) internal-to-terminal
+    # voltage difference instead of the node's absolute potential. A gmin
+    # anchor to ground leaks gmin*V per internal node, which measurably skews
+    # weakly-conducting circuits: on the VACASK `mul` benchmark (diode chain at
+    # 50 V, junction conductance ~2e-9 S) the 50 pA/node ground leak dropped
+    # the chain's DC operating point by ~50 mV, the dominant part of a ~1e-4
+    # rel-L2 disagreement with VACASK/ngspice, which have no such ground leak.
     # Uses _mna_spec_.gmin (default 1e-12 S = 1 pS, standard SPICE minimum conductance)
     gmin_stamp = Expr(:block)
+    anchor_param = node_params[1]
     for int_param in internal_node_params
         push!(gmin_stamp.args, quote
-            if $int_param != 0
+            if $int_param != 0 && $int_param != $anchor_param
                 Cadnip.MNA.stamp_G!(ctx, $int_param, $int_param, _mna_spec_.gmin)
+                Cadnip.MNA.stamp_G!(ctx, $int_param, $anchor_param, -_mna_spec_.gmin)
+                Cadnip.MNA.stamp_G!(ctx, $anchor_param, $int_param, -_mna_spec_.gmin)
+                Cadnip.MNA.stamp_G!(ctx, $anchor_param, $anchor_param, _mna_spec_.gmin)
             end
         end)
     end

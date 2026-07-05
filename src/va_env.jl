@@ -12,7 +12,7 @@ import ChainRules
 
 import Base:
     +, *, -, ==, !=, /, >, <,  <=, >=,
-    max, min, abs,
+    max, min, abs, clamp,
     exp,
     sinh, cosh, tanh,
     zero, atan, floor, %, NaN
