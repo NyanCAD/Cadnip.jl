@@ -170,4 +170,29 @@ C3 in1 0 10f
         @test normalized_corr < 0.5  # Not in phase
     end
 
+    @testset "3-stage CMOS ring oscillator with per-class vector abstol" begin
+        # Same circuit, but abstol is a per-class NamedTuple (vntol/iabstol/chgtol)
+        # instead of one scalar, exercising MNA.state_abstol via tran!'s expansion.
+        circuit = MNACircuit(ring_oscillator)
+        tspan = (0.0, 200e-9)
+
+        sol = tran!(circuit, tspan;
+                    solver=Rodas5P(linsolve=KLUFactorization()),
+                    initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                    abstol=(vntol=1e-6, iabstol=1e-12, chgtol=1e-14), reltol=1e-6,
+                    dtmax=1e-9)
+
+        @test sol.retcode == SciMLBase.ReturnCode.Success
+
+        t_start = 100e-9
+        t_end = 200e-9
+        times = range(t_start, t_end; length=1000)
+        V_out1 = [nameat(sol, :out1, t) for t in times]
+
+        out1_min, out1_max = extrema(V_out1)
+        @test (out1_max - out1_min) > 2.0
+        @test out1_max > 2.5
+        @test out1_min < 0.8
+    end
+
 end
