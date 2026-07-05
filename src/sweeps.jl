@@ -518,7 +518,13 @@ iteration, ensuring correct handling of nonlinear devices.
 - `circuit`: The MNA circuit
 - `tspan`: Time span for simulation `(t0, tf)`
 - `solver`: Solver algorithm (default: IDA with tuned parameters for circuits)
-- `abstol`, `reltol`: Solver tolerances
+- `abstol`, `reltol`: Solver tolerances. `abstol` also accepts a per-class
+  NamedTuple `(vntol=..., iabstol=..., chgtol=...)` (see `MNA.state_abstol`),
+  expanded into a full-length vector so node voltages, branch currents, and
+  charge states each get their own natural scale instead of one scalar being
+  dominated by the tiniest-unit variable. `reltol` must stay scalar when
+  `solver` is a Sundials DAE algorithm (e.g. `IDA`) — vector `reltol` isn't
+  supported by `IDASVtolerances`.
 - `explicit_jacobian`: Use explicit Jacobian (default: true for performance)
 - `auto_tstops::Bool=true`: Automatically derive solver `tstops` (and, on the
   ODE/DDE path, `d_discontinuities`) from PWL/PULSE/SIN source breakpoints
@@ -571,6 +577,12 @@ end
 # below never pass them to solve() - solve's kwarg splat would clobber
 # prob.kwargs instead of merging.
 
+# Expand a per-class tolerance NamedTuple (e.g. `(vntol=1e-6, iabstol=1e-12,
+# chgtol=1e-14)`) into a full-length abstol vector via `MNA.state_abstol`,
+# using the `MNAData` the problem constructor already attached as `prob.f.sys`.
+# Scalars and pre-built vectors pass through unchanged.
+_resolve_abstol(abstol, prob) = abstol isa NamedTuple ? MNA.state_abstol(prob.f.sys; abstol...) : abstol
+
 # DAE solver dispatch (IDA, DFBDF, etc.)
 # Note: explicit_jacobian defaults to true for Sundials solvers (IDA) for performance.
 # OrdinaryDiffEq DAE solvers (DFBDF, DABDF2, DImplicitEuler) need explicit_jacobian=false
@@ -592,8 +604,15 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
         explicit_jacobian = solver isa Sundials.SundialsDAEAlgorithm
     end
 
+    # Sundials' IDASVtolerances only support a scalar reltol (vector abstol is fine).
+    if solver isa Sundials.SundialsDAEAlgorithm && !(reltol isa Real)
+        throw(ArgumentError("Sundials IDA only supports a scalar `reltol` (got $(typeof(reltol))); " *
+                             "use a per-class NamedTuple only for `abstol`."))
+    end
+
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian,
                                 auto_tstops=auto_tstops, tstops=tstops)
+    abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
@@ -607,6 +626,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan; auto_tstops=auto_tstops,
                                 tstops=tstops, d_discontinuities=d_discontinuities)
+    abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
@@ -620,6 +640,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         kwargs...)
     prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags, auto_tstops=auto_tstops,
                                 tstops=tstops, d_discontinuities=d_discontinuities)
+    abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
