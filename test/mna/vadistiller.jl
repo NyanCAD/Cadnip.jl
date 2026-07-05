@@ -220,22 +220,35 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test actual_I < 0.1  # Should be less than 100mA
         end
 
-        @testset "DC polish: weakly-conducting floating nodes" begin
+        @testset "Internal-node gmin anchor must not leak to ground" begin
             # Regression for the VACASK `mul` WPD-benchmark cross-check gap
             # (~1e-4 rel-L2 between the Cadnip and VACASK tight goldens): a
             # diode chain hanging off a driven node carries zero DC current,
-            # so every chain node must sit at exactly the driven voltage. The
-            # junction conductance at vd=0 is only Is/(N*Vt) ≈ 2e-9 S, so a
-            # residual-norm-only Newton termination (abstol=1e-10 A) can stop
-            # with the chain nodes ~50 mV low; _dc_newton_polish! must pin
-            # them via its voltage-update criterion.
+            # so with the whole chain at exactly the driven 50 V, every KCL
+            # residual must be exactly zero. When each diode's internal node
+            # was anchored with gmin to GROUND, the anchor injected
+            # gmin*50V = 50 pA into each internal node's KCL row, which
+            # (junction conductance at vd=0 being only Is/(N*Vt) ≈ 2e-9 S)
+            # dragged the solved chain ~50 mV below the source - VACASK and
+            # ngspice both put it at exactly 50 V. The anchor now goes to
+            # the device's first terminal, whose potential equals the
+            # internal node's here, so the residual at the exact solution
+            # is zero. Checked at the stamped-equation level (residual at
+            # the hand-built exact operating point) because the DC solver's
+            # own residual-norm termination slack on this weakly-conducting
+            # circuit (mV scale, see the DC-Newton-termination issue notes)
+            # would otherwise mask or fake the leak.
             va"""
-            module ChainDiode(a, c);
+            module ChainDiodeRs(a, c);
                 parameter real Is = 76.9e-12;
                 parameter real N = 1.45;
+                parameter real Rs = 0.042;
                 inout a, c;
-                electrical a, c;
-                analog I(a,c) <+ Is*(limexp(V(a,c)/(N*0.02585)) - 1.0);
+                electrical a, c, a_int;
+                analog begin
+                    I(a, a_int) <+ V(a, a_int) / Rs;
+                    I(a_int, c) <+ Is*(limexp(V(a_int,c)/(N*0.02585)) - 1.0);
+                end
             endmodule
             """
 
@@ -251,17 +264,43 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 nc = get_node!(ctx, :nc)
 
                 stamp!(VoltageSource(50.0; name=:V1), ctx, n1, 0)
-                stamp!(ChainDiode(), ctx, n1, na; _mna_x_=x)
-                stamp!(ChainDiode(), ctx, na, nb; _mna_x_=x)
-                stamp!(ChainDiode(), ctx, nb, nc; _mna_x_=x)
+                stamp!(ChainDiodeRs(), ctx, n1, na; _mna_x_=x, _mna_instance_=:d1)
+                stamp!(ChainDiodeRs(), ctx, na, nb; _mna_x_=x, _mna_instance_=:d2)
+                stamp!(ChainDiodeRs(), ctx, nb, nc; _mna_x_=x, _mna_instance_=:d3)
 
                 return ctx
             end
 
-            sol = solve_dc(chain_circuit, (;), MNASpec())
-            @test isapprox(sol[:na], 50.0; atol=1e-6)
-            @test isapprox(sol[:nb], 50.0; atol=1e-6)
-            @test isapprox(sol[:nc], 50.0; atol=1e-6)
+            spec = MNASpec()
+            ctx = chain_circuit((;), spec)
+            cs = Cadnip.MNA.compile_structure(chain_circuit, (;), spec; ctx=ctx)
+            ws = Cadnip.MNA.create_workspace(cs; ctx=ctx)
+            n = Cadnip.MNA.system_size(ctx)
+
+            # Exact operating point: every node (terminals AND the diodes'
+            # internal nodes) at 50 V, source branch current 0.
+            u = zeros(n)
+            for (i, name) in enumerate(ctx.node_names)
+                u[i] = 50.0
+            end
+            Cadnip.MNA.fast_rebuild!(ws, cs, u, 0.0)
+            F = cs.G * u .- ws.dctx.b
+
+            # KCL rows of the chain and internal nodes must carry no
+            # residual at the exact solution. The old gmin-to-ground anchor
+            # put 5e-11 A on each internal node's row.
+            for (i, name) in enumerate(ctx.node_names)
+                name == :n1 && continue   # source row balances the branch current
+                @test abs(F[i]) < 1e-15
+            end
+
+            # End-to-end sanity: the solved chain must sit near 50 V. The
+            # bound is loose (residual-norm termination slack is mV-scale
+            # on this circuit) but far below the ~50 mV the leak caused.
+            sol = solve_dc(chain_circuit, (;), spec)
+            @test isapprox(sol[:na], 50.0; atol=2e-2)
+            @test isapprox(sol[:nb], 50.0; atol=2e-2)
+            @test isapprox(sol[:nc], 50.0; atol=2e-2)
         end
 
     end

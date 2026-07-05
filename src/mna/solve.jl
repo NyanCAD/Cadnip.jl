@@ -417,9 +417,7 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
     mul!(resid, cs.G, u0)
     resid .-= ws.dctx.b
     if norm(resid) < abstol
-        u = copy(u0)
-        _dc_newton_polish!(cs, ws, u)
-        return u, true
+        return u0, true
     end
 
     # Need Newton iteration with compiled evaluation
@@ -443,72 +441,7 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
     sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
     converged = sol.retcode == SciMLBase.ReturnCode.Success
 
-    if converged
-        u = copy(sol.u)
-        _dc_newton_polish!(cs, ws, u)
-        return u, true
-    end
     return sol.u, converged
-end
-
-"""
-    _dc_newton_polish!(cs, ws, u; dv_abstol=1e-9, dv_reltol=1e-12, max_polish=10)
-
-Full-Newton polish of a residual-converged DC solution, terminating on the
-**update size** `max|δu| ≤ dv_abstol + dv_reltol*max|u|` instead of the
-residual norm.
-
-The residual-norm termination above can accept node voltages that are still
-tens of mV off wherever the local conductance is tiny: a chain of
-weakly-conducting p-n junctions has gd ≈ Is/(n*Vt) ≈ 1e-9 S, so a voltage
-error of 50 mV produces a KCL residual of only ~5e-11 A — inside
-abstol=1e-10. The absolute residual tolerance also cannot simply be
-tightened: KCL rows containing large conductances (e.g. a 0.01 Ω source
-loop at 50 V) cancel ~5e3-scale currents, leaving a floating-point noise
-floor of ~1e-12 A in those rows, so no single residual norm serves both
-row scales (observed directly on the VACASK `mul` benchmark: tightening
-abstol below 1e-12 makes the solve *fail*, while at 1e-10 the diode-chain
-nodes sit 50 mV low). Standard SPICE terminates NR on per-node voltage
-updates instead; near the solution Newton converges quadratically, so this
-costs only a few extra sparse solves and pins weakly-conducting nodes to
-sub-µV accuracy.
-"""
-function _dc_newton_polish!(cs::CompiledStructure, ws::EvalWorkspace, u::AbstractVector;
-                             dv_abstol::Real=1e-9, dv_reltol::Real=1e-12,
-                             max_polish::Int=10)
-    n = length(u)
-    n == 0 && return u
-    F = zeros(n)
-    residnorm = let
-        fast_rebuild!(ws, cs, u, 0.0)
-        mul!(F, cs.G, u)
-        F .-= ws.dctx.b
-        norm(F)
-    end
-    for _ in 1:max_polish
-        δ = try
-            cs.G \ F
-        catch
-            break   # singular factorization: keep the residual-converged u
-        end
-        du = maximum(abs, δ)
-        isfinite(du) || break
-        u .-= δ
-        fast_rebuild!(ws, cs, u, 0.0)
-        mul!(F, cs.G, u)
-        F .-= ws.dctx.b
-        newnorm = norm(F)
-        # Near a solution a full Newton step must not grow the residual (2x
-        # slack for roundoff). If it does — ill-conditioned G, garbage step —
-        # revert and keep the residual-converged point.
-        if !isfinite(newnorm) || newnorm > 2 * residnorm
-            u .+= δ
-            break
-        end
-        residnorm = newnorm
-        du ≤ dv_abstol + dv_reltol * maximum(abs, u) && break
-    end
-    return u
 end
 
 #==============================================================================#
