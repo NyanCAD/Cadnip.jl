@@ -8,7 +8,7 @@
 using SparseArrays
 using LinearAlgebra
 
-export MNAData, assemble!, assemble_G, assemble_C, get_rhs, get_rhs_ac
+export MNAData, assemble!, assemble_G, assemble_C, get_rhs, get_rhs_ac, state_abstol
 
 """
     MNAData{T}
@@ -257,6 +257,24 @@ current_variable_indices(sys::MNAData) = (sys.n_nodes + 1):(sys.n_nodes + sys.n_
 Return the indices in the solution vector corresponding to charge variables.
 """
 charge_variable_indices(sys::MNAData) = (sys.n_nodes + sys.n_currents + 1):(sys.n_nodes + sys.n_currents + sys.n_charges)
+
+"""
+    state_abstol(sys::MNAData; vntol=1e-6, iabstol=1e-12, chgtol=1e-14) -> Vector{Float64}
+
+Build a per-class absolute tolerance vector for the solution vector, mirroring
+SPICE's `vntol`/`abstol`/`chgtol` split: node voltages get `vntol`, branch
+currents get `iabstol`, and charge state variables get `chgtol`. A single
+scalar `abstol` mixes ~1V node voltages with µA currents and femto-scale
+charges, so the tiniest-unit variables dominate the error test; this gives
+each variable class its own natural scale instead.
+"""
+function state_abstol(sys::MNAData; vntol=1e-6, iabstol=1e-12, chgtol=1e-14)
+    tol = Vector{Float64}(undef, system_size(sys))
+    tol[node_voltage_indices(sys)] .= vntol
+    tol[current_variable_indices(sys)] .= iabstol
+    tol[charge_variable_indices(sys)] .= chgtol
+    return tol
+end
 
 """
     get_node_index(sys::MNAData, name::Symbol) -> Int
