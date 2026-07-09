@@ -1124,6 +1124,88 @@ end
 # Phase 6: Nonlinear Devices
 #==============================================================================#
 
+#==============================================================================#
+# PCNR Newton Limiting (see doc/pcnr_plan.md)
+#
+# pnjlim is the SPICE PN-junction limiter, ported verbatim from the ngspice
+# variant shipped in-repo as Verilog-A (DEVpnjlim in
+# models/VADistillerModels.jl/va/diode.va). PNJunctionLimit packages the
+# limiter parameters as a refine spec for alloc_limit!; the PCNR corrector
+# (_dc_pcnr_newton in solve.jl) applies refine_limit between Newton steps.
+#==============================================================================#
+
+export pnjlim, PNJunctionLimit
+
+"""
+    pnjlim(vnew, vold, vt, vcrit) -> (vlim, limited::Bool)
+
+SPICE PN-junction voltage limiter: propose an evaluation voltage between
+`vold` (the voltage the device was evaluated at last iteration) and `vnew`
+(the voltage Newton proposes), compressing large forward-bias jumps
+logarithmically. Fixed point: `pnjlim(v, v, vt, vcrit) == v` for `v ≤ vcrit`.
+
+Port of `DEVpnjlim` from `models/VADistillerModels.jl/va/diode.va` (the
+ngspice variant, including its negative-voltage clamp).
+"""
+function pnjlim(vnew::Float64, vold::Float64, vt::Float64, vcrit::Float64)
+    if vnew > vcrit && abs(vnew - vold) > vt + vt
+        if vold > 0.0
+            arg = (vnew - vold) / vt
+            if arg > 0.0
+                return vold + vt * (2.0 + log(arg - 2.0)), true
+            else
+                return vold - vt * (2.0 + log(2.0 - arg)), true
+            end
+        else
+            return vt * log(vnew / vt), true
+        end
+    elseif vnew < 0.0
+        # Negative vnew: ngspice reverse-bias clamp
+        arg = vold > 0.0 ? -vold - 1.0 : 2.0 * vold - 1.0
+        if vnew < arg
+            return arg, true
+        end
+    end
+    return vnew, false
+end
+
+"""
+    PNJunctionLimit(vt, vcrit)
+
+Refine spec for PN-junction limiting variables (pass as `refine=` to
+`alloc_limit!`). `vt` is the (ideality-scaled) thermal voltage n·Vt and
+`vcrit = n·Vt·ln(n·Vt / (√2·Is))` the critical voltage.
+"""
+struct PNJunctionLimit
+    vt::Float64
+    vcrit::Float64
+end
+
+function PNJunctionLimit(; Is::Real, Vt::Real, n::Real=1.0)
+    nVt = Float64(n) * Float64(Vt)
+    PNJunctionLimit(nVt, nVt * log(nVt / (sqrt(2.0) * Float64(Is))))
+end
+
+"""
+    refine_limit(spec, vnew, vold) -> Float64
+
+Apply a limiting variable's corrector: given the Newton-proposed value `vnew`
+and the previous iterate's value `vold`, return the value the device should
+evaluate at next. `nothing` specs pass `vnew` through.
+"""
+refine_limit(::Nothing, vnew::Float64, vold::Float64) = vnew
+refine_limit(spec::PNJunctionLimit, vnew::Float64, vold::Float64) =
+    pnjlim(vnew, vold, spec.vt, spec.vcrit)[1]
+
+"""
+    limit_initial_value(spec) -> Float64
+
+Initial value for a limiting variable when the DC solve starts from scratch
+(SPICE seeds junctions at vcrit so the exponential starts in a live region).
+"""
+limit_initial_value(::Nothing) = 0.0
+limit_initial_value(spec::PNJunctionLimit) = spec.vcrit
+
 """
     Diode(; Is=1e-14, Vt=0.026, n=1.0, name=:D)
 
@@ -1159,30 +1241,53 @@ struct Diode
     Is::Float64    # Saturation current
     Vt::Float64    # Thermal voltage
     n::Float64     # Ideality factor
+    limit::Bool    # PCNR junction limiting (see doc/pcnr_plan.md)
     name::Symbol
 end
 
-function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, name::Symbol=:D)
-    Diode(Float64(Is), Float64(Vt), Float64(n), name)
+function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, limit::Bool=true, name::Symbol=:D)
+    Diode(Float64(Is), Float64(Vt), Float64(n), limit, name)
 end
 
 export Diode
+
+# Diode I-V evaluation with linear extension above exponent 80 (like limexp):
+# keeps I and G finite for wildly wrong intermediate iterates without moving
+# any fixed point in the physical range.
+@inline function _diode_iv(Is::Float64, nVt::Float64, v::Float64)
+    xarg = v / nVt
+    if xarg > 80.0
+        e80 = exp(80.0)
+        I0 = Is * (e80 * (1.0 + (xarg - 80.0)) - 1.0)
+        Gd = Is / nVt * e80
+    else
+        expterm = exp(xarg)
+        I0 = Is * (expterm - 1.0)
+        Gd = Is / nVt * expterm
+    end
+    return I0, Gd
+end
 
 """
     stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
 
 Stamp a nonlinear diode into MNA matrices.
 
-Uses Newton companion model: linearize I(V) at operating point V0.
-I ≈ I(V0) + G(V0) * (V - V0) = G*V + (I0 - G*V0)
+Uses Newton companion model: linearize I(V) at the evaluation point.
 
-where G = dI/dV = Is/(n*Vt) * exp(V0/(n*Vt)) at operating point.
+With `D.limit == true` (default), the diode uses a PCNR limiting variable
+(doc/pcnr_plan.md): it evaluates at `v_lim = x[lim]` instead of `V_p - V_n`,
+stamps its conductance into the `v_lim` *column*, and adds the linear row
+`g_lim = v_lim - (V_p - V_n) = 0`. Under plain Newton this is step-for-step
+equivalent to the unlimited diode (Schur complement identity); the PCNR
+corrector applies `pnjlim` to `v_lim` between iterations for SPICE-style
+convergence robustness.
 
-Stamps:
+With `D.limit == false`, stamps the classic companion model at `V0 = V_p - V_n`:
 - G matrix: conductance G(V0) between p and n
 - b vector: Newton companion current Ieq = I0 - G*V0
 
-The x parameter provides the current solution for V0.
+The x parameter provides the current solution vector.
 """
 function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
                 x::AbstractVector=Float64[])
@@ -1191,29 +1296,48 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
     Vn = n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[n])
     V0 = Vp - Vn
 
-    # Diode equation: I = Is * (exp(V/(n*Vt)) - 1)
     Is, Vt, n_factor = D.Is, D.Vt, D.n
     nVt = n_factor * Vt
 
-    # Current at operating point
-    expterm = exp(V0 / nVt)
-    I0 = Is * (expterm - 1.0)
+    if D.limit
+        # PCNR: allocate the limiting variable (unconditional — keeps
+        # DirectStampContext counters synchronized) and evaluate at it.
+        lidx = alloc_limit!(ctx, :vdlim, D.name, p, n;
+                            refine=PNJunctionLimit(Is=Is, Vt=Vt, n=n_factor))
+        li = resolve_index(ctx, lidx)
+        w = li <= length(x) ? x[li] : 0.0
 
-    # Conductance (dI/dV) at operating point
-    G = Is / nVt * expterm
+        I0, Gd = _diode_iv(Is, nVt, w)
 
-    # Newton companion model: I = G*V + Ieq
-    # where Ieq = I0 - G*V0
-    Ieq = I0 - G * V0
+        # KCL rows: current depends on v_lim only — conductance goes in the
+        # v_lim column (J_MNA/lim), nothing in the node-node block.
+        stamp_G!(ctx, p, lidx,  Gd)
+        stamp_G!(ctx, n, lidx, -Gd)
 
-    # Stamp conductance (same pattern as resistor)
-    stamp_conductance!(ctx, p, n, G)
+        # Companion current so the row residual equals I(w) at this iterate
+        Ieq = I0 - Gd * w
+        stamp_b!(ctx, p, -Ieq)
+        stamp_b!(ctx, n,  Ieq)
 
-    # Stamp companion current source
-    # Current I flows from p to n (out of p, into n in MNA convention)
-    # So: -Ieq enters p, +Ieq enters n
-    stamp_b!(ctx, p, -Ieq)
-    stamp_b!(ctx, n,  Ieq)
+        # Limiting row: g_lim = v_lim - (V_p - V_n) = 0 (linear, J_lim/lim = 1)
+        stamp_G!(ctx, lidx, lidx, 1.0)
+        stamp_G!(ctx, lidx, p, -1.0)
+        stamp_G!(ctx, lidx, n,  1.0)
+    else
+        I0, Gd = _diode_iv(Is, nVt, V0)
+
+        # Newton companion model: I = G*V + Ieq where Ieq = I0 - G*V0
+        Ieq = I0 - Gd * V0
+
+        # Stamp conductance (same pattern as resistor)
+        stamp_conductance!(ctx, p, n, Gd)
+
+        # Stamp companion current source
+        # Current I flows from p to n (out of p, into n in MNA convention)
+        # So: -Ieq enters p, +Ieq enters n
+        stamp_b!(ctx, p, -Ieq)
+        stamp_b!(ctx, n,  Ieq)
+    end
 
     return nothing
 end

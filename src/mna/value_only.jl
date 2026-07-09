@@ -44,6 +44,7 @@ mutable struct DirectStampContext
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
     n_currents::Int
+    n_charges::Int  # Needed to resolve LimitIndex (limits come after charges)
     current_names::Vector{Symbol}  # For get_current_idx lookups (CCVS/CCCS)
 
     # Direct references to sparse matrix storage (these are the actual nzval arrays)
@@ -65,6 +66,7 @@ mutable struct DirectStampContext
     b_deferred_pos::Int
     current_pos::Int
     charge_pos::Int
+    limit_pos::Int
 
     # Expected sizes for bounds checking
     n_G::Int
@@ -110,6 +112,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         ctx.node_to_idx,
         ctx.n_nodes,
         ctx.n_currents,
+        ctx.n_charges,
         ctx.current_names,
         G_nzval,
         C_nzval,
@@ -118,7 +121,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         b,
         Vector{Float64}(undef, n_b_deferred),
         b_resolved,
-        1, 1, 1, 1, 1,  # positions
+        1, 1, 1, 1, 1, 1,  # positions (G, C, b_deferred, current, charge, limit)
         n_G, n_C, n_b_deferred,
         copy(ctx.charge_is_vdep),
         1,
@@ -162,6 +165,10 @@ This mirrors the MNAContext version for DirectStampContext compatibility.
 @inline function resolve_index(ctx::DirectStampContext, idx::ChargeIndex)::Int
     return ctx.n_nodes + ctx.n_currents + idx.k
 end
+# LimitIndex for DirectStampContext (limits come after charges)
+@inline function resolve_index(ctx::DirectStampContext, idx::LimitIndex)::Int
+    return ctx.n_nodes + ctx.n_currents + ctx.n_charges + idx.k
+end
 
 """
     reset_direct_stamp!(dctx::DirectStampContext)
@@ -175,6 +182,7 @@ Reset counters and zero sparse matrix values for a new iteration.
     dctx.b_deferred_pos = 1
     dctx.current_pos = 1
     dctx.charge_pos = 1
+    dctx.limit_pos = 1
     dctx.charge_detection_pos = 1
     dctx.internal_node_pos = 1
 
@@ -284,6 +292,28 @@ For DirectStampContext, names are ignored - uses counter-based access.
     pos = dctx.charge_pos
     dctx.charge_pos = pos + 1
     return ChargeIndex(pos)
+end
+
+@inline function alloc_limit!(dctx::DirectStampContext, name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+    pos = dctx.limit_pos
+    dctx.limit_pos = pos + 1
+    return LimitIndex(pos)
+end
+
+@inline alloc_limit!(dctx::DirectStampContext, name::String, p::Int, n::Int; refine=nothing) =
+    alloc_limit!(dctx, Symbol(name), p, n)
+
+"""
+    alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+
+Component-based limit allocation that avoids Symbol interpolation at call site.
+For DirectStampContext, names and refine specs are ignored - uses counter-based
+access (specs were captured during structure discovery on MNAContext).
+"""
+@inline function alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+    pos = dctx.limit_pos
+    dctx.limit_pos = pos + 1
+    return LimitIndex(pos)
 end
 
 """

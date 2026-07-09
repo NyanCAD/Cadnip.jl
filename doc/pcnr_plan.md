@@ -129,71 +129,84 @@ device owns the solution variables it limits".
 The state slot for a branch is updated to the value returned by the *last*
 `$limit` site executed on that branch in an evaluation pass.
 
-## v1 design: inline limiting with state in `x` (recommended)
+## v1 design: paper-pure formulation with an explicit corrector (implemented)
 
-Rather than the paper-pure flow (devices evaluate at `v_lim`, separate
-corrector phase, Schur solve), v1 keeps the models' own inline limiter calls
-and only moves the state into `x`. This turns out to *be* PCNR with a
-one-sided coupling approximation — and it requires **zero changes to any
-solver**: DC (`CedarRobustNLSolve` and the stepping fallbacks), transient
-(IDA, FBDF, Rodas5P), sweeps and `alter` all see just a slightly larger
-system.
+> **Design correction (learned during implementation).** An earlier revision
+> of this plan proposed a "fused" v1: keep the models' inline limiter calls,
+> stamp `g_lim = x_lim − w(V)` as a linearized row, and let plain Newton do
+> the correcting — no custom solver loop. **That cannot work.** Any limit
+> equation solved *simultaneously* with the MNA rows makes `x_lim` track the
+> new branch voltage to first order, so at every stamping pass
+> `vold ≈ vnew` and the limiter never fires (trace the 5V rectifier from
+> zeros: iteration 1 sets `x_lim = V_out ≈ 5`, iteration 2 sees
+> `pnjlim(5, 5) = 5` and evaluates `exp(5/0.026)`). The nonlinear corrector
+> applied *between* iterations is not an optimization — it is the mechanism.
+> This is presumably exactly why the paper has an explicit correct phase.
+
+The implemented design is the paper's, with the corrector living in a small
+Cadnip-owned Newton loop:
 
 ### Formulation
 
-Augment the state: `x = [V₁..Vₙ, I₁..Iₘ, q₁..qₖ, v_lim,1..v_lim,L]`.
+Augment the state: `x = [V₁..Vₙ, I₁..Iₘ, q₁..qₖ, v_lim,1..v_lim,L]`
+(`LimitIndex`, `alloc_limit!` — mirrors of `ChargeIndex`/`alloc_charge!`).
 
-During stamping at `x`, for limit site(s) on branch `(p, n)` with limiting
-variable index `ℓ`:
+For a limited device on branch `(p, n)` with limiting variable `ℓ`:
 
-- `vnew` = `V_p − V_n` as today's `JacobianTag` dual (node partials only);
-- `vold` = `x[ℓ]` read as **plain Float64** (no dual — see "Jacobian
-  treatment" below);
-- the model computes `w = limfn(vnew, vold, args...)` inline (its own
-  `DEVpnjlim`), and evaluates all currents/charges at `w`. AD flows the
-  node partials through `limfn`, so `J_MNA/MNA` keeps its usual node-anchored
-  conductance entries (evaluated at the limited point, damped by
-  `∂w/∂vnew`) — **the sparsity pattern of the MNA block is unchanged**;
-- the simulator stamps one extra row, the limiting equation
-  `g_lim,ℓ = x[ℓ] − w(x_MNA) = 0`, in Newton-companion form (exactly the
-  pattern of `stamp_contribution!`, `src/mna/contrib.jl:438-475`):
-  `G[ℓ,ℓ] = 1`, `G[ℓ,p] = −∂w/∂V_p`, `G[ℓ,n] = −∂w/∂V_n`,
-  `b[ℓ] = G_row·x₀ − g_lim(x₀)`.
+- the device evaluates its currents **at `w = x[ℓ]`** (not at `V_p − V_n`),
+  and stamps its conductance into the **`x_lim` column**:
+  `G[p,ℓ] += G_d`, `G[n,ℓ] −= G_d`, with the matching companion
+  `b[p] −= I(w) − G_d·w`, `b[n] += ...`. The diode contributes *nothing* to
+  the node-node block — exactly the paper's Jacobian (Fig. 2);
+- the simulator stamps the **linear** limiting row
+  `g_lim = x[ℓ] − (V_p − V_n) = 0`:
+  `G[ℓ,ℓ] = 1`, `G[ℓ,p] = −1`, `G[ℓ,n] = +1`, `b[ℓ] = 0` — so
+  `J_lim/lim = I` identically;
+- the refine spec (e.g. `PNJunctionLimit(vt, vcrit)`) is recorded at
+  allocation time (`alloc_limit!(...; refine=spec)`) and carried through
+  `MNAContext.limit_specs` → `CompiledStructure.limit_specs`.
 
-### Why this is PCNR
+### The PCNR loop (`_dc_pcnr_newton`, src/mna/solve.jl)
 
-With `vold` un-dualed, `J_MNA/lim = 0` and `J_lim/lim = I`, so the augmented
-Jacobian is block lower-triangular:
+Runs as tier 0 of `_dc_solve_with_fallbacks`, only when `cs.n_limits > 0`:
 
-```
-J = [ J_MNA/MNA      0 ]        Δx_MNA solved from J_MNA/MNA alone  (predictor,
-    [ J_lim/MNA      I ]        Schur complement is trivially J_MNA/MNA)
-                                Δx_lim = -(g_lim + J_lim/MNA·Δx_MNA)  (paper's step (ii))
-```
+1. **Initialize**: seed `x_lim` slots with `limit_initial_value(spec)`
+   (vcrit for junctions — SPICE's junction seeding) when starting from zeros.
+2. **Predict**: plain Newton step on the augmented system
+   (`δ = G \ F`; `G` is the companion Jacobian, same machinery as the
+   standard path).
+3. **Correct**: `x_lim,k ← refine_limit(spec_k, proposed_k, previous_k)` —
+   i.e. `pnjlim(vnew, vold, vt, vcrit)` — applied by the *simulator*,
+   per the paper.
+4. **Converge**: `‖F‖ < abstol`. The `g_lim` rows are part of `F`, so
+   convergence implies `x_lim = V_branch` (no active limiting) — SPICE's
+   "no limiting applied this iteration" condition falls out automatically,
+   as does the `$discontinuity(-1)` iterate-again signal.
 
-The linear solve stays MNA-sized *by construction* — the paper's Schur
-elimination is free here. And the corrector is fused into the `g_lim` row:
-Newton's update gives `x_lim,i+1 = w_i + ∂w/∂V·ΔV`, i.e. a first-order
-estimate of `refine(x_i, x_{i+1})` — the limited voltage at the new iterate.
-The fixed point is unchanged: at convergence `x[ℓ] = w`, and since
-`pnjlim(v, v) = v`, `w = vnew`, so the solution solves the original
-unlimited system exactly. The `limited` flag / `$discontinuity(-1)`
-"iterate again" signal is subsumed by convergence checking: while limiting is
-active, `g_lim ≠ 0` keeps the residual norm up automatically.
+On failure it falls through to the unchanged standard chain
+(`CedarRobustNLSolve` → gmin stepping → source stepping).
 
-In practice the solver sees a *full* sparse system of size `n_MNA + L` (KLU
-factors the block-triangular structure cheaply; nnz grows by ~4 per limited
-branch, one row/col per junction — BSIM4: 9, diode: 1). No dual widening: the
-generated per-module dual width stays `n_all_nodes`, because `vold` is a
-Float64. Cost is negligible.
+### Why every other solver still works, unchanged
 
-### Jacobian treatment options (for the record)
+For solvers with no corrector phase (transient IDA/FBDF/Rodas, the
+NonlinearSolve fallback chain), plain Newton on the augmented system is
+**step-for-step equivalent** to Newton on the original system: the Schur
+complement of the linear `g_lim` rows is
+`S = J_MNA/MNA − J_MNA/lim·J_lim/MNA`, which puts each `G_d` back at its
+familiar node-node positions, and `g_lim = 0` along the whole trajectory
+(it starts at 0 from zeros/DC-consistent states and the linear rows are
+solved exactly). So: same iterates, same fixed point, ~`L` extra rows of
+bookkeeping. Nothing regresses; the corrector is pure upside where it runs.
+The augmented matrix is nonsingular exactly when the Schur complement (=
+today's matrix) is, even for diode-only nodes whose node-node diagonal is
+empty in the augmented form.
 
-| option | `vold` | coupling | notes |
-|---|---|---|---|
-| **(a) v1, chosen** | Float64 | `J_MNA/lim = 0`, block triangular | free Schur; matches SPICE's "vold is a constant this iteration" |
-| (b) full AD | extra dual slot per lim var | full 4-block Jacobian | exact Newton on the smoothed system; needs dual width `n_nodes + n_lim` (BSIM4: +9) and a real Schur solve or full factorization; try only if (a)'s convergence disappoints |
-| (c) paper-pure | evaluate at `v_lim` itself, explicit corrector | conductances *move* to `J_MNA/lim` columns | without Schur, `J_MNA/MNA` loses junction conductances (zero diagonals on diode-only nodes); with Schur, reproduces (a)'s matrix plus corrector flexibility. This is the upstreaming shape, not the v1 shape. |
+### Cost
+
+One row/col per limited junction (diode: 1, BSIM4: 9), ~5 extra nnz per
+junction, no dual widening (device evaluation at a scalar `x[ℓ]`), one
+`Vector{Any}` of refine specs consulted only in the corrector (L iterations
+of dynamic dispatch per Newton step — noise).
 
 ### Transient, AC, initialization
 
@@ -237,33 +250,38 @@ For anyone diffing against the old research artifact:
 
 ## Implementation plan (all inside Cadnip)
 
-### Phase 1: context plumbing + native `Diode` pilot
+### Phase 1: context plumbing + native `Diode` pilot — **implemented**
 
-Goal: end-to-end limiting on the handwritten `Diode`
-(`src/mna/devices.jl:1158-1219`) before touching codegen.
+End-to-end limiting on the handwritten `Diode` before touching codegen.
+As built:
 
-1. `src/mna/context.jl`:
-   - `LimitIndex <: MNAIndex` (like `ChargeIndex`); `resolve_index` maps it to
-     `n_nodes + n_currents + n_charges + k`; extend `system_size`,
-     `reset_for_restamping!`, `clear!`, `show`.
-   - `alloc_limit!(ctx, name::Symbol, p::Int, n::Int) -> LimitIndex` storing
-     `limit_names` and `limit_branches` (mirror of `alloc_charge!`,
-     including the component-based name variants for DirectStampContext
-     compatibility).
-2. `src/mna/value_only.jl`: positional `limit_pos` counter on
-   `DirectStampContext` (mirror of `charge_pos`); `alloc_limit!` returns the
-   pre-resolved index.
-3. `src/mna/contrib.jl` (or a small new `src/mna/limit.jl`):
-   `stamp_limit_row!(ctx, ℓ, p, n, w_dual, x)` emitting the companion-form
-   `g_lim` row described above.
-4. `src/mna/build.jl` / SII: limit names appear in solution indexing
-   (`sol[:D1_vdlim]`); `state_abstol` gains the limit class.
-5. Opt-in limiting for `Diode`: read `vold`, apply a Julia `pnjlim`
-   (port of `DEVpnjlim` — one small function, unit-testable), stamp the row.
-6. `test/mna/pcnr.jl`: fixed-point invariance (solution identical with/without
-   limiting on converging circuits), iteration-count reduction on a stiff
-   diode chain (the `doc/dc_newton_termination.md` 3-diode case and the
-   VACASK `mul` 50 V chain), Jacobian block structure checks.
+1. `src/mna/context.jl`: `LimitIndex <: MNAIndex`; `resolve_index` maps it to
+   `n_nodes + n_currents + n_charges + k`; `system_size`,
+   `reset_for_restamping!`, `clear!`, `show` extended;
+   `alloc_limit!(ctx, name, p, n; refine=spec)` storing `limit_names`,
+   `limit_branches`, `limit_specs` (mirror of `alloc_charge!`, including the
+   component-based name variants).
+2. `src/mna/value_only.jl`: `limit_pos` counter + `n_charges` field on
+   `DirectStampContext` (needed to resolve `LimitIndex`); counter-based
+   `alloc_limit!`.
+3. `src/mna/precompile.jl`: `LimitIndex` branch in the deferred-b resolution;
+   `CompiledStructure` carries `n_limits` + `limit_specs`.
+4. `src/mna/build.jl`: `MNAData.limit_names`/`n_limits`; SII lookup so
+   `sol[:D1_vdlim]` works; `state_abstol` maps limit variables to `vntol`.
+5. `src/mna/devices.jl`: `pnjlim` (verbatim port of `DEVpnjlim` from
+   `diode.va`, value + `limited` flag), `PNJunctionLimit` refine spec,
+   `refine_limit`, `limit_initial_value`; `Diode` gained `limit::Bool=true`
+   and stamps the paper-pure form (evaluation at `x[ℓ]`, conductance in the
+   lim column, linear `g_lim` row). Exponent clamped at 80 with linear
+   extension (limexp-style) so wild intermediate iterates stay finite.
+6. `src/mna/solve.jl`: `_dc_pcnr_newton` + tier-0 wiring in
+   `_dc_solve_with_fallbacks`.
+7. `test/mna/pcnr.jl`: pnjlim unit tests, plumbing, matrix structure,
+   fixed-point invariance, stiff-chain convergence, transient smoke.
+
+Measured on first bring-up (cold start from zeros, abstol=1e-10):
+5V/1k rectifier converges in **5 iterations**, 50V/1k 3-diode series chain
+in **6 iterations**; limited and unlimited solutions agree to ~1e-15.
 
 ### Phase 2: `$limit` codegen in vasim.jl
 

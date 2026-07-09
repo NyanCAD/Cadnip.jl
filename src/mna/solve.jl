@@ -445,6 +445,77 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 end
 
 #==============================================================================#
+# PCNR: Predictor/Corrector Newton-Raphson (see doc/pcnr_plan.md)
+#
+# Newton on the limit-augmented system with an explicit corrector phase:
+# after each Newton update, the limiting components of the state are replaced
+# by their device-specific refine functions (e.g. pnjlim), exactly as in
+# Aadithya/Keiter/Mei, SAND2018-5689C. This is the SPICE limiting loop with
+# the per-device vold state made explicit as solution variables, which is
+# what lets Cadnip's stateless builders participate at all.
+#
+# Only runs when the circuit allocated limiting variables (cs.n_limits > 0).
+# The linear g_lim rows make plain Newton on the augmented system equivalent
+# to Newton on the original system, so all other solvers (fallback chain,
+# transient integrators) work unchanged; this loop adds the correction that
+# plain Newton cannot express.
+#==============================================================================#
+
+function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                         abstol::Real=1e-10, maxiters::Int=100)
+    n = length(u0)
+    L = cs.n_limits
+    L == 0 && return u0, false
+    lim0 = n - L
+
+    u = copy(u0)
+    # Cold start: seed limiting variables from their specs (SPICE seeds
+    # junctions at vcrit so the exponentials start in a live region).
+    if iszero(u0)
+        for k in 1:L
+            u[lim0 + k] = limit_initial_value(cs.limit_specs[k])
+        end
+    end
+
+    F = zeros(n)
+    for _ in 1:maxiters
+        # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
+        # companion formulation, ws.dctx.b the matching RHS.
+        fast_rebuild!(ws, cs, u, 0.0)
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+
+        # Residual includes the g_lim rows, so convergence implies both KCL
+        # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
+        # limiting applied" convergence condition falls out automatically.
+        if norm(F) < abstol
+            return u, true
+        end
+
+        # PREDICT: plain Newton step on the augmented system
+        δ = try
+            cs.G \ F
+        catch err
+            err isa LinearAlgebra.SingularException && return u, false
+            rethrow()
+        end
+        all(isfinite, δ) || return u, false
+
+        # CORRECT: apply device refine functions to the limiting components.
+        # Element-wise update; limit slots use their own previous value as vold.
+        @inbounds for i in 1:n
+            unew = u[i] - δ[i]
+            if i > lim0
+                unew = refine_limit(cs.limit_specs[i - lim0], unew, u[i])
+            end
+            u[i] = unew
+        end
+    end
+
+    return u, false
+end
+
+#==============================================================================#
 # GMIN Stepping (gshunt homotopy)
 #
 # Steps gshunt from a large value down to 0 (or target gshunt).
@@ -622,6 +693,17 @@ function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::
     n = length(u0)
     if n == 0
         return u0, true
+    end
+
+    # 0. PCNR predictor/corrector Newton — only when the circuit allocated
+    # limiting variables. SPICE-style junction limiting; typically converges
+    # where plain Newton needs the stepping fallbacks (see doc/pcnr_plan.md).
+    if cs.n_limits > 0
+        u, converged = _dc_pcnr_newton(cs, ws, u0; abstol=abstol, maxiters=maxiters)
+        if converged
+            return u, true
+        end
+        @debug "PCNR solve did not converge, falling back to standard chain"
     end
 
     # 1. Try regular solve first

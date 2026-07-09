@@ -115,6 +115,13 @@ struct CompiledStructure{F,P,S,M<:AbstractMatrix{Float64}}
     # For sparse: index into G.nzval
     # For dense: linear index (i + (i-1)*n)
     G_diag_idx::Vector{Int}
+
+    # PCNR Newton limiting variables (see doc/pcnr_plan.md)
+    # Limit variables occupy the last n_limits slots of the state vector.
+    # limit_specs[k] is the refine spec for limit k (e.g. PNJunctionLimit),
+    # or nothing for a plain tracking variable.
+    n_limits::Int
+    limit_specs::Vector{Any}
 end
 
 """
@@ -327,7 +334,8 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices
             G_empty, C_empty,
             Int[], 0,
-            Int[]
+            Int[],
+            0, Any[]
         )
     end
 
@@ -351,6 +359,8 @@ function compile_structure(builder::F, params::P, spec::S;
             ctx0.n_nodes + idx_typed.k
         elseif idx_typed isa ChargeIndex
             ctx0.n_nodes + ctx0.n_currents + idx_typed.k
+        elseif idx_typed isa LimitIndex
+            ctx0.n_nodes + ctx0.n_currents + ctx0.n_charges + idx_typed.k
         else
             0  # GroundIndex - skip
         end
@@ -393,7 +403,8 @@ function compile_structure(builder::F, params::P, spec::S;
             G_I_resolved, G_J_resolved, C_I_resolved, C_J_resolved,
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx
+            G_diag_idx,
+            ctx0.n_limits, copy(ctx0.limit_specs)
         )
     else
         # Sparse matrix compilation (original path)
@@ -426,7 +437,8 @@ function compile_structure(builder::F, params::P, spec::S;
             Int[], Int[], Int[], Int[],  # Empty COO indices for sparse
             G, C,
             b_deferred_resolved, n_b_deferred,
-            G_diag_idx
+            G_diag_idx,
+            ctx0.n_limits, copy(ctx0.limit_specs)
         )
     end
 end

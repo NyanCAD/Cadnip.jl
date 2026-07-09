@@ -46,14 +46,21 @@ struct MNAData{T<:Real}
     node_names::Vector{Symbol}
     current_names::Vector{Symbol}
     charge_names::Vector{Symbol}
+    limit_names::Vector{Symbol}
     n_nodes::Int
     n_currents::Int
     n_charges::Int
+    n_limits::Int
 end
 
-# Constructor without charges (for backwards compat with older callers)
+# Constructor without charges/limits (for backwards compat with older callers)
 function MNAData{T}(G, C, b, node_names, current_names, n_nodes, n_currents) where {T<:Real}
-    MNAData{T}(G, C, b, node_names, current_names, Symbol[], n_nodes, n_currents, 0)
+    MNAData{T}(G, C, b, node_names, current_names, Symbol[], Symbol[], n_nodes, n_currents, 0, 0)
+end
+
+# Constructor without limits (for backwards compat with older callers)
+function MNAData{T}(G, C, b, node_names, current_names, charge_names, n_nodes, n_currents, n_charges) where {T<:Real}
+    MNAData{T}(G, C, b, node_names, current_names, charge_names, Symbol[], n_nodes, n_currents, n_charges, 0)
 end
 
 """
@@ -61,7 +68,7 @@ end
 
 Return the total system size (number of unknowns).
 """
-system_size(data::MNAData) = data.n_nodes + data.n_currents + data.n_charges
+system_size(data::MNAData) = data.n_nodes + data.n_currents + data.n_charges + data.n_limits
 
 #==============================================================================#
 # Matrix Assembly
@@ -227,9 +234,11 @@ function assemble!(ctx::MNAContext)
         copy(ctx.node_names),
         copy(ctx.current_names),
         copy(ctx.charge_names),
+        copy(ctx.limit_names),
         ctx.n_nodes,
         ctx.n_currents,
-        ctx.n_charges
+        ctx.n_charges,
+        ctx.n_limits
     )
 end
 
@@ -259,6 +268,13 @@ Return the indices in the solution vector corresponding to charge variables.
 charge_variable_indices(sys::MNAData) = (sys.n_nodes + sys.n_currents + 1):(sys.n_nodes + sys.n_currents + sys.n_charges)
 
 """
+    limit_variable_indices(sys::MNAData) -> UnitRange{Int}
+
+Return the indices in the solution vector corresponding to Newton limiting variables.
+"""
+limit_variable_indices(sys::MNAData) = (sys.n_nodes + sys.n_currents + sys.n_charges + 1):(sys.n_nodes + sys.n_currents + sys.n_charges + sys.n_limits)
+
+"""
     state_abstol(sys::MNAData; vntol=1e-6, iabstol=1e-12, chgtol=1e-14) -> Vector{Float64}
 
 Build a per-class absolute tolerance vector for the solution vector, mirroring
@@ -267,12 +283,15 @@ currents get `iabstol`, and charge state variables get `chgtol`. A single
 scalar `abstol` mixes ~1V node voltages with µA currents and femto-scale
 charges, so the tiniest-unit variables dominate the error test; this gives
 each variable class its own natural scale instead.
+
+Newton limiting variables are branch voltages, so they share `vntol`.
 """
 function state_abstol(sys::MNAData; vntol=1e-6, iabstol=1e-12, chgtol=1e-14)
     tol = Vector{Float64}(undef, system_size(sys))
     tol[node_voltage_indices(sys)] .= vntol
     tol[current_variable_indices(sys)] .= iabstol
     tol[charge_variable_indices(sys)] .= chgtol
+    tol[limit_variable_indices(sys)] .= vntol
     return tol
 end
 
@@ -327,6 +346,9 @@ function Base.show(io::IO, ::MIME"text/plain", sys::MNAData{T}) where T
     println(io, "  Voltage nodes: $(sys.n_nodes)")
     println(io, "  Current variables: $(sys.n_currents)")
     println(io, "  Charge variables: $(sys.n_charges)")
+    if sys.n_limits > 0
+        println(io, "  Limit variables: $(sys.n_limits)")
+    end
     println(io, "  G matrix: $(nnz(sys.G)) nonzeros")
     println(io, "  C matrix: $(nnz(sys.C)) nonzeros")
     if !isempty(sys.node_names)
@@ -388,7 +410,7 @@ end
 Display the G matrix (for debugging small circuits).
 """
 function show_G(sys::MNAData)
-    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
+    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names, sys.limit_names)
     show_matrix(stdout, sys.G, all_names)
 end
 
@@ -398,7 +420,7 @@ end
 Display the C matrix (for debugging small circuits).
 """
 function show_C(sys::MNAData)
-    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
+    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names, sys.limit_names)
     show_matrix(stdout, sys.C, all_names)
 end
 
@@ -412,7 +434,7 @@ end
 import SymbolicIndexingInterface as SII
 
 function _sii_all_names(sys::MNAData)
-    return vcat(sys.node_names, sys.current_names, sys.charge_names)
+    return vcat(sys.node_names, sys.current_names, sys.charge_names, sys.limit_names)
 end
 
 # Do NOT define `SII.symbolic_container` — it triggers default recursive
@@ -430,6 +452,8 @@ function SII.variable_index(sys::MNAData, sym::Symbol)
     idx === nothing || return sys.n_nodes + idx
     idx = findfirst(==(sym), sys.charge_names)
     idx === nothing || return sys.n_nodes + sys.n_currents + idx
+    idx = findfirst(==(sym), sys.limit_names)
+    idx === nothing || return sys.n_nodes + sys.n_currents + sys.n_charges + idx
     return nothing
 end
 SII.variable_index(::MNAData, ::Any) = nothing

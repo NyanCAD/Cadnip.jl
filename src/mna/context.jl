@@ -8,11 +8,12 @@
 #==============================================================================#
 
 export MNAContext, MNAData
-export MNAIndex, NodeIndex, CurrentIndex, ChargeIndex, GroundIndex
+export MNAIndex, NodeIndex, CurrentIndex, ChargeIndex, LimitIndex, GroundIndex
 export ZeroVector, ZERO_VECTOR
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
+export alloc_limit!, get_limit_idx, has_limit, n_limits
 export stamp_G!, stamp_C!, stamp_b!, stamp_b_ac!
 export stamp_conductance!, stamp_capacitance!
 export get_G_idx!, get_C_idx!, get_b_idx!, stamp_G_at_idx!, stamp_C_at_idx!, stamp_b_at_idx!
@@ -76,11 +77,28 @@ struct ChargeIndex <: MNAIndex
     k::Int  # Charge variable number (1-based)
 end
 
+"""
+    LimitIndex
+
+Index for a Newton limiting variable (PCNR — see doc/pcnr_plan.md).
+Contains the limit variable number k; resolved to
+n_nodes + n_currents + n_charges + k at assembly.
+
+Limiting variables carry the "voltage the device evaluated at last iteration"
+state that SPICE keeps hidden inside each device. They are algebraic unknowns
+tied to their branch by a `g_lim = x_lim - w(V_p - V_n) = 0` row, where `w`
+is the device's limiting function (e.g. `pnjlim`).
+"""
+struct LimitIndex <: MNAIndex
+    k::Int  # Limit variable number (1-based)
+end
+
 # Ground check for stamps
 Base.iszero(::GroundIndex) = true
 Base.iszero(::NodeIndex) = false
 Base.iszero(::CurrentIndex) = false
 Base.iszero(::ChargeIndex) = false
+Base.iszero(::LimitIndex) = false
 
 #==============================================================================#
 # ZeroVector - phantom vector for initial stamping
@@ -206,6 +224,18 @@ mutable struct MNAContext
     charge_V_values::Vector{Float64}  # Stored V_branch values for comparison
     charge_detection_pos::Int
 
+    # Newton limiting variables (PCNR — see doc/pcnr_plan.md)
+    # One per (device instance, limited branch). Algebraic unknowns holding the
+    # voltage the device evaluates at, tied to the branch by the linear row
+    # g_lim = x_lim - (V_p - V_n) = 0.
+    limit_names::Vector{Symbol}
+    n_limits::Int
+    # Branch nodes (p, n) whose voltage the limit variable tracks
+    limit_branches::Vector{Tuple{Int,Int}}
+    # Per-limit refine specs (e.g. PNJunctionLimit) used by the PCNR corrector.
+    # `nothing` entries get no correction (plain tracking variable).
+    limit_specs::Vector{Any}
+
     # Breakpoint times collected from time-dependent sources (PWL/PULSE/SIN),
     # expanded into solver tstops by the tran! constructors. Recomputed from
     # scratch on every rebuild (not a detection cache like charge_is_vdep).
@@ -246,6 +276,10 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
+        Symbol[],           # limit_names
+        0,                  # n_limits
+        Tuple{Int,Int}[],   # limit_branches
+        Any[],              # limit_specs
         BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
     )
@@ -255,11 +289,11 @@ end
     system_size(ctx::MNAContext) -> Int
 
 Return the total system size (number of unknowns).
-Includes nodes, current variables, and charge state variables.
+Includes nodes, current variables, charge state variables, and limiting variables.
 
-System vector layout: [V₁...Vₙ, I₁...Iₘ, q₁...qₖ]
+System vector layout: [V₁...Vₙ, I₁...Iₘ, q₁...qₖ, v_lim,1...v_lim,L]
 """
-@inline system_size(ctx::MNAContext) = ctx.n_nodes + ctx.n_currents + ctx.n_charges
+@inline system_size(ctx::MNAContext) = ctx.n_nodes + ctx.n_currents + ctx.n_charges + ctx.n_limits
 
 """
     n_charges(ctx::MNAContext) -> Int
@@ -267,6 +301,13 @@ System vector layout: [V₁...Vₙ, I₁...Iₘ, q₁...qₖ]
 Return the number of charge state variables.
 """
 @inline n_charges(ctx::MNAContext) = ctx.n_charges
+
+"""
+    n_limits(ctx::MNAContext) -> Int
+
+Return the number of Newton limiting variables.
+"""
+@inline n_limits(ctx::MNAContext) = ctx.n_limits
 
 #==============================================================================#
 # Node and Current Variable Allocation
@@ -386,14 +427,16 @@ Resolve an MNA index to an actual system row/column index.
 - NodeIndex: Returns the node index unchanged
 - CurrentIndex(k): Returns n_nodes + k
 - ChargeIndex(k): Returns n_nodes + n_currents + k
+- LimitIndex(k): Returns n_nodes + n_currents + n_charges + k
 
-This allows current and charge variable indices to be stamped before all nodes are known,
-and resolved at assembly time when n_nodes is final.
+This allows current, charge, and limit variable indices to be stamped before all
+nodes are known, and resolved at assembly time when n_nodes is final.
 """
 @inline resolve_index(ctx::MNAContext, ::GroundIndex)::Int = 0
 @inline resolve_index(ctx::MNAContext, idx::NodeIndex)::Int = idx.idx
 @inline resolve_index(ctx::MNAContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
 @inline resolve_index(ctx::MNAContext, idx::ChargeIndex)::Int = ctx.n_nodes + ctx.n_currents + idx.k
+@inline resolve_index(ctx::MNAContext, idx::LimitIndex)::Int = ctx.n_nodes + ctx.n_currents + ctx.n_charges + idx.k
 
 """
     get_current_idx(ctx::MNAContext, name::Symbol) -> CurrentIndex
@@ -612,6 +655,94 @@ function get_charge_branch(ctx::MNAContext, name::Symbol)::Tuple{Int, Int}
 end
 
 #==============================================================================#
+# Limiting Variable Allocation (PCNR Newton limiting)
+#==============================================================================#
+
+"""
+    alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+
+Allocate a Newton limiting variable for the branch (p, n).
+
+Limiting variables carry the SPICE-style limited junction voltage as an
+explicit unknown (PCNR — see doc/pcnr_plan.md). The device evaluates its
+currents *at* `x_lim = x[resolve_index(ctx, idx)]` (not at `V_p - V_n`),
+stamps its conductance into the `x_lim` column, and stamps the linear
+limiting row `g_lim = x_lim - (V_p - V_n) = 0`.
+
+The `refine` spec (e.g. [`PNJunctionLimit`](@ref)) tells the PCNR corrector
+how to limit this variable between Newton iterations:
+`x_lim ← refine_limit(spec, x_lim_proposed, x_lim_previous)`. Solvers without
+a corrector phase (transient integrators, the NonlinearSolve fallback chain)
+solve the augmented system with plain Newton, which is step-for-step
+equivalent to Newton on the original system (Schur complement identity), so
+behavior is unchanged there.
+
+At convergence `x_lim = V_p - V_n`, so the solution of the augmented system
+solves the original circuit exactly.
+
+# Allocation discipline
+Like charge variables, limit allocation must be unconditional (not under a
+runtime branch) so that positional counters in `DirectStampContext` stay
+synchronized across restamping passes.
+"""
+function alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+    ctx.n_limits += 1
+    push!(ctx.limit_names, name)
+    push!(ctx.limit_branches, (p, n))
+    push!(ctx.limit_specs, refine)
+    return LimitIndex(ctx.n_limits)
+end
+
+alloc_limit!(ctx::MNAContext, name::String, p::Int, n::Int; refine=nothing) =
+    alloc_limit!(ctx, Symbol(name), p, n; refine)
+
+"""
+    alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+
+Component-based limit allocation that builds the full name from components.
+Avoids Symbol interpolation at call site for use with DirectStampContext.
+For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+"""
+function alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return alloc_limit!(ctx, name, p, n; refine)
+end
+
+"""
+    get_limit_idx(ctx::MNAContext, name::Symbol) -> LimitIndex
+
+Look up a limiting variable index by name.
+Use `resolve_index` to get the actual system index.
+"""
+function get_limit_idx(ctx::MNAContext, name::Symbol)::LimitIndex
+    idx = findfirst(==(name), ctx.limit_names)
+    idx === nothing && error("Limit variable $name not found in MNA context")
+    return LimitIndex(idx)
+end
+
+get_limit_idx(ctx::MNAContext, name::String) = get_limit_idx(ctx, Symbol(name))
+
+"""
+    has_limit(ctx::MNAContext, name::Symbol) -> Bool
+
+Check if a limiting variable with the given name exists.
+"""
+function has_limit(ctx::MNAContext, name::Symbol)::Bool
+    return name in ctx.limit_names
+end
+
+"""
+    get_limit_branch(ctx::MNAContext, name::Symbol) -> Tuple{Int, Int}
+
+Get the branch nodes (p, n) whose voltage a limiting variable tracks.
+"""
+function get_limit_branch(ctx::MNAContext, name::Symbol)::Tuple{Int, Int}
+    idx = findfirst(==(name), ctx.limit_names)
+    idx === nothing && error("Limit variable $name not found in MNA context")
+    return ctx.limit_branches[idx]
+end
+
+#==============================================================================#
 # Stamping Primitives
 #==============================================================================#
 
@@ -632,6 +763,7 @@ end
 @inline _to_typed(idx::NodeIndex) = idx
 @inline _to_typed(idx::CurrentIndex) = idx
 @inline _to_typed(idx::ChargeIndex) = idx
+@inline _to_typed(idx::LimitIndex) = idx
 
 """
     stamp_G!(ctx::MNAContext, i, j, val)
@@ -949,6 +1081,12 @@ function reset_for_restamping!(ctx::MNAContext)
     # Reset charge detection counter for re-stamping (cache is preserved)
     ctx.charge_detection_pos = 1
 
+    # Limiting variables
+    empty!(ctx.limit_names)
+    ctx.n_limits = 0
+    empty!(ctx.limit_branches)
+    empty!(ctx.limit_specs)
+
     # Breakpoints are recomputed from scratch every build (not a cache)
     empty!(ctx.breakpoints)
 
@@ -999,6 +1137,10 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_Q_values)
     empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
+    empty!(ctx.limit_names)
+    ctx.n_limits = 0
+    empty!(ctx.limit_branches)
+    empty!(ctx.limit_specs)
     empty!(ctx.breakpoints)
     ctx.finalized = false
     return nothing
@@ -1014,6 +1156,9 @@ function Base.show(io::IO, ctx::MNAContext)
     print(io, ", currents=$(ctx.n_currents)")
     if ctx.n_charges > 0
         print(io, ", charges=$(ctx.n_charges)")
+    end
+    if ctx.n_limits > 0
+        print(io, ", limits=$(ctx.n_limits)")
     end
     print(io, ", G_nnz=$(length(ctx.G_V)), ")
     print(io, "C_nnz=$(length(ctx.C_V))")
@@ -1046,6 +1191,14 @@ function Base.show(io::IO, ::MIME"text/plain", ctx::MNAContext)
         base_idx = ctx.n_nodes + ctx.n_currents
         for (i, name) in enumerate(ctx.charge_names)
             (p, n) = ctx.charge_branches[i]
+            println(io, "    [$(base_idx + i)] $name (branch $p → $n)")
+        end
+    end
+    if ctx.n_limits > 0
+        println(io, "  Limit variables ($(ctx.n_limits)):")
+        base_idx = ctx.n_nodes + ctx.n_currents + ctx.n_charges
+        for (i, name) in enumerate(ctx.limit_names)
+            (p, n) = ctx.limit_branches[i]
             println(io, "    [$(base_idx + i)] $name (branch $p → $n)")
         end
     end
