@@ -465,7 +465,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
                          abstol::Real=1e-10, maxiters::Int=100)
     n = length(u0)
     L = cs.n_limits
-    L == 0 && return u0, false
+    L == 0 && return u0, false, 0
     lim0 = n - L
 
     u = copy(u0)
@@ -478,7 +478,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     end
 
     F = zeros(n)
-    for _ in 1:maxiters
+    for iter in 1:maxiters
         # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
         # companion formulation, ws.dctx.b the matching RHS.
         fast_rebuild!(ws, cs, u, 0.0)
@@ -489,17 +489,17 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
         # limiting applied" convergence condition falls out automatically.
         if norm(F) < abstol
-            return u, true
+            return u, true, iter - 1
         end
 
         # PREDICT: plain Newton step on the augmented system
         δ = try
             cs.G \ F
         catch err
-            err isa LinearAlgebra.SingularException && return u, false
+            err isa LinearAlgebra.SingularException && return u, false, iter - 1
             rethrow()
         end
-        all(isfinite, δ) || return u, false
+        all(isfinite, δ) || return u, false, iter - 1
 
         # CORRECT: apply device refine functions to the limiting components.
         # Element-wise update; limit slots use their own previous value as vold.
@@ -512,7 +512,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         end
     end
 
-    return u, false
+    return u, false, maxiters
 end
 
 #==============================================================================#

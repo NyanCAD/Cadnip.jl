@@ -307,18 +307,42 @@ Measured on first bring-up (cold start from zeros, abstol=1e-10):
 5V/1k rectifier converges in **5 iterations**, 50V/1k 3-diode series chain
 in **6 iterations**; limited and unlimited solutions agree to ~1e-15.
 
-### Phase 2: `$limit` codegen in vasim.jl
+### Phase 2: `$limit` codegen in vasim.jl — future work (not a quick job)
 
-7. `src/vasim.jl` `$limit` handler (`:1192`):
-   - group call sites by probe branch within the module; first site allocates
-     (hoisted, unconditional — same rule as hoisted `get_G_idx!` stamping, so
-     DirectStampContext counters stay synchronized; all VADistiller sites are
-     unconditional today, but enforce/document the constraint);
-   - emit `vold = _mna_x_[resolve(ℓ)]` (Float64, pre-dual read) and
-     `w = fn(vnew, vold, args...)` via the existing VA analog-function call
-     machinery (`all_functions`, handles the `inout limited` flag already);
-   - after the analog block, stamp the `g_lim` row from the **last** site's
-     returned value per branch (NewSet site for VADistiller models).
+**Design insight from Phase 1**: the native-`Diode` pilot uses the paper-pure
+scheme (device evaluates *at* `x_lim`; the simulator owns the refine
+function). VADistiller models can't use that shape — their limiter lives
+*inside* the model (`DEVpnjlim` inline, reached via the OldGet/NewSet
+`$limit` pattern). The SPICE-faithful mapping for them:
+
+- OldGet site → `vold = x[ℓ]` (plain Float64 read, pre-dual);
+- the model computes `w = DEVpnjlim(vnew, vold, ...)` itself and evaluates
+  at `w`; AD flows node partials through the limiter, so conductances stay
+  in the node-node block;
+- the NewSet site's returned value is **recorded** into a per-iteration
+  buffer on the workspace (new `limit_w` slots on `DirectStampContext`);
+- the corrector is then just `x_lim ← w_recorded` — a copy; the simulator
+  needs no knowledge of the model's limiter (`RecordedLimit` spec alongside
+  `PNJunctionLimit`);
+- the `g_lim` row stays the linear `x_lim − (V_p − V_n) = 0`.
+
+Trace check (rectifier from zeros): iter 0 stamps at `w₀ = pnjlim(0,0) = 0`;
+predict pushes `V → 5` but correct resets `x_lim ← 0`; iter 1 computes
+`w₁ = pnjlim(5, 0) = vt·ln(5/vt) ≈ 0.14` — the limiter fires exactly as in
+ngspice.
+
+**Effort assessment**: this is the most delicate file in the repo
+(positional-counter discipline, dual handling, per-branch site grouping
+across a 3.7k-line codegen; BSIM4 has 18 sites/9 branches to validate).
+Multi-session, careful work — not delegable to a quick agent pass. No type
+piracy anywhere: it's all Cadnip-owned codegen and context plumbing.
+
+7. `src/vasim.jl` `$limit` handler (`:1192`): group call sites by probe
+   branch within the module; first site allocates (hoisted, unconditional —
+   same rule as hoisted `get_G_idx!` stamping); emit the OldGet read and the
+   NewSet record per the mapping above, via the existing VA analog-function
+   call machinery (`all_functions`, which already handles the
+   `inout limited` flag).
 8. Integration tests: `test/mna/vadistiller.jl` additions — diode rectifier,
    the astable BJT case (`test/mna/astable_bjt_test.jl`), MOS sweeps; verify
    `dc!`/`tran!` results unchanged on already-converging circuits and
@@ -327,6 +351,9 @@ in **6 iterations**; limited and unlimited solutions agree to ~1e-15.
    vs. VACASK (which runs the same models *with* limiting active), wpd plots
    for `mul`. This is the acceptance gate: limiting should cut iterations
    and/or fallback invocations without accuracy regressions.
+   A first cross-method DC benchmark (PCNR vs NewtonRaphson / TrustRegion /
+   RobustMultiNewton / LM / PseudoTransient / `CedarRobustNLSolve` on
+   graetz/mul-style native-Diode topologies) lives in `benchmarks/pcnr/`.
 
 ### Phase 3 (optional, evidence-driven): explicit corrector + full coupling
 
