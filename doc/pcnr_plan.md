@@ -186,6 +186,30 @@ Runs as tier 0 of `_dc_solve_with_fallbacks`, only when `cs.n_limits > 0`:
 On failure it falls through to the unchanged standard chain
 (`CedarRobustNLSolve` → gmin stepping → source stepping).
 
+### Scope: DC and transient initialization now; in-step transient later
+
+The corrector currently runs in `_dc_pcnr_newton`, i.e. for `dc!` and for
+transient *initialization* (`CedarDCOp`/`CedarTranOp` route through
+`_dc_solve_with_fallbacks`). SPICE also applies pnjlim on every NR iteration
+inside every timestep (`vold` seeded from the previous timepoint); we don't
+yet — during stepping the limit variables ride along inertly (see the
+equivalence argument below). In-step limiting matters most for switching
+circuits and sharp source edges; the integrator's predictor and timestep
+control cover much of the rest.
+
+The path to in-step limiting is `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg`:
+implicit steppers can delegate their stage solves to any NonlinearSolve.jl
+algorithm, so packaging the PCNR loop as an `AbstractNonlinearSolveAlgorithm`
+gives `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` — SPICE-style
+limiting inside every timestep with **zero OrdinaryDiffEq changes**. This
+supersedes the "post-iteration hook in NLNewton" idea in the upstreaming
+table as the primary transient route. Wrinkles: the stage solve works in a
+transformed variable (γ-scaled stage, not `x` directly), so the corrector
+must map its limit slots through that affine relation; the refine specs
+already reach the algorithm via `CompiledStructure` in `prob.p`. Sundials
+IDA (today's `tran!` default) can never participate — its Newton loop is C —
+so limiting-sensitive circuits would move to FBDF to benefit.
+
 ### Why every other solver still works, unchanged
 
 For solvers with no corrector phase (transient IDA/FBDF/Rodas, the
@@ -346,7 +370,7 @@ upstream as follows:
 | piece | target | shape | status/blockers |
 |---|---|---|---|
 | PCNR descent (Schur predictor, option (c)) | **NonlinearSolveBase / NonlinearSolveFirstOrder** | `PCNRDescent <: AbstractDescentDirection` with `InternalAPI.init(prob, alg, J, fu, u; ...)` / `InternalAPI.solve!(cache, J, fu, u, idx; ...) -> DescentResult` (API verified at the resolved NonlinearSolveBase v2.33.0 and on master) | compat narrowed to `NonlinearSolve = "4"` (no-op for resolution — see above). The corrector needs a **post-descent hook** in `GeneralizedFirstOrderAlgorithm` that doesn't exist yet — that's the major-API-change part: prototype the hook locally, open the upstream RFC proposing a `correct!(u, u_prev, p)` callback so limiting composes with TrustRegion/LineSearch instead of replacing them, and PR `PCNRDescent` only once the hook shape is agreed. |
-| Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | either a post-iteration hook in `NLNewton`'s `compute_step!`, or an `NLPCNR <: AbstractNLSolverAlgorithm` (verified: `NLNewton`, `NonlinearSolveAlg` exist; no hook today; the `relax` field is the nearest precedent) | Only needed for the *explicit-corrector* variant; v1's fused formulation needs nothing here. |
+| Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | primary route needs **no upstream change**: package PCNR as an `AbstractNonlinearSolveAlgorithm` and pass `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` (see "Scope" section). A post-iteration hook in `NLNewton` remains the fallback idea if the `NonlinearSolveAlg` bridge proves too indirect (stage-variable mapping) | Corrector must map limit slots through the γ-scaled stage variable. |
 | Limiting in IDA | **Sundials.jl** | not possible — IDA's Newton loop is C and unhookable | v1's formulation (limiting fused into the residual/Jacobian) is the *only* PCNR variant that works under IDA. This is a strong argument for keeping the v1 formulation permanently, even after upstream hooks exist. |
 | `$limit` semantics & experience | **VADistiller / VACASK** (Bürmen, codeberg) | no model changes needed — the models drive the design; report the per-branch state-keying convention and any model bugs found | coordination only |
 | `$limit` parsing | **NyanVerilogAParser.jl** | already parses (vasim receives the args today) | none expected |
