@@ -301,12 +301,33 @@ Only if v1 convergence is insufficient on real cases:
 
 ## Deferred upstreaming plan
 
-Nothing above requires forking or patching dependencies. Once v1/v2 evidence
-exists in Cadnip, the reusable solver pieces map upstream as follows:
+Nothing above requires forking or patching dependencies. Strategy: PCNR is a
+published algorithm (Sandia/Springer), which SciML historically receives
+well — but the corrector requires a cross-cutting API change (a post-step
+hook in the solve loop), and most of PCNR's value lives in the device
+coupling (limiting functions, `$limit` state, stamping), which is
+Cadnip-specific and stays local. So: **implement locally first, open an
+upstream API discussion early** (an RFC issue describing the corrector hook,
+citing the paper and the working Cadnip implementation), and only PR the
+generic pieces once the hook API is agreed. The generic pieces are small —
+a Schur-complement descent over an identity block and a `refine`-style
+iterate callback; everything else is not upstreamable by nature.
+
+Dependency status (verified 2026-07 by fresh resolution on Julia 1.12):
+Manifests are gitignored and CI resolves fresh, and the resolver already
+picks **NonlinearSolve v4.20.2** (NonlinearSolveBase v2.33.0,
+NonlinearSolveFirstOrder v2.1.3, SciMLBase v3.33, OrdinaryDiffEq v7.1,
+DiffEqBase v7.6, Sundials v6.2). The old `NonlinearSolve = "3, 4"` compat was
+therefore never CI-tested on the 3.x branch; it has been narrowed to `"4"`.
+The descent API (`AbstractDescentDirection`, `InternalAPI.init/solve!`,
+`DescentResult`) is confirmed present at the resolved NonlinearSolveBase
+version, so nothing blocks prototyping `PCNRDescent` against the shipped
+packages. Once v1/v2 evidence exists in Cadnip, the reusable pieces map
+upstream as follows:
 
 | piece | target | shape | status/blockers |
 |---|---|---|---|
-| PCNR descent (Schur predictor, option (c)) | **NonlinearSolveBase / NonlinearSolveFirstOrder** | `PCNRDescent <: AbstractDescentDirection` with `InternalAPI.init(prob, alg, J, fu, u; ...)` / `InternalAPI.solve!(cache, J, fu, u, idx; ...) -> DescentResult` (API verified against master) | Cadnip's compat allows NonlinearSolve 3 *and* 4; the descent API is 4.x-only — pin `NonlinearSolve = "4"` first. The corrector needs a **post-descent hook** in `GeneralizedFirstOrderAlgorithm` that doesn't exist yet — open an upstream issue proposing a `correct!(u, u_prev, p)` callback so limiting composes with TrustRegion/LineSearch instead of replacing them. |
+| PCNR descent (Schur predictor, option (c)) | **NonlinearSolveBase / NonlinearSolveFirstOrder** | `PCNRDescent <: AbstractDescentDirection` with `InternalAPI.init(prob, alg, J, fu, u; ...)` / `InternalAPI.solve!(cache, J, fu, u, idx; ...) -> DescentResult` (API verified at the resolved NonlinearSolveBase v2.33.0 and on master) | compat narrowed to `NonlinearSolve = "4"` (no-op for resolution — see above). The corrector needs a **post-descent hook** in `GeneralizedFirstOrderAlgorithm` that doesn't exist yet — that's the major-API-change part: prototype the hook locally, open the upstream RFC proposing a `correct!(u, u_prev, p)` callback so limiting composes with TrustRegion/LineSearch instead of replacing them, and PR `PCNRDescent` only once the hook shape is agreed. |
 | Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | either a post-iteration hook in `NLNewton`'s `compute_step!`, or an `NLPCNR <: AbstractNLSolverAlgorithm` (verified: `NLNewton`, `NonlinearSolveAlg` exist; no hook today; the `relax` field is the nearest precedent) | Only needed for the *explicit-corrector* variant; v1's fused formulation needs nothing here. |
 | Limiting in IDA | **Sundials.jl** | not possible — IDA's Newton loop is C and unhookable | v1's formulation (limiting fused into the residual/Jacobian) is the *only* PCNR variant that works under IDA. This is a strong argument for keeping the v1 formulation permanently, even after upstream hooks exist. |
 | `$limit` semantics & experience | **VADistiller / VACASK** (Bürmen, codeberg) | no model changes needed — the models drive the design; report the per-branch state-keying convention and any model bugs found | coordination only |
