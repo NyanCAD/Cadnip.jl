@@ -77,6 +77,10 @@ mutable struct DirectStampContext
     charge_is_vdep::Vector{Bool}
     charge_detection_pos::Int
 
+    # Recorded limited voltages for the current stamping pass (PCNR).
+    # Written positionally via record_limit_w!; read by the PCNR corrector.
+    limit_w::Vector{Float64}
+
     # Internal node indices for counter-based allocation (avoids Symbol interpolation)
     internal_node_indices::Vector{Int}
     internal_node_pos::Int
@@ -125,6 +129,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         n_G, n_C, n_b_deferred,
         copy(ctx.charge_is_vdep),
         1,
+        copy(ctx.limit_w),  # recorded limited voltages (seeded with limit_init)
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
@@ -294,26 +299,36 @@ For DirectStampContext, names are ignored - uses counter-based access.
     return ChargeIndex(pos)
 end
 
-@inline function alloc_limit!(dctx::DirectStampContext, name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+@inline function alloc_limit!(dctx::DirectStampContext, name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
     pos = dctx.limit_pos
     dctx.limit_pos = pos + 1
     return LimitIndex(pos)
 end
 
-@inline alloc_limit!(dctx::DirectStampContext, name::String, p::Int, n::Int; refine=nothing) =
+@inline alloc_limit!(dctx::DirectStampContext, name::String, p::Int, n::Int; init::Float64=0.0) =
     alloc_limit!(dctx, Symbol(name), p, n)
 
 """
-    alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+    alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init=0.0) -> LimitIndex
 
 Component-based limit allocation that avoids Symbol interpolation at call site.
-For DirectStampContext, names and refine specs are ignored - uses counter-based
-access (specs were captured during structure discovery on MNAContext).
+For DirectStampContext, names and init values are ignored - uses counter-based
+access (init values were captured during structure discovery on MNAContext).
 """
-@inline function alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+@inline function alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
     pos = dctx.limit_pos
     dctx.limit_pos = pos + 1
     return LimitIndex(pos)
+end
+
+"""
+    record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64)
+
+Record the limited voltage for the PCNR corrector (positional write).
+"""
+@inline function record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64)
+    dctx.limit_w[lidx.k] = w
+    return nothing
 end
 
 """

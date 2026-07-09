@@ -3,7 +3,8 @@
 #
 # See doc/pcnr_plan.md. Covers:
 # - pnjlim: the pure PN-junction limiter function (ported from DEVpnjlim)
-# - PNJunctionLimit: the refine spec attached to a limiting variable
+# - limit!: the $limit-shaped runtime primitive (vold read, w recording,
+#   linear tracking row) that both native devices and future VA codegen use
 # - MNAContext plumbing: alloc_limit!, LimitIndex, resolve_index
 # - Diode(limit=true): the augmented [nodes; currents; charges; limits]
 #   system, and fixed-point invariance vs. Diode(limit=false)
@@ -19,7 +20,7 @@ using Cadnip.MNA: MNAContext, get_node!, resolve_index, system_size
 using Cadnip.MNA: stamp!, assemble!, reset_for_restamping!
 using Cadnip.MNA: Resistor, Capacitor, VoltageSource, Diode
 using Cadnip.MNA: alloc_limit!, get_limit_idx, has_limit, LimitIndex
-using Cadnip.MNA: pnjlim, PNJunctionLimit, refine_limit, limit_initial_value
+using Cadnip.MNA: pnjlim, limit!, record_limit_w!
 using Cadnip.MNA: ZERO_VECTOR
 using Cadnip.MNA: MNASpec, MNACircuit, solve_dc
 import Cadnip.MNA as MNA
@@ -145,26 +146,40 @@ end
     end
 
     #==========================================================================#
-    # PNJunctionLimit: refine spec
+    # limit!: the $limit-shaped runtime primitive
     #==========================================================================#
 
-    @testset "PNJunctionLimit spec" begin
-        Is, Vt, n = 1e-14, 0.026, 1.0
-        spec = PNJunctionLimit(Is=Is, Vt=Vt, n=n)
+    @testset "limit! API" begin
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        c = get_node!(ctx, :c)
 
-        expected_vt = n * Vt
-        expected_vcrit = expected_vt * log(expected_vt / (sqrt(2.0) * Is))
-        @test spec.vt ≈ expected_vt
-        @test spec.vcrit ≈ expected_vcrit
-        @test spec.vcrit ≈ 0.7342 atol=1e-3  # hand-computed check
+        # Previous-iterate state: x = [Va, Vc, x_lim]; vold = x[3] = 0.6
+        x = [0.2, 0.0, 0.6]
+        w = limit!(ctx, :vdlim, :D1, a, c, 0.2, x, (vn, vo) -> (vn + vo) / 2)
 
-        # refine_limit dispatch
-        @test refine_limit(nothing, 3.0, 1.0) == 3.0
-        @test refine_limit(spec, 5.0, 0.6) == pnjlim(5.0, 0.6, spec.vt, spec.vcrit)[1]
+        @test w ≈ 0.4                    # fn(vnew=0.2, vold=0.6)
+        @test ctx.n_limits == 1
+        @test has_limit(ctx, :D1_vdlim)
+        @test ctx.limit_w[1] ≈ 0.4       # recorded corrector target
 
-        # limit_initial_value: SPICE seeds junctions at vcrit
-        @test limit_initial_value(nothing) == 0.0
-        @test limit_initial_value(spec) == spec.vcrit
+        # Linear tracking row g_lim = x_lim - (Va - Vc) = 0
+        sys = assemble!(ctx)
+        li = system_size(sys)
+        @test sys.G[li, li] == 1.0
+        @test sys.G[li, a] == -1.0
+        @test sys.G[li, c] == 1.0
+
+        # Multi-site pattern (VA OldGet/NewSet): later records win
+        record_limit_w!(ctx, MNA.get_limit_idx(ctx, :D1_vdlim), 0.55)
+        @test ctx.limit_w[1] == 0.55
+
+        # init kwarg seeds the PCNR solve
+        ctx2 = MNAContext()
+        get_node!(ctx2, :a)
+        get_node!(ctx2, :c)
+        limit!(ctx2, :vdlim, :D2, 1, 2, 0.0, ZERO_VECTOR, (vn, vo) -> vn; init=0.7)
+        @test ctx2.limit_init[1] == 0.7
     end
 
     #==========================================================================#
@@ -178,7 +193,7 @@ end
         @test n1 == 1
         @test n2 == 2
 
-        lidx = alloc_limit!(ctx, :D1_vdlim, 1, 2; refine=PNJunctionLimit(Is=1e-14, Vt=0.026))
+        lidx = alloc_limit!(ctx, :D1_vdlim, 1, 2; init=0.66)
 
         @test ctx.n_limits == 1
         @test system_size(ctx) == 3  # 2 nodes + 1 limit variable
@@ -186,7 +201,8 @@ end
         @test get_limit_idx(ctx, :D1_vdlim) == LimitIndex(1)
         @test has_limit(ctx, :D1_vdlim)
         @test ctx.limit_branches[1] == (1, 2)
-        @test ctx.limit_specs[1] isa PNJunctionLimit
+        @test ctx.limit_init[1] == 0.66
+        @test ctx.limit_w[1] == 0.66  # recording buffer seeded with init
 
         MNA.reset_for_restamping!(ctx)
         @test ctx.n_limits == 0
@@ -212,9 +228,11 @@ end
         @test sys.G[li, li] == 1.0
         @test sys.G[li, out_idx] == -1.0
 
-        # Diode conductance lives in the lim COLUMN, not the node-node block
-        @test sys.G[out_idx, li] > 0.0
-        @test sys.G[out_idx, out_idx] ≈ 1 / 1000.0  # resistor only
+        # Conductances land at the usual node positions (AD through the
+        # limiter); the lim column carries no device entry. At the
+        # ZERO_VECTOR build point the diode adds only Is/nVt ≈ 3.8e-13.
+        @test sys.G[out_idx, li] == 0.0
+        @test isapprox(sys.G[out_idx, out_idx], 1 / 1000.0; rtol=1e-6)
     end
 
     #==========================================================================#

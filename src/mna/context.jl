@@ -13,7 +13,7 @@ export ZeroVector, ZERO_VECTOR
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
-export alloc_limit!, get_limit_idx, has_limit, n_limits
+export alloc_limit!, get_limit_idx, has_limit, n_limits, record_limit_w!
 export stamp_G!, stamp_C!, stamp_b!, stamp_b_ac!
 export stamp_conductance!, stamp_capacitance!
 export get_G_idx!, get_C_idx!, get_b_idx!, stamp_G_at_idx!, stamp_C_at_idx!, stamp_b_at_idx!
@@ -226,15 +226,18 @@ mutable struct MNAContext
 
     # Newton limiting variables (PCNR — see doc/pcnr_plan.md)
     # One per (device instance, limited branch). Algebraic unknowns holding the
-    # voltage the device evaluates at, tied to the branch by the linear row
+    # voltage the device evaluated at, tied to the branch by the linear row
     # g_lim = x_lim - (V_p - V_n) = 0.
     limit_names::Vector{Symbol}
     n_limits::Int
     # Branch nodes (p, n) whose voltage the limit variable tracks
     limit_branches::Vector{Tuple{Int,Int}}
-    # Per-limit refine specs (e.g. PNJunctionLimit) used by the PCNR corrector.
-    # `nothing` entries get no correction (plain tracking variable).
-    limit_specs::Vector{Any}
+    # Initial values for the limit variables when a solve starts from scratch
+    limit_init::Vector{Float64}
+    # Recorded limited voltages from the current stamping pass (via
+    # record_limit_w! / limit!). The PCNR corrector copies these into the
+    # state so they become vold for the next iteration.
+    limit_w::Vector{Float64}
 
     # Breakpoint times collected from time-dependent sources (PWL/PULSE/SIN),
     # expanded into solver tstops by the tran! constructors. Recomputed from
@@ -279,7 +282,8 @@ function MNAContext()
         Symbol[],           # limit_names
         0,                  # n_limits
         Tuple{Int,Int}[],   # limit_branches
-        Any[],              # limit_specs
+        Float64[],          # limit_init
+        Float64[],          # limit_w (recorded limited voltages)
         BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
     )
@@ -659,23 +663,17 @@ end
 #==============================================================================#
 
 """
-    alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+    alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; init=0.0) -> LimitIndex
 
 Allocate a Newton limiting variable for the branch (p, n).
 
-Limiting variables carry the SPICE-style limited junction voltage as an
-explicit unknown (PCNR — see doc/pcnr_plan.md). The device evaluates its
-currents *at* `x_lim = x[resolve_index(ctx, idx)]` (not at `V_p - V_n`),
-stamps its conductance into the `x_lim` column, and stamps the linear
-limiting row `g_lim = x_lim - (V_p - V_n) = 0`.
+Limiting variables carry the SPICE-style "voltage the device evaluated at"
+state as an explicit unknown (PCNR — see doc/pcnr_plan.md). Prefer the
+[`limit!`](@ref) primitive, which mirrors Verilog-A's `\$limit` and handles
+the vold read, the recording, and the tracking row in one call; use bare
+`alloc_limit!` + [`record_limit_w!`](@ref) only for multi-site patterns.
 
-The `refine` spec (e.g. [`PNJunctionLimit`](@ref)) tells the PCNR corrector
-how to limit this variable between Newton iterations:
-`x_lim ← refine_limit(spec, x_lim_proposed, x_lim_previous)`. Solvers without
-a corrector phase (transient integrators, the NonlinearSolve fallback chain)
-solve the augmented system with plain Newton, which is step-for-step
-equivalent to Newton on the original system (Schur complement identity), so
-behavior is unchanged there.
+`init` seeds the variable when a DC solve starts from scratch.
 
 At convergence `x_lim = V_p - V_n`, so the solution of the augmented system
 solves the original circuit exactly.
@@ -683,29 +681,46 @@ solves the original circuit exactly.
 # Allocation discipline
 Like charge variables, limit allocation must be unconditional (not under a
 runtime branch) so that positional counters in `DirectStampContext` stay
-synchronized across restamping passes.
+synchronized across restamping passes. Every allocated limit variable must
+be recorded (via `limit!` or `record_limit_w!`) on every stamping pass —
+an unrecorded variable never converges under the PCNR corrector.
 """
-function alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+function alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
     ctx.n_limits += 1
     push!(ctx.limit_names, name)
     push!(ctx.limit_branches, (p, n))
-    push!(ctx.limit_specs, refine)
+    push!(ctx.limit_init, init)
+    push!(ctx.limit_w, init)
     return LimitIndex(ctx.n_limits)
 end
 
-alloc_limit!(ctx::MNAContext, name::String, p::Int, n::Int; refine=nothing) =
-    alloc_limit!(ctx, Symbol(name), p, n; refine)
+alloc_limit!(ctx::MNAContext, name::String, p::Int, n::Int; init::Float64=0.0) =
+    alloc_limit!(ctx, Symbol(name), p, n; init)
 
 """
-    alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing) -> LimitIndex
+    alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init=0.0) -> LimitIndex
 
 Component-based limit allocation that builds the full name from components.
 Avoids Symbol interpolation at call site for use with DirectStampContext.
 For MNAContext, constructs: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
 """
-function alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; refine=nothing)::LimitIndex
+function alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
     name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
-    return alloc_limit!(ctx, name, p, n; refine)
+    return alloc_limit!(ctx, name, p, n; init)
+end
+
+"""
+    record_limit_w!(ctx, lidx::LimitIndex, w::Float64)
+
+Record the limited voltage a device actually evaluated at during this
+stamping pass. The PCNR corrector copies recorded values into the state
+after the predict step, so they become `vold` for the next iteration.
+Multiple records on the same variable within one pass are allowed
+(VA OldGet/NewSet multi-site pattern) — the last record wins.
+"""
+@inline function record_limit_w!(ctx::MNAContext, lidx::LimitIndex, w::Float64)
+    ctx.limit_w[lidx.k] = w
+    return nothing
 end
 
 """
@@ -1085,7 +1100,8 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.limit_names)
     ctx.n_limits = 0
     empty!(ctx.limit_branches)
-    empty!(ctx.limit_specs)
+    empty!(ctx.limit_init)
+    empty!(ctx.limit_w)
 
     # Breakpoints are recomputed from scratch every build (not a cache)
     empty!(ctx.breakpoints)
@@ -1140,7 +1156,8 @@ function clear!(ctx::MNAContext)
     empty!(ctx.limit_names)
     ctx.n_limits = 0
     empty!(ctx.limit_branches)
-    empty!(ctx.limit_specs)
+    empty!(ctx.limit_init)
+    empty!(ctx.limit_w)
     empty!(ctx.breakpoints)
     ctx.finalized = false
     return nothing

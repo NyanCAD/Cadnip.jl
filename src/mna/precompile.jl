@@ -118,10 +118,9 @@ struct CompiledStructure{F,P,S,M<:AbstractMatrix{Float64}}
 
     # PCNR Newton limiting variables (see doc/pcnr_plan.md)
     # Limit variables occupy the last n_limits slots of the state vector.
-    # limit_specs[k] is the refine spec for limit k (e.g. PNJunctionLimit),
-    # or nothing for a plain tracking variable.
+    # limit_init[k] seeds limit k when a DC solve starts from scratch.
     n_limits::Int
-    limit_specs::Vector{Any}
+    limit_init::Vector{Float64}
 end
 
 """
@@ -335,7 +334,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G_empty, C_empty,
             Int[], 0,
             Int[],
-            0, Any[]
+            0, Float64[]
         )
     end
 
@@ -404,7 +403,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G, C,
             b_deferred_resolved, n_b_deferred,
             G_diag_idx,
-            ctx0.n_limits, copy(ctx0.limit_specs)
+            ctx0.n_limits, copy(ctx0.limit_init)
         )
     else
         # Sparse matrix compilation (original path)
@@ -438,7 +437,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G, C,
             b_deferred_resolved, n_b_deferred,
             G_diag_idx,
-            ctx0.n_limits, copy(ctx0.limit_specs)
+            ctx0.n_limits, copy(ctx0.limit_init)
         )
     end
 end

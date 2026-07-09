@@ -146,45 +146,68 @@ The state slot for a branch is updated to the value returned by the *last*
 The implemented design is the paper's, with the corrector living in a small
 Cadnip-owned Newton loop:
 
-### Formulation
+### Formulation — one API, shared with the future `$limit` codegen
 
 Augment the state: `x = [V₁..Vₙ, I₁..Iₘ, q₁..qₖ, v_lim,1..v_lim,L]`
 (`LimitIndex`, `alloc_limit!` — mirrors of `ChargeIndex`/`alloc_charge!`).
 
-For a limited device on branch `(p, n)` with limiting variable `ℓ`:
+All limiting goes through **one runtime primitive**, shaped 1:1 like
+Verilog-A's `$limit(V(p,n), fn, args...)` so the native devices exercise
+exactly the entry point Phase 2 codegen will lower to (no second system):
 
-- the device evaluates its currents **at `w = x[ℓ]`** (not at `V_p − V_n`),
-  and stamps its conductance into the **`x_lim` column**:
-  `G[p,ℓ] += G_d`, `G[n,ℓ] −= G_d`, with the matching companion
-  `b[p] −= I(w) − G_d·w`, `b[n] += ...`. The diode contributes *nothing* to
-  the node-node block — exactly the paper's Jacobian (Fig. 2);
-- the simulator stamps the **linear** limiting row
-  `g_lim = x[ℓ] − (V_p − V_n) = 0`:
-  `G[ℓ,ℓ] = 1`, `G[ℓ,p] = −1`, `G[ℓ,n] = +1`, `b[ℓ] = 0` — so
-  `J_lim/lim = I` identically;
-- the refine spec (e.g. `PNJunctionLimit(vt, vcrit)`) is recorded at
-  allocation time (`alloc_limit!(...; refine=spec)`) and carried through
-  `MNAContext.limit_specs` → `CompiledStructure.limit_specs`.
+```julia
+w = limit!(ctx, base_name, instance, p, n, vnew, x, fn, args...)
+```
+
+which, for the branch's limiting variable `ℓ`:
+
+- allocates `ℓ` (positionally stable, unconditional);
+- reads `vold = x[ℓ]` as a plain Float64 — the voltage the device evaluated
+  at last iteration;
+- computes `w = fn(vnew, vold, args...)`. `vnew` may be a `JacobianTag`
+  dual, so AD carries `∂w/∂vnew` into the device's conductances — which
+  therefore land in the **node-node block** as usual (the `x_lim` column
+  stays empty apart from the row diagonal);
+- **records** `extract_value(w)` into a per-iteration workspace buffer
+  (`limit_w`) — this is the corrector's target;
+- stamps the **linear** tracking row `g_lim = x[ℓ] − (V_p − V_n) = 0`:
+  `G[ℓ,ℓ] = 1`, `G[ℓ,p] = −1`, `G[ℓ,n] = +1` — so `J_lim/lim = I`.
+
+The device then evaluates its currents at `w`. Multi-site `$limit` branches
+(VADistiller's OldGet/NewSet pattern) lower to the same primitives —
+allocate once per branch, record at each site, last record wins.
 
 ### The PCNR loop (`_dc_pcnr_newton`, src/mna/solve.jl)
 
 Runs as tier 0 of `_dc_solve_with_fallbacks`, only when `cs.n_limits > 0`:
 
-1. **Initialize**: seed `x_lim` slots with `limit_initial_value(spec)`
-   (vcrit for junctions — SPICE's junction seeding) when starting from zeros.
+1. **Initialize**: seed `x_lim` slots from `limit_init` (allocation-time
+   `init=` values; default 0).
 2. **Predict**: plain Newton step on the augmented system
    (`δ = G \ F`; `G` is the companion Jacobian, same machinery as the
    standard path).
-3. **Correct**: `x_lim,k ← refine_limit(spec_k, proposed_k, previous_k)` —
-   i.e. `pnjlim(vnew, vold, vt, vcrit)` — applied by the *simulator*,
-   per the paper.
+3. **Correct**: `x_lim,k ← limit_w[k]` — copy the recorded limited voltage
+   each device *actually evaluated at* during this iteration's stamping, so
+   it becomes `vold` for the next. The simulator needs no knowledge of any
+   device's limiter function — the correction is a copy, which is what makes
+   the same mechanism serve both native devices and VA models whose limiter
+   lives inline (`DEVpnjlim`).
 4. **Converge**: `‖F‖ < abstol`. The `g_lim` rows are part of `F`, so
-   convergence implies `x_lim = V_branch` (no active limiting) — SPICE's
-   "no limiting applied this iteration" condition falls out automatically,
-   as does the `$discontinuity(-1)` iterate-again signal.
+   convergence implies `x_lim = V_branch`, hence `w = fn(V, V) = V` (no
+   active limiting) — SPICE's "no limiting applied this iteration"
+   condition falls out automatically, as does the `$discontinuity(-1)`
+   iterate-again signal.
 
 On failure it falls through to the unchanged standard chain
 (`CedarRobustNLSolve` → gmin stepping → source stepping).
+
+> Historical note: the first Phase-1 pilot used the paper-verbatim shape
+> instead — device evaluates *at* `x[ℓ]`, conductance stamped into the
+> `x_lim` column, simulator-side `PNJunctionLimit` refine specs. It worked
+> (same iteration counts), but its corrector required the simulator to know
+> each device's limiter, which VADistiller models can't provide — their
+> limiter is inline VA. It was replaced by the recorded-`w` scheme above to
+> keep one system; `pnjlim` survives as the limiter function itself.
 
 ### Scope: DC and transient initialization now; in-step transient later
 
@@ -213,17 +236,14 @@ so limiting-sensitive circuits would move to FBDF to benefit.
 ### Why every other solver still works, unchanged
 
 For solvers with no corrector phase (transient IDA/FBDF/Rodas, the
-NonlinearSolve fallback chain), plain Newton on the augmented system is
-**step-for-step equivalent** to Newton on the original system: the Schur
-complement of the linear `g_lim` rows is
-`S = J_MNA/MNA − J_MNA/lim·J_lim/MNA`, which puts each `G_d` back at its
-familiar node-node positions, and `g_lim = 0` along the whole trajectory
-(it starts at 0 from zeros/DC-consistent states and the linear rows are
-solved exactly). So: same iterates, same fixed point, ~`L` extra rows of
+NonlinearSolve fallback chain), the augmented system reduces to the
+original one: the device conductances are in the node-node block as always,
+the `x_lim` columns are empty except for their row diagonals (block
+lower-triangular Jacobian), and the linear `g_lim` rows are solved exactly
+by every Newton step, so `x_lim` tracks `V_branch` and
+`w = fn(V, V) = V` — the limiter is inert and the MNA iterates are the
+unlimited ones. Same trajectory, same fixed point, `L` extra rows of
 bookkeeping. Nothing regresses; the corrector is pure upside where it runs.
-The augmented matrix is nonsingular exactly when the Schur complement (=
-today's matrix) is, even for diode-only nodes whose node-node diagonal is
-empty in the augmented form.
 
 ### Cost
 
@@ -303,31 +323,36 @@ As built:
 7. `test/mna/pcnr.jl`: pnjlim unit tests, plumbing, matrix structure,
    fixed-point invariance, stiff-chain convergence, transient smoke.
 
-Measured on first bring-up (cold start from zeros, abstol=1e-10):
-5V/1k rectifier converges in **5 iterations**, 50V/1k 3-diode series chain
-in **6 iterations**; limited and unlimited solutions agree to ~1e-15.
+Measured (cold start from zeros, abstol=1e-10): 5V/1k rectifier converges
+in **17 iterations**, 50V/1k 3-diode series chain in **18**; limited and
+unlimited solutions agree to ~1e-15. For reference, plain Newton takes 65+
+on these and the best trust-region methods 15-27 (see `benchmarks/pcnr/`).
+The earlier paper-pure pilot (simulator-side refine + vcrit seeding)
+converged in 5-6 — faster because it corrected the *proposed* `x_lim` and
+started the junction at vcrit, but that shape couldn't serve VA models. The
+recorded-`w` counts match real SPICE behavior (the evaluation voltage climbs
+in limited steps); recovering the cold-start advantage cleanly would mean an
+ngspice-style `MODEINITJCT` first-iteration signal (a spec/mode flag letting
+devices evaluate at vcrit on iteration 0) — noted as a possible follow-up.
 
 ### Phase 2: `$limit` codegen in vasim.jl — future work (not a quick job)
 
-**Design insight from Phase 1**: the native-`Diode` pilot uses the paper-pure
-scheme (device evaluates *at* `x_lim`; the simulator owns the refine
-function). VADistiller models can't use that shape — their limiter lives
-*inside* the model (`DEVpnjlim` inline, reached via the OldGet/NewSet
-`$limit` pattern). The SPICE-faithful mapping for them:
+**The runtime side is already built and proven.** The `limit!` primitive
+(see "Formulation" above) is exactly what `$limit(V(p,n), fn, args...)`
+lowers to, and the native `Diode` already goes through it — so Phase 2 is
+*pure codegen*: no new solver or context mechanisms. Per site:
 
-- OldGet site → `vold = x[ℓ]` (plain Float64 read, pre-dual);
-- the model computes `w = DEVpnjlim(vnew, vold, ...)` itself and evaluates
-  at `w`; AD flows node partials through the limiter, so conductances stay
-  in the node-node block;
-- the NewSet site's returned value is **recorded** into a per-iteration
-  buffer on the workspace (new `limit_w` slots on `DirectStampContext`);
-- the corrector is then just `x_lim ← w_recorded` — a copy; the simulator
-  needs no knowledge of the model's limiter (`RecordedLimit` spec alongside
-  `PNJunctionLimit`);
+- OldGet-style read → the `vold = x[ℓ]` read inside `limit!`;
+- the model computes `w = DEVpnjlim(vnew, vold, ...)` itself (an ordinary
+  VA analog-function call, already supported) and evaluates at `w`; AD flows
+  node partials through the limiter, so conductances stay in the node-node
+  block;
+- NewSet-style sites → additional `record_limit_w!` calls on the same
+  branch variable (allocate once per branch, last record wins);
 - the `g_lim` row stays the linear `x_lim − (V_p − V_n) = 0`.
 
 Trace check (rectifier from zeros): iter 0 stamps at `w₀ = pnjlim(0,0) = 0`;
-predict pushes `V → 5` but correct resets `x_lim ← 0`; iter 1 computes
+predict pushes `V → 5` but correct resets `x_lim ← w₀ = 0`; iter 1 computes
 `w₁ = pnjlim(5, 0) = vt·ln(5/vt) ≈ 0.14` — the limiter fires exactly as in
 ngspice.
 

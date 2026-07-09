@@ -449,10 +449,12 @@ end
 #
 # Newton on the limit-augmented system with an explicit corrector phase:
 # after each Newton update, the limiting components of the state are replaced
-# by their device-specific refine functions (e.g. pnjlim), exactly as in
-# Aadithya/Keiter/Mei, SAND2018-5689C. This is the SPICE limiting loop with
-# the per-device vold state made explicit as solution variables, which is
-# what lets Cadnip's stateless builders participate at all.
+# by the limited voltages the devices recorded during stamping (limit! /
+# record_limit_w!) — the correct-phase of Aadithya/Keiter/Mei,
+# SAND2018-5689C, with the refine computation living device-side. This is
+# the SPICE limiting loop with the per-device vold state made explicit as
+# solution variables, which is what lets Cadnip's stateless builders
+# participate at all.
 #
 # Only runs when the circuit allocated limiting variables (cs.n_limits > 0).
 # The linear g_lim rows make plain Newton on the augmented system equivalent
@@ -469,11 +471,10 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     lim0 = n - L
 
     u = copy(u0)
-    # Cold start: seed limiting variables from their specs (SPICE seeds
-    # junctions at vcrit so the exponentials start in a live region).
+    # Cold start: seed limiting variables from their allocation-time inits.
     if iszero(u0)
         for k in 1:L
-            u[lim0 + k] = limit_initial_value(cs.limit_specs[k])
+            u[lim0 + k] = cs.limit_init[k]
         end
     end
 
@@ -501,14 +502,17 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         end
         all(isfinite, δ) || return u, false, iter - 1
 
-        # CORRECT: apply device refine functions to the limiting components.
-        # Element-wise update; limit slots use their own previous value as vold.
+        # CORRECT: adopt the recorded limited voltages — the values the
+        # devices actually evaluated at during this iteration's stamping
+        # (via limit!/record_limit_w!) — so they become vold for the next
+        # iteration. Spec-free: the simulator needs no knowledge of any
+        # device's limiter function.
         @inbounds for i in 1:n
-            unew = u[i] - δ[i]
-            if i > lim0
-                unew = refine_limit(cs.limit_specs[i - lim0], unew, u[i])
-            end
-            u[i] = unew
+            u[i] -= δ[i]
+        end
+        limit_w = ws.dctx.limit_w
+        @inbounds for k in 1:L
+            u[lim0 + k] = limit_w[k]
         end
     end
 
