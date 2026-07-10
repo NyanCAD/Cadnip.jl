@@ -34,12 +34,12 @@ CI (`.github/workflows/benchmark.yml`) runs this and publishes
 `pcnr_results.md` in the job summary alongside the VACASK benchmark tables.
 
 **Interpretation:** PCNR converges on every circuit here and wins iteration
-count on all but mul4 (14-22 iterations vs. 15-30+ for the best unaugmented
-`NonlinearSolve` algorithm, 65-104 for plain Newton; on mul4 TrustRegion
-edges it 17 vs. 18). The counts reflect the SPICE-faithful recorded-`w`
-corrector — see the "Measured" note in `doc/pcnr_plan.md` for why the
-earlier paper-pure pilot was faster on cold starts and how an ngspice-style
-`MODEINITJCT` seed could recover that.
+count on all of them: 6-7 iterations on the rectifier/chain cases and 14 on
+graetz/mul4, vs. 15-30+ for the best unaugmented `NonlinearSolve` algorithm
+and 65-104 for plain Newton — with `initjct` seeding and evaluation-anchored
+(`lim_rhs`) companions; see the "Measured" notes in `doc/pcnr_plan.md`.
+The graetz rows are the robustness headline: `RobustMultiNewton` and
+`CedarRobustNLSolve` throw there, TrustRegion hits MaxIters, LM stalls.
 `RobustMultiNewton`/`CedarRobustNLSolve` throw `MethodError` on the Graetz
 bridge -- a known issue (see `CedarShampineNLSolve`'s docstring in
 `src/mna/solve.jl`): its `TrustRegion(Bastin)` member needs a
