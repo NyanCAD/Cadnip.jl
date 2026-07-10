@@ -361,9 +361,12 @@ voltage):
 
    *Convergence-tail detail:* the recorded-`w` corrector leaves a one-step
    lag in the `g_lim` rows (`x_lim = V` from the previous iterate), so on
-   convergence the loop snaps the limit slots to their exact branch voltages
+   convergence the loop adopts the *current* stamping's `limit_w` lag-free
    and re-verifies — otherwise fast solves hand transient initialization a
    state whose residual (~|ΔV_last|) fails CheckInit's tighter tolerance.
+   No extra state is needed: reaching the check implies the limiter was
+   inert on that stamping, and pnjlim's pass-through returns `vnew`
+   bit-exactly, so `limit_w` already equals the branch voltages.
 2. **Evaluation-anchored companions** (ngspice convention ≡ OSDI/OpenVAF
    `lim_rhs`): when the device evaluates at `w ≠ V_probe`, its companion
    must be linearized around `w` — `I ≈ I(w) + G_d·(V − w)`, full `G_d` at

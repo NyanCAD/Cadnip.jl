@@ -495,18 +495,19 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
         # limiting applied" convergence condition falls out automatically.
         if norm(F) < abstol
-            # Settle the limit slots exactly: the recorded-w corrector leaves
-            # a one-step lag (x_lim = V from the *previous* iterate), so |F|
-            # carries |ΔV_last| in the g_lim rows even though KCL converged
-            # quadratically. Snap x_lim to the branch voltages (the linear
-            # rows' exact solution; the limiter is inert at convergence) and
-            # re-verify, so downstream consumers with tighter tolerances
+            # Settle the limit slots: the corrector normally runs after the
+            # predict step, so x_lim lags one iterate behind (x_lim = V from
+            # the *previous* stamping) and |F| carries |ΔV_last| in the g_lim
+            # rows even though KCL converged quadratically. Reaching this
+            # branch implies the limiter was inert on the stamping above
+            # (pnjlim's pass-through returns vnew bit-exactly), so this
+            # iteration's recorded limit_w already equals the branch voltages
+            # — adopting it lag-free settles the g_lim rows exactly.
+            # Re-verify so downstream consumers with tighter tolerances
             # (transient CheckInit) see a consistent state.
-            for k in 1:L
-                (p, nn) = cs.limit_branches[k]
-                Vp = p == 0 ? 0.0 : u[p]
-                Vn = nn == 0 ? 0.0 : u[nn]
-                u[lim0 + k] = Vp - Vn
+            limit_w = ws.dctx.limit_w
+            @inbounds for k in 1:L
+                u[lim0 + k] = limit_w[k]
             end
             fast_rebuild!(ws, cs, u, 0.0)
             mul!(F, cs.G, u)
@@ -514,8 +515,8 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
             if norm(F) < abstol
                 return u, true, iter - 1
             end
-            # else: snapped state regressed (still-active limiting edge
-            # case) — fall through and keep iterating from the snapped state.
+            # else: settled state regressed (still-active limiting edge
+            # case) — fall through and keep iterating from it.
         end
 
         # PREDICT: plain Newton step on the augmented system
