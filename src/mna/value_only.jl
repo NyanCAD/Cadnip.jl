@@ -44,6 +44,7 @@ mutable struct DirectStampContext
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
     n_currents::Int
+    n_charges::Int  # Needed to resolve LimitIndex (limits come after charges)
     current_names::Vector{Symbol}  # For get_current_idx lookups (CCVS/CCCS)
 
     # Direct references to sparse matrix storage (these are the actual nzval arrays)
@@ -65,6 +66,7 @@ mutable struct DirectStampContext
     b_deferred_pos::Int
     current_pos::Int
     charge_pos::Int
+    limit_pos::Int
 
     # Expected sizes for bounds checking
     n_G::Int
@@ -75,6 +77,10 @@ mutable struct DirectStampContext
     charge_is_vdep::Vector{Bool}
     charge_detection_pos::Int
 
+    # Recorded limited voltages for the current stamping pass (PCNR).
+    # Written positionally via record_limit_w!; read by the PCNR corrector.
+    limit_w::Vector{Float64}
+
     # Internal node indices for counter-based allocation (avoids Symbol interpolation)
     internal_node_indices::Vector{Int}
     internal_node_pos::Int
@@ -84,6 +90,9 @@ mutable struct DirectStampContext
     warned_C_overflow::Bool
     warned_b_overflow::Bool
 
+    # PCNR initjct signal (see MNAContext.initjct): first-cold-iteration
+    # evaluation-point override for limit!. Managed by _dc_pcnr_newton.
+    initjct::Bool
 end
 
 """
@@ -110,6 +119,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         ctx.node_to_idx,
         ctx.n_nodes,
         ctx.n_currents,
+        ctx.n_charges,
         ctx.current_names,
         G_nzval,
         C_nzval,
@@ -118,13 +128,15 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         b,
         Vector{Float64}(undef, n_b_deferred),
         b_resolved,
-        1, 1, 1, 1, 1,  # positions
+        1, 1, 1, 1, 1, 1,  # positions (G, C, b_deferred, current, charge, limit)
         n_G, n_C, n_b_deferred,
         copy(ctx.charge_is_vdep),
         1,
+        copy(ctx.limit_w),  # recorded limited voltages (seeded with limit_init)
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
+        false,  # initjct
     )
 end
 
@@ -162,6 +174,10 @@ This mirrors the MNAContext version for DirectStampContext compatibility.
 @inline function resolve_index(ctx::DirectStampContext, idx::ChargeIndex)::Int
     return ctx.n_nodes + ctx.n_currents + idx.k
 end
+# LimitIndex for DirectStampContext (limits come after charges)
+@inline function resolve_index(ctx::DirectStampContext, idx::LimitIndex)::Int
+    return ctx.n_nodes + ctx.n_currents + ctx.n_charges + idx.k
+end
 
 """
     reset_direct_stamp!(dctx::DirectStampContext)
@@ -175,6 +191,7 @@ Reset counters and zero sparse matrix values for a new iteration.
     dctx.b_deferred_pos = 1
     dctx.current_pos = 1
     dctx.charge_pos = 1
+    dctx.limit_pos = 1
     dctx.charge_detection_pos = 1
     dctx.internal_node_pos = 1
 
@@ -284,6 +301,38 @@ For DirectStampContext, names are ignored - uses counter-based access.
     pos = dctx.charge_pos
     dctx.charge_pos = pos + 1
     return ChargeIndex(pos)
+end
+
+@inline function alloc_limit!(dctx::DirectStampContext, name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
+    pos = dctx.limit_pos
+    dctx.limit_pos = pos + 1
+    return LimitIndex(pos)
+end
+
+@inline alloc_limit!(dctx::DirectStampContext, name::String, p::Int, n::Int; init::Float64=0.0) =
+    alloc_limit!(dctx, Symbol(name), p, n; init)
+
+"""
+    alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init=0.0) -> LimitIndex
+
+Component-based limit allocation that avoids Symbol interpolation at call site.
+For DirectStampContext, names and init values are ignored - uses counter-based
+access (init values were captured during structure discovery on MNAContext).
+"""
+@inline function alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init::Float64=0.0)::LimitIndex
+    pos = dctx.limit_pos
+    dctx.limit_pos = pos + 1
+    return LimitIndex(pos)
+end
+
+"""
+    record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64)
+
+Record the limited voltage for the PCNR corrector (positional write).
+"""
+@inline function record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64)
+    dctx.limit_w[lidx.k] = w
+    return nothing
 end
 
 """

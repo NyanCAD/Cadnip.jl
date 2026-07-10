@@ -1124,10 +1124,132 @@ end
 # Phase 6: Nonlinear Devices
 #==============================================================================#
 
+#==============================================================================#
+# PCNR Newton Limiting (see doc/pcnr_plan.md)
+#
+# limit! is the single runtime primitive that Verilog-A `$limit` lowers to;
+# native devices use exactly the same call so there is one limiting system.
+# pnjlim is the SPICE PN-junction limiter, ported verbatim from the ngspice
+# variant shipped in-repo as Verilog-A (DEVpnjlim in
+# models/VADistillerModels.jl/va/diode.va).
+#==============================================================================#
+
+export pnjlim, limit!
+
 """
-    Diode(; Is=1e-14, Vt=0.026, n=1.0, name=:D)
+    pnjlim(vnew, vold, vt, vcrit) -> (vlim, limited::Bool)
+
+SPICE PN-junction voltage limiter: propose an evaluation voltage between
+`vold` (the voltage the device was evaluated at last iteration) and `vnew`
+(the voltage Newton proposes), compressing large forward-bias jumps
+logarithmically. Fixed point: `pnjlim(v, v, vt, vcrit) == v` for `v ≤ vcrit`.
+
+Generic over `Real` so `vnew` may be a ForwardDiff dual — the Jacobian of
+the limited evaluation then flows through automatically.
+
+Port of `DEVpnjlim` from `models/VADistillerModels.jl/va/diode.va` (the
+ngspice variant, including its negative-voltage clamp).
+"""
+function pnjlim(vnew::Real, vold::Real, vt::Real, vcrit::Real)
+    if vnew > vcrit && abs(vnew - vold) > vt + vt
+        if vold > 0.0
+            arg = (vnew - vold) / vt
+            if arg > 0.0
+                return vold + vt * (2.0 + log(arg - 2.0)), true
+            else
+                return vold - vt * (2.0 + log(2.0 - arg)), true
+            end
+        else
+            return vt * log(vnew / vt), true
+        end
+    elseif vnew < 0.0
+        # Negative vnew: ngspice reverse-bias clamp
+        arg = vold > 0.0 ? -vold - 1.0 : 2.0 * vold - 1.0
+        if vnew < arg
+            return arg + zero(vnew), true
+        end
+    end
+    return vnew, false
+end
+
+"""
+    limit!(ctx, base_name, instance_name, p, n, vnew, x, fn, args...; init=0.0) -> w
+
+Runtime primitive for Newton limiting — the native equivalent of Verilog-A's
+`\$limit(V(p,n), fn, args...)`, and the call that `\$limit` codegen lowers to.
+
+For the limiting variable `ℓ` of branch `(p, n)` (allocated on first call):
+reads `vold = x[ℓ]` (the voltage the device evaluated at last iteration),
+computes `w = fn(vnew, vold, args...)`, records `w` as the PCNR corrector
+target (see [`record_limit_w!`](@ref)), stamps the linear tracking row
+`g_lim = x[ℓ] - (V_p - V_n) = 0`, and returns `w`.
+
+`vnew` may be a `JacobianTag` dual — AD then carries `∂w/∂vnew` into the
+device's conductance stamps, which land at their usual node positions.
+
+Must be called unconditionally on every stamping pass (same discipline as
+all allocation primitives).
+"""
+function limit!(ctx::AnyMNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int,
+                vnew, x::AbstractVector, fn::F, args...; init::Float64=0.0) where {F}
+    lidx = alloc_limit!(ctx, base_name, instance_name, p, n; init)
+    li = resolve_index(ctx, lidx)
+    # ZERO_VECTOR (structure discovery, AC restamp) is the only legitimate
+    # short x; an undersized non-empty x is a caller bug and should
+    # BoundsError loudly rather than silently read vold = 0.
+    vold = isempty(x) ? 0.0 : extract_value(x[li])
+    w = if ctx.initjct
+        # ngspice MODEINITJCT: first cold iteration evaluates at the seed
+        # (e.g. vcrit), bypassing the limiter — pnjlim would trust the cold
+        # vnew=0 and kill the seed. Value replaced, ∂/∂vnew kept at 1 so
+        # the device still stamps its conductance at the seed point.
+        vnew - extract_value(vnew) + init
+    else
+        fn(vnew, vold, args...)
+    end
+    record_limit_w!(ctx, lidx, extract_value(w))
+
+    # Linear tracking row: g_lim = x_lim - (V_p - V_n) = 0
+    stamp_G!(ctx, lidx, lidx, 1.0)
+    stamp_G!(ctx, lidx, p, -1.0)
+    stamp_G!(ctx, lidx, n, 1.0)
+
+    return w
+end
+
+"""
+    stamp_limited_companion!(ctx, p, n, w, I0, Gd)
+
+Stamp a limited device's Newton companion **anchored at the evaluation
+voltage `w`** (ngspice convention ≡ OSDI `lim_rhs`):
+
+    I ≈ I(w) + Gd·(V_p − V_n − w)
+
+with the full conductance `Gd` at the node positions. Every limited device
+must anchor at `w`, not at the probe voltage `V_p − V_n` — probe-anchoring
+injects `I(w)` as a phantom current at the probe (e.g. "18mA at 0V" when
+initjct seeds `w = vcrit`) and drives the node the wrong way; see the
+"Measured" notes in doc/pcnr_plan.md. Use this helper instead of copying
+the probe-anchored pattern from unlimited devices.
+"""
+@inline function stamp_limited_companion!(ctx::AnyMNAContext, p::Int, n::Int,
+                                          w::Float64, I0::Float64, Gd::Float64)
+    stamp_conductance!(ctx, p, n, Gd)
+    Ieq = I0 - Gd * w
+    stamp_b!(ctx, p, -Ieq)
+    stamp_b!(ctx, n,  Ieq)
+    return nothing
+end
+
+"""
+    Diode(; Is=1e-14, Vt=0.026, n=1.0, limit=true, name=:D)
 
 Ideal diode with exponential I-V characteristic: I = Is * (exp(V/(n*Vt)) - 1)
+
+With `limit=true` (default) the diode uses a PCNR limiting variable, adding
+one unknown to the system per instance (see the `stamp!` docstring and
+doc/pcnr_plan.md); pass `limit=false` for the classic companion model and
+the original system size.
 
 This is a nonlinear device that requires Newton iteration for DC analysis.
 The stamp! method takes `x` parameter for the current operating point.
@@ -1159,30 +1281,61 @@ struct Diode
     Is::Float64    # Saturation current
     Vt::Float64    # Thermal voltage
     n::Float64     # Ideality factor
+    limit::Bool    # PCNR junction limiting (see doc/pcnr_plan.md)
+    vcrit::Float64 # pnjlim critical voltage (precomputed; constant per device)
     name::Symbol
 end
 
-function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, name::Symbol=:D)
-    Diode(Float64(Is), Float64(Vt), Float64(n), name)
+function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, limit::Bool=true, name::Symbol=:D)
+    nVt = Float64(n) * Float64(Vt)
+    vcrit = nVt * log(nVt / (sqrt(2.0) * Float64(Is)))
+    Diode(Float64(Is), Float64(Vt), Float64(n), limit, vcrit, name)
 end
 
 export Diode
+
+# Diode I-V evaluation with linear extension above exponent 80 (like limexp):
+# keeps I and G finite for wildly wrong intermediate iterates without moving
+# any fixed point in the physical range. Used by the LIMITED path only —
+# the limit=false path keeps the classic unclamped exponential so the
+# reference model matches its pre-PCNR semantics exactly (benchmarks compare
+# other solvers against it as the unaugmented baseline).
+@inline function _diode_iv(Is::Float64, nVt::Float64, v::Float64)
+    xarg = v / nVt
+    if xarg > 80.0
+        e80 = exp(80.0)
+        I0 = Is * (e80 * (1.0 + (xarg - 80.0)) - 1.0)
+        Gd = Is / nVt * e80
+    else
+        expterm = exp(xarg)
+        I0 = Is * (expterm - 1.0)
+        Gd = Is / nVt * expterm
+    end
+    return I0, Gd
+end
 
 """
     stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
 
 Stamp a nonlinear diode into MNA matrices.
 
-Uses Newton companion model: linearize I(V) at operating point V0.
-I ≈ I(V0) + G(V0) * (V - V0) = G*V + (I0 - G*V0)
+Uses Newton companion model: linearize I(V) at the evaluation point.
 
-where G = dI/dV = Is/(n*Vt) * exp(V0/(n*Vt)) at operating point.
+With `D.limit == true` (default), the diode limits through the [`limit!`](@ref)
+primitive — exactly the call Verilog-A `\$limit` codegen lowers to
+(doc/pcnr_plan.md): it evaluates at `w = pnjlim(V_p - V_n, vold, ...)` where
+`vold = x[lim]` is the voltage used last iteration, records `w` for the PCNR
+corrector, and adds the linear tracking row `g_lim = x[lim] - (V_p - V_n) = 0`.
+Conductances land at the usual node positions via AD through the limiter.
+Under plain Newton (no corrector) `x[lim]` tracks the branch voltage and the
+limiter is inert, so behavior matches the unlimited diode; the PCNR corrector
+turns the limiting on for SPICE-style convergence robustness.
 
-Stamps:
+With `D.limit == false`, stamps the classic companion model at `V0 = V_p - V_n`:
 - G matrix: conductance G(V0) between p and n
 - b vector: Newton companion current Ieq = I0 - G*V0
 
-The x parameter provides the current solution for V0.
+The x parameter provides the current solution vector.
 """
 function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
                 x::AbstractVector=Float64[])
@@ -1191,29 +1344,41 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
     Vn = n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[n])
     V0 = Vp - Vn
 
-    # Diode equation: I = Is * (exp(V/(n*Vt)) - 1)
     Is, Vt, n_factor = D.Is, D.Vt, D.n
     nVt = n_factor * Vt
 
-    # Current at operating point
-    expterm = exp(V0 / nVt)
-    I0 = Is * (expterm - 1.0)
+    if D.limit
+        # PCNR via the limit! primitive (the same entry point $limit codegen
+        # lowers to): evaluate at w = pnjlim(vnew, vold), with vold = x[lim].
+        vcrit = D.vcrit
+        w = limit!(ctx, :vdlim, D.name, p, n, V0, x,
+                   (vn, vo) -> pnjlim(vn, vo, nVt, vcrit)[1]; init=vcrit)
 
-    # Conductance (dI/dV) at operating point
-    G = Is / nVt * expterm
+        I0, Gd = _diode_iv(Is, nVt, w)
 
-    # Newton companion model: I = G*V + Ieq
-    # where Ieq = I0 - G*V0
-    Ieq = I0 - G * V0
+        # Companion anchored at the evaluation voltage w — see
+        # stamp_limited_companion! for why probe-anchoring is wrong here.
+        stamp_limited_companion!(ctx, p, n, w, I0, Gd)
+    else
+        # Classic companion model, identical to the pre-PCNR diode: raw
+        # exponential (no clamp — this is the reference/unaugmented model),
+        # linearized at the probe voltage V0.
+        expterm = exp(V0 / nVt)
+        I0 = Is * (expterm - 1.0)
+        Gd = Is / nVt * expterm
 
-    # Stamp conductance (same pattern as resistor)
-    stamp_conductance!(ctx, p, n, G)
+        # Newton companion model: I = G*V + Ieq where Ieq = I0 - G*V0
+        Ieq = I0 - Gd * V0
 
-    # Stamp companion current source
-    # Current I flows from p to n (out of p, into n in MNA convention)
-    # So: -Ieq enters p, +Ieq enters n
-    stamp_b!(ctx, p, -Ieq)
-    stamp_b!(ctx, n,  Ieq)
+        # Stamp conductance (same pattern as resistor)
+        stamp_conductance!(ctx, p, n, Gd)
+
+        # Stamp companion current source
+        # Current I flows from p to n (out of p, into n in MNA convention)
+        # So: -Ieq enters p, +Ieq enters n
+        stamp_b!(ctx, p, -Ieq)
+        stamp_b!(ctx, n,  Ieq)
+    end
 
     return nothing
 end

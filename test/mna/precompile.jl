@@ -223,15 +223,17 @@ end
     ws = compile(circuit)
     cs = ws.structure
 
-    @test system_size(ws) == 3
+    # 2 nodes + 1 source current + 1 PCNR limit variable (Diode limits by default)
+    @test system_size(ws) == 4
     @test cs.n_nodes == 2
+    @test cs.n_limits == 1
 
     # Test that structure matches at different operating points
-    u0 = zeros(3)
+    u0 = zeros(4)
     fast_rebuild!(ws, u0, 0.0)
     G_nnz_0 = nnz(cs.G)
 
-    u1 = [5.0, 0.6, 0.0]  # Diode forward biased
+    u1 = [5.0, 0.6, 0.0, 0.6]  # Diode forward biased (limit var at branch voltage)
     fast_rebuild!(ws, u1, 0.0)
     G_nnz_1 = nnz(cs.G)
 

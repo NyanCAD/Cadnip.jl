@@ -131,15 +131,19 @@ export with_temp, with_mode, with_time, with_gshunt, with_srcfact
 Result of DC operating point analysis.
 
 # Fields
-- `x::Vector{Float64}`: Solution vector [V₁, V₂, ..., I₁, I₂, ...]
+- `x::Vector{Float64}`: Solution vector [V₁..Vₙ, I₁..Iₘ, q₁..qₖ, v_lim,1..v_lim,L]
 - `node_names::Vector{Symbol}`: Node names for interpretation
 - `current_names::Vector{Symbol}`: Current variable names
+- `charge_names::Vector{Symbol}`: Charge state variable names
+- `limit_names::Vector{Symbol}`: Newton limiting variable names
 - `n_nodes::Int`: Number of voltage nodes
 """
 struct DCSolution
     x::Vector{Float64}
     node_names::Vector{Symbol}
     current_names::Vector{Symbol}
+    charge_names::Vector{Symbol}
+    limit_names::Vector{Symbol}
     n_nodes::Int
 end
 
@@ -149,7 +153,8 @@ end
 Create a DC solution from a system and solution vector.
 """
 DCSolution(sys::MNAData, x::Vector{Float64}) =
-    DCSolution(copy(x), sys.node_names, sys.current_names, sys.n_nodes)
+    DCSolution(copy(x), sys.node_names, sys.current_names,
+               sys.charge_names, sys.limit_names, sys.n_nodes)
 
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
@@ -169,6 +174,11 @@ function Base.getindex(sol::DCSolution, name::Symbol)
     idx === nothing || return sol.x[idx]
     idx = findfirst(==(name), sol.current_names)
     idx === nothing || return sol.x[sol.n_nodes + idx]
+    idx = findfirst(==(name), sol.charge_names)
+    idx === nothing || return sol.x[sol.n_nodes + length(sol.current_names) + idx]
+    idx = findfirst(==(name), sol.limit_names)
+    idx === nothing || return sol.x[sol.n_nodes + length(sol.current_names) +
+                                    length(sol.charge_names) + idx]
     error("Unknown variable: $name")
 end
 
@@ -297,6 +307,7 @@ end
 #==============================================================================#
 
 using NonlinearSolve
+using LinearSolve: LinearProblem, KLUFactorization
 using SciMLBase
 using SciMLBase: MatrixOperator
 using ADTypes
@@ -442,6 +453,126 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
     converged = sol.retcode == SciMLBase.ReturnCode.Success
 
     return sol.u, converged
+end
+
+#==============================================================================#
+# PCNR: Predictor/Corrector Newton-Raphson (see doc/pcnr_plan.md)
+#
+# Newton on the limit-augmented system with an explicit corrector phase:
+# after each Newton update, the limiting components of the state are replaced
+# by the limited voltages the devices recorded during stamping (limit! /
+# record_limit_w!) — the correct-phase of Aadithya/Keiter/Mei,
+# SAND2018-5689C, with the refine computation living device-side. This is
+# the SPICE limiting loop with the per-device vold state made explicit as
+# solution variables, which is what lets Cadnip's stateless builders
+# participate at all.
+#
+# Only runs when the circuit allocated limiting variables (cs.n_limits > 0).
+# The linear g_lim rows make plain Newton on the augmented system equivalent
+# to Newton on the original system, so all other solvers (fallback chain,
+# transient integrators) work unchanged; this loop adds the correction that
+# plain Newton cannot express.
+#==============================================================================#
+
+function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                         abstol::Real=1e-10, maxiters::Int=100)
+    n = length(u0)
+    L = cs.n_limits
+    L == 0 && return u0, false, 0
+    lim0 = n - L
+
+    u = copy(u0)
+    F = zeros(n)
+    # Cached linear solve: the sparsity pattern of cs.G is fixed across
+    # iterations, so factor symbolically once (KLU reuse_symbolic) and only
+    # refactor numerically each iteration — a from-scratch `cs.G \ F` per
+    # iteration re-runs the symbolic ordering every time.
+    linalg = cs.G isa SparseMatrixCSC ? KLUFactorization() : nothing
+    lincache = init(LinearProblem(cs.G, F), linalg)
+
+    # Cold start: seed limiting variables from their allocation-time inits,
+    # and arm the initjct signal (ngspice MODEINITJCT) so the first stamping
+    # evaluates limited devices at their seeds (e.g. vcrit) instead of at
+    # the cold probe voltages — see limit!. Armed immediately before the
+    # try/finally so nothing can throw while the flag is set.
+    if iszero(u0)
+        for k in 1:L
+            u[lim0 + k] = cs.limit_init[k]
+        end
+        ws.dctx.initjct = true
+    end
+
+    try
+    for iter in 1:maxiters
+        # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
+        # companion formulation, ws.dctx.b the matching RHS.
+        fast_rebuild!(ws, cs, u, 0.0)
+        ws.dctx.initjct = false  # only the first stamping of a cold start
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+        all(isfinite, F) || return u, false, iter - 1
+
+        # Residual includes the g_lim rows, so convergence implies both KCL
+        # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
+        # limiting applied" convergence condition falls out automatically.
+        if norm(F) < abstol
+            # Settle the limit slots: the corrector normally runs after the
+            # predict step, so x_lim lags one iterate behind (x_lim = V from
+            # the *previous* stamping) and |F| carries |ΔV_last| in the g_lim
+            # rows even though KCL converged quadratically. Reaching this
+            # branch implies the limiter was inert on the stamping above
+            # (pnjlim's pass-through returns vnew bit-exactly), so this
+            # iteration's recorded limit_w already equals the branch voltages
+            # — adopting it lag-free settles the g_lim rows exactly.
+            # Re-verify so downstream consumers with tighter tolerances
+            # (transient CheckInit) see a consistent state.
+            limit_w = ws.dctx.limit_w
+            @inbounds for k in 1:L
+                u[lim0 + k] = limit_w[k]
+            end
+            fast_rebuild!(ws, cs, u, 0.0)
+            mul!(F, cs.G, u)
+            F .-= ws.dctx.b
+            if norm(F) < abstol
+                return u, true, iter - 1
+            end
+            # else: settled state regressed (still-active limiting edge
+            # case) — fall through and keep iterating from it.
+        end
+
+        # PREDICT: plain Newton step on the augmented system, reusing the
+        # cached factorization (numeric-only refactor; pattern is fixed).
+        lincache.A = cs.G
+        lincache.b = F
+        δ = try
+            solve!(lincache).u
+        catch err
+            err isa LinearAlgebra.SingularException && return u, false, iter - 1
+            rethrow()
+        end
+        all(isfinite, δ) || return u, false, iter - 1
+
+        # CORRECT: adopt the recorded limited voltages — the values the
+        # devices actually evaluated at during this iteration's stamping
+        # (via limit!/record_limit_w!) — so they become vold for the next
+        # iteration. Spec-free: the simulator needs no knowledge of any
+        # device's limiter function.
+        @inbounds for i in 1:n
+            u[i] -= δ[i]
+        end
+        limit_w = ws.dctx.limit_w
+        @inbounds for k in 1:L
+            u[lim0 + k] = limit_w[k]
+        end
+    end
+
+    return u, false, maxiters
+    finally
+        # The initjct arm must never outlive this solve — the workspace is
+        # reused by the fallback tiers and by transient stepping, and a
+        # stuck flag would silently pin every limited device at its seed.
+        ws.dctx.initjct = false
+    end
 end
 
 #==============================================================================#
@@ -624,6 +755,25 @@ function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::
         return u0, true
     end
 
+    # 0. PCNR predictor/corrector Newton — only when the circuit allocated
+    # limiting variables. SPICE-style junction limiting; typically converges
+    # where plain Newton needs the stepping fallbacks (see doc/pcnr_plan.md).
+    # Guarded so that an exception at a PCNR-specific iterate (device stamping
+    # DomainError, factorization failure) degrades to the standard chain
+    # instead of aborting the whole DC solve.
+    if cs.n_limits > 0
+        u, converged = try
+            _dc_pcnr_newton(cs, ws, u0; abstol=abstol, maxiters=maxiters)
+        catch err
+            @debug "PCNR solve threw, falling back to standard chain" exception=err
+            u0, false
+        end
+        if converged
+            return u, true
+        end
+        @debug "PCNR solve did not converge, falling back to standard chain"
+    end
+
     # 1. Try regular solve first
     u, converged = _dc_newton_compiled(cs, ws, u0; abstol=abstol, maxiters=maxiters, nlsolve=nlsolve)
     if converged
@@ -745,7 +895,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -2065,7 +2215,7 @@ function solve_dc(circuit::MNACircuit)
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
