@@ -35,11 +35,17 @@ CI (`.github/workflows/benchmark.yml`) runs this and publishes
 
 **Interpretation:** PCNR converges on every circuit here and wins iteration
 count on all of them: 6-7 iterations on the rectifier/chain cases and 14 on
-graetz/mul4, vs. 15-30+ for the best unaugmented `NonlinearSolve` algorithm
-and 65-104 for plain Newton — with `initjct` seeding and evaluation-anchored
-(`lim_rhs`) companions; see the "Measured" notes in `doc/pcnr_plan.md`.
-The graetz rows are the robustness headline: `RobustMultiNewton` and
-`CedarRobustNLSolve` throw there, TrustRegion hits MaxIters, LM stalls.
+graetz/mul4 (with `initjct` seeding and evaluation-anchored `lim_rhs`
+companions; see the "Measured" notes in `doc/pcnr_plan.md`). Against the
+true classic diode model (the `limit=false` baseline is the unclamped
+exponential, identical to pre-PCNR semantics), plain `NewtonRaphson` goes
+Unstable or hits MaxIters on most stiff cases — exp overflow at the first
+overshoot — and the best trust-region methods take 15-30+ where they
+survive. The graetz rows are the robustness headline: `RobustMultiNewton`
+and `CedarRobustNLSolve` throw there, TrustRegion hits MaxIters, LM stalls.
+(Earlier revisions of this branch accidentally clamped the baseline model,
+which made plain Newton look like it converged in 65-104 iterations; that
+was an artifact.)
 `RobustMultiNewton`/`CedarRobustNLSolve` throw `MethodError` on the Graetz
 bridge -- a known issue (see `CedarShampineNLSolve`'s docstring in
 `src/mna/solve.jl`): its `TrustRegion(Bastin)` member needs a
