@@ -10,7 +10,11 @@
 # both be exercised fairly.
 #
 # Run with:
-#   ~/.juliaup/bin/julia --project=test benchmarks/pcnr/dc_newton_iterations.jl
+#   ~/.juliaup/bin/julia --project=test benchmarks/pcnr/dc_newton_iterations.jl [output_file]
+#
+# If output_file is provided, a markdown report is written there (same
+# convention as benchmarks/vacask/run_benchmarks.jl). Otherwise, the original
+# fixed-width text table is printed to stdout.
 #==============================================================================#
 
 using Cadnip
@@ -336,6 +340,62 @@ function print_summary(all_rows::Vector{Row})
     end
 end
 
+#==============================================================================#
+# Markdown report (for CI job summaries -- see benchmarks/vacask/run_benchmarks.jl
+# for the same output_file convention)
+#==============================================================================#
+
+function generate_markdown(all_rows::Vector{Row})
+    io = IOBuffer()
+
+    println(io, "## DC Newton method comparison (PCNR)")
+    println(io)
+    println(io, "Compares DC Newton *iteration counts* (not wall-clock) across every ",
+                 "nonlinear method Cadnip uses -- the PCNR limiting-augmented loop, a ",
+                 "reference plain-Newton loop on the same augmented system with the ",
+                 "corrector disabled, and each `NonlinearSolve.jl` algorithm on the ",
+                 "natural (unaugmented) system.")
+    println(io)
+    println(io, "Benchmarks run on Julia $(VERSION)")
+    println(io)
+
+    seen = Tuple{String,Float64}[]
+    for r in all_rows
+        key = (r.circuit, r.Vsrc)
+        key in seen && continue
+        push!(seen, key)
+    end
+
+    for (circuit, Vsrc) in seen
+        println(io, "### $circuit (Vsrc=$Vsrc)")
+        println(io)
+        println(io, "| Method | Converged | Iters | nf | \\|\\|F\\|\\| | Retcode |")
+        println(io, "|--------|-----------|------:|---:|--------|---------|")
+        for r in filter(r -> r.circuit == circuit && r.Vsrc == Vsrc, all_rows)
+            @printf(io, "| %s | %s | %d | %d | %.3e | %s |\n",
+                    r.method, r.converged ? "yes" : "no", r.iters, r.nf, r.resid, r.retcode)
+        end
+        println(io)
+    end
+
+    println(io, "### Summary")
+    println(io)
+    println(io, "Fewest iterations among converged methods, per circuit/Vsrc:")
+    println(io)
+    for (circuit, Vsrc) in seen
+        candidates = filter(r -> r.circuit == circuit && r.Vsrc == Vsrc && r.converged, all_rows)
+        if isempty(candidates)
+            println(io, "- **$circuit** (Vsrc=$Vsrc): no method converged")
+        else
+            best = candidates[argmin([r.iters for r in candidates])]
+            println(io, "- **$circuit** (Vsrc=$Vsrc): `$(best.method)` wins with $(best.iters) iterations")
+        end
+    end
+    println(io)
+
+    return String(take!(io))
+end
+
 function main()
     println("PCNR vs. NonlinearSolve.jl DC Newton convergence benchmark")
     println("="^100)
@@ -357,6 +417,16 @@ function main()
     println()
     print_table(all_rows)
     print_summary(all_rows)
+
+    if length(ARGS) >= 1
+        output_file = ARGS[1]
+        markdown = generate_markdown(all_rows)
+        open(output_file, "w") do f
+            write(f, markdown)
+        end
+        println()
+        println("Report written to: $output_file")
+    end
 end
 
 main()

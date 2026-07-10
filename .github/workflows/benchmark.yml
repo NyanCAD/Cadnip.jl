@@ -53,6 +53,15 @@ jobs:
         run: |
           julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl benchmark_results.md
 
+      - name: Run DC Newton method comparison (PCNR)
+        # Iteration-count comparison across Cadnip's DC Newton methods (PCNR,
+        # plain Newton, NonlinearSolve.jl algorithms) on hand-written diode
+        # circuits -- see benchmarks/pcnr/README.md. Independent of the VACASK
+        # circuits above, so a failure here shouldn't block those results.
+        continue-on-error: true
+        run: |
+          julia --project=benchmarks benchmarks/pcnr/dc_newton_iterations.jl pcnr_results.md
+
       - name: Run Cadnip c6288 benchmark (-O0)
         # Separate process/step deliberately: c6288's generated builder (2419
         # inlined subckt calls) hits LLVM RAGreedy's super-linear blowup at
@@ -78,6 +87,8 @@ jobs:
           echo >> $GITHUB_STEP_SUMMARY
           cat vacask_reference.md >> $GITHUB_STEP_SUMMARY
           echo >> $GITHUB_STEP_SUMMARY
+          cat pcnr_results.md >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(no PCNR output captured)" >> $GITHUB_STEP_SUMMARY
+          echo >> $GITHUB_STEP_SUMMARY
           cat c6288_results.md >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(no c6288 output captured)" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark results
@@ -89,6 +100,7 @@ jobs:
             benchmark_results.md
             vacask_reference.md
             vacask_reference.tsv
+            pcnr_results.md
             c6288_results.md
           retention-days: 30
 

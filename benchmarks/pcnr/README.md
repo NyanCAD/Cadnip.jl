@@ -17,13 +17,29 @@ Run with:
 ~/.juliaup/bin/julia --project=test benchmarks/pcnr/dc_newton_iterations.jl
 ```
 
+`--project=benchmarks` works too (that's what CI uses).
+
 Takes a couple of minutes (package precompilation dominates; the solves
 themselves are fast). No plotting or CSV output -- just a fixed-width table
 plus a per-circuit summary line naming the fewest-iteration converged method.
 
-**Interpretation:** PCNR wins iteration count on every circuit here, most
-dramatically on the stiff cases (rectifier/chain3, ~5-6 iterations vs. 15-30+
-for the best unaugmented `NonlinearSolve` algorithm, ~65+ for plain Newton).
+An optional output-file argument writes the same results as a markdown
+report instead (same convention as `benchmarks/vacask/run_benchmarks.jl`):
+
+```
+julia --project=benchmarks benchmarks/pcnr/dc_newton_iterations.jl pcnr_results.md
+```
+
+CI (`.github/workflows/benchmark.yml`) runs this and publishes
+`pcnr_results.md` in the job summary alongside the VACASK benchmark tables.
+
+**Interpretation:** PCNR converges on every circuit here and wins iteration
+count on all but mul4 (14-22 iterations vs. 15-30+ for the best unaugmented
+`NonlinearSolve` algorithm, 65-104 for plain Newton; on mul4 TrustRegion
+edges it 17 vs. 18). The counts reflect the SPICE-faithful recorded-`w`
+corrector — see the "Measured" note in `doc/pcnr_plan.md` for why the
+earlier paper-pure pilot was faster on cold starts and how an ngspice-style
+`MODEINITJCT` seed could recover that.
 `RobustMultiNewton`/`CedarRobustNLSolve` throw `MethodError` on the Graetz
 bridge -- a known issue (see `CedarShampineNLSolve`'s docstring in
 `src/mna/solve.jl`): its `TrustRegion(Bastin)` member needs a
