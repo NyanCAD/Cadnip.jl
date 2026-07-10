@@ -1195,7 +1195,15 @@ function limit!(ctx, base_name::Symbol, instance_name::Symbol, p::Int, n::Int,
     lidx = alloc_limit!(ctx, base_name, instance_name, p, n; init)
     li = resolve_index(ctx, lidx)
     vold = li <= length(x) ? extract_value(x[li]) : 0.0
-    w = fn(vnew, vold, args...)
+    w = if ctx.initjct
+        # ngspice MODEINITJCT: first cold iteration evaluates at the seed
+        # (e.g. vcrit), bypassing the limiter — pnjlim would trust the cold
+        # vnew=0 and kill the seed. Value replaced, ∂/∂vnew kept at 1 so
+        # the device still stamps its conductance at the seed point.
+        vnew - extract_value(vnew) + init
+    else
+        fn(vnew, vold, args...)
+    end
     record_limit_w!(ctx, lidx, extract_value(w))
 
     # Linear tracking row: g_lim = x_lim - (V_p - V_n) = 0
@@ -1268,18 +1276,6 @@ export Diode
     return I0, Gd
 end
 
-# Dual-generic diode current with the same linear extension; derivatives
-# come from AD (used by the limited path's contribution evaluation).
-@inline function _diode_current(Is::Float64, nVt::Float64, v::Real)
-    xarg = v / nVt
-    if xarg > 80.0
-        e80 = exp(80.0)
-        return Is * (e80 * (1.0 + (xarg - 80.0)) - 1.0)
-    else
-        return Is * (exp(xarg) - 1.0)
-    end
-end
-
 """
     stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
 
@@ -1316,16 +1312,23 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
     if D.limit
         # PCNR via the limit! primitive (the same entry point $limit codegen
         # lowers to): evaluate at w = pnjlim(vnew, vold), with vold = x[lim].
-        # The contribution path carries ∂w/∂vnew into the node conductances
-        # via AD, exactly as generated VA code will.
         vcrit = nVt * log(nVt / (sqrt(2.0) * Is))
-        dname = D.name
-        stamp_current_contribution!(ctx, p, n,
-            V -> begin
-                w = limit!(ctx, :vdlim, dname, p, n, V, x,
-                           (vn, vo) -> pnjlim(vn, vo, nVt, vcrit)[1])
-                _diode_current(Is, nVt, w)
-            end, x)
+        w = limit!(ctx, :vdlim, D.name, p, n, V0, x,
+                   (vn, vo) -> pnjlim(vn, vo, nVt, vcrit)[1]; init=vcrit)
+
+        I0, Gd = _diode_iv(Is, nVt, w)
+
+        # ngspice/OSDI "lim_rhs" anchoring: the companion is linearized
+        # around the EVALUATION voltage w (not the probe voltage V0), with
+        # the full conductance Gd at the node positions:
+        #   I ≈ I(w) + Gd·(V - w)
+        # Anchoring at the probe instead would inject I(w) at V0 as a phantom
+        # current source (e.g. 18mA "at 0V" when initjct seeds w=vcrit) and
+        # drive the node the wrong way.
+        stamp_conductance!(ctx, p, n, Gd)
+        Ieq = I0 - Gd * w
+        stamp_b!(ctx, p, -Ieq)
+        stamp_b!(ctx, n,  Ieq)
     else
         I0, Gd = _diode_iv(Is, nVt, V0)
 

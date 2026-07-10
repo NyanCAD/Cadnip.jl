@@ -247,6 +247,12 @@ mutable struct MNAContext
     # Track if system has been finalized
     finalized::Bool
 
+    # PCNR initjct signal (ngspice MODEINITJCT): when true, limit! ignores
+    # its limiter function for this stamping pass and evaluates at the
+    # variable's init value (e.g. vcrit for junctions), so the first cold
+    # linearization starts in the conductive region. Set by the PCNR loop
+    # for the first iteration of a cold start only.
+    initjct::Bool
 end
 
 """
@@ -286,6 +292,7 @@ function MNAContext()
         Float64[],          # limit_w (recorded limited voltages)
         BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
+        false,              # initjct
     )
 end
 

@@ -118,9 +118,11 @@ struct CompiledStructure{F,P,S,M<:AbstractMatrix{Float64}}
 
     # PCNR Newton limiting variables (see doc/pcnr_plan.md)
     # Limit variables occupy the last n_limits slots of the state vector.
-    # limit_init[k] seeds limit k when a DC solve starts from scratch.
+    # limit_init[k] seeds limit k when a DC solve starts from scratch;
+    # limit_branches[k] is the (p, n) node pair its g_lim row tracks.
     n_limits::Int
     limit_init::Vector{Float64}
+    limit_branches::Vector{Tuple{Int,Int}}
 end
 
 """
@@ -334,7 +336,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G_empty, C_empty,
             Int[], 0,
             Int[],
-            0, Float64[]
+            0, Float64[], Tuple{Int,Int}[]
         )
     end
 
@@ -403,7 +405,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G, C,
             b_deferred_resolved, n_b_deferred,
             G_diag_idx,
-            ctx0.n_limits, copy(ctx0.limit_init)
+            ctx0.n_limits, copy(ctx0.limit_init), copy(ctx0.limit_branches)
         )
     else
         # Sparse matrix compilation (original path)
@@ -437,7 +439,7 @@ function compile_structure(builder::F, params::P, spec::S;
             G, C,
             b_deferred_resolved, n_b_deferred,
             G_diag_idx,
-            ctx0.n_limits, copy(ctx0.limit_init)
+            ctx0.n_limits, copy(ctx0.limit_init), copy(ctx0.limit_branches)
         )
     end
 end

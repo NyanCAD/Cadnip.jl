@@ -90,6 +90,9 @@ mutable struct DirectStampContext
     warned_C_overflow::Bool
     warned_b_overflow::Bool
 
+    # PCNR initjct signal (see MNAContext.initjct): first-cold-iteration
+    # evaluation-point override for limit!. Managed by _dc_pcnr_newton.
+    initjct::Bool
 end
 
 """
@@ -133,6 +136,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
+        false,  # initjct
     )
 end
 

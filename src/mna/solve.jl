@@ -471,11 +471,15 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     lim0 = n - L
 
     u = copy(u0)
-    # Cold start: seed limiting variables from their allocation-time inits.
+    # Cold start: seed limiting variables from their allocation-time inits,
+    # and arm the initjct signal (ngspice MODEINITJCT) so the first stamping
+    # evaluates limited devices at their seeds (e.g. vcrit) instead of at
+    # the cold probe voltages — see limit!.
     if iszero(u0)
         for k in 1:L
             u[lim0 + k] = cs.limit_init[k]
         end
+        ws.dctx.initjct = true
     end
 
     F = zeros(n)
@@ -483,6 +487,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
         # companion formulation, ws.dctx.b the matching RHS.
         fast_rebuild!(ws, cs, u, 0.0)
+        ws.dctx.initjct = false  # only the first stamping of a cold start
         mul!(F, cs.G, u)
         F .-= ws.dctx.b
 
@@ -490,7 +495,27 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
         # limiting applied" convergence condition falls out automatically.
         if norm(F) < abstol
-            return u, true, iter - 1
+            # Settle the limit slots exactly: the recorded-w corrector leaves
+            # a one-step lag (x_lim = V from the *previous* iterate), so |F|
+            # carries |ΔV_last| in the g_lim rows even though KCL converged
+            # quadratically. Snap x_lim to the branch voltages (the linear
+            # rows' exact solution; the limiter is inert at convergence) and
+            # re-verify, so downstream consumers with tighter tolerances
+            # (transient CheckInit) see a consistent state.
+            for k in 1:L
+                (p, nn) = cs.limit_branches[k]
+                Vp = p == 0 ? 0.0 : u[p]
+                Vn = nn == 0 ? 0.0 : u[nn]
+                u[lim0 + k] = Vp - Vn
+            end
+            fast_rebuild!(ws, cs, u, 0.0)
+            mul!(F, cs.G, u)
+            F .-= ws.dctx.b
+            if norm(F) < abstol
+                return u, true, iter - 1
+            end
+            # else: snapped state regressed (still-active limiting edge
+            # case) — fall through and keep iterating from the snapped state.
         end
 
         # PREDICT: plain Newton step on the augmented system

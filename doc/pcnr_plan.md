@@ -323,17 +323,64 @@ As built:
 7. `test/mna/pcnr.jl`: pnjlim unit tests, plumbing, matrix structure,
    fixed-point invariance, stiff-chain convergence, transient smoke.
 
-Measured (cold start from zeros, abstol=1e-10): 5V/1k rectifier converges
-in **17 iterations**, 50V/1k 3-diode series chain in **18**; limited and
+Measured (cold start from zeros, abstol=1e-10): 5V/1k rectifier and the
+50V/1k 3-diode series chain both converge in **7 iterations**; limited and
 unlimited solutions agree to ~1e-15. For reference, plain Newton takes 65+
 on these and the best trust-region methods 15-27 (see `benchmarks/pcnr/`).
-The earlier paper-pure pilot (simulator-side refine + vcrit seeding)
-converged in 5-6 — faster because it corrected the *proposed* `x_lim` and
-started the junction at vcrit, but that shape couldn't serve VA models. The
-recorded-`w` counts match real SPICE behavior (the evaluation voltage climbs
-in limited steps); recovering the cold-start advantage cleanly would mean an
-ngspice-style `MODEINITJCT` first-iteration signal (a spec/mode flag letting
-devices evaluate at vcrit on iteration 0) — noted as a possible follow-up.
+
+Getting to 7 required two mechanisms beyond the bare recorded-`w` corrector,
+both lifted from how real SPICE stacks behave (without them the counts were
+17-18 — an honest reproduction of ngspice's *cold-start crawl*, where the
+evaluation voltage climbs in ~2·vt steps while the node waits at the source
+voltage):
+
+1. **initjct** (ngspice `MODEINITJCT`): on the first stamping of a cold
+   start, `limit!` bypasses the limiter and evaluates at the variable's
+   `init` seed (vcrit for junctions) — signalled by an `initjct` flag on the
+   stamping context, armed by `_dc_pcnr_newton` for exactly one pass.
+   Seeding `x_lim` alone is useless: `pnjlim(vnew=0, vold=vcrit) = 0`
+   because pnjlim trusts a small `vnew`; the bypass is what ngspice's
+   MODEINITJCT branch does in every device's C load function.
+
+   *Scoping (design-reviewed):* only the solver may set the flag, because
+   initjct encodes solver knowledge-state ("no iterate history yet"), not
+   circuit state. Value heuristics ("bypass when `vnew == 0`" or
+   `vnew < vcrit`) are provably wrong: those are legitimate operating points
+   (reverse-biased junctions, the graetz zero-crossing diodes, unbiased
+   junctions), and a value-triggered bypass would re-fire every iteration
+   for any junction whose true solution rests there, resetting `x_lim` to
+   vcrit forever — non-convergent by construction. Transient needs no flag
+   interaction at all: warm starts have `vnew ≈ vold`, which makes pnjlim a
+   no-op on its own; `x_lim` carries the previous timestep's value through
+   the DAE state, playing the role of ngspice's MODEINITPRED vold. Placement
+   note: when Phase 2 lands, the signal should probably move from the
+   stamping context to `MNASpec` (matching SPICE's CKTmode and letting VA
+   models read the *same* signal via `$simparam("initjct", 0)`), with the
+   PCNR loop stamping its first cold pass through a spec-modified
+   `CompiledStructure` as the stepping code already does for gshunt/srcFact.
+
+   *Convergence-tail detail:* the recorded-`w` corrector leaves a one-step
+   lag in the `g_lim` rows (`x_lim = V` from the previous iterate), so on
+   convergence the loop snaps the limit slots to their exact branch voltages
+   and re-verifies — otherwise fast solves hand transient initialization a
+   state whose residual (~|ΔV_last|) fails CheckInit's tighter tolerance.
+2. **Evaluation-anchored companions** (ngspice convention ≡ OSDI/OpenVAF
+   `lim_rhs`): when the device evaluates at `w ≠ V_probe`, its companion
+   must be linearized around `w` — `I ≈ I(w) + G_d·(V − w)`, full `G_d` at
+   the node positions — not around the probe. Probe-anchoring (what the AD
+   contribution path does naturally) injects `I(w)` as a phantom current at
+   the probe voltage; with a vcrit seed that reads as "18mA at 0V" and
+   drives the node *negative*. Chain-rule AD anchoring is also consistent
+   but keeps the damped `∂w/∂vnew` in the Jacobian, which is exactly what
+   produces the 17-iteration crawl. This is why OSDI has `lim_rhs`; Phase 2
+   codegen must implement the same correction
+   (`Δb = Σ ∂I/∂w_k · (V_probe,k − w_k)` for each limit-replaced voltage).
+
+The earlier paper-pure pilot's 5-6 iterations are thus fully explained and
+recovered: its advantage was never the corrector-on-proposal placement, it
+was that evaluating *at* `x_lim` made the vcrit seed effective and the
+anchoring trivially consistent. Same behavior now lives inside the unified
+`limit!` API.
 
 ### Phase 2: `$limit` codegen in vasim.jl — future work (not a quick job)
 
@@ -355,6 +402,40 @@ Trace check (rectifier from zeros): iter 0 stamps at `w₀ = pnjlim(0,0) = 0`;
 predict pushes `V → 5` but correct resets `x_lim ← w₀ = 0`; iter 1 computes
 `w₁ = pnjlim(5, 0) = vt·ln(5/vt) ≈ 0.14` — the limiter fires exactly as in
 ngspice.
+
+**Codegen must also implement `lim_rhs` anchoring** (see the "Measured"
+notes above): contributions that used limit-replaced voltages need their
+companion anchored at the evaluation point,
+`Δb = Σ ∂I/∂w_k · (V_probe,k − w_k)`, with the *undamped* `∂I/∂w` partials
+(limit-replaced values enter the dual system with passthrough partials, not
+chain-ruled through the limiter). This is OSDI's `lim_rhs` field, so
+OpenVAF-targeted models already assume a simulator that does this.
+
+**Recovering initjct for VA models.** The `initjct` bypass inside `limit!`
+covers native devices and any LRM-idiomatic `$limit(V(p,n), "pnjlim", vte,
+vcrit)` site (where the simulator owns the limiter). It can NOT cover the
+VADistiller OldGet/NewSet idiom, because there the limiter runs inline in
+the model and trusts the cold probe. Options, in order of preference:
+
+1. **VADistiller emits the MODEINITJCT branch it currently drops.** The
+   branch exists in the ngspice C sources the distiller transpiles
+   (`if (CKTmode & MODEINITJCT) vd = vcrit`); emitting it guarded by
+   `$simparam("initjct", 0)` costs one line per junction and Cadnip's
+   `$simparam` plumbing already exists (`MNASpec` fields). Faithful to
+   ngspice, no heuristics. Worth proposing upstream to VADistiller; a local
+   patch to the distilled models is a stopgap.
+2. **VADistiller emits string-form `$limit`** where it recognizes the
+   `DEVpnjlim(vnew, vold, args...)` call pattern — then the simulator owns
+   evaluation point, seeding, and corrector outright (full paper-pure
+   semantics). Partial coverage only: composite limiting like diode.va's
+   breakdown branch (`pnjlim` on `-(vd+bv)`) can't be expressed per-probe.
+3. **AST pattern-matching in Cadnip's codegen** to extract the limiter
+   dataflow between OldGet and NewSet sites: fragile against arbitrary VA
+   between the sites; not recommended.
+
+None of this is "baked into how `$limit` works" — the get/set idiom is a
+VADistiller transpilation convention, not the LRM's intent; the LRM's
+named-function form is simulator-side limiting, i.e. the pilot shape.
 
 **Effort assessment**: this is the most delicate file in the repo
 (positional-counter discipline, dual handling, per-branch site grouping
