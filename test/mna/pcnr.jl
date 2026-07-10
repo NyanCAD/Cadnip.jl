@@ -146,6 +146,32 @@ end
     end
 
     #==========================================================================#
+    # _diode_iv: linear extension above exponent 80 (limited path only)
+    #==========================================================================#
+
+    @testset "_diode_iv linear extension" begin
+        Is, nVt = 1e-14, 0.026
+
+        # Continuous across the clamp boundary
+        I_lo, G_lo = MNA._diode_iv(Is, nVt, 80.0 * nVt - 1e-9)
+        I_hi, G_hi = MNA._diode_iv(Is, nVt, 80.0 * nVt + 1e-9)
+        @test isapprox(I_lo, I_hi; rtol=1e-6)
+        @test isapprox(G_lo, G_hi; rtol=1e-6)
+
+        # Deep in the extension: finite, linear in v with constant slope
+        I1, G1 = MNA._diode_iv(Is, nVt, 10.0)
+        I2, G2 = MNA._diode_iv(Is, nVt, 11.0)
+        @test isfinite(I1) && isfinite(I2)
+        @test G1 == G2
+        @test isapprox(I2 - I1, G1 * 1.0; rtol=1e-12)
+
+        # Below the threshold: exact classic exponential
+        I3, G3 = MNA._diode_iv(Is, nVt, 0.7)
+        @test I3 ≈ Is * (exp(0.7 / nVt) - 1.0)
+        @test G3 ≈ Is / nVt * exp(0.7 / nVt)
+    end
+
+    #==========================================================================#
     # limit!: the $limit-shaped runtime primitive
     #==========================================================================#
 
@@ -253,12 +279,9 @@ end
         @test isapprox(I_R, I_D; rtol=1e-2)
 
         # The limit variable equals the branch voltage at convergence (branch
-        # is out -> gnd, so branch voltage == V(out)). DCSolution's name-based
-        # getindex only walks node_names/current_names (not limit_names), so
-        # index the limit variable positionally via a freshly built context.
-        ctx = rectifier_lim((;), MNASpec(mode=:dcop))
-        li = system_size(ctx)
-        @test sol_lim.x[li] ≈ sol_lim[:out] atol=1e-6
+        # is out -> gnd, so branch voltage == V(out)), and is addressable by
+        # name on DCSolution just like on transient solutions.
+        @test sol_lim[:D1_vdlim] ≈ sol_lim[:out] atol=1e-6
     end
 
     #==========================================================================#
@@ -310,16 +333,27 @@ end
         ctx = MNA._detect_structure(rectifier_lim, (;), spec)
         cs = MNA.compile_structure(rectifier_lim, (;), spec; ctx=ctx)
         ws = MNA.create_workspace(cs; ctx=ctx)
-        u, ok = MNA._dc_pcnr_newton(cs, ws, zeros(system_size(ctx)); abstol=1e-10, maxiters=100)
+        u, ok, iters = MNA._dc_pcnr_newton(cs, ws, zeros(system_size(ctx)); abstol=1e-10, maxiters=100)
         @test ok == true
         @test cs.n_limits == 1
+        # Regression guard for the headline result: with initjct seeding and
+        # evaluation-anchored companions this converges in ~7 iterations;
+        # the unseeded crawl was 17 (see doc/pcnr_plan.md "Measured").
+        @test iters <= 10
 
         ctx2 = MNA._detect_structure(chain_lim, (;), spec)
         cs2 = MNA.compile_structure(chain_lim, (;), spec; ctx=ctx2)
         ws2 = MNA.create_workspace(cs2; ctx=ctx2)
-        u2, ok2 = MNA._dc_pcnr_newton(cs2, ws2, zeros(system_size(ctx2)); abstol=1e-10, maxiters=100)
+        u2, ok2, iters2 = MNA._dc_pcnr_newton(cs2, ws2, zeros(system_size(ctx2)); abstol=1e-10, maxiters=100)
         @test ok2 == true
         @test cs2.n_limits == 3
+        @test iters2 <= 10
+
+        # Zero-allocation guarantee for the limited stamping hot path
+        # (mirrors test/mna/audio_integration.jl's measure_allocations pin).
+        rebuild() = MNA.fast_rebuild!(ws2, cs2, u2, 0.0)
+        rebuild()  # warm up
+        @test (@allocated rebuild()) == 0
     end
 
     #==========================================================================#

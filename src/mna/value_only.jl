@@ -310,7 +310,7 @@ end
 end
 
 @inline alloc_limit!(dctx::DirectStampContext, name::String, p::Int, n::Int; init::Float64=0.0) =
-    alloc_limit!(dctx, Symbol(name), p, n)
+    alloc_limit!(dctx, Symbol(name), p, n; init)
 
 """
     alloc_limit!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int; init=0.0) -> LimitIndex

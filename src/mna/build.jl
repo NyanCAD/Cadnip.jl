@@ -53,16 +53,6 @@ struct MNAData{T<:Real}
     n_limits::Int
 end
 
-# Constructor without charges/limits (for backwards compat with older callers)
-function MNAData{T}(G, C, b, node_names, current_names, n_nodes, n_currents) where {T<:Real}
-    MNAData{T}(G, C, b, node_names, current_names, Symbol[], Symbol[], n_nodes, n_currents, 0, 0)
-end
-
-# Constructor without limits (for backwards compat with older callers)
-function MNAData{T}(G, C, b, node_names, current_names, charge_names, n_nodes, n_currents, n_charges) where {T<:Real}
-    MNAData{T}(G, C, b, node_names, current_names, charge_names, Symbol[], n_nodes, n_currents, n_charges, 0)
-end
-
 """
     system_size(data::MNAData) -> Int
 

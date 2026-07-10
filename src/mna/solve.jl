@@ -131,15 +131,19 @@ export with_temp, with_mode, with_time, with_gshunt, with_srcfact
 Result of DC operating point analysis.
 
 # Fields
-- `x::Vector{Float64}`: Solution vector [V₁, V₂, ..., I₁, I₂, ...]
+- `x::Vector{Float64}`: Solution vector [V₁..Vₙ, I₁..Iₘ, q₁..qₖ, v_lim,1..v_lim,L]
 - `node_names::Vector{Symbol}`: Node names for interpretation
 - `current_names::Vector{Symbol}`: Current variable names
+- `charge_names::Vector{Symbol}`: Charge state variable names
+- `limit_names::Vector{Symbol}`: Newton limiting variable names
 - `n_nodes::Int`: Number of voltage nodes
 """
 struct DCSolution
     x::Vector{Float64}
     node_names::Vector{Symbol}
     current_names::Vector{Symbol}
+    charge_names::Vector{Symbol}
+    limit_names::Vector{Symbol}
     n_nodes::Int
 end
 
@@ -149,7 +153,8 @@ end
 Create a DC solution from a system and solution vector.
 """
 DCSolution(sys::MNAData, x::Vector{Float64}) =
-    DCSolution(copy(x), sys.node_names, sys.current_names, sys.n_nodes)
+    DCSolution(copy(x), sys.node_names, sys.current_names,
+               sys.charge_names, sys.limit_names, sys.n_nodes)
 
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
@@ -169,6 +174,11 @@ function Base.getindex(sol::DCSolution, name::Symbol)
     idx === nothing || return sol.x[idx]
     idx = findfirst(==(name), sol.current_names)
     idx === nothing || return sol.x[sol.n_nodes + idx]
+    idx = findfirst(==(name), sol.charge_names)
+    idx === nothing || return sol.x[sol.n_nodes + length(sol.current_names) + idx]
+    idx = findfirst(==(name), sol.limit_names)
+    idx === nothing || return sol.x[sol.n_nodes + length(sol.current_names) +
+                                    length(sol.charge_names) + idx]
     error("Unknown variable: $name")
 end
 
@@ -297,6 +307,7 @@ end
 #==============================================================================#
 
 using NonlinearSolve
+using LinearSolve: LinearProblem, KLUFactorization
 using SciMLBase
 using SciMLBase: MatrixOperator
 using ADTypes
@@ -471,10 +482,19 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     lim0 = n - L
 
     u = copy(u0)
+    F = zeros(n)
+    # Cached linear solve: the sparsity pattern of cs.G is fixed across
+    # iterations, so factor symbolically once (KLU reuse_symbolic) and only
+    # refactor numerically each iteration — a from-scratch `cs.G \ F` per
+    # iteration re-runs the symbolic ordering every time.
+    linalg = cs.G isa SparseMatrixCSC ? KLUFactorization() : nothing
+    lincache = init(LinearProblem(cs.G, F), linalg)
+
     # Cold start: seed limiting variables from their allocation-time inits,
     # and arm the initjct signal (ngspice MODEINITJCT) so the first stamping
     # evaluates limited devices at their seeds (e.g. vcrit) instead of at
-    # the cold probe voltages — see limit!.
+    # the cold probe voltages — see limit!. Armed immediately before the
+    # try/finally so nothing can throw while the flag is set.
     if iszero(u0)
         for k in 1:L
             u[lim0 + k] = cs.limit_init[k]
@@ -482,7 +502,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         ws.dctx.initjct = true
     end
 
-    F = zeros(n)
+    try
     for iter in 1:maxiters
         # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
         # companion formulation, ws.dctx.b the matching RHS.
@@ -490,6 +510,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         ws.dctx.initjct = false  # only the first stamping of a cold start
         mul!(F, cs.G, u)
         F .-= ws.dctx.b
+        all(isfinite, F) || return u, false, iter - 1
 
         # Residual includes the g_lim rows, so convergence implies both KCL
         # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
@@ -519,9 +540,12 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
             # case) — fall through and keep iterating from it.
         end
 
-        # PREDICT: plain Newton step on the augmented system
+        # PREDICT: plain Newton step on the augmented system, reusing the
+        # cached factorization (numeric-only refactor; pattern is fixed).
+        lincache.A = cs.G
+        lincache.b = F
         δ = try
-            cs.G \ F
+            solve!(lincache).u
         catch err
             err isa LinearAlgebra.SingularException && return u, false, iter - 1
             rethrow()
@@ -543,6 +567,12 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     end
 
     return u, false, maxiters
+    finally
+        # The initjct arm must never outlive this solve — the workspace is
+        # reused by the fallback tiers and by transient stepping, and a
+        # stuck flag would silently pin every limited device at its seed.
+        ws.dctx.initjct = false
+    end
 end
 
 #==============================================================================#
@@ -728,8 +758,16 @@ function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::
     # 0. PCNR predictor/corrector Newton — only when the circuit allocated
     # limiting variables. SPICE-style junction limiting; typically converges
     # where plain Newton needs the stepping fallbacks (see doc/pcnr_plan.md).
+    # Guarded so that an exception at a PCNR-specific iterate (device stamping
+    # DomainError, factorization failure) degrades to the standard chain
+    # instead of aborting the whole DC solve.
     if cs.n_limits > 0
-        u, converged = _dc_pcnr_newton(cs, ws, u0; abstol=abstol, maxiters=maxiters)
+        u, converged = try
+            _dc_pcnr_newton(cs, ws, u0; abstol=abstol, maxiters=maxiters)
+        catch err
+            @debug "PCNR solve threw, falling back to standard chain" exception=err
+            u0, false
+        end
         if converged
             return u, true
         end
@@ -857,7 +895,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -2177,7 +2215,7 @@ function solve_dc(circuit::MNACircuit)
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
