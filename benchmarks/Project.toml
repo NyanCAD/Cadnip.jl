@@ -21,6 +21,14 @@ UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
 VACASKModels = "a2b3c4d5-6789-4abc-def0-123456789abc"
 VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
 
+[compat]
+# 2026-07-10: OrdinaryDiffEqBDF 2.2.3 regressed QBDF on the graetz diode
+# kink (dt forced below eps at t=0.312, "Unstable") — bisected via CI runs
+# on identical main code: 2.2.2 passed on 2026-07-04, 2.2.3 failed on
+# 2026-07-06. See the SOLVERS_NONLINEAR comment in
+# benchmarks/vacask/run_benchmarks.jl. Lift when upstream fixes.
+OrdinaryDiffEqBDF = "=2.2.2"
+
 [sources]
 Cadnip = {path = ".."}
 PSPModels = {path = "../models/PSPModels.jl"}

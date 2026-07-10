@@ -92,6 +92,13 @@ const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 # still; every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2,
 # KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails
 # outright or is markedly slower.
+#
+# 2026-07-10 update: OrdinaryDiffEqBDF 2.2.3 regressed QBDF on graetz — the
+# same dt-below-eps abort at t=0.312 that QNDF shows, on unchanged Cadnip
+# code (CI bisection on main: 2.2.2 green 2026-07-04, 2.2.3 red 2026-07-06;
+# 2.3.0 also red). benchmarks/Project.toml pins
+# OrdinaryDiffEqBDF = "=2.2.2" until upstream fixes; worth reporting to
+# SciML with this circuit as the reproducer.
 const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_QBDF]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
