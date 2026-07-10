@@ -21,7 +21,7 @@ using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
 using OrdinaryDiffEqBDF: QNDF, FBDF
-using OrdinaryDiffEqRosenbrock: Rodas3, Rodas5P
+using OrdinaryDiffEqRosenbrock: Rodas3
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
 
@@ -46,7 +46,6 @@ const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures
 const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
-const SOLVER_RODAS5P = ("Rodas5P", () -> Rodas5P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
 # Ring oscillator: FBDF is 4x faster than IDA for PSP103 ring oscillator
 const SOLVER_FBDF_RING = ("FBDF", () -> FBDF(autodiff=AutoFiniteDiff()))
@@ -83,8 +82,9 @@ const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 # exactly what the `QBDF` algorithm is (`QNDF` with `kappa` all zeros) - so
 # QBDF was the third slot for a while.
 #
-# The third slot is now Rodas5P (a Rosenbrock-W method), NOT QBDF. QBDF was
-# dropped because it regressed and no longer reaches the end on graetz:
+# The third slot is now Rodas3 (a low-order Rosenbrock method), NOT QBDF.
+# QBDF was dropped because it regressed and no longer reaches the end on
+# graetz:
 #
 #   - 2026-07-06 onward, QBDF aborts `Unstable` on graetz with dt forced
 #     below Float64 eps at t=0.312 (a diode zero-crossing, same failure mode
@@ -103,21 +103,31 @@ const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 #     but a solver that no longer reaches the end on one of the two circuits
 #     it's listed for can't stay.
 #
-# Rodas5P replaces it: it reaches t_end with retcode Success on BOTH graetz
-# (1000001 steps) and mul (500002 steps) at the throughput settings, verified
-# on Julia 1.12. It's also the Rosenbrock representative the work-precision
-# benchmark already uses for graetz (see wpd/run_wpd.jl / wpd/README.md
-# "Solver survey"). Note wpd excludes Rodas5P from mul because it hangs there
-# under *adaptive* stepping (mul's 100kHz cascaded-diode switching is far
-# stiffer); that caveat does NOT apply here - the throughput benchmark forces
-# a tiny fixed dtmax=1e-9 on mul, which caps the step and keeps Rodas5P
-# stable and fast (mul: Rodas5P ~ FBDF, both well under IDA). RadauIIA5, the
-# other wpd graetz candidate, is currently broken upstream on this stack
-# (`UndefVarError: FastConvergence not defined in OrdinaryDiffEqFIRK`), so
-# it's not an option. Every SDIRK/ESDIRK method previously tried (Trapezoid,
-# TRBDF2, KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either
-# fails outright on graetz or is markedly slower.
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS5P]
+# Rodas3 (3rd-order Rosenbrock, the same low-order method already used for the
+# RC case) replaces it. Rosenbrock is the family the work-precision benchmark
+# uses on these diode circuits (see wpd/run_wpd.jl / wpd/README.md "Solver
+# survey"), but *low* order is the right pick for THIS benchmark specifically:
+# throughput forces a tiny fixed dtmax, so the local truncation error is
+# dt-limited, not order-limited, and a high-order method just pays for stages
+# it can't use. Measured on Julia 1.12 at the throughput settings, every
+# Rosenbrock order reaches t_end with retcode Success on BOTH graetz and mul
+# at the SAME accuracy (rel-L2 = 2.87e-6 vs IDA on graetz for Rodas3, Rodas5P
+# and ROS3P alike), but runtime tracks order monotonically - graetz (to
+# t=0.4): Rodas3 5.5s < Rodas4 7.1s < Rodas5P 8.5s; mul (to 0.2ms): Rodas3
+# 2.7s < Rodas4 3.6s < Rodas5P 4.3s. So Rodas3 is the fastest robust
+# Rosenbrock here (ROS3P is a touch faster still, ~4.2s/2.6s, but Rodas3 is
+# already imported for the RC case and equally accurate, so there's no reason
+# to add a second Rosenbrock name). The wpd survey excludes Rodas5P from mul
+# because it hangs there under *adaptive* stepping (mul's 100kHz
+# cascaded-diode switching is far stiffer); that caveat does NOT apply here -
+# the fixed dtmax=1e-9 caps the step and keeps every Rosenbrock order stable.
+# RadauIIA5, the other wpd graetz candidate, is currently broken upstream on
+# this stack (`UndefVarError: FastConvergence not defined in
+# OrdinaryDiffEqFIRK`), so it's not an option. Every SDIRK/ESDIRK method
+# previously tried (Trapezoid, TRBDF2, KenCarp3/4/5/47/58, Kvaerno3/4/5,
+# SDIRK2, Cash4, Hairer4/42) either fails outright on graetz or is markedly
+# slower.
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS3]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
