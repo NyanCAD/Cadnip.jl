@@ -233,6 +233,30 @@ already reach the algorithm via `CompiledStructure` in `prob.p`. Sundials
 IDA (today's `tran!` default) can never participate — its Newton loop is C —
 so limiting-sensitive circuits would move to FBDF to benefit.
 
+### Why no Schur factorization is needed (and what that costs)
+
+The paper's third key insight — Schur-eliminating the limit variables so
+linear solves stay MNA-sized — exists because in its formulation the device
+conductances live in the `J_MNA/lim` columns, coupling the blocks both ways
+(and L is not small: ~9 per BSIM4 instance, comparable to its node count).
+The recorded-`w` formulation reads `vold = x[ℓ]` as a plain Float64, so
+`∂I/∂x_lim` is deliberately dropped and those columns are *empty*: the
+augmented matrix is block lower-triangular `[[A, 0], [∓1, I]]`, its Schur
+complement is trivially `A`, and KLU's BTF preprocessing exploits the
+structure automatically — the extra unknowns cost O(L) memory plus a
+back-substitution. This is not free lunch: it is bought with the
+vold-as-per-iteration-constant approximation, i.e. exactly SPICE's classical
+Jacobian, and the corrector overwrites the lim slots anyway. Benchmark cost
+of the approximation: ~1 iteration vs the paper-pure pilot.
+
+For the upstream flagship (paper-pure, refine functions as parameters):
+full-solve of the augmented system is the correct baseline — fill-reducing
+orderings pivot the lim variables early (3-entry rows, unit diagonal) and
+implicitly perform the paper's elimination. The explicit `PCNRDescent`
+Schur descent is a performance option for contexts that must preserve the
+exact n×n legacy pattern (existing symbolic factorizations,
+preconditioners) or dense solves, not a correctness requirement.
+
 ### Why every other solver still works, unchanged
 
 For solvers with no corrector phase (transient IDA/FBDF/Rodas, the
