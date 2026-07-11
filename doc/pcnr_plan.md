@@ -429,19 +429,23 @@ ngspice.
 
 #### Verified facts that reshape the earlier sketch
 
-1. **initjct needs no model patches and no upstream ask.** All 13 limited
-   models already ship `initialize_limiting()` *with* the MODEINITJCT
+1. **initjct seeding is deferred (measured: it must wait for Option 2).**
+   All 13 limited models ship `initialize_limiting()` *with* the MODEINITJCT
    vcrit-seed branch emitted (e.g. `diode.va:367-381` and the seed at
-   `:738-740`), gated on `$simparam("iniLim", -1)`. The earlier options
-   discussion (VADistiller emitting the branch / string-form `$limit` /
-   AST pattern-matching) is superseded: the branch is there; only the
-   `iniLim` answer is missing. Today `iniLim` defaults to −1, which routes
-   to a heuristic requiring `analysis("nodeset")` — hardcoded `false` in
-   vasim — so `initialize_limiting()` is always false and the seed never
-   fires. The single wire needed: special-case `"iniLim"` in the
-   `$simparam` handler (`src/vasim.jl:1135-1154`) to emit
-   `Int(ctx.initjct)` — the per-pass flag both context types already carry
-   and `_dc_pcnr_newton` already arms for exactly the first cold pass.
+   `:738-740`), gated on `$simparam("iniLim", -1)`, so no model patch or
+   upstream ask is needed to *reach* the seed. But the seed as the models
+   write it is `load_vd = DIOtVcrit` — a plain constant assignment that
+   **drops the AD partials**. Under Option 1 (below), the device then stamps
+   *zero* conductance on the seeded pass, which is singular for
+   series-junction topologies (the 3-diode chain floats its internal nodes).
+   Native `limit!` avoids this because its bypass seeds while *keeping*
+   passthrough partials (`vnew − value(vnew) + init`, `devices.jl:1206`);
+   reproducing that for VA models needs the w-anchored dual the site builds
+   in Option 2, not the model's own constant seed. So the Option 1 impl
+   leaves `$simparam("iniLim")` returning **0** (special-cased in the
+   `$simparam` handler at `src/vasim.jl:1135-1154`, seed off) and takes the
+   honest cold-start limiter crawl instead. Wiring `iniLim` to `ctx.initjct`
+   becomes correct once Option 2's passthrough-dual return is in place.
    The LRM string form `$limit(V(p,n), "pnjlim", vte, vcrit)` (simulator-
    owned limiter, covered by `limit!`'s own initjct bypass) stays future
    work — no in-repo model uses it.
@@ -454,8 +458,8 @@ ngspice.
    | `tnom`, `gmin`, `reltol`, `vntol`, `abstol` | 64 | resolve against existing `MNASpec` fields |
    | `scale` (1), `defw`/`defl` (1e-4), `defas`/`defad` (0), `epsmin` | 62 | defaults correct (ngspice defaults) |
    | `oldlimit` (0) | 12 | default 0 = ngspice `CKTfixLimit` off = modern fetlim+limvds path |
-   | `iteration` (10) | 13 | only read in the `initialize_limiting()` heuristic; dead once `iniLim` answers |
-   | **`iniLim` (−1)** | 13 | **wire to `ctx.initjct`** (above) |
+   | `iteration` (10) | 13 | only read in the `initialize_limiting()` heuristic; dead while `iniLim` returns 0 |
+   | **`iniLim` (−1)** | 13 | special-cased to **0** for now (seed off); wire to `ctx.initjct` in Option 2 (above) |
    | `sourceScaleFactor` (1.0) | 1 | vdmos thermal branch; ngspice's srcFact — optionally map to `_mna_spec_.srcFact` |
 
 3. **Per-branch state, per-site lowering, no OldGet/NewSet classification.**

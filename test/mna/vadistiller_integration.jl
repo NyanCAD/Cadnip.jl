@@ -223,6 +223,63 @@ D1 da 0 diode_a m=5
                 @test v_diode > 0.6 && v_diode < 0.7
             end
 
+            @testset "\$limit codegen: limiting variable + convergence" begin
+                # Verify VA `$limit` now lowers to a real PCNR limiting variable
+                # (previously a no-op). One limiting variable per sp_diode
+                # instance, keyed on its junction branch.
+                function rect(Vsrc; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
+                    vin = get_node!(ctx, :vin)
+                    out = get_node!(ctx, :out)
+                    stamp!(VoltageSource(Vsrc; name=:V1), ctx, vin, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vin, out)
+                    stamp!(sp_diode(), ctx, out, 0; _mna_spec_=MNASpec(), _mna_x_=x)
+                    return ctx
+                end
+
+                # Structure: stamping allocates exactly one limiting variable.
+                ctx0 = rect(5.0)
+                @test ctx0.n_limits == 1
+
+                # Cold-start convergence from zeros on a hard 50 V drive — the
+                # case classic Newton diverges on (exp(50/vt) overflow) and
+                # limiting exists to tame.
+                for Vsrc in (5.0, 50.0, 325.0)
+                    sol = solve_dc((p, s, t=0.0; x=Float64[], ctx=MNAContext()) -> rect(Vsrc; x, ctx),
+                                   (;), MNASpec())
+                    vj = sol.x[2]                     # junction voltage
+                    i_r = (Vsrc - vj) / 1000.0        # series-R current
+                    @test 0.4 < vj < 1.2              # sane forward drop, no overflow
+                    @test i_r > 1e-4                  # diode conducts
+                end
+            end
+
+            @testset "\$limit: 3-diode series chain converges" begin
+                function chain3_va(Vsrc; x=Float64[], ctx=MNAContext())
+                    reset_for_restamping!(ctx)
+                    vin = get_node!(ctx, :vin)
+                    n1 = get_node!(ctx, :n1)
+                    n2 = get_node!(ctx, :n2)
+                    n3 = get_node!(ctx, :n3)
+                    stamp!(VoltageSource(Vsrc; name=:V1), ctx, vin, 0)
+                    stamp!(Resistor(1000.0; name=:R1), ctx, vin, n1)
+                    stamp!(sp_diode(), ctx, n1, n2; _mna_spec_=MNASpec(), _mna_x_=x)
+                    stamp!(sp_diode(), ctx, n2, n3; _mna_spec_=MNASpec(), _mna_x_=x)
+                    stamp!(sp_diode(), ctx, n3, 0;  _mna_spec_=MNASpec(), _mna_x_=x)
+                    return ctx
+                end
+
+                ctx0 = chain3_va(50.0)
+                @test ctx0.n_limits == 3          # one per junction
+
+                sol = solve_dc((p, s, t=0.0; x=Float64[], ctx=MNAContext()) -> chain3_va(50.0; x, ctx),
+                               (;), MNASpec())
+                # Three forward-biased junctions in series from n1 to ground; each
+                # drops ~0.7-0.8 V, so n1 sits near 2.0-2.5 V and R1 takes the rest.
+                v_n1 = sol.x[2]
+                @test 1.8 < v_n1 < 2.7
+            end
+
             @testset "Diode with series resistance" begin
                 function sp_diode_rs_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
