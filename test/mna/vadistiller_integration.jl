@@ -146,6 +146,34 @@ D2 n2 n3 dlc
 D3 n3 0 dlc
 """i
 
+# Darlington pair (NPN): Q1's emitter drives Q2's base, so the Vbe drops stack
+# and the current gains multiply — the BJT analog of the diode chain, and a
+# genuinely stiff convergence case (nanoamp base current, milliamp output). Each
+# sp_bjt contributes three limited junctions (vbe, vbc, vsub), so this exercises
+# the multi-branch `$limit` path the lim_rhs anchoring is really about.
+const darlington = sp"""
+* NPN Darlington pair — chained exponentials
+.model qn npn bf=100 is=1e-15
+Vcc vcc 0 DC 5
+Vin in 0 DC 3
+Rb in b 10k
+Q1 vcc b mid qn
+Q2 vcc mid out qn
+Rl out 0 1k
+"""i
+
+# Drive a builder through the PCNR limiting loop directly and report its
+# iteration count — the convergence measurement the correctness tests don't make.
+function pcnr_converge(builder; abstol=1e-8, maxiters=200)
+    spec = MNASpec(mode=:dcop)
+    ctx = Cadnip.MNA._detect_structure(builder, (;), spec)
+    cs = Cadnip.MNA.compile_structure(builder, (;), spec; ctx=ctx)
+    ws = Cadnip.MNA.create_workspace(cs; ctx=ctx)
+    n = Cadnip.MNA.system_size(ctx)
+    u, ok, iters = Cadnip.MNA._dc_pcnr_newton(cs, ws, zeros(n); abstol=abstol, maxiters=maxiters)
+    return (u=u, converged=ok, iters=iters, n_limits=ctx.n_limits)
+end
+
 @testset "VADistiller Integration Tests" begin
 
     #==========================================================================#
@@ -274,6 +302,21 @@ D3 n3 0 dlc
                 # Three forward-biased junctions in series from n1 to ground; each
                 # drops ~0.7-0.8 V, so n1 sits near 2.0-2.5 V and R1 takes the rest.
                 @test 1.8 < sol[:n1] < 2.7
+            end
+
+            @testset "\$limit: Darlington pair convergence (multi-branch BJT)" begin
+                # Chained BJT exponentials — the multi-branch analog of the diode
+                # chain. Pins that the PCNR limiting loop actually converges (not
+                # just that the answer is right), which is where Option 2's
+                # per-site lim_rhs anchoring on multi-junction devices matters.
+                r = pcnr_converge(darlington)
+                @test r.converged
+                @test r.n_limits == 6          # 3 junctions (vbe/vbc/vsub) × 2 BJTs
+                @test r.iters <= 20            # Option 2 measures 12; margin for CI
+                # Operating point: out ≈ Vin − 2·Vbe ≈ 1.6 V (both BJTs on).
+                sol = dc!(MNACircuit(darlington))
+                @test 1.4 < sol[:out] < 1.9
+                @test sol[:mid] > sol[:out]    # Q1 emitter above Q2 emitter
             end
 
             @testset "Diode with series resistance" begin
