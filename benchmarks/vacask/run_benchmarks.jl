@@ -20,7 +20,7 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEqBDF: QNDF, QBDF, FBDF
+using OrdinaryDiffEqBDF: QNDF, FBDF
 using OrdinaryDiffEqRosenbrock: Rodas3
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
@@ -44,7 +44,6 @@ include(joinpath(BENCHMARK_DIR, "report_utils.jl"))
 # dropping it.
 const SOLVER_IDA = ("IDA", () -> IDA(linear_solver=:KLU, max_error_test_failures=20))
 const SOLVER_QNDF = ("QNDF", () -> QNDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
-const SOLVER_QBDF = ("QBDF", () -> QBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_FBDF = ("FBDF", () -> FBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 const SOLVER_RODAS3 = ("Rodas3", () -> Rodas3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff()))
 
@@ -76,30 +75,59 @@ const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 # genuine solver/compiler-codegen interaction, not stale local testing or a
 # different package resolution.
 #
-# Root cause: QNDF's default `kappa` correction coefficients (the
-# Shampine-Reichelt stability/accuracy correction for the quasi-constant-step
-# formulation) interact badly with the derivative kink at the diode
-# zero-crossing. Zeroing `kappa` removes the failure entirely - which is
-# exactly what the `QBDF` algorithm is (`QNDF` with `kappa` all zeros).
-# `QNDF2` (a distinct fixed-2nd-order implementation, not just "QNDF capped
-# at order 2" - that still fails) also survives, but neither tuning
-# `extrapolant` nor just lowering `max_order` helps, and `QNDF1` fails even
-# earlier than the default - so this isn't a generic "be more conservative"
-# fix, it's specifically the kappa term. QBDF fills the third slot: robust
-# on both circuits (validated on Julia 1.12), and 5x faster than Rodas3 on
-# graetz (8.9s vs 46.1s) and 8x faster on mul (2.7s vs 22.8s, also Julia
-# 1.12 timings). Rodas5P/RadauIIA5 are also robust (0 rejects) but slower
-# still; every SDIRK/ESDIRK method tried (Trapezoid, TRBDF2,
-# KenCarp3/4/5/47/58, Kvaerno3/4/5, SDIRK2, Cash4, Hairer4/42) either fails
-# outright or is markedly slower.
+# Root cause of the QNDF failure: its default `kappa` correction coefficients
+# (the Shampine-Reichelt stability/accuracy correction for the
+# quasi-constant-step formulation) interact badly with the derivative kink at
+# the diode zero-crossing. Zeroing `kappa` removes the failure - which is
+# exactly what the `QBDF` algorithm is (`QNDF` with `kappa` all zeros) - so
+# QBDF was the third slot for a while.
 #
-# 2026-07-10 update: OrdinaryDiffEqBDF 2.2.3 regressed QBDF on graetz — the
-# same dt-below-eps abort at t=0.312 that QNDF shows, on unchanged Cadnip
-# code (CI bisection on main: 2.2.2 green 2026-07-04, 2.2.3 red 2026-07-06;
-# 2.3.0 also red). benchmarks/Project.toml pins
-# OrdinaryDiffEqBDF = "=2.2.2" until upstream fixes; worth reporting to
-# SciML with this circuit as the reproducer.
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_QBDF]
+# The third slot is now Rodas3 (a low-order Rosenbrock method), NOT QBDF.
+# QBDF was dropped because it regressed and no longer reaches the end on
+# graetz:
+#
+#   - 2026-07-06 onward, QBDF aborts `Unstable` on graetz with dt forced
+#     below Float64 eps at t=0.312 (a diode zero-crossing, same failure mode
+#     QNDF has), after ~313099 of the expected ~1000001 steps. Reproduced
+#     locally on Julia 1.12 at the throughput settings (dtmax=1e-6,
+#     reltol=abstol=1e-3) and in CI on main.
+#   - The pin `OrdinaryDiffEqBDF = "=2.2.2"` (added 2026-07-10) does NOT fix
+#     it: the latest main CI run resolves OrdinaryDiffEqBDF v2.2.2 exactly
+#     and QBDF still aborts at t=0.312. The regression is not in
+#     OrdinaryDiffEqBDF at all - it lives in the transitive solver stack that
+#     floats regardless of the BDF pin (OrdinaryDiffEqCore v4.6.0,
+#     OrdinaryDiffEqDifferentiation v3.2.3, OrdinaryDiffEqNonlinearSolve
+#     v2.1.0 in that run). Pinning only BDF was treating the wrong package;
+#     the pin has been removed since it holds BDF back for no working reason.
+#   - QBDF still passes on mul (it's only graetz's diode kink that trips it),
+#     but a solver that no longer reaches the end on one of the two circuits
+#     it's listed for can't stay.
+#
+# Rodas3 (3rd-order Rosenbrock, the same low-order method already used for the
+# RC case) replaces it. Rosenbrock is the family the work-precision benchmark
+# uses on these diode circuits (see wpd/run_wpd.jl / wpd/README.md "Solver
+# survey"), but *low* order is the right pick for THIS benchmark specifically:
+# throughput forces a tiny fixed dtmax, so the local truncation error is
+# dt-limited, not order-limited, and a high-order method just pays for stages
+# it can't use. Measured on Julia 1.12 at the throughput settings, every
+# Rosenbrock order reaches t_end with retcode Success on BOTH graetz and mul
+# at the SAME accuracy (rel-L2 = 2.87e-6 vs IDA on graetz for Rodas3, Rodas5P
+# and ROS3P alike), but runtime tracks order monotonically - graetz (to
+# t=0.4): Rodas3 5.5s < Rodas4 7.1s < Rodas5P 8.5s; mul (to 0.2ms): Rodas3
+# 2.7s < Rodas4 3.6s < Rodas5P 4.3s. So Rodas3 is the fastest robust
+# Rosenbrock here (ROS3P is a touch faster still, ~4.2s/2.6s, but Rodas3 is
+# already imported for the RC case and equally accurate, so there's no reason
+# to add a second Rosenbrock name). The wpd survey excludes Rodas5P from mul
+# because it hangs there under *adaptive* stepping (mul's 100kHz
+# cascaded-diode switching is far stiffer); that caveat does NOT apply here -
+# the fixed dtmax=1e-9 caps the step and keeps every Rosenbrock order stable.
+# RadauIIA5, the other wpd graetz candidate, is currently broken upstream on
+# this stack (`UndefVarError: FastConvergence not defined in
+# OrdinaryDiffEqFIRK`), so it's not an option. Every SDIRK/ESDIRK method
+# previously tried (Trapezoid, TRBDF2, KenCarp3/4/5/47/58, Kvaerno3/4/5,
+# SDIRK2, Cash4, Hairer4/42) either fails outright on graetz or is markedly
+# slower.
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS3]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
