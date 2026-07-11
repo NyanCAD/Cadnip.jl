@@ -377,11 +377,13 @@ voltage):
    interaction at all: warm starts have `vnew ≈ vold`, which makes pnjlim a
    no-op on its own; `x_lim` carries the previous timestep's value through
    the DAE state, playing the role of ngspice's MODEINITPRED vold. Placement
-   note: when Phase 2 lands, the signal should probably move from the
-   stamping context to `MNASpec` (matching SPICE's CKTmode and letting VA
-   models read the *same* signal via `$simparam("initjct", 0)`), with the
-   PCNR loop stamping its first cold pass through a spec-modified
-   `CompiledStructure` as the stepping code already does for gshunt/srcFact.
+   note (corrected 2026-07): an earlier revision suggested moving the signal
+   to `MNASpec` and exposing it as `$simparam("initjct", 0)` — but no model
+   reads any "initjct" simparam. What the VADistiller models actually read is
+   `$simparam("iniLim", -1)` inside `initialize_limiting()` (all 13 limited
+   models, e.g. `diode.va:370`), so Phase 2 keeps the flag on the stamping
+   context and special-cases `iniLim` in `$simparam` codegen to read it (see
+   Phase 2 below). No spec-modified `CompiledStructure` pass is needed.
 
    *Convergence-tail detail:* the recorded-`w` corrector leaves a one-step
    lag in the `g_lim` rows (`x_lim = V` from the previous iterate), so on
@@ -409,60 +411,107 @@ was that evaluating *at* `x_lim` made the vcrit seed effective and the
 anchoring trivially consistent. Same behavior now lives inside the unified
 `limit!` API.
 
-### Phase 2: `$limit` codegen in vasim.jl — future work (not a quick job)
+### Phase 2: `$limit` codegen in vasim.jl — refined plan (researched 2026-07)
 
 **The runtime side is already built and proven.** The `limit!` primitive
 (see "Formulation" above) is exactly what `$limit(V(p,n), fn, args...)`
 lowers to, and the native `Diode` already goes through it — so Phase 2 is
-*pure codegen*: no new solver or context mechanisms. Per site:
-
-- OldGet-style read → the `vold = x[ℓ]` read inside `limit!`;
-- the model computes `w = DEVpnjlim(vnew, vold, ...)` itself (an ordinary
-  VA analog-function call, already supported) and evaluates at `w`; AD flows
-  node partials through the limiter, so conductances stay in the node-node
-  block;
-- NewSet-style sites → additional `record_limit_w!` calls on the same
-  branch variable (allocate once per branch, last record wins);
-- the `g_lim` row stays the linear `x_lim − (V_p − V_n) = 0`.
+*pure codegen*: no new solver or context mechanisms, and (verified) no
+changes to `contrib.jl`/`context.jl`/`value_only.jl`/`solve.jl` at all,
+because generated VA `stamp!` methods inline all of their own stamping
+(dual extraction `src/vasim.jl:2907-2948`, Ieq companion `:3055-3078`) and
+never route through `stamp_contribution!`.
 
 Trace check (rectifier from zeros): iter 0 stamps at `w₀ = pnjlim(0,0) = 0`;
 predict pushes `V → 5` but correct resets `x_lim ← w₀ = 0`; iter 1 computes
 `w₁ = pnjlim(5, 0) = vt·ln(5/vt) ≈ 0.14` — the limiter fires exactly as in
 ngspice.
 
-**Codegen must also implement `lim_rhs` anchoring** (see the "Measured"
-notes above): contributions that used limit-replaced voltages need their
-companion anchored at the evaluation point,
-`Δb = Σ ∂I/∂w_k · (V_probe,k − w_k)`, with the *undamped* `∂I/∂w` partials
-(limit-replaced values enter the dual system with passthrough partials, not
-chain-ruled through the limiter). This is OSDI's `lim_rhs` field, so
-OpenVAF-targeted models already assume a simulator that does this.
+#### Verified facts that reshape the earlier sketch
 
-**Recovering initjct for VA models.** The `initjct` bypass inside `limit!`
-covers native devices and any LRM-idiomatic `$limit(V(p,n), "pnjlim", vte,
-vcrit)` site (where the simulator owns the limiter). It can NOT cover the
-VADistiller OldGet/NewSet idiom, because there the limiter runs inline in
-the model and trusts the cold probe. Options, in order of preference:
+1. **initjct needs no model patches and no upstream ask.** All 13 limited
+   models already ship `initialize_limiting()` *with* the MODEINITJCT
+   vcrit-seed branch emitted (e.g. `diode.va:367-381` and the seed at
+   `:738-740`), gated on `$simparam("iniLim", -1)`. The earlier options
+   discussion (VADistiller emitting the branch / string-form `$limit` /
+   AST pattern-matching) is superseded: the branch is there; only the
+   `iniLim` answer is missing. Today `iniLim` defaults to −1, which routes
+   to a heuristic requiring `analysis("nodeset")` — hardcoded `false` in
+   vasim — so `initialize_limiting()` is always false and the seed never
+   fires. The single wire needed: special-case `"iniLim"` in the
+   `$simparam` handler (`src/vasim.jl:1135-1154`) to emit
+   `Int(ctx.initjct)` — the per-pass flag both context types already carry
+   and `_dc_pcnr_newton` already arms for exactly the first cold pass.
+   The LRM string form `$limit(V(p,n), "pnjlim", vte, vcrit)` (simulator-
+   owned limiter, covered by `limit!`'s own initjct bypass) stays future
+   work — no in-repo model uses it.
 
-1. **VADistiller emits the MODEINITJCT branch it currently drops.** The
-   branch exists in the ngspice C sources the distiller transpiles
-   (`if (CKTmode & MODEINITJCT) vd = vcrit`); emitting it guarded by
-   `$simparam("initjct", 0)` costs one line per junction and Cadnip's
-   `$simparam` plumbing already exists (`MNASpec` fields). Faithful to
-   ngspice, no heuristics. Worth proposing upstream to VADistiller; a local
-   patch to the distilled models is a stopgap.
-2. **VADistiller emits string-form `$limit`** where it recognizes the
-   `DEVpnjlim(vnew, vold, args...)` call pattern — then the simulator owns
-   evaluation point, seeding, and corrector outright (full paper-pure
-   semantics). Partial coverage only: composite limiting like diode.va's
-   breakdown branch (`pnjlim` on `-(vd+bv)`) can't be expressed per-probe.
-3. **AST pattern-matching in Cadnip's codegen** to extract the limiter
-   dataflow between OldGet and NewSet sites: fragile against arbitrary VA
-   between the sites; not recommended.
+2. **Simparam inventory** (grep over all 13 models; every call carries a
+   default, so unmatched names never error):
 
-None of this is "baked into how `$limit` works" — the get/set idiom is a
-VADistiller transpilation convention, not the LRM's intent; the LRM's
-named-function form is simulator-side limiting, i.e. the pilot shape.
+   | simparam (default) | uses | status |
+   |---|---|---|
+   | `tnom`, `gmin`, `reltol`, `vntol`, `abstol` | 64 | resolve against existing `MNASpec` fields |
+   | `scale` (1), `defw`/`defl` (1e-4), `defas`/`defad` (0), `epsmin` | 62 | defaults correct (ngspice defaults) |
+   | `oldlimit` (0) | 12 | default 0 = ngspice `CKTfixLimit` off = modern fetlim+limvds path |
+   | `iteration` (10) | 13 | only read in the `initialize_limiting()` heuristic; dead once `iniLim` answers |
+   | **`iniLim` (−1)** | 13 | **wire to `ctx.initjct`** (above) |
+   | `sourceScaleFactor` (1.0) | 1 | vdmos thermal branch; ngspice's srcFact — optionally map to `_mna_spec_.srcFact` |
+
+3. **Per-branch state, per-site lowering, no OldGet/NewSet classification.**
+   State (limit variable, `vold`, `g_lim` row) is keyed per (instance,
+   probe branch) — allocated hoisted/unconditionally, one slot per branch.
+   Every `$limit` site on that branch lowers uniformly: call its limiter fn
+   as `fn(vnew_dual, vold, user_args...)` via the existing VA-function
+   machinery (`:1206-1237`), `record_limit_w!(extract_value(result))`
+   (last record wins — OldGet's `vold` record is overwritten by NewSet's),
+   return per the dual-semantics choice below. Site counts are OldGet/NewSet
+   pairs everywhere: diode 2/1, bjt 6/3, mos*/bsim3v3/vdmos 8/4, jfet 4/2,
+   bsim4v8 18/9.
+
+#### Jacobian dual semantics — the option space
+
+The design hinge is what dual a `$limit` site returns, because its partials
+become the stamped conductance. The inline `DEVpnjlim` output `w_raw`
+carries chain-ruled partials `∂w/∂V` (≈1 inactive, ≪1 when compressing).
+Coherent (G, RHS-anchor) combinations:
+
+- **Option 1 — chain-ruled (damped) G + probe anchor.** Return `w_raw`
+  as-is. `G = dI/dw·∂w/∂V` is the true composite derivative, so the
+  existing probe-anchored `Ieq` (`:3058-3062`) is already consistent.
+  ~3-line change, no dual widening, no Δb. Cost: hard limiting collapses
+  the stamped conductance → the measured 17-18-iteration cold-start crawl
+  (see the "Measured" notes above). Correct, just slower.
+- **Option 2 — passthrough (undamped) G + w anchor** (ngspice/OSDI
+  `lim_rhs`). Return a fresh dual `Dual(w, ±1 at the probe-node slots)`:
+  `G = dI/dw` full-strength (SPICE's `gd`), i.e. linearization
+  `I ≈ I(w) + G·(V − w)`. The probe-anchored companion is then wrong by a
+  phantom current `G·(V_probe − w)`, so the RHS needs
+  `Δb = Σⱼ (∂I/∂wⱼ)·(V_probe,ⱼ − wⱼ)`. Getting `∂I/∂wⱼ` requires one
+  extra dual slot per site (widen the `JacobianTag` duals from
+  `n_all_nodes` to `W = n_all_nodes + S`; site j's return carries `+1` at
+  slot `n_all_nodes+j`, read only for Δb, never stamped into G) — the node
+  partial is the *sum* of direct-V dependence (series-R path, gmin terms)
+  and through-w dependence, and Δb needs the through-w part isolated. This
+  dual shape mirrors the initjct bypass already inside `limit!`
+  (`devices.jl:1206`). Cross-check against the native diode:
+  `Ieq = I(w) − G·V + G·(V − w) = I(w) − G·w` — exactly
+  `stamp_limited_companion!`.
+- **Option 3 — chain-ruled G + w anchor**: what native `Diode` does today
+  (generic `pnjlim` under AD + `stamp_limited_companion!`); impure but
+  benign — damping only bites far from the solution, and with the initjct
+  seed the limiter is barely active after the first pass; 7 iterations
+  measured on the pilot.
+- Undamped G + probe anchor is the invalid fourth combination (the phantom
+  "18 mA at 0 V" failure in the Measured notes).
+
+**Sequencing: land Option 1 first** (verifies VA limiting end-to-end with
+the PCNR corrector at minimal complexity), **then upgrade to Option 2**
+(dual widening + Δb) with `benchmarks/pcnr` iteration counts as referee.
+The two remain a one-line A/B at the site-return emission — which the
+"damped Jacobian" risk item below explicitly asks to keep.
+
+#### Effort and steps
 
 **Effort assessment**: this is the most delicate file in the repo
 (positional-counter discipline, dual handling, per-branch site grouping
@@ -470,23 +519,51 @@ across a 3.7k-line codegen; BSIM4 has 18 sites/9 branches to validate).
 Multi-session, careful work — not delegable to a quick agent pass. No type
 piracy anywhere: it's all Cadnip-owned codegen and context plumbing.
 
-7. `src/vasim.jl` `$limit` handler (`:1192`): group call sites by probe
-   branch within the module; first site allocates (hoisted, unconditional —
-   same rule as hoisted `get_G_idx!` stamping); emit the OldGet read and the
-   NewSet record per the mapping above, via the existing VA analog-function
-   call machinery (`all_functions`, which already handles the
-   `inout limited` flag).
-8. Integration tests: `test/mna/vadistiller.jl` additions — diode rectifier,
-   the astable BJT case (`test/mna/astable_bjt_test.jl`), MOS sweeps; verify
-   `dc!`/`tran!` results unchanged on already-converging circuits and
-   fallback usage (gmin/source stepping) reduced on the difficult ones.
-9. Benchmarks: `benchmarks/vacask` suite — NR iteration counts and wall-clock
-   vs. VACASK (which runs the same models *with* limiting active), wpd plots
-   for `mul`. This is the acceptance gate: limiting should cut iterations
-   and/or fallback invocations without accuracy regressions.
-   A first cross-method DC benchmark (PCNR vs NewtonRaphson / TrustRegion /
-   RobustMultiNewton / LM / PseudoTransient / `CedarRobustNLSolve` on
-   graetz/mul-style native-Diode topologies) lives in `benchmarks/pcnr/`.
+7. `src/vasim.jl` changes. `MNAScope` (~`:551-575`) gains `limit_branches`
+   (ordered unique probe branches), `limit_sites` (one per site in lowering
+   order) and a `cond_depth` counter (incremented around conditional/loop/
+   case body lowering). The `$limit` handler (replace `:1192-1198`) errors
+   at codegen time for non-`V(p,n)` probes, string-form limiters, unknown
+   fns, or a site under a runtime conditional (`cond_depth > 0` would
+   desync positional counters); otherwise find-or-append the branch, push
+   the site, and emit the uniform lowering above (reusing the VA-function
+   arg-marshalling at `:1206-1237`). `$simparam` gains the `iniLim`
+   special case. Assembly (`generate_mna_stamp_method_nterm`): hoisted
+   limit preamble spliced between `$internal_node_alloc` (`:3426`) and
+   `$instance_stamp_calls` (`:3429`) — per branch: `alloc_limit!(...;
+   init=0.0)` (the vcrit seed comes from the model's own iniLim branch,
+   unlike native `Diode`'s `init=vcrit`), the `vold = _mna_x_[li]` read,
+   and the 3-entry `g_lim` row. For Option 2 additionally: per-site
+   partials constants, widened `dual_creation` (`:3176-3183`), `dIdW/dqdW`
+   extraction in the three `branch_stamp` type branches (`:2907-2948`),
+   and Δb terms in the Ieq (`:3058-3062`), charge-constraint
+   (`:3036-3040`, before the `CHARGE_SCALE` multiply) and two-node voltage
+   (`:3325-3357`) companions. A module with no `$limit` sites generates
+   byte-identical code to today.
+8. Integration tests. `test/mna/pcnr.jl` additions: sp_diode structure
+   detection (5 random-x passes), anchoring unit test against
+   hand-computed `pnjlim` (crafted `x` with `V_probe = 5`,
+   `x_lim = vold = 0.6`), initjct seed test (`limit_w ≈ vcrit`, no phantom
+   current), rectifier/chain3 convergence counts, transient smoke.
+   `test/mna/vadistiller.jl` / `test/mna/vadistiller_integration.jl`
+   regression — audit size-sensitive assertions (system sizes grow by
+   n_limits for every limited model). Validation ladder: diode → bjt
+   (`test/mna/astable_bjt_test.jl`, 3 limit vars/instance) → mos1 (fetlim
+   cross-branch: vds limited using vgs — fine, the `g_lim` row stays
+   3-entry, cross couplings ride the node conductances via AD); bsim4v8
+   compile+DC smoke only (W = n_all_nodes+18 is the compile-pressure worst
+   case; the `noinline` escape hatch at `:3412` exists).
+9. Benchmarks: `benchmarks/pcnr/dc_newton_iterations.jl` gains VA twins of
+   its four circuits (stamping `sp_diode(is=76.9e-12, n=1.45)` directly,
+   pattern per `test/mna/vadistiller_integration.jl:211-221`) alongside
+   the native rows — native `limit=false` remains the unaugmented baseline
+   VA cannot express; the NonlinearSolve methods run on the VA circuits'
+   augmented system (limiter provably inert under correctorless solvers,
+   see "Why every other solver still works"). `benchmarks/vacask` remains
+   the acceptance gate: NR iteration counts and wall-clock vs. VACASK
+   (which runs the same models *with* limiting active), wpd plots for
+   `mul` — limiting should cut iterations and/or fallback invocations
+   without accuracy regressions.
 
 ### Phase 3 (optional, evidence-driven): explicit corrector + full coupling
 
