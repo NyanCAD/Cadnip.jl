@@ -475,15 +475,18 @@ end
 #==============================================================================#
 
 # The DC corrector's copy: adopt every recorded limited voltage into the
-# limit slots of an iterate (unconditional — the DC loop repairs the
-# resulting one-iteration lag with a settle step at convergence). The in-step
-# transient corrector (CedarPCNRCorrect, pcnr_nlsolve.jl) has no settle hook,
-# so it instead adopts only the *active* branches (limit_active) — see the
-# comment there.
+# limit slots of an iterate, but only for branches whose limiter was *active*
+# this pass (`limit_active`). Inert branches keep the Newton step's own
+# solution of the linear g_lim row (x_lim = V_branch, lag-free); adopting the
+# lagged limit_w there would inject a one-iteration lag into the state. Shared
+# by the DC loop (below) and the in-step transient corrector's FBDF branch
+# (CedarPCNRCorrect, pcnr_nlsolve.jl). At a true fixed point every limiter is
+# inert, so this leaves a consistent iterate — which is what lets the DC loop
+# converge without a separate lag-repair pass.
 @inline function _pcnr_adopt_limits!(u::AbstractVector, limit_w::AbstractVector,
-                                     lim0::Int, L::Int)
+                                     limit_active::AbstractVector, lim0::Int, L::Int)
     @inbounds for k in 1:L
-        u[lim0 + k] = limit_w[k]
+        limit_active[k] && (u[lim0 + k] = limit_w[k])
     end
     return u
 end
@@ -530,25 +533,23 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
         # limiting applied" convergence condition falls out automatically.
         if norm(F) < abstol
-            # Settle the limit slots: the corrector normally runs after the
-            # predict step, so x_lim lags one iterate behind (x_lim = V from
-            # the *previous* stamping) and |F| carries |ΔV_last| in the g_lim
-            # rows even though KCL converged quadratically. Reaching this
-            # branch implies the limiter was inert on the stamping above
-            # (pnjlim's pass-through returns vnew bit-exactly), so this
-            # iteration's recorded limit_w already equals the branch voltages
-            # — adopting it lag-free settles the g_lim rows exactly.
-            # Re-verify so downstream consumers with tighter tolerances
-            # (transient CheckInit) see a consistent state.
-            _pcnr_adopt_limits!(u, ws.dctx.limit_w, lim0, L)
+            # The active-aware corrector (below) already left every inert
+            # branch at its exact g_lim solution (x_lim = V_branch), so
+            # reaching this check implies a lag-free, consistent state — no
+            # separate settle pass is needed. Re-adopt (active-aware, a no-op
+            # for inert branches) and re-verify only as a safety net for
+            # downstream consumers with tighter tolerances (transient
+            # CheckInit); the re-verify is what guards a marginally-active
+            # branch that slipped under abstol.
+            _pcnr_adopt_limits!(u, ws.dctx.limit_w, ws.dctx.limit_active, lim0, L)
             fast_rebuild!(ws, cs, u, 0.0)
             mul!(F, cs.G, u)
             F .-= ws.dctx.b
             if norm(F) < abstol
                 return u, true, iter - 1
             end
-            # else: settled state regressed (still-active limiting edge
-            # case) — fall through and keep iterating from it.
+            # else: state regressed (still-active limiting edge case) — fall
+            # through and keep iterating from it.
         end
 
         # PREDICT: plain Newton step on the augmented system, reusing the
@@ -563,15 +564,16 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         end
         all(isfinite, δ) || return u, false, iter - 1
 
-        # CORRECT: adopt the recorded limited voltages — the values the
-        # devices actually evaluated at during this iteration's stamping
-        # (via limit!/record_limit_w!) — so they become vold for the next
-        # iteration. Spec-free: the simulator needs no knowledge of any
-        # device's limiter function.
+        # CORRECT: for each branch whose limiter was active this pass, adopt
+        # the recorded limited voltage — the value the device actually
+        # evaluated at (via limit!/record_limit_w!) — so it becomes vold for
+        # the next iteration. Inert branches keep the Newton step's own
+        # (lag-free) g_lim solution. Spec-free: the simulator needs no
+        # knowledge of any device's limiter function.
         @inbounds for i in 1:n
             u[i] -= δ[i]
         end
-        _pcnr_adopt_limits!(u, ws.dctx.limit_w, lim0, L)
+        _pcnr_adopt_limits!(u, ws.dctx.limit_w, ws.dctx.limit_active, lim0, L)
     end
 
     return u, false, maxiters

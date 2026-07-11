@@ -262,9 +262,9 @@ function (::CedarPCNRCorrect)(u, uprev, p)
     limit_active = ws.dctx.limit_active
     lim0 = length(u) - L
     if _stage_method(p) === COEFFICIENT_MULTISTEP
-        @inbounds for k in 1:L
-            limit_active[k] && (u[lim0 + k] = limit_w[k])
-        end
+        # FBDF: stage variable is u(t+dt) itself, so the map is the identity —
+        # the same active-aware adopt the DC loop uses.
+        _pcnr_adopt_limits!(u, limit_w, limit_active, lim0, L)
     else
         tmp = _stage_tmp(p)
         γ = _stage_γ(p)
