@@ -27,9 +27,9 @@ using Cadnip.MNA
 import Cadnip.MNA as MNA
 using LinearAlgebra
 using Printf
-# Real distilled ngspice diode (registers sp_diode; carries a PCNR limiting
-# variable via the Verilog-A `$limit` codegen). See doc/pcnr_plan.md.
-using VADistillerModels: sp_diode
+# Real distilled ngspice devices (register sp_diode / sp_bjt; each carries PCNR
+# limiting variables via the Verilog-A `$limit` codegen). See doc/pcnr_plan.md.
+using VADistillerModels: sp_diode, sp_bjt
 
 # NonlinearSolve/SciMLBase are not direct dependencies of test/Project.toml,
 # but MNA does `using NonlinearSolve` / `using SciMLBase` internally, which
@@ -126,6 +126,25 @@ function mul4(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
     return ctx
 end
 
+# 5. Darlington pair (NPN): Q1's emitter drives Q2's base, so the two Vbe drops
+# stack and the current gains multiply — the BJT analog of the diode chain, and
+# the multi-branch stress case (each sp_bjt has 3 limited junctions: vbe, vbc,
+# vsub). Vsrc drives the input base through Rb; the output emitter sits at
+# ~Vsrc − 2·Vbe. sp_bjt terminals: collector, base, emitter, substrate.
+q(name::Symbol) = sp_bjt(; bf=100.0, is=1e-15)
+function darlington(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
+    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
+    vcc = get_node!(ctx, :vcc); vin = get_node!(ctx, :vin); base = get_node!(ctx, :base)
+    mid = get_node!(ctx, :mid); out = get_node!(ctx, :out)
+    stamp!(VoltageSource(5.0; name=:Vcc), ctx, vcc, 0)
+    stamp!(VoltageSource(params.Vsrc; name=:Vin), ctx, vin, 0)
+    stamp!(Resistor(10e3), ctx, vin, base)                 # rb
+    stamp!(q(:Q1), ctx, vcc, base, mid, 0; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:Q1)
+    stamp!(q(:Q2), ctx, vcc, mid, out, 0;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:Q2)
+    stamp!(Resistor(1e3), ctx, out, 0)                     # rl
+    return ctx
+end
+
 #==============================================================================#
 # Circuit list: (name, builder, [Vsrc...])
 #==============================================================================#
@@ -135,6 +154,7 @@ const CIRCUITS = [
     ("chain3", chain3, [50.0]),
     ("graetz", graetz, [20.0, 325.0]),
     ("mul4", mul4, [50.0]),
+    ("darlington", darlington, [3.0, 5.0]),
 ]
 
 #==============================================================================#
