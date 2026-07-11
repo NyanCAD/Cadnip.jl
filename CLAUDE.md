@@ -2,44 +2,23 @@
 
 ## Environment
 
-### Local Development (Native)
+**Use Julia 1.12.** Better compilation performance for long functions (like VA
+models), and it builds a full c6288 (212k-variable, PSP103-heavy) circuit with
+no trouble.
 
-When running on a local machine with full system access:
+- On a local machine Julia is usually pre-installed via juliaup — just use `julia`.
+- In a fresh cloud/remote session Julia is typically not pre-installed. Install it:
+  ```bash
+  curl -fsSL https://install.julialang.org | sh -s -- -y
+  . ~/.bashrc
+  ~/.juliaup/bin/juliaup add 1.12 && ~/.juliaup/bin/juliaup default 1.12
+  ```
+  then run Julia via `~/.juliaup/bin/julia` (full path).
+- For a fresh local setup: `juliaup add 1.12 && juliaup default 1.12`.
 
-- **Use Julia 1.12** - better compilation performance for long functions (like VA models)
-- Julia is typically pre-installed via juliaup, just use `julia` command
-- Full system resources available - no memory limits
-- For fresh setup: `juliaup add 1.12 && juliaup default 1.12`
-
-### Web/Sandbox Environment (Claude Code Web)
-
-When running in gVisor-sandboxed environment (check with `uname -r` showing `runsc` or kernel 4.4.0):
-
-- **Julia is NOT pre-installed** - install juliaup first:
-  - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
-  - Then source the profile: `. ~/.bashrc`
-  - Add Julia 1.11: `~/.juliaup/bin/juliaup add 1.11`
-  - Set as default: `~/.juliaup/bin/juliaup default 1.11`
-  - Use `~/.juliaup/bin/julia` to run Julia (full path required)
-- **Use Julia 1.11** - more stable in sandbox environment
-  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads in gVisor
-- **Memory limited** - large VA model compilations (PSP103VA with 200+ params) may OOM
-- **Precompilation issues** - may need to disable compile workloads
-
-### Other Cloud/Remote Environments (Claude Code Remote, non-gVisor)
-
-Some cloud sessions (e.g. Claude Code Remote containers) are *not* the gVisor
-sandbox above - `uname -r` shows a real kernel version (not `runsc`/`4.4.0`).
-Julia is also typically not pre-installed here, so use the same juliaup
-install steps as the gVisor case. But treat these like "Local Development
-(Native)" for the version choice: **Julia 1.12 works fine** - confirmed in a
-session on a real (non-runsc) kernel where `Pkg.instantiate()`/precompile and
-a full c6288 (212k-variable, PSP103-heavy) circuit build under 1.12 completed
-with no segfaults. The 1.12 threading/segfault issue documented above is
-specific to the actual gVisor/runsc sandbox, not to cloud environments in
-general - don't downgrade to 1.11 just because you're in a container.
-
-**Fix for precompilation segfaults:** Create `test/LocalPreferences.toml`:
+**Heavy VA model precompilation** (PSP103VA with 200+ params, BSIM4) can be slow
+or memory-hungry. To skip the compile workloads, create
+`test/LocalPreferences.toml`:
 
 ```toml
 [PSPModels]

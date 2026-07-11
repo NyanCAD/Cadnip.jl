@@ -2859,7 +2859,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(limit_preamble.args, quote
             $lidx_sym = Cadnip.MNA.alloc_limit!(ctx, $lim_name, _mna_instance_, $p_param, $n_param; init=0.0)
             $li_sym = Cadnip.MNA.resolve_index(ctx, $lidx_sym)
-            $vold_sym = Cadnip.MNA.extract_value(_mna_x_[$li_sym])
+            # vold read tolerant of a short x: ZERO_VECTOR (structure discovery)
+            # and the intermediate detection passes in build_with_detection pass
+            # an x sized to a *prior* system, and voltage-dependent charge
+            # detection (e.g. a junction cap) grows n_charges between passes,
+            # shifting limit indices past that x. vold only affects the limited
+            # evaluation value, never the (branch-free) stamp structure, so 0.0
+            # is correct whenever x can't supply it.
+            $vold_sym = $li_sym <= length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $lidx_sym, 1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $p_param, -1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $n_param, 1.0)
