@@ -20,10 +20,12 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEqBDF: QNDF, FBDF
+using OrdinaryDiffEqBDF: QNDF, QBDF, FBDF
 using OrdinaryDiffEqRosenbrock: Rodas3
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
+using Cadnip: pcnr_fbdf, CedarPCNR
+using Cadnip.MNA: NonlinearSolveAlg
 
 const BENCHMARK_DIR = @__DIR__
 
@@ -127,7 +129,22 @@ const SOLVERS_RC = [SOLVER_QNDF, SOLVER_IDA, SOLVER_RODAS3]
 # previously tried (Trapezoid, TRBDF2, KenCarp3/4/5/47/58, Kvaerno3/4/5,
 # SDIRK2, Cash4, Hairer4/42) either fails outright on graetz or is markedly
 # slower.
-const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS3]
+# FBDF with in-step PCNR limiting (src/mna/pcnr_nlsolve.jl): the stage solves
+# run the SPICE-style predict/correct loop, applying pnjlim on every NR
+# iteration of every timestep. IDA can never do this (C Newton loop), so this
+# row measures what in-step limiting buys on the limited (diode/BJT) circuits.
+const SOLVER_FBDF_PCNR = ("FBDF+PCNR", () -> pcnr_fbdf())
+
+# QBDF probe (graetz only): QBDF aborts `Unstable` with dt underflow at the
+# t=0.312 diode zero-crossing under its stock NLNewton (see the QBDF history
+# above). If in-step PCNR limiting tames the kink, that's direct evidence the
+# failure is Newton-vs-diode-exponential, not the BDF formulation itself; a
+# ❌ row costs nothing.
+const SOLVER_QBDF_PCNR = ("QBDF+PCNR",
+    () -> QBDF(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(),
+               nlsolve=NonlinearSolveAlg(CedarPCNR())))
+
+const SOLVERS_NONLINEAR = [SOLVER_IDA, SOLVER_FBDF, SOLVER_RODAS3, SOLVER_FBDF_PCNR]
 # Ring Oscillator (PSP103 MOSFETs): FBDF with force_dtmin for no-cap circuit
 const SOLVERS_RING = [SOLVER_FBDF_RING]
 
@@ -166,13 +183,14 @@ function run_benchmark_with_solver(name, script_path, solver_name, solver_fn)
                 "Stopped at t=$(sol.t[end]), expected $(tspan_end)")
         end
 
-        # Extract rejected steps from solver stats
+        # Extract rejected steps and NR iteration counts from solver stats
         rejected = hasproperty(sol.stats, :nreject) ? sol.stats.nreject : 0
+        nr_iters = hasproperty(sol.stats, :nnonliniter) ? sol.stats.nnonliniter : 0
 
         return BenchmarkResult(
             name, solver_name, :success,
             median(bench.times) / 1e9, minimum(bench.times) / 1e9, maximum(bench.times) / 1e9,
-            bench.memory / 1e6, bench.allocs, length(sol.t), rejected, warning
+            bench.memory / 1e6, bench.allocs, length(sol.t), rejected, nr_iters, warning
         )
     catch e
         return BenchmarkResult(name, solver_name, :failed, sprint(showerror, e))
@@ -220,14 +238,22 @@ function main()
         joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl"),
         SOLVERS_RC)
 
-    # Graetz Bridge - nonlinear (diodes), needs robust DAE solver
+    # Graetz Bridge - nonlinear (diodes), needs robust DAE solver.
+    # QBDF+PCNR is a graetz-only probe of the documented QBDF dt-underflow
+    # at the diode zero-crossings (see SOLVER_QBDF_PCNR above).
     add_benchmark!("Graetz Bridge",
         joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme.jl"),
-        SOLVERS_NONLINEAR)
+        vcat(SOLVERS_NONLINEAR, [SOLVER_QBDF_PCNR]))
 
     # Voltage Multiplier - nonlinear (diodes), needs robust DAE solver
     add_benchmark!("Voltage Multiplier",
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"),
+        SOLVERS_NONLINEAR)
+
+    # Darlington Pair - nonlinear (BJTs), the multi-branch junction-limiting
+    # stress case (three limited junctions per sp_bjt)
+    add_benchmark!("Darlington Pair",
+        joinpath(BENCHMARK_DIR, "darlington", "cedarsim", "runme.jl"),
         SOLVERS_NONLINEAR)
 
     # Ring Oscillator - IDA only (needs tuned settings for oscillation)

@@ -1,0 +1,29 @@
+Darlington pair switch driven by a pulse train
+
+// Two cascaded NPN BJTs switched between cutoff and saturation by a 500kHz
+// pulse train - the multi-branch junction-limiting stress case (three
+// limited junctions per BJT). Same circuit as ../cedarsim/runme.sp.
+
+load "spice/resistor.osdi"
+load "spice/capacitor.osdi"
+load "spice/sn/bjt.osdi"
+
+model r sp_resistor
+model c sp_capacitor
+model vsource vsource
+model qmod sp_bjt ( bf=100 is=1e-15 cje=10p cjc=5p tf=0.3n )
+
+vcc (vcc 0) vsource dc=5
+vs (vin 0) vsource dc=0 type="pulse" val0=0 val1=3 rise=10n fall=10n width=0.99u period=2u
+rb (vin b1) r r=10k
+q1 (coll b1 b2 0) qmod
+q2 (coll b2 0 0) qmod
+rbleed (b2 0) r r=10k
+rl (vcc coll) r r=1k
+cl (coll 0) c c=100p
+
+control
+  options tran_method="gear2" nr_bypass=0 nr_contbypass=1
+  analysis tran1 tran step=2n stop=1m maxstep=2n
+  print stats
+endc

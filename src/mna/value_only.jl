@@ -80,6 +80,10 @@ mutable struct DirectStampContext
     # Recorded limited voltages for the current stamping pass (PCNR).
     # Written positionally via record_limit_w!; read by the PCNR corrector.
     limit_w::Vector{Float64}
+    # Whether the limiter changed the evaluation point this pass (w != vnew),
+    # per branch. The in-step transient corrector adopts limit_w only for
+    # active branches (see MNAContext.limit_active).
+    limit_active::Vector{Bool}
 
     # Internal node indices for counter-based allocation (avoids Symbol interpolation)
     internal_node_indices::Vector{Int}
@@ -133,6 +137,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         copy(ctx.charge_is_vdep),
         1,
         copy(ctx.limit_w),  # recorded limited voltages (seeded with limit_init)
+        copy(ctx.limit_active),  # per-branch limiter-active flags
         internal_node_indices,
         1,  # internal_node_pos
         false, false, false,  # warning flags (G, C, b)
@@ -330,8 +335,9 @@ end
 
 Record the limited voltage for the PCNR corrector (positional write).
 """
-@inline function record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64)
+@inline function record_limit_w!(dctx::DirectStampContext, lidx::LimitIndex, w::Float64, active::Bool=true)
     dctx.limit_w[lidx.k] = w
+    dctx.limit_active[lidx.k] = active
     return nothing
 end
 

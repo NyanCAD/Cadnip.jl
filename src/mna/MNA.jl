@@ -75,6 +75,11 @@ include("precompile.jl")
 # Analysis solvers (uses precompile.jl types)
 include("solve.jl")
 
+# PCNR as a NonlinearSolve.jl algorithm: in-step transient limiting via
+# OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg (uses solve.jl's
+# _pcnr_adopt_limits! and precompile.jl's EvalWorkspace)
+include("pcnr_nlsolve.jl")
+
 # Cedar DC operating point initialization (uses EvalWorkspace from precompile.jl)
 include("dcop.jl")
 

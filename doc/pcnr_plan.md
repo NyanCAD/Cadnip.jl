@@ -209,29 +209,68 @@ On failure it falls through to the unchanged standard chain
 > limiter is inline VA. It was replaced by the recorded-`w` scheme above to
 > keep one system; `pnjlim` survives as the limiter function itself.
 
-### Scope: DC and transient initialization now; in-step transient later
+### Scope: DC, transient initialization, and in-step transient — **implemented**
 
-The corrector currently runs in `_dc_pcnr_newton`, i.e. for `dc!` and for
-transient *initialization* (`CedarDCOp`/`CedarTranOp` route through
-`_dc_solve_with_fallbacks`). SPICE also applies pnjlim on every NR iteration
-inside every timestep (`vold` seeded from the previous timepoint); we don't
-yet — during stepping the limit variables ride along inertly (see the
-equivalence argument below). In-step limiting matters most for switching
-circuits and sharp source edges; the integrator's predictor and timestep
-control cover much of the rest.
+The corrector runs in `_dc_pcnr_newton` for `dc!` and transient
+*initialization* (`CedarDCOp`/`CedarTranOp` route through
+`_dc_solve_with_fallbacks`), **and now inside every timestep** via
+`pcnr_fbdf()` — `FBDF(nlsolve=NonlinearSolveAlg(CedarPCNR()))`. SPICE applies
+pnjlim on every NR iteration inside every timestep (`vold` seeded from the
+previous timepoint); in-step PCNR reproduces that, with `vold` carried by the
+DAE state and warm-started by the integrator's predictor. IDA (the current
+`tran!` default) can never participate — its Newton loop is C — so
+limiting-sensitive circuits opt into `pcnr_fbdf()`.
 
-The path to in-step limiting is `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg`:
-implicit steppers can delegate their stage solves to any NonlinearSolve.jl
-algorithm, so packaging the PCNR loop as an `AbstractNonlinearSolveAlgorithm`
-gives `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` — SPICE-style
-limiting inside every timestep with **zero OrdinaryDiffEq changes**. This
-supersedes the "post-iteration hook in NLNewton" idea in the upstreaming
-table as the primary transient route. Wrinkles: the stage solve works in a
-transformed variable (γ-scaled stage, not `x` directly), so the corrector
-must map its limit slots through that affine relation; the refine specs
-already reach the algorithm via `CompiledStructure` in `prob.p`. Sundials
-IDA (today's `tran!` default) can never participate — its Newton loop is C —
-so limiting-sensitive circuits would move to FBDF to benefit.
+**Implementation** (`src/mna/pcnr_nlsolve.jl`): a generic
+`PCNRSolver <: AbstractNonlinearSolveAlgorithm` (Newton + a post-update
+`correct!(u_proposed, u_prev, p)` hook) plus Cadnip glue (`CedarPCNRCorrect`,
+`CedarPCNRStageJac`) that decodes OrdinaryDiffEqNonlinearSolve's per-stage
+params tuple to reach the `EvalWorkspace` (Cadnip passes it as `prob.p`) and
+its recorded `limit_w`/`limit_active` buffers. Zero OrdinaryDiffEq changes.
+
+**Finding — the FBDF affine map is the identity, not γ-scaled.** An earlier
+revision of this plan warned that "the stage solve works in a transformed
+variable (γ-scaled stage), so the corrector must map its limit slots through
+that affine relation." Verified against the source: that is true only for the
+DIRK family (`u = tmp + γ·z`). FBDF sets `method = COEFFICIENT_MULTISTEP`,
+where the stage variable **is** `u(t+dt)` directly, so the corrector on the
+primary route is the same plain copy as DC. `CedarPCNRCorrect` implements
+both maps (dispatch on `method`); FBDF is the target and needs only the
+trivial one.
+
+**Finding — the corrector must skip inert branches (`limit_active`).** The
+recorded-`w` corrector adopts `limit_w` (recorded at the *previous* iterate's
+probe) into the limit slots. In the DC loop a lag-free settle step at
+convergence repairs the resulting one-iteration lag. In-step there is no
+settle hook, and injecting that lag into the *accepted* stage state makes the
+BDF error estimator see spurious displacement — measured to drive `dt` to
+underflow (`Unstable`) on a switching rectifier. Fix: `limit!` records a
+per-branch `limit_active` flag (`w != vnew`), and the in-step corrector
+adopts `limit_w` only for active branches; inert branches keep Newton's own
+`g_lim` solution (`x_lim = V_branch`, lag-free). At a true fixed point every
+limiter is inert (`pnjlim(V, V) = V`), so acceptance always lands on a
+consistent state. With the fix, the switching half-wave rectifier converges
+with ~40% fewer Newton iterations than plain FBDF at the same trajectory.
+
+**Measured (Newton iterations per accepted step; short runs, Julia 1.12).**
+FBDF+PCNR reaches the SPICE ideal of ~1 iteration/step on the diode circuits,
+clearly beating both IDA and plain FBDF; on the tightly-coupled 6-junction
+BJT Darlington it *costs* iterations relative to both. All three solvers
+reach the same trajectory.
+
+| circuit | IDA | FBDF | FBDF+PCNR |
+|---|---|---|---|
+| Graetz bridge (diodes) | 1.01 | 1.21 | **1.00** |
+| Voltage multiplier (diodes) | 1.21 | 1.34 | **1.00** |
+| Darlington pair (2 BJTs, 6 junctions) | **1.21** | 2.81 | 3.87 |
+
+**Default decision (`tran!`): opt-in, IDA stays the default.** The win is
+device-dependent — big on diode switching, negative on coupled multi-junction
+BJTs — so PCNR does not uniformly beat IDA on limited circuits. Auto-flipping
+the global default would also change every limited transient's IDA-shaped
+golden trajectory and force a compile-before-dispatch restructure of `tran!`.
+Users opt in per circuit via `tran!(c, tspan; solver=pcnr_fbdf())`; the
+`benchmarks/vacask` `FBDF+PCNR` rows track the trade at production scale.
 
 ### Why no Schur factorization is needed (and what that costs)
 
@@ -569,6 +608,15 @@ piracy anywhere: it's all Cadnip-owned codegen and context plumbing.
    `mul` — limiting should cut iterations and/or fallback invocations
    without accuracy regressions.
 
+### Phase 2b: in-step transient limiting via NonlinearSolveAlg — **implemented**
+
+`pcnr_fbdf()` runs the PCNR predict/correct loop as FBDF's per-stage
+nonlinear solver (`src/mna/pcnr_nlsolve.jl`). See "Scope" above for the
+design, the FBDF-identity-map and `limit_active` findings, and the
+benchmark additions (`benchmarks/vacask` graetz/mul/darlington + a
+QBDF+PCNR graetz probe). Opt-in via `tran!(circuit, tspan;
+solver=pcnr_fbdf())`; IDA stays the default.
+
 ### Phase 3 (optional, evidence-driven): explicit corrector + full coupling
 
 Only if v1 convergence is insufficient on real cases:
@@ -611,7 +659,7 @@ upstream as follows:
 | piece | target | shape | status/blockers |
 |---|---|---|---|
 | Post-step correction hook + PCNR algorithm | **NonlinearSolveBase / NonlinearSolveFirstOrder** | The single required API is a `correct!(u_proposed, u_prev, p)` hook run between the Newton update and the next residual evaluation. The pilot-vs-SPICE variant choice is *invisible to the solver* — it lives inside the callback (algorithm-owned refine closures vs a copy from a problem-recorded buffer). Ship the published algorithm as the hook's flagship instantiation: `PCNR(limit_idxs, refine_fns; inits)` per Aadithya et al., documented and tested against the paper's diode example — the citable, self-contained shape that's easiest to land. Cadnip consumes the same hook with its recorded-`w` callback (production models can't expose refine functions; their limiter is inline — which is itself the argument that the hook, not the named algorithm, is the right API boundary). | Notably, the recorded-`w` formulation **shrank** the upstream footprint: its Jacobian's lim columns are empty (block lower-triangular), so plain `NewtonDescent` is already optimal and the previously-planned `PCNRDescent` Schur descent is only relevant to the paper-pure variant — keep it as an optional companion to the flagship, not a requirement. Compat already narrowed to `NonlinearSolve = "4"`. |
-| Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | primary route needs **no upstream change**: package PCNR as an `AbstractNonlinearSolveAlgorithm` and pass `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` (see "Scope" section). A post-iteration hook in `NLNewton` remains the fallback idea if the `NonlinearSolveAlg` bridge proves too indirect (stage-variable mapping) | Corrector must map limit slots through the γ-scaled stage variable. |
+| Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | **shipped, no upstream change** (`src/mna/pcnr_nlsolve.jl`): PCNR packaged as `PCNRSolver <: AbstractNonlinearSolveAlgorithm`, driven via `FBDF(nlsolve=NonlinearSolveAlg(CedarPCNR()))` (see "Scope" section). The only OrdinaryDiffEqNonlinearSolve-internal knowledge is the per-stage params-tuple layout, isolated to a handful of accessors with a typed `EvalWorkspace` assert as a version canary. | The affine map for FBDF is the **identity** (`COEFFICIENT_MULTISTEP`), not γ-scaled — that wrinkle applies only to DIRK, which `CedarPCNRCorrect` also handles. In-step needs the `limit_active` skip (no settle hook); see "Scope". |
 | Limiting in IDA | **Sundials.jl** | not possible — IDA's Newton loop is C and unhookable | v1's formulation (limiting fused into the residual/Jacobian) is the *only* PCNR variant that works under IDA. This is a strong argument for keeping the v1 formulation permanently, even after upstream hooks exist. |
 | `$limit` semantics & experience | **VADistiller / VACASK** (Bürmen, codeberg) | no model changes needed — the models drive the design; report the per-branch state-keying convention and any model bugs found | coordination only |
 | `$limit` parsing | **NyanVerilogAParser.jl** | already parses (vasim receives the args today) | none expected |

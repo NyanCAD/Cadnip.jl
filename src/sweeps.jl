@@ -543,11 +543,24 @@ The default IDA solver is configured for circuit simulation with:
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
 - For circuits with time-dependent sources (SIN, PWL), use `explicit_jacobian=false`.
 
+# In-step PCNR limiting (`pcnr_fbdf`)
+For circuits with junction-limiting variables (diodes/BJTs/MOSFETs via the
+`\$limit` machinery — `circuit`'s `n_limits > 0`), `solver=pcnr_fbdf()` runs
+SPICE-style predict/correct limiting *inside every timestep* (FBDF delegating
+its stage solves to `NonlinearSolveAlg(CedarPCNR())`; see
+src/mna/pcnr_nlsolve.jl). IDA (the default) cannot — its Newton loop is C.
+On diode-switching circuits (rectifiers, multipliers) this converges each
+step in ~1 Newton iteration and is markedly faster; on tightly-coupled
+multi-junction circuits (BJT chains) it can cost iterations, so it is opt-in
+rather than the default. On unlimited circuits the corrector is inert and it
+behaves as plain FBDF.
+
 # Example
 ```julia
 circuit = MNACircuit(build_inverter; Vdd=1.8, W=1e-6, L=100e-9)
 sol = tran!(circuit, (0.0, 1e-6))           # Uses IDA (default)
 sol = tran!(circuit, (0.0, 1e-6); solver=Rodas5P())  # Uses ODEProblem
+sol = tran!(rectifier, (0.0, 1e-3); solver=pcnr_fbdf())  # in-step limiting
 sol(1e-7)  # Get state at t=0.1μs
 ```
 """

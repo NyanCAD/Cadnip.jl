@@ -474,6 +474,20 @@ end
 # plain Newton cannot express.
 #==============================================================================#
 
+# The DC corrector's copy: adopt every recorded limited voltage into the
+# limit slots of an iterate (unconditional — the DC loop repairs the
+# resulting one-iteration lag with a settle step at convergence). The in-step
+# transient corrector (CedarPCNRCorrect, pcnr_nlsolve.jl) has no settle hook,
+# so it instead adopts only the *active* branches (limit_active) — see the
+# comment there.
+@inline function _pcnr_adopt_limits!(u::AbstractVector, limit_w::AbstractVector,
+                                     lim0::Int, L::Int)
+    @inbounds for k in 1:L
+        u[lim0 + k] = limit_w[k]
+    end
+    return u
+end
+
 function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
                          abstol::Real=1e-10, maxiters::Int=100)
     n = length(u0)
@@ -526,10 +540,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
             # — adopting it lag-free settles the g_lim rows exactly.
             # Re-verify so downstream consumers with tighter tolerances
             # (transient CheckInit) see a consistent state.
-            limit_w = ws.dctx.limit_w
-            @inbounds for k in 1:L
-                u[lim0 + k] = limit_w[k]
-            end
+            _pcnr_adopt_limits!(u, ws.dctx.limit_w, lim0, L)
             fast_rebuild!(ws, cs, u, 0.0)
             mul!(F, cs.G, u)
             F .-= ws.dctx.b
@@ -560,10 +571,7 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
         @inbounds for i in 1:n
             u[i] -= δ[i]
         end
-        limit_w = ws.dctx.limit_w
-        @inbounds for k in 1:L
-            u[lim0 + k] = limit_w[k]
-        end
+        _pcnr_adopt_limits!(u, ws.dctx.limit_w, lim0, L)
     end
 
     return u, false, maxiters

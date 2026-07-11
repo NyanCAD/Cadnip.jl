@@ -13,6 +13,8 @@ export MNA
 export DAEProblem
 export @dyn, @requires, @provides, @isckt_or
 export solve
+# In-step PCNR transient limiting (src/mna/pcnr_nlsolve.jl)
+export pcnr_fbdf, CedarPCNR, PCNRSolver
 
 # MNA SPICE codegen exports
 export @sp_str, @spc_str
