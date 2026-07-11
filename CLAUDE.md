@@ -123,6 +123,56 @@ See `doc/` for design documents. Check `git log --oneline -20 --name-only` for r
 | `test/mna/vadistiller_integration.jl` | Large VA models (BSIM4) |
 | `test/mna/audio_integration.jl` | BJT circuits |
 
+### Test Style: prefer netlists + the high-level API
+
+**Default to SPICE/Spectre netlists driven through the high-level API for any
+test that asserts on *circuit behavior* (a DC operating point, a transient
+trajectory, convergence, model-card parameter handling, an AC response).**
+Reserve hand-written `stamp!` / `MNAContext` / `get_node!` builders for unit
+tests that specifically exercise *low-level stamping mechanics* — matrix
+assembly, COO structure, positional-counter discipline, `stamp_G!`/`stamp_C!`,
+the `alloc_*` primitives, `DirectStampContext` restamping. If a test is really
+about "does this circuit solve to the right answer," it should be a netlist.
+
+Preferred (declarative; exercises the real
+parser → codegen → `ModelRegistry` → solve path that production uses):
+
+```julia
+const rectifier = sp"""
+V1 vin 0 DC 5
+R1 vin out 1k
+D1 out 0 dmod
+.model dmod d is=76.9p n=1.45
+"""i
+
+sol = dc!(MNACircuit(rectifier))
+@test 0.6 < sol[:out] < 0.8        # name-based access, robust to system size
+```
+
+Avoid, for behavioral tests (hand-managed nodes, `_mna_x_` threading, and
+fragile positional `sol.x[2]` indexing that breaks the moment the system gains
+a variable — e.g. a `$limit` limiting row):
+
+```julia
+function rect(p, s, t=0.0; x=Float64[], ctx=MNAContext())
+    reset_for_restamping!(ctx)
+    vin = get_node!(ctx, :vin); out = get_node!(ctx, :out)
+    stamp!(VoltageSource(5.0; name=:V1), ctx, vin, 0)
+    stamp!(Resistor(1000.0), ctx, vin, out)
+    stamp!(sp_diode(), ctx, out, 0; _mna_spec_=s, _mna_x_=x)
+    return ctx
+end
+sol = solve_dc(rect, (;), MNASpec()); @test 0.6 < sol.x[2] < 0.8
+```
+
+Why: netlists cover the parser, codegen, and two-tier model resolution that
+real users hit (a hand-stamped `sp_diode()` skips all of it); `sol[:name]`
+survives added state variables where `sol.x[i]` silently shifts; and the
+netlist form is a fraction of the boilerplate. Load netlists at module top
+level (`const c = sp"""..."""i`, or `Base.include(@__MODULE__,
+SpiceFile(path))`) and pass the builder to `MNACircuit` — see **File-First
+Circuit Loading** below for the world-age rules.
+
 ## Gotchas and Patterns
 
 ### Builder Function Signature
