@@ -255,6 +255,37 @@ altered = alter(circuit; var"inner.params.R1"=200.0)
 ```
 The `lens(; defaults...)` call merges with `lens.nt.params` if present.
 
+### Parameter Sweeps (the sweep API)
+
+Don't hand-roll a `for`-loop that rebuilds a circuit per value — use the sweep
+API. Wrap the range(s) in a sweep, bind to a builder with `CircuitSweep`, and
+run `dc!`/`tran!`, which return a `SweepResult` iterating `(params, sol)` pairs:
+
+```julia
+sweep = Sweep(vac = [0.5e-3, 1e-3, 2e-3])          # one axis
+# ProductSweep(a=..., b=...)  → full grid;  TandemSweep(a=..., b=...) → zipped
+cs = CircuitSweep(ce_amplifier, sweep; vac=1e-3, freq=1e3)   # base params as kwargs
+for (params, sol) in tran!(cs, (0.0, 5e-3))
+    @test sol[:coll] ...                            # params aligned to its sol
+end
+```
+
+**The gotcha (the "wrap"):** two things must line up or the sweep is a silent
+no-op that returns the default for every point.
+1. **Pass the base value as a `CircuitSweep` kwarg** (`; vac=1e-3, freq=1e3`
+   above) — this seeds the params NamedTuple so the swept name resolves. The
+   canonical working netlist example is `test/mna/audio_integration.jl`
+   (`.param vac` / `.param freq` driving a `SIN` source).
+2. **The builder must actually read `params.<name>` where you want variation.**
+   A hand-coded builder must `merge(defaults, params)` or use `ParamLens`. In a
+   SPICE netlist, a `.param` that feeds a *runtime-evaluated* source (SIN/PULSE
+   amplitude, freq) responds to the sweep; a `.param` baked into a *DC operating
+   value* is folded at codegen time and will not — vary that via a builder that
+   reads the param, not a bare `.param` on a `DC` card.
+
+For hierarchical/subcircuit params use `var"a.b.c"` selectors with a matching
+wrapped base (`inner=(params=(R1=…),)`), same as `alter` (see ParamLens above).
+
 ### SPICE Name Collisions
 PDK modules use `baremodule` so SPICE names like `inv`, `log`, `exp` don't
 conflict with Julia builtins. Generated code uses explicit `Base.hasfield`,

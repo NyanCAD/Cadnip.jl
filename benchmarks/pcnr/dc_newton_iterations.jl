@@ -2,20 +2,17 @@
 # PCNR vs. NonlinearSolve.jl DC Newton convergence benchmark
 #
 # Compares DC Newton iteration counts across all the nonlinear methods Cadnip
-# uses (see doc/pcnr_plan.md and src/mna/solve.jl) on a handful of diode
-# rectifier / cascade topologies, in two families:
+# uses (see doc/pcnr_plan.md and src/mna/solve.jl) on a handful of real
+# VADistiller `sp_diode` rectifier / cascade topologies -- the end goal of the
+# `$limit` work: the distilled ngspice diode with SPICE limiting active.
 #
-#   * native `Diode` builders (rectifier/chain3/graetz/mul4), each with a
-#     `limit=true` and `limit=false` variant so PCNR (which needs the
-#     limiting-augmented system) and the plain NonlinearSolve algorithms
-#     (which run on the natural, unaugmented system) are both exercised;
-#   * real VADistiller `sp_diode` twins (*_va), which always carry a PCNR
-#     limiting variable via the Verilog-A `$limit` codegen -- there is no
-#     `limit=false` twin, so every method runs on the one augmented system
-#     (the correctorless ones see an inert limiter, i.e. the natural problem).
-#
-# The VA twins are the end goal of the `$limit` work: measuring the distilled
-# ngspice diode with real limiting active, next to the native reference.
+# sp_diode always carries a PCNR limiting variable (via the Verilog-A `$limit`
+# codegen), so there is no unlimited twin: PCNR, a reference plain-Newton loop
+# (corrector disabled), and every NonlinearSolve algorithm all run on the one
+# limit-augmented system. The correctorless methods see an inert limiter (the
+# linear g_lim rows pin x_lim = V), i.e. the natural problem -- so this is
+# exactly the comparison of interest: limiting-aware PCNR vs. methods that
+# don't support limiting, on the same circuit.
 #
 # Run with:
 #   ~/.juliaup/bin/julia --project=test benchmarks/pcnr/dc_newton_iterations.jl [output_file]
@@ -56,70 +53,54 @@ const CedarRobustNLSolve = MNA.CedarRobustNLSolve
 # sync between the structure-detection pass and later fast restamps.
 #==============================================================================#
 
-# d1n4007-like diode parameters (rs/cjo ignored -- this is a DC benchmark)
+# Real distilled ngspice diode (d1n4007-like is/n; rs/cjo irrelevant at DC).
+# sp_diode ships its own SPICE limiting logic in Verilog-A and, via the
+# `$limit` codegen, always carries a PCNR limiting variable. There is no
+# "unlimited" twin, so every method (PCNR, plain-Newton, and the NonlinearSolve
+# algorithms) runs on the same limit-augmented system: under a correctorless
+# solver the limiter is provably inert (the linear g_lim rows keep x_lim = V),
+# so those methods see the natural problem; only PCNR's corrector activates it.
+# That is exactly the comparison of interest -- limiting-aware PCNR vs. methods
+# that don't support limiting -- so a native/unlimited reference is unnecessary.
 const DIODE_IS = 76.9e-12
 const DIODE_N = 1.45
-const DIODE_VT = 0.026
-
-make_diode(name::Symbol, limit::Bool) =
-    Diode(Is=DIODE_IS, n=DIODE_N, Vt=DIODE_VT, limit=limit, name=name)
+d(name::Symbol) = sp_diode(; is=DIODE_IS, n=DIODE_N)
 
 # 1. Half-wave rectifier: Vsrc -[1k]- out -D1- gnd
 function rectifier(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    if ctx === nothing
-        ctx = MNAContext()
-    else
-        MNA.reset_for_restamping!(ctx)
-    end
+    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
     vin = get_node!(ctx, :vin)
     out = get_node!(ctx, :out)
-
     stamp!(VoltageSource(params.Vsrc; name=:V1), ctx, vin, 0)
     stamp!(Resistor(1000.0), ctx, vin, out)
-    stamp!(make_diode(:D1, params.limit), ctx, out, 0; x=x)
+    stamp!(d(:D1), ctx, out, 0; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
     return ctx
 end
 
 # 2. Series chain: Vsrc -[1k]- n1 -D1- n2 -D2- n3 -D3- gnd
 function chain3(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    if ctx === nothing
-        ctx = MNAContext()
-    else
-        MNA.reset_for_restamping!(ctx)
-    end
-    vin = get_node!(ctx, :vin)
-    n1 = get_node!(ctx, :n1)
-    n2 = get_node!(ctx, :n2)
-    n3 = get_node!(ctx, :n3)
-
+    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
+    vin = get_node!(ctx, :vin); n1 = get_node!(ctx, :n1)
+    n2 = get_node!(ctx, :n2); n3 = get_node!(ctx, :n3)
     stamp!(VoltageSource(params.Vsrc; name=:V1), ctx, vin, 0)
     stamp!(Resistor(1000.0), ctx, vin, n1)
-    stamp!(make_diode(:D1, params.limit), ctx, n1, n2; x=x)
-    stamp!(make_diode(:D2, params.limit), ctx, n2, n3; x=x)
-    stamp!(make_diode(:D3, params.limit), ctx, n3, 0; x=x)
+    stamp!(d(:D1), ctx, n1, n2; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
+    stamp!(d(:D2), ctx, n2, n3; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
+    stamp!(d(:D3), ctx, n3, 0;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
     return ctx
 end
 
 # 3. Full-wave (Graetz) bridge, DC only (100uF smoothing cap is open at DC,
 # so it's omitted -- see benchmarks/vacask/graetz/cedarsim/runme.sp).
-# vs inp inn 0 sin ... -> DC value Vsrc, stamped node-to-node (two-node
-# VoltageSource is supported directly, no need to route through ground).
 function graetz(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    if ctx === nothing
-        ctx = MNAContext()
-    else
-        MNA.reset_for_restamping!(ctx)
-    end
-    inp = get_node!(ctx, :inp)
-    inn = get_node!(ctx, :inn)
-    outp = get_node!(ctx, :outp)
-    outn = get_node!(ctx, :outn)
-
+    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
+    inp = get_node!(ctx, :inp); inn = get_node!(ctx, :inn)
+    outp = get_node!(ctx, :outp); outn = get_node!(ctx, :outn)
     stamp!(VoltageSource(params.Vsrc; name=:VS), ctx, inp, inn)
-    stamp!(make_diode(:D1, params.limit), ctx, inp, outp; x=x)
-    stamp!(make_diode(:D2, params.limit), ctx, outn, inp; x=x)
-    stamp!(make_diode(:D3, params.limit), ctx, inn, outp; x=x)
-    stamp!(make_diode(:D4, params.limit), ctx, outn, inn; x=x)
+    stamp!(d(:D1), ctx, inp, outp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
+    stamp!(d(:D2), ctx, outn, inp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
+    stamp!(d(:D3), ctx, inn, outp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
+    stamp!(d(:D4), ctx, outn, inn;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D4)
     stamp!(Resistor(1e3), ctx, outp, outn)     # rl
     stamp!(Resistor(1e6), ctx, inn, 0)          # rgnd1
     stamp!(Resistor(1e6), ctx, outn, 0)         # rgnd2
@@ -127,98 +108,21 @@ function graetz(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
 end
 
 # 4. Diode multiplier (mul4), DC only -- caps replaced by 100k resistors
-# (open at DC; the resistors keep the DC problem meaningful, preserving the
-# cascade stiffness without leaving nodes floating through reverse-diode
-# leakage alone). See benchmarks/vacask/mul/cedarsim/runme.sp.
+# (open at DC; the resistors keep the DC problem meaningful). See
+# benchmarks/vacask/mul/cedarsim/runme.sp.
 function mul4(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    if ctx === nothing
-        ctx = MNAContext()
-    else
-        MNA.reset_for_restamping!(ctx)
-    end
-    a = get_node!(ctx, :a)
-    n1 = get_node!(ctx, :n1)
-    n2 = get_node!(ctx, :n2)
-    n10 = get_node!(ctx, :n10)
-    n20 = get_node!(ctx, :n20)
-
-    stamp!(VoltageSource(params.Vsrc; name=:VS), ctx, a, 0)
-    stamp!(Resistor(0.01), ctx, a, n1)          # r1
-    stamp!(make_diode(:D1, params.limit), ctx, 0, n1; x=x)
-    stamp!(make_diode(:D2, params.limit), ctx, n1, n10; x=x)
-    stamp!(make_diode(:D3, params.limit), ctx, n10, n2; x=x)
-    stamp!(make_diode(:D4, params.limit), ctx, n2, n20; x=x)
-    stamp!(Resistor(100e3), ctx, n1, n2)        # c1 || c3 (dedup'd)
-    stamp!(Resistor(100e3), ctx, 0, n10)        # c2
-    stamp!(Resistor(100e3), ctx, n10, n20)      # c4
-    return ctx
-end
-
-#==============================================================================#
-# VADistiller sp_diode twins of the circuits above.
-#
-# The end goal (doc/pcnr_plan.md): exercise the DC benchmark on the *real*
-# distilled ngspice diode instead of the hand-written native `Diode`. sp_diode
-# ships its own SPICE limiting logic in Verilog-A and, via the `$limit` codegen,
-# always carries a PCNR limiting variable -- there is no `limit=false` twin, so
-# for these circuits every method (PCNR, plain-Newton, and the NonlinearSolve
-# algorithms) runs on the same limit-augmented system. Under a correctorless
-# solver the limiter is provably inert (the linear g_lim rows keep x_lim = V),
-# so those methods see the natural problem; only PCNR's corrector activates it.
-#
-# d1n4007-like parameters matching the native DIODE_* constants above.
-va_diode(name::Symbol) = sp_diode(; is=DIODE_IS, n=DIODE_N)
-
-function rectifier_va(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
-    vin = get_node!(ctx, :vin)
-    out = get_node!(ctx, :out)
-    stamp!(VoltageSource(params.Vsrc; name=:V1), ctx, vin, 0)
-    stamp!(Resistor(1000.0), ctx, vin, out)
-    stamp!(va_diode(:D1), ctx, out, 0; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
-    return ctx
-end
-
-function chain3_va(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
-    vin = get_node!(ctx, :vin); n1 = get_node!(ctx, :n1)
-    n2 = get_node!(ctx, :n2); n3 = get_node!(ctx, :n3)
-    stamp!(VoltageSource(params.Vsrc; name=:V1), ctx, vin, 0)
-    stamp!(Resistor(1000.0), ctx, vin, n1)
-    stamp!(va_diode(:D1), ctx, n1, n2; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
-    stamp!(va_diode(:D2), ctx, n2, n3; _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
-    stamp!(va_diode(:D3), ctx, n3, 0;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
-    return ctx
-end
-
-function graetz_va(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
-    ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
-    inp = get_node!(ctx, :inp); inn = get_node!(ctx, :inn)
-    outp = get_node!(ctx, :outp); outn = get_node!(ctx, :outn)
-    stamp!(VoltageSource(params.Vsrc; name=:VS), ctx, inp, inn)
-    stamp!(va_diode(:D1), ctx, inp, outp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
-    stamp!(va_diode(:D2), ctx, outn, inp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
-    stamp!(va_diode(:D3), ctx, inn, outp;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
-    stamp!(va_diode(:D4), ctx, outn, inn;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D4)
-    stamp!(Resistor(1e3), ctx, outp, outn)
-    stamp!(Resistor(1e6), ctx, inn, 0)
-    stamp!(Resistor(1e6), ctx, outn, 0)
-    return ctx
-end
-
-function mul4_va(params, spec, t::Real=0.0; x=MNA.ZERO_VECTOR, ctx=nothing)
     ctx = ctx === nothing ? MNAContext() : (MNA.reset_for_restamping!(ctx); ctx)
     a = get_node!(ctx, :a); n1 = get_node!(ctx, :n1); n2 = get_node!(ctx, :n2)
     n10 = get_node!(ctx, :n10); n20 = get_node!(ctx, :n20)
     stamp!(VoltageSource(params.Vsrc; name=:VS), ctx, a, 0)
-    stamp!(Resistor(0.01), ctx, a, n1)
-    stamp!(va_diode(:D1), ctx, 0, n1;    _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
-    stamp!(va_diode(:D2), ctx, n1, n10;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
-    stamp!(va_diode(:D3), ctx, n10, n2;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
-    stamp!(va_diode(:D4), ctx, n2, n20;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D4)
-    stamp!(Resistor(100e3), ctx, n1, n2)
-    stamp!(Resistor(100e3), ctx, 0, n10)
-    stamp!(Resistor(100e3), ctx, n10, n20)
+    stamp!(Resistor(0.01), ctx, a, n1)          # r1
+    stamp!(d(:D1), ctx, 0, n1;    _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D1)
+    stamp!(d(:D2), ctx, n1, n10;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D2)
+    stamp!(d(:D3), ctx, n10, n2;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D3)
+    stamp!(d(:D4), ctx, n2, n20;  _mna_spec_=spec, _mna_x_=x, _mna_instance_=:D4)
+    stamp!(Resistor(100e3), ctx, n1, n2)        # c1 || c3 (dedup'd)
+    stamp!(Resistor(100e3), ctx, 0, n10)        # c2
+    stamp!(Resistor(100e3), ctx, n10, n20)      # c4
     return ctx
 end
 
@@ -233,20 +137,12 @@ const CIRCUITS = [
     ("mul4", mul4, [50.0]),
 ]
 
-# VA sp_diode twins, run through run_circuit_va (single augmented system).
-const CIRCUITS_VA = [
-    ("rectifier_va", rectifier_va, [5.0, 50.0]),
-    ("chain3_va", chain3_va, [50.0]),
-    ("graetz_va", graetz_va, [20.0, 325.0]),
-    ("mul4_va", mul4_va, [50.0]),
-]
-
 #==============================================================================#
 # Sanity check: DC solution via the default (fully robust) solve path
 #==============================================================================#
 
 function sanity_check(name, builder, Vsrc)
-    params = (Vsrc=Vsrc, limit=true)
+    params = (Vsrc=Vsrc,)
     spec = MNASpec(mode=:dcop)
     sol = MNA.solve_dc(builder, params, spec)
     println("== $name (Vsrc=$Vsrc) DC sanity check ==")
@@ -356,47 +252,12 @@ function build_problem(builder, params, spec)
     return cs, ws, n
 end
 
+# sp_diode has no `limit=false` twin (the `$limit` codegen always allocates a
+# limiting variable), so PCNR, plain-Newton, and every NonlinearSolve method run
+# on the *same* limit-augmented system. The correctorless methods see an inert
+# limiter (linear g_lim rows pin x_lim = V), i.e. the natural problem; only
+# PCNR's corrector activates it.
 function run_circuit(name, builder, Vsrc)
-    spec = MNASpec(mode=:dcop)
-    rows = Row[]
-
-    # --- limit=true variant: PCNR + reference plain-Newton-on-augmented ---
-    params_lim = (Vsrc=Vsrc, limit=true)
-    cs_lim, ws_lim, n_lim = build_problem(builder, params_lim, spec)
-
-    u_pcnr, ok_pcnr, iters_pcnr = MNA._dc_pcnr_newton(cs_lim, ws_lim, zeros(n_lim);
-                                                       abstol=1e-10, maxiters=200)
-    Fpcnr = zeros(n_lim)
-    MNA.fast_rebuild!(ws_lim, cs_lim, u_pcnr, 0.0)
-    mul!(Fpcnr, cs_lim.G, u_pcnr)
-    Fpcnr .-= ws_lim.dctx.b
-    push!(rows, Row(name, Vsrc, "PCNR", ok_pcnr, iters_pcnr, iters_pcnr, norm(Fpcnr),
-                     ok_pcnr ? "Success" : "Failure"))
-
-    u_plain, ok_plain, iters_plain, resid_plain = plain_newton_loop(cs_lim, ws_lim, zeros(n_lim);
-                                                                     abstol=1e-10, maxiters=200)
-    push!(rows, Row(name, Vsrc, "PlainNewton(augmented,no-correct)", ok_plain, iters_plain,
-                     iters_plain, resid_plain, ok_plain ? "Success" : "Failure"))
-
-    # --- limit=false variant: NonlinearSolve.jl algorithms on the natural system ---
-    params_nolim = (Vsrc=Vsrc, limit=false)
-    cs_nolim, ws_nolim, n_nolim = build_problem(builder, params_nolim, spec)
-    u0 = zeros(n_nolim)
-
-    for (mname, alg_fn) in NLS_METHODS
-        r = run_nls_method(cs_nolim, ws_nolim, alg_fn, u0; abstol=1e-10, maxiters=200)
-        push!(rows, Row(name, Vsrc, mname, r.converged, r.nsteps, r.nf, r.resid, r.retcode))
-    end
-
-    return rows
-end
-
-# VA sp_diode: there is no `limit=false` twin (the `$limit` codegen always
-# allocates a limiting variable), so PCNR, plain-Newton, and every
-# NonlinearSolve method run on the *same* limit-augmented system. The
-# correctorless methods see an inert limiter (linear g_lim rows pin
-# x_lim = V), i.e. the natural problem; only PCNR's corrector activates it.
-function run_circuit_va(name, builder, Vsrc)
     spec = MNASpec(mode=:dcop)
     rows = Row[]
     params = (Vsrc=Vsrc,)
@@ -471,11 +332,12 @@ function generate_markdown(all_rows::Vector{Row})
 
     println(io, "## DC Newton method comparison (PCNR)")
     println(io)
-    println(io, "Compares DC Newton *iteration counts* (not wall-clock) across every ",
-                 "nonlinear method Cadnip uses -- the PCNR limiting-augmented loop, a ",
-                 "reference plain-Newton loop on the same augmented system with the ",
-                 "corrector disabled, and each `NonlinearSolve.jl` algorithm on the ",
-                 "natural (unaugmented) system.")
+    println(io, "Compares DC Newton *iteration counts* (not wall-clock) on the real ",
+                 "distilled `sp_diode` across every nonlinear method Cadnip uses -- the ",
+                 "PCNR limiting-augmented loop, a reference plain-Newton loop with the ",
+                 "corrector disabled, and each `NonlinearSolve.jl` algorithm -- all on ",
+                 "the one limit-augmented system (the correctorless methods see an inert ",
+                 "limiter, i.e. the natural problem).")
     println(io)
     println(io, "Benchmarks run on Julia $(VERSION)")
     println(io)
@@ -532,12 +394,6 @@ function main()
     for (name, builder, Vsrcs) in CIRCUITS
         for Vsrc in Vsrcs
             append!(all_rows, run_circuit(name, builder, Vsrc))
-        end
-    end
-    # Real VADistiller sp_diode twins (single augmented system per circuit).
-    for (name, builder, Vsrcs) in CIRCUITS_VA
-        for Vsrc in Vsrcs
-            append!(all_rows, run_circuit_va(name, builder, Vsrc))
         end
     end
 
