@@ -249,8 +249,37 @@ per-branch `limit_active` flag (`w != vnew`), and the in-step corrector
 adopts `limit_w` only for active branches; inert branches keep Newton's own
 `g_lim` solution (`x_lim = V_branch`, lag-free). At a true fixed point every
 limiter is inert (`pnjlim(V, V) = V`), so acceptance always lands on a
-consistent state. With the fix, the switching half-wave rectifier converges
-with ~40% fewer Newton iterations than plain FBDF at the same trajectory.
+consistent state. This unified the corrector: `_dc_pcnr_newton` now uses the
+same active-aware adopt, and its settle step degenerated to a re-verify.
+
+**Finding — the in-step corrector is measured to be inert during stepping;
+the `pcnr_fbdf` speedup is a full-Newton effect, not active limiting.**
+Instrumenting the corrector (counting `limit_active` adoptions) shows *zero*
+activations across every transient case tried — the switching half-wave
+rectifier (adaptive and forced-dt), the graetz bridge at `dtmax=1e-6` (50014
+corrector calls, 0 adoptions), the single BJT, and the darlington. The cause
+is fundamental: the integrator's predictor warm-starts each step so close to
+the solution that the junction moves less than `2·vt` between Newton
+iterations, so `pnjlim` passes through every time. Junction limiting is a
+*cold-start* mechanism (the junction swinging from 0/vcrit to its bias) — i.e.
+DC/init, which `_dc_pcnr_newton` already covers. Once warm-stepping there is
+nothing to limit.
+
+So what `pcnr_fbdf` actually buys over plain `FBDF` is **full Newton vs
+modified Newton**: `PCNRSolver.step!` restamps and refactors `J = −(G + c·C)`
+every iteration, whereas FBDF's `NLNewton` reuses a frozen `W` (refreshed only
+on γdt drift). Measured: graetz **1.00** iters/step vs FBDF's 1.21 (≈2×
+faster warm, KLU symbolic-reuse makes the per-iteration refactor a
+numeric-only cost); darlington **1.13** vs 1.34; RC and single-BJT identical.
+The earlier "40% fewer iterations from in-step limiting" and "darlington costs
+iterations (3.87 i/s)" readings were mischaracterised — the former is the
+full-Newton effect, the latter a rejection/JIT artifact of a one-period run.
+The PCNR limiting corrector rides along as a **dormant safety net**: correct,
+tested, and ready to engage if a junction ever swings hard in a single step
+(huge dt, an unguarded discontinuity), but not the source of the measured
+speedup. This is also the concrete form of the "per-iteration KLU refactor
+vs frozen-W reuse" tradeoff flagged in Risks — a net win on the diode
+circuits, roughly neutral on the coupled BJT.
 
 **Measured (Newton iterations per accepted step; short runs, Julia 1.12).**
 FBDF+PCNR reaches the SPICE ideal of ~1 iteration/step on the diode circuits,

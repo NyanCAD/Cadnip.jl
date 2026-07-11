@@ -1,16 +1,27 @@
 #==============================================================================#
-# PCNR as a NonlinearSolve.jl algorithm: in-step transient limiting
+# PCNR as a NonlinearSolve.jl algorithm: full-Newton FBDF stage solve with a
+# dormant in-step limiting corrector
 #
 # Packages the PCNR predict/correct loop (see doc/pcnr_plan.md and
 # _dc_pcnr_newton in solve.jl) as an AbstractNonlinearSolveAlgorithm so that
-# implicit OrdinaryDiffEq steppers can run the corrector inside every
-# timestep's stage solve:
+# implicit OrdinaryDiffEq steppers can run it as their per-stage nonlinear
+# solve:
 #
 #     FBDF(nlsolve = NonlinearSolveAlg(CedarPCNR()))
 #
-# This is the SPICE behavior — pnjlim applied on every NR iteration of every
-# timestep — with zero OrdinaryDiffEq changes. Sundials IDA can never
-# participate (its Newton loop is C); use `pcnr_fbdf()` from `tran!` instead.
+# with zero OrdinaryDiffEq changes. Sundials IDA can never participate (its
+# Newton loop is C); use `pcnr_fbdf()` from `tran!` instead.
+#
+# What this actually buys over plain FBDF (measured): a *full* Newton stage
+# solve — restamp + refactor J every iteration — versus FBDF's modified
+# Newton (frozen-W reuse). That is a ~2x warm speedup on diode-switching
+# circuits. The SPICE junction-limiting corrector is carried along but is
+# *inert during normal stepping*: the integrator's predictor warm-starts each
+# step within 2*vt, so pnjlim never fires (adopt count measured at 0 across
+# rectifier/graetz/BJT cases). Limiting is a cold-start mechanism, handled by
+# _dc_pcnr_newton at DC/init; here the corrector is a dormant safety net that
+# engages only if a junction swings hard in a single step. See doc/pcnr_plan.md
+# "Finding — the in-step corrector is measured to be inert".
 #
 # The file is split in two clearly-fenced sections:
 #

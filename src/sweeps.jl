@@ -543,17 +543,23 @@ The default IDA solver is configured for circuit simulation with:
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
 - For circuits with time-dependent sources (SIN, PWL), use `explicit_jacobian=false`.
 
-# In-step PCNR limiting (`pcnr_fbdf`)
-For circuits with junction-limiting variables (diodes/BJTs/MOSFETs via the
-`\$limit` machinery — `circuit`'s `n_limits > 0`), `solver=pcnr_fbdf()` runs
-SPICE-style predict/correct limiting *inside every timestep* (FBDF delegating
-its stage solves to `NonlinearSolveAlg(CedarPCNR())`; see
-src/mna/pcnr_nlsolve.jl). IDA (the default) cannot — its Newton loop is C.
-On diode-switching circuits (rectifiers, multipliers) this converges each
-step in ~1 Newton iteration and is markedly faster; on tightly-coupled
-multi-junction circuits (BJT chains) it can cost iterations, so it is opt-in
-rather than the default. On unlimited circuits the corrector is inert and it
-behaves as plain FBDF.
+# `pcnr_fbdf`: full-Newton FBDF with a dormant in-step limiting corrector
+`solver=pcnr_fbdf()` runs FBDF with its per-stage nonlinear solve delegated to
+a full-Newton PCNR algorithm (`NonlinearSolveAlg(CedarPCNR())`; see
+src/mna/pcnr_nlsolve.jl) that restamps and refactors the Jacobian on every
+iteration, versus FBDF's default modified Newton (frozen-W reuse). On
+diode-switching circuits (rectifiers, multipliers) this converges in ~1
+iteration/step and is ~2× faster warm; on tightly-coupled multi-junction
+circuits (BJT chains) it is roughly neutral, so it is opt-in, not the default.
+IDA (the default) cannot use it — its Newton loop is C.
+
+The SPICE-style predict/correct junction-limiting corrector rides along but is
+*inert during normal stepping* (measured): the integrator's predictor
+warm-starts each step within `2·vt`, so `pnjlim` never fires. It is a dormant
+safety net that engages only if a junction swings hard in a single step; the
+speedup above is the full-Newton stage solve, not active limiting. Cold-start
+limiting (DC/init) is handled separately by the DC PCNR loop. On unlimited
+circuits `pcnr_fbdf` is plain full-Newton FBDF.
 
 # Example
 ```julia

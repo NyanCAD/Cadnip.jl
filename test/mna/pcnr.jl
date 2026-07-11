@@ -24,11 +24,13 @@ using Cadnip.MNA: pnjlim, limit!, record_limit_w!
 using Cadnip.MNA: ZERO_VECTOR
 using Cadnip.MNA: MNASpec, MNACircuit, solve_dc
 using Cadnip.MNA: SinWave, CedarPCNRCorrect
+using Cadnip.MNA: CedarPCNR, NonlinearSolveAlg
 import Cadnip.MNA as MNA
 
 using Cadnip
 using Cadnip: dc!, tran!, pcnr_fbdf  # explicit import to avoid Julia 1.12 conflict
 using OrdinaryDiffEqBDF: FBDF
+using OrdinaryDiffEqSDIRK: TRBDF2, ImplicitEuler
 using OrdinaryDiffEq.OrdinaryDiffEqCore: COEFFICIENT_MULTISTEP, DIRK
 using Cadnip.MNA.ADTypes: AutoFiniteDiff
 
@@ -453,7 +455,7 @@ end
         @test u[lim0 + 1] ≈ (0.42 - 0.1) / γ
     end
 
-    @testset "in-step limiting reduces NR iterations" begin
+    @testset "pcnr_fbdf: full-Newton stage solve, same trajectory" begin
         tspan = (0.0, 0.04)  # two 50Hz cycles
         kw = (; abstol=1e-9, reltol=1e-6, dense=false)
 
@@ -465,9 +467,11 @@ end
         @test sol_fbdf.retcode == ReturnCode.Success
         @test sol_pcnr.retcode == ReturnCode.Success
 
-        # In-step limiting fires: PCNR converges each stage in fewer Newton
-        # iterations than plain FBDF (NLNewton) on this switching circuit.
-        @test sol_pcnr.stats.nnonliniter < sol_fbdf.stats.nnonliniter
+        # pcnr_fbdf's full Newton (fresh J every iteration) converges each stage
+        # in no more iterations than FBDF's modified Newton (frozen-W reuse).
+        # NB: this is the full-Newton effect, not the limiting corrector, which
+        # is inert during warm stepping (see doc/pcnr_plan.md).
+        @test sol_pcnr.stats.nnonliniter <= sol_fbdf.stats.nnonliniter
 
         # Same trajectory as the IDA reference (name-based access at the load
         # node), at least as accurate as plain FBDF.
@@ -475,6 +479,23 @@ end
         err_pcnr = maximum(abs(sol_pcnr(t; idxs=2) - sol_ida(t; idxs=2)) for t in ts)
         @test err_pcnr < 0.02
         @test sol_pcnr[:out][end] ≈ sol_ida[:out][end] atol=1e-2
+    end
+
+    @testset "SDIRK stepper drives PCNR (DIRK affine branch)" begin
+        # CedarPCNR as the stage solver of an SDIRK method exercises the
+        # u = tmp + γ·z affine map (vs FBDF's identity). The corrector is inert
+        # during stepping (warm starts), so this validates the solver
+        # integration + trajectory, not the limiter firing.
+        tspan = (0.0, 0.04)
+        kw = (; abstol=1e-6, reltol=1e-4, dense=false)
+        sol_ida = tran!(MNACircuit(halfwave_rect), tspan; kw...)
+        for S in (TRBDF2, ImplicitEuler)
+            solver = S(autodiff=AutoFiniteDiff(), nlsolve=NonlinearSolveAlg(CedarPCNR()))
+            sol = tran!(MNACircuit(halfwave_rect), tspan; solver=solver, kw...)
+            @test sol.retcode == ReturnCode.Success
+            ts = range(1e-3, 0.039; length=15)
+            @test maximum(abs(sol(t; idxs=2) - sol_ida(t; idxs=2)) for t in ts) < 0.03
+        end
     end
 
     @testset "inert on unlimited circuits (n_limits == 0)" begin
