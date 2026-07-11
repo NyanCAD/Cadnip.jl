@@ -200,7 +200,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Tuple{Int, Vector{Symbol}}}(),
         Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
-        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
+        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[])
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -319,7 +320,8 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         named_branches, nothing,
         array_nodes, access_map,
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
-        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}())
+        Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
+        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[])
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -572,6 +574,17 @@ struct MNAScope
     extra_module_stmts::Vector{Expr}
     table_itp_consts::Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}
     table_files::Dict{String, Any}  # abspath -> parsed _TableData{D}
+    # PCNR `$limit` support. Populated during analog-block lowering, consumed
+    # by generate_mna_stamp_method_nterm. Each unique probe branch (p, n) gets
+    # one limiting variable; `$limit` sites on the same branch share it. Shared
+    # by reference across scope copies so pushes during lowering are visible at
+    # assembly time.
+    limit_branches::Vector{Tuple{Symbol,Symbol}}
+    cond_depth::Base.RefValue{Int}  # runtime-conditional nesting; `$limit` sites must be at depth 0
+    # One entry per `$limit` call site (its probe branch), index = site j. Each
+    # site gets an extra JacobianTag dual slot (n_all_nodes+j) so its ∂I/∂w can
+    # be isolated for the OSDI `lim_rhs` companion anchoring (Option 2).
+    limit_sites::Vector{Tuple{Symbol,Symbol}}
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -580,7 +593,8 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.used_branches, s.var_types, s.all_functions, s.undefault_ids,
     s.ddx_order, s.named_branches, delay_jl,
     s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes,
-    s.extra_module_stmts, s.table_itp_consts, s.table_files)
+    s.extra_module_stmts, s.table_itp_consts, s.table_files,
+    s.limit_branches, s.cond_depth, s.limit_sites)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -1140,6 +1154,16 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             param_str = String(stmt.args[1].item)
         end
         param_sym = Symbol(param_str)
+        if param_str == "iniLim"
+            # ngspice MODEINITJCT signal. The VADistiller models gate their
+            # vcrit-seed branch (initialize_limiting()) on this; wire it to the
+            # per-pass initjct flag the PCNR loop arms for the first cold pass.
+            # Safe now that the `$limit` return is a passthrough dual: even
+            # though the model's seed assigns `load_vd = vcrit` as a constant,
+            # the NewSet site rebuilds it as Dual(vcrit, passthrough), so the
+            # junction still stamps conductance at vcrit (no singular matrix).
+            return :(Int(ctx.initjct))
+        end
         if length(stmt.args) == 1
             # No default - error if not found
             return :(hasproperty(_mna_spec_, $(QuoteNode(param_sym))) ?
@@ -1190,12 +1214,83 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             return false
         end
     elseif fname == Symbol("\$limit")
-        # $limit(voltage, limiter_fn, ...) - voltage limiting for Newton convergence
-        # In our MNA implementation, we can optionally apply limiting or just return the voltage
-        # For now, we simply return the voltage value without limiting
-        # This allows the model to run, though convergence may be slower
-        voltage_expr = to_julia(stmt.args[1].item)
-        return voltage_expr
+        # $limit(V(p,n), limiter_fn, user_args...) — PCNR Newton voltage limiting.
+        #
+        # Per the Verilog-AMS LRM the simulator prepends (vnew, vold) to the
+        # user arguments, where `vold` is the branch's limiting variable (the
+        # voltage the device evaluated at last iteration, x[ℓ]). The model's
+        # own limiter (DEVlimitOldGet/NewSet, wrapping DEVpnjlim/fetlim) then
+        # computes the value the device actually uses; we record it as the
+        # PCNR corrector target and return it.
+        #
+        # State is keyed per (instance, probe branch): one limiting variable
+        # shared across all `$limit` sites on that branch. The variable is
+        # allocated, its `vold` read, and its linear g_lim tracking row stamped
+        # by the hoisted preamble in generate_mna_stamp_method_nterm; here we
+        # only reference the per-branch locals it binds (_mna_lidx_<b>,
+        # _mna_vold_<b>).
+        length(stmt.args) >= 2 || return Expr(:call, error, "\$limit requires at least 2 arguments")
+        probe = stmt.args[1].item
+        if !(probe isa VANode{FunctionCall} &&
+             get(to_julia.access_map, Symbol(probe.id), nothing) == :potential &&
+             length(probe.args) in (1, 2))
+            return Expr(:call, error, "\$limit: first argument must be a potential probe V(p[,n])")
+        end
+        to_julia.cond_depth[] == 0 ||
+            return Expr(:call, error, "\$limit under a runtime conditional is unsupported (would desync stamping counters)")
+        limiter = stmt.args[2].item
+        limiter isa VANode{StringLiteral} &&
+            return Expr(:call, error, "\$limit string-form limiter is not yet supported; use the function-reference form")
+        limiter_fn = Symbol(limiter)
+        haskey(to_julia.all_functions, limiter_fn) ||
+            return Expr(:call, error, "\$limit: unknown limiter function $limiter_fn")
+
+        # Resolve the probe to a (p, n) node pair, mirroring the V() handler:
+        # V(p,n) → (p,n); V(br) with br a named branch → its nodes; V(p) → (p, gnd).
+        id1 = resolve_array_ref(to_julia, probe.args[1].item)
+        if length(probe.args) == 1 && haskey(to_julia.named_branches, id1)
+            bn = to_julia.named_branches[id1]
+            p_sym, n_sym = bn.first, bn.second
+        elseif length(probe.args) == 1
+            p_sym, n_sym = id1, Symbol("0")
+        else
+            p_sym = id1
+            n_sym = resolve_array_ref(to_julia, probe.args[2].item)
+        end
+        branch = (p_sym, n_sym)
+        b = findfirst(==(branch), to_julia.limit_branches)
+        if b === nothing
+            push!(to_julia.limit_branches, branch)
+            b = length(to_julia.limit_branches)
+        end
+
+        # Register this call site (index j); it owns an extra dual slot so its
+        # ∂I/∂w can be isolated for the lim_rhs companion anchoring below.
+        push!(to_julia.limit_sites, (p_sym, n_sym))
+        j = length(to_julia.limit_sites)
+
+        vnew_expr = to_julia(probe)  # dual (p - n), identity partials on the probe nodes
+        vold_sym = Symbol("_mna_vold_", b)
+        lidx_sym = Symbol("_mna_lidx_", b)
+        w_sym = Symbol("_mna_limw_", j)        # recorded value, reused in the Ieq Δb term
+        seed_sym = Symbol("_mna_limseed_", j)  # Dual(0, e_j), bound by the preamble
+        # stmt.args is a NodeList (integer indexing only, no range slicing).
+        user_args = Any[to_julia(stmt.args[i].item) for i in 3:length(stmt.args)]
+        fn_call = Expr(:call, limiter_fn, vnew_expr, vold_sym, user_args...)
+        # Return a fresh *passthrough* (undamped) dual anchored at w: value = w,
+        # ∂/∂V_p = +1, ∂/∂V_n = -1 (carried from the probe), plus a unit partial
+        # in this site's own slot j. The model's inline limiter (DEVpnjlim) ran
+        # chain-ruled under AD; we discard those damped partials here — the
+        # undamped conductance G(w) at the node positions is ngspice/OSDI's
+        # convention, and the site slot lets the companion re-anchor at w (the
+        # `Δb` correction in generate_mna_stamp_method_nterm). Mirrors limit!'s
+        # initjct bypass (`vnew - value(vnew) + init`), so the model's own
+        # constant vcrit seed is repaired to a conductance-carrying dual too.
+        return quote
+            $w_sym = Cadnip.MNA.extract_value($fn_call)
+            Cadnip.MNA.record_limit_w!(ctx, $lidx_sym, $w_sym)
+            $vnew_expr - Cadnip.MNA.extract_value($vnew_expr) + $w_sym + $seed_sym
+        end
     end
 
     # Noise functions - return 0 in MNA (noise not simulated in DC/transient)
@@ -1987,6 +2082,10 @@ function hoist_conditional_stamps(ifex::Expr)
 end
 
 function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
+    # `$limit` sites nested under a runtime conditional would desync the
+    # positional stamping counters; track depth so the handler can reject them.
+    to_julia.cond_depth[] += 1
+    try
     aif = stmt.aif
     function if_body_to_julia(ifstmt)
         if formof(ifstmt) == AnalogSeqBlock
@@ -2021,6 +2120,9 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogConditionalBlock})
         return ifex
     else
         return Expr(:block, hoisted_exprs..., transformed_ifex)
+    end
+    finally
+        to_julia.cond_depth[] -= 1
     end
 end
 
@@ -2077,26 +2179,41 @@ end
 
 # Handle analog for loops
 function (to_julia::MNAScope)(stmt::VANode{AnalogFor})
-    body = to_julia(stmt.stmt)
-    push!(body.args, to_julia(stmt.update_stmt))
-    # Convert VA condition to boolean
-    cond = :(!(iszero($(to_julia(stmt.cond_expr)))))
-    while_expr = Expr(:while, cond, body)
-    Expr(:block, to_julia(stmt.init_stmt), while_expr)
+    to_julia.cond_depth[] += 1
+    try
+        body = to_julia(stmt.stmt)
+        push!(body.args, to_julia(stmt.update_stmt))
+        # Convert VA condition to boolean
+        cond = :(!(iszero($(to_julia(stmt.cond_expr)))))
+        while_expr = Expr(:while, cond, body)
+        Expr(:block, to_julia(stmt.init_stmt), while_expr)
+    finally
+        to_julia.cond_depth[] -= 1
+    end
 end
 
 # Handle analog while loops
 function (to_julia::MNAScope)(stmt::VANode{AnalogWhile})
-    body = to_julia(stmt.stmt)
-    # Convert VA condition to boolean
-    cond = :(!(iszero($(to_julia(stmt.cond_expr)))))
-    Expr(:while, cond, body)
+    to_julia.cond_depth[] += 1
+    try
+        body = to_julia(stmt.stmt)
+        # Convert VA condition to boolean
+        cond = :(!(iszero($(to_julia(stmt.cond_expr)))))
+        Expr(:while, cond, body)
+    finally
+        to_julia.cond_depth[] -= 1
+    end
 end
 
 # Handle analog repeat loops
 function (to_julia::MNAScope)(stmt::VANode{AnalogRepeat})
-    body = to_julia(stmt.stmt)
-    Expr(:for, :(_ = 1:$(stmt.num_repeat)), body)
+    to_julia.cond_depth[] += 1
+    try
+        body = to_julia(stmt.stmt)
+        Expr(:for, :(_ = 1:$(stmt.num_repeat)), body)
+    finally
+        to_julia.cond_depth[] -= 1
+    end
 end
 
 # Handle contribution statements inside conditionals
@@ -2303,6 +2420,8 @@ end
 
 # Handle case statements
 function (to_julia::MNAScope)(stmt::VANode{CaseStatement})
+    to_julia.cond_depth[] += 1
+    try
     s = gensym()
     first = true
     expr = nothing
@@ -2328,6 +2447,9 @@ function (to_julia::MNAScope)(stmt::VANode{CaseStatement})
     end
     default_case !== nothing && push!(expr.args, default_case)
     Expr(:block, :($s = $(to_julia(stmt.switch))), expr)
+    finally
+        to_julia.cond_depth[] -= 1
+    end
 end
 
 function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
@@ -2371,7 +2493,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.named_branches, nothing,
         to_julia.array_nodes, to_julia.access_map,
         to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes,
-        to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files)
+        to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files,
+        to_julia.limit_branches, to_julia.cond_depth, to_julia.limit_sites)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2688,6 +2811,25 @@ function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionS
 end
 
 """
+    limit_rhs_terms(to_julia, all_node_syms, prefix) -> [(dw_sym, delta_expr), ...]
+
+Per-`\$limit`-site pieces of the OSDI `lim_rhs` companion correction. For site
+`j` with probe branch `(p, n)`, returns the extracted partial symbol
+`<prefix>j` (e.g. `dI_dW3`) paired with the anchor delta `(V_p − V_n − wⱼ)` as
+Float64 node-voltage locals. Empty when the module has no `\$limit` sites.
+"""
+function limit_rhs_terms(to_julia::MNAScope, all_node_syms, prefix::Symbol)
+    map(1:length(to_julia.limit_sites)) do j
+        (p_sym, n_sym) = to_julia.limit_sites[j]
+        pidx = p_sym == Symbol("0") ? nothing : findfirst(==(p_sym), all_node_syms)
+        nidx = n_sym == Symbol("0") ? nothing : findfirst(==(n_sym), all_node_syms)
+        vp = pidx === nothing ? 0.0 : Symbol("V_", pidx)
+        vn = nidx === nothing ? 0.0 : Symbol("V_", nidx)
+        (Symbol(prefix, j), :($vp - $vn - $(Symbol("_mna_limw_", j))))
+    end
+end
+
+"""
 Generate stamp! method for n-terminal device (potentially with internal nodes).
 
 For n-terminal devices with internal nodes, we use a vector-valued dual approach:
@@ -2727,6 +2869,61 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # All node symbols for dual creation (terminals + internal)
     all_node_syms = [port_args; internal_nodes]
     all_node_params = [node_params; internal_node_params]
+
+    # PCNR `$limit` dual layout: the JacobianTag duals carry n_all_nodes node
+    # partials plus one extra slot per `$limit` call site (S of them), so each
+    # site's ∂I/∂w is isolable for lim_rhs anchoring. Width W == n_all_nodes when
+    # the module has no `$limit` sites, so non-limited codegen is unchanged.
+    n_limit_sites = length(to_julia.limit_sites)
+    dual_width = n_all_nodes + n_limit_sites
+
+    # PCNR `$limit` preamble. One limiting variable per unique probe branch
+    # collected during lowering (to_julia.limit_branches). For each branch we
+    # allocate the variable (hoisted + unconditional so DirectStampContext's
+    # positional counters stay in sync across passes), read its `vold` from the
+    # solution vector, and stamp the linear tracking row g_lim = x_lim − (V_p −
+    # V_n) = 0. The `$limit` sites (lowered into contrib_eval) reference the
+    # per-branch _mna_lidx_<b> / _mna_vold_<b> locals bound here.
+    map_node_param(sym) = sym == Symbol("0") ? 0 : begin
+        idx = findfirst(==(sym), all_node_syms)
+        idx === nothing && error("\$limit probe node $sym not a terminal or internal node of the module")
+        all_node_params[idx]
+    end
+    limit_preamble = Expr(:block)
+    for (b, (p_sym, n_sym)) in enumerate(to_julia.limit_branches)
+        p_param = map_node_param(p_sym)
+        n_param = map_node_param(n_sym)
+        lidx_sym = Symbol("_mna_lidx_", b)
+        li_sym = Symbol("_mna_li_", b)
+        vold_sym = Symbol("_mna_vold_", b)
+        lim_name = QuoteNode(Symbol(symname, "_lim_", p_sym, "_", n_sym))
+        # stamp_G! skips ground (col 0) internally on both context types, before
+        # touching DirectStampContext's positional counter, so unconditional
+        # calls stay counter-consistent — matching the native limit! primitive.
+        push!(limit_preamble.args, quote
+            $lidx_sym = Cadnip.MNA.alloc_limit!(ctx, $lim_name, _mna_instance_, $p_param, $n_param; init=0.0)
+            $li_sym = Cadnip.MNA.resolve_index(ctx, $lidx_sym)
+            # vold read tolerant of a short x: ZERO_VECTOR (structure discovery)
+            # and the intermediate detection passes in build_with_detection pass
+            # an x sized to a *prior* system, and voltage-dependent charge
+            # detection (e.g. a junction cap) grows n_charges between passes,
+            # shifting limit indices past that x. vold only affects the limited
+            # evaluation value, never the (branch-free) stamp structure, so 0.0
+            # is correct whenever x can't supply it.
+            $vold_sym = $li_sym <= length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
+            Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $lidx_sym, 1.0)
+            Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $p_param, -1.0)
+            Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $n_param, 1.0)
+        end)
+    end
+    # Per-site unit dual for the site's own slot (n_all_nodes+j): the `$limit`
+    # handler adds this to the probe dual to build the passthrough return.
+    for j in 1:n_limit_sites
+        seed_partials = Expr(:tuple, [k == n_all_nodes + j ? 1.0 : 0.0 for k in 1:dual_width]...)
+        push!(limit_preamble.args,
+            :($(Symbol("_mna_limseed_", j)) =
+                ForwardDiff.Dual{Cadnip.MNA.JacobianTag}(0.0, $seed_partials...)))
+    end
 
     # Split into two blocks:
     # 1. local_var_init: Variable initialization (before internal_node_alloc)
@@ -2922,10 +3119,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Extract resistive values (JacobianTag partials are plain floats)
                 I_val = ForwardDiff.value(I_resist)
                 $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
+                # Per-`$limit`-site ∂I/∂w and ∂q/∂w (undamped, from the site slots).
+                $([:($(Symbol("dI_dW", j)) = ForwardDiff.partials(I_resist, $(n_all_nodes + j))) for j in 1:n_limit_sites]...)
 
                 # Extract charge value and capacitances
                 q_val = ForwardDiff.value(I_react)
                 $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
+                $([:($(Symbol("dq_dW", j)) = ForwardDiff.partials(I_react, $(n_all_nodes + j))) for j in 1:n_limit_sites]...)
 
                 has_reactive = true
 
@@ -2933,16 +3133,20 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Pure resistive: just JacobianTag dual, no ContributionTag
                 I_val = ForwardDiff.value(I_branch)
                 $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
+                $([:($(Symbol("dI_dW", j)) = ForwardDiff.partials(I_branch, $(n_all_nodes + j))) for j in 1:n_limit_sites]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                $([:($(Symbol("dq_dW", j)) = 0.0) for j in 1:n_limit_sites]...)
                 has_reactive = false
 
             else
                 # Scalar result (constant contribution)
                 I_val = Float64(I_branch)
                 $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                $([:($(Symbol("dI_dW", j)) = 0.0) for j in 1:n_limit_sites]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                $([:($(Symbol("dq_dW", j)) = 0.0) for j in 1:n_limit_sites]...)
                 has_reactive = false
             end
         end
@@ -3037,6 +3241,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     $([quote
                         _b_constraint -= $(Symbol("dq_dV", k)) * $(Symbol("V_", k))  # - dQ/dV_k * V_k
                     end for k in 1:n_all_nodes]...)
+                    # lim_rhs anchoring for the charge companion (same as Ieq): the
+                    # junction charge was evaluated at w, so re-anchor there.
+                    $([:(_b_constraint += $dw * $delta)
+                       for (dw, delta) in limit_rhs_terms(to_julia, all_node_syms, :dq_dW)]...)
                     Cadnip.MNA.stamp_b!(ctx, _q_idx, Cadnip.MNA.CHARGE_SCALE * _b_constraint)
                 else
                     # Linear capacitor: use standard C matrix stamping
@@ -3058,6 +3266,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         ieq_terms = Any[:I_val]
         for k in 1:n_all_nodes
             push!(ieq_terms, :(- $(Symbol("dI_dV", k)) * $(Symbol("V_", k))))
+        end
+        # lim_rhs anchoring: with passthrough duals the companion is linearized
+        # at the probe voltage, but the device evaluated at w. Re-anchor at w by
+        # adding Σⱼ ∂I/∂wⱼ · (V_probe,j − wⱼ). ∂I/∂wⱼ is 0 for sites this branch
+        # doesn't depend on, and the whole term → 0 at convergence (w = V_probe),
+        # so the fixed point is unchanged — only the Newton path is corrected.
+        for (dw, delta) in limit_rhs_terms(to_julia, all_node_syms, :dI_dW)
+            push!(ieq_terms, :($dw * $delta))
         end
         ieq_expr = Expr(:call, :+, ieq_terms...)
 
@@ -3176,8 +3392,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     dual_creation = Expr(:block)
     for i in 1:n_all_nodes
         node_sym = all_node_syms[i]
-        # Create JacobianTag dual with identity partials for ddx() support
-        partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
+        # Create JacobianTag dual with identity partials for ddx() support.
+        # Width is dual_width (n_all_nodes + one slot per `$limit` site); the
+        # site slots are zero for node duals and carry the passthrough unit in
+        # the `$limit` handler's return (see limit_preamble seeds).
+        partials = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:dual_width]...)
         push!(dual_creation.args,
             :($node_sym = ForwardDiff.Dual{Cadnip.MNA.JacobianTag}($(Symbol("V_", i)), $partials...)))
     end
@@ -3424,6 +3643,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Allocate internal nodes (idempotent - returns existing index if already allocated)
         $internal_node_alloc
+
+        # PCNR `$limit`: allocate limiting variables, read vold, stamp g_lim rows.
+        # After internal_node_alloc (probes may reference internal nodes) and at a
+        # fixed position for positional-counter discipline.
+        $limit_preamble
 
         # Stamp child module instances (module instantiation)
         $instance_stamp_calls

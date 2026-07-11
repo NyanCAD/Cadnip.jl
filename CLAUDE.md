@@ -2,44 +2,23 @@
 
 ## Environment
 
-### Local Development (Native)
+**Use Julia 1.12.** Better compilation performance for long functions (like VA
+models), and it builds a full c6288 (212k-variable, PSP103-heavy) circuit with
+no trouble.
 
-When running on a local machine with full system access:
+- On a local machine Julia is usually pre-installed via juliaup — just use `julia`.
+- In a fresh cloud/remote session Julia is typically not pre-installed. Install it:
+  ```bash
+  curl -fsSL https://install.julialang.org | sh -s -- -y
+  . ~/.bashrc
+  ~/.juliaup/bin/juliaup add 1.12 && ~/.juliaup/bin/juliaup default 1.12
+  ```
+  then run Julia via `~/.juliaup/bin/julia` (full path).
+- For a fresh local setup: `juliaup add 1.12 && juliaup default 1.12`.
 
-- **Use Julia 1.12** - better compilation performance for long functions (like VA models)
-- Julia is typically pre-installed via juliaup, just use `julia` command
-- Full system resources available - no memory limits
-- For fresh setup: `juliaup add 1.12 && juliaup default 1.12`
-
-### Web/Sandbox Environment (Claude Code Web)
-
-When running in gVisor-sandboxed environment (check with `uname -r` showing `runsc` or kernel 4.4.0):
-
-- **Julia is NOT pre-installed** - install juliaup first:
-  - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
-  - Then source the profile: `. ~/.bashrc`
-  - Add Julia 1.11: `~/.juliaup/bin/juliaup add 1.11`
-  - Set as default: `~/.juliaup/bin/juliaup default 1.11`
-  - Use `~/.juliaup/bin/julia` to run Julia (full path required)
-- **Use Julia 1.11** - more stable in sandbox environment
-  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads in gVisor
-- **Memory limited** - large VA model compilations (PSP103VA with 200+ params) may OOM
-- **Precompilation issues** - may need to disable compile workloads
-
-### Other Cloud/Remote Environments (Claude Code Remote, non-gVisor)
-
-Some cloud sessions (e.g. Claude Code Remote containers) are *not* the gVisor
-sandbox above - `uname -r` shows a real kernel version (not `runsc`/`4.4.0`).
-Julia is also typically not pre-installed here, so use the same juliaup
-install steps as the gVisor case. But treat these like "Local Development
-(Native)" for the version choice: **Julia 1.12 works fine** - confirmed in a
-session on a real (non-runsc) kernel where `Pkg.instantiate()`/precompile and
-a full c6288 (212k-variable, PSP103-heavy) circuit build under 1.12 completed
-with no segfaults. The 1.12 threading/segfault issue documented above is
-specific to the actual gVisor/runsc sandbox, not to cloud environments in
-general - don't downgrade to 1.11 just because you're in a container.
-
-**Fix for precompilation segfaults:** Create `test/LocalPreferences.toml`:
+**Heavy VA model precompilation** (PSP103VA with 200+ params, BSIM4) can be slow
+or memory-hungry. To skip the compile workloads, create
+`test/LocalPreferences.toml`:
 
 ```toml
 [PSPModels]
@@ -122,6 +101,56 @@ See `doc/` for design documents. Check `git log --oneline -20 --name-only` for r
 | `test/mna/vadistiller.jl` | VADistiller models |
 | `test/mna/vadistiller_integration.jl` | Large VA models (BSIM4) |
 | `test/mna/audio_integration.jl` | BJT circuits |
+
+### Test Style: prefer netlists + the high-level API
+
+**Default to SPICE/Spectre netlists driven through the high-level API for any
+test that asserts on *circuit behavior* (a DC operating point, a transient
+trajectory, convergence, model-card parameter handling, an AC response).**
+Reserve hand-written `stamp!` / `MNAContext` / `get_node!` builders for unit
+tests that specifically exercise *low-level stamping mechanics* — matrix
+assembly, COO structure, positional-counter discipline, `stamp_G!`/`stamp_C!`,
+the `alloc_*` primitives, `DirectStampContext` restamping. If a test is really
+about "does this circuit solve to the right answer," it should be a netlist.
+
+Preferred (declarative; exercises the real
+parser → codegen → `ModelRegistry` → solve path that production uses):
+
+```julia
+const rectifier = sp"""
+V1 vin 0 DC 5
+R1 vin out 1k
+D1 out 0 dmod
+.model dmod d is=76.9p n=1.45
+"""i
+
+sol = dc!(MNACircuit(rectifier))
+@test 0.6 < sol[:out] < 0.8        # name-based access, robust to system size
+```
+
+Avoid, for behavioral tests (hand-managed nodes, `_mna_x_` threading, and
+fragile positional `sol.x[2]` indexing that breaks the moment the system gains
+a variable — e.g. a `$limit` limiting row):
+
+```julia
+function rect(p, s, t=0.0; x=Float64[], ctx=MNAContext())
+    reset_for_restamping!(ctx)
+    vin = get_node!(ctx, :vin); out = get_node!(ctx, :out)
+    stamp!(VoltageSource(5.0; name=:V1), ctx, vin, 0)
+    stamp!(Resistor(1000.0), ctx, vin, out)
+    stamp!(sp_diode(), ctx, out, 0; _mna_spec_=s, _mna_x_=x)
+    return ctx
+end
+sol = solve_dc(rect, (;), MNASpec()); @test 0.6 < sol.x[2] < 0.8
+```
+
+Why: netlists cover the parser, codegen, and two-tier model resolution that
+real users hit (a hand-stamped `sp_diode()` skips all of it); `sol[:name]`
+survives added state variables where `sol.x[i]` silently shifts; and the
+netlist form is a fraction of the boilerplate. Load netlists at module top
+level (`const c = sp"""..."""i`, or `Base.include(@__MODULE__,
+SpiceFile(path))`) and pass the builder to `MNACircuit` — see **File-First
+Circuit Loading** below for the world-age rules.
 
 ## Gotchas and Patterns
 
@@ -225,6 +254,37 @@ circuit = MNACircuit(my_circuit; inner = (params = (R1=100.0,),))
 altered = alter(circuit; var"inner.params.R1"=200.0)
 ```
 The `lens(; defaults...)` call merges with `lens.nt.params` if present.
+
+### Parameter Sweeps (the sweep API)
+
+Don't hand-roll a `for`-loop that rebuilds a circuit per value — use the sweep
+API. Wrap the range(s) in a sweep, bind to a builder with `CircuitSweep`, and
+run `dc!`/`tran!`, which return a `SweepResult` iterating `(params, sol)` pairs:
+
+```julia
+sweep = Sweep(vac = [0.5e-3, 1e-3, 2e-3])          # one axis
+# ProductSweep(a=..., b=...)  → full grid;  TandemSweep(a=..., b=...) → zipped
+cs = CircuitSweep(ce_amplifier, sweep; vac=1e-3, freq=1e3)   # base params as kwargs
+for (params, sol) in tran!(cs, (0.0, 5e-3))
+    @test sol[:coll] ...                            # params aligned to its sol
+end
+```
+
+**The gotcha (the "wrap"):** two things must line up or the sweep is a silent
+no-op that returns the default for every point.
+1. **Pass the base value as a `CircuitSweep` kwarg** (`; vac=1e-3, freq=1e3`
+   above) — this seeds the params NamedTuple so the swept name resolves. The
+   canonical working netlist example is `test/mna/audio_integration.jl`
+   (`.param vac` / `.param freq` driving a `SIN` source).
+2. **The builder must actually read `params.<name>` where you want variation.**
+   A hand-coded builder must `merge(defaults, params)` or use `ParamLens`. In a
+   SPICE netlist, a `.param` that feeds a *runtime-evaluated* source (SIN/PULSE
+   amplitude, freq) responds to the sweep; a `.param` baked into a *DC operating
+   value* is folded at codegen time and will not — vary that via a builder that
+   reads the param, not a bare `.param` on a `DC` card.
+
+For hierarchical/subcircuit params use `var"a.b.c"` selectors with a matching
+wrapped base (`inner=(params=(R1=…),)`), same as `alter` (see ParamLens above).
 
 ### SPICE Name Collisions
 PDK modules use `baremodule` so SPICE names like `inv`, `log`, `exp` don't
