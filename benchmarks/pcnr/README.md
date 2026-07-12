@@ -1,12 +1,5 @@
 # PCNR DC Newton iteration benchmark
 
-> **In-step transient limiting** (PCNR inside every timestep, via
-> `pcnr_fbdf()` = `FBDF(nlsolve=NonlinearSolveAlg(CedarPCNR()))`) is benchmarked
-> separately, as a transient wall-clock + NR-iteration comparison in the VACASK
-> suite (`benchmarks/vacask/run_benchmarks.jl`): the `FBDF+PCNR` solver row on
-> the **Graetz Bridge**, **Voltage Multiplier**, and **Darlington Pair** cases,
-> plus a `QBDF+PCNR` probe on Graetz. This file stays DC-only.
-
 `dc_newton_iterations.jl` compares DC Newton *iteration counts* (not
 wall-clock) across every nonlinear method Cadnip uses -- the PCNR
 limiting-augmented loop (`MNA._dc_pcnr_newton`), a hand-rolled plain-Newton

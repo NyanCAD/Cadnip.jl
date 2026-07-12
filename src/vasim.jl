@@ -1288,10 +1288,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         # constant vcrit seed is repaired to a conductance-carrying dual too.
         return quote
             $w_sym = Cadnip.MNA.extract_value($fn_call)
-            # active = limiter moved the eval point off the probe voltage;
-            # the in-step transient corrector adopts limit_w only when active.
-            Cadnip.MNA.record_limit_w!(ctx, $lidx_sym, $w_sym,
-                                       $w_sym != Cadnip.MNA.extract_value($vnew_expr))
+            Cadnip.MNA.record_limit_w!(ctx, $lidx_sym, $w_sym)
             $vnew_expr - Cadnip.MNA.extract_value($vnew_expr) + $w_sym + $seed_sym
         end
     end

@@ -32,9 +32,7 @@ The tables below were measured by the VACASK authors on an AMD Threadripper 7970
 benchmarks/vacask/run_vacask.sh results.md
 ```
 
-The script downloads a prebuilt VACASK release (pinned to `0.3.3-dev`, which ships the PSP103.4 and SPICE-distilled OSDI models used here), then runs the official [`benchmark.py`](benchmark.py) methodology (1 warmup + 5 timed runs, averaged) on every case and writes a markdown table of wall-clock time, timepoints, rejected timepoints, and NR iterations. Set `VACASK_DIR` to point at an already-extracted release to skip the download, or `CASES="rc graetz mul darlington ring"` to skip the slow c6288 case.
-
-The Cadnip suite ([`run_benchmarks.jl`](run_benchmarks.jl)) also runs a **Darlington Pair** case (two cascaded BJTs, the multi-junction limiting stress case; no upstream reference table below) and an **`FBDF+PCNR`** solver row on the diode/BJT cases — FBDF with SPICE-style junction limiting applied inside every timestep (`pcnr_fbdf()`, see `doc/pcnr_plan.md`). The summary table reports NR iterations and iterations-per-step so the effect of in-step limiting is visible.
+The script downloads a prebuilt VACASK release (pinned to `0.3.3-dev`, which ships the PSP103.4 and SPICE-distilled OSDI models used here), then runs the official [`benchmark.py`](benchmark.py) methodology (1 warmup + 5 timed runs, averaged) on every case and writes a markdown table of wall-clock time, timepoints, rejected timepoints, and NR iterations. Set `VACASK_DIR` to point at an already-extracted release to skip the download, or `CASES="rc graetz mul ring"` to skip the slow c6288 case.
 
 Absolute timings depend on the machine, but the timepoint and iteration counts should match the upstream tables closely (the released binary reproduces the same algorithms).
 

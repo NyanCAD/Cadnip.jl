@@ -194,12 +194,11 @@ function result_for_solver(solver_name)
         end
 
         rejected = hasproperty(sol.stats, :nreject) ? sol.stats.nreject : 0
-        nr_iters = hasproperty(sol.stats, :nnonliniter) ? sol.stats.nnonliniter : 0
 
         return BenchmarkResult(
             BENCHMARK_NAME, solver_name, :success,
             median(bench.times) / 1e9, minimum(bench.times) / 1e9, maximum(bench.times) / 1e9,
-            bench.memory / 1e6, bench.allocs, length(sol.t), rejected, nr_iters, warning
+            bench.memory / 1e6, bench.allocs, length(sol.t), rejected, warning
         )
     catch e
         return BenchmarkResult(BENCHMARK_NAME, solver_name, :failed, sprint(showerror, e))

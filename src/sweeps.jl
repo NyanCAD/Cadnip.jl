@@ -543,26 +543,11 @@ The default IDA solver is configured for circuit simulation with:
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
 - For circuits with time-dependent sources (SIN, PWL), use `explicit_jacobian=false`.
 
-# `pcnr_fbdf`: FBDF with a dormant in-step junction-limiting corrector
-`solver=pcnr_fbdf()` runs FBDF with its per-stage nonlinear solve delegated to
-`NonlinearSolveAlg(CedarPCNR())` (see src/mna/pcnr_nlsolve.jl). The stage solve
-is a modified Newton that factorizes once per step and reuses it for that
-step's iterations, so multi-iteration steps skip factorizations versus full
-Newton while re-linearizing at each step (robust on hard switching). The
-junction-limiting corrector is inert during warm stepping — the predictor
-keeps each Newton iteration within `2·vt`, so `pnjlim` never fires
-(`pcnr_activations()` reports the count) — and only forces a re-linearization
-if a junction swings hard in a single step; cold-start limiting (DC/init) is
-handled separately by the DC PCNR loop. IDA (the default) cannot use this —
-its Newton loop is C. Pass `pcnr_fbdf(always_new=true)` for from-scratch full
-Newton (refactor every iteration; usually slower at scale).
-
 # Example
 ```julia
 circuit = MNACircuit(build_inverter; Vdd=1.8, W=1e-6, L=100e-9)
 sol = tran!(circuit, (0.0, 1e-6))           # Uses IDA (default)
 sol = tran!(circuit, (0.0, 1e-6); solver=Rodas5P())  # Uses ODEProblem
-sol = tran!(rectifier, (0.0, 1e-3); solver=pcnr_fbdf())  # in-step limiting
 sol(1e-7)  # Get state at t=0.1μs
 ```
 """

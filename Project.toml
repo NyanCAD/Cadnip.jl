@@ -32,14 +32,11 @@ Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
 NaNMath = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
 NonlinearSolve = "8913a72c-1f9b-4ce2-8d82-65094dcecaec"
-NonlinearSolveBase = "be0214bd-f91f-a760-ac4e-3421ce2b2da0"
 NyanLexers = "d66291fa-f43e-4b10-8b90-d63ec5d3f0a1"
 NyanSpectreNetlistParser = "f050a39a-f089-4c65-a86a-958b8b907b9b"
 NyanVerilogAParser = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
-OrdinaryDiffEqBDF = "6ad6398a-0878-4a85-9266-38940aa047c8"
-OrdinaryDiffEqNonlinearSolve = "127b3ac7-2247-4354-8eb6-78cf4e7c58e8"
 OrdinaryDiffEqSDIRK = "2d112036-d095-4a1e-ab9a-08536f3ecdbf"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
@@ -61,10 +58,14 @@ ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
 PlotlyLight = "ca7969ec-10b3-423e-8d99-40f33abb42bf"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 
-[sources]
-NyanLexers = {path = "NyanLexers.jl"}
-NyanSpectreNetlistParser = {path = "NyanSpectreNetlistParser.jl"}
-NyanVerilogAParser = {path = "NyanVerilogAParser.jl"}
+[sources.NyanLexers]
+path = "NyanLexers.jl"
+
+[sources.NyanSpectreNetlistParser]
+path = "NyanSpectreNetlistParser.jl"
+
+[sources.NyanVerilogAParser]
+path = "NyanVerilogAParser.jl"
 
 [extensions]
 CadnipModelingToolkitExt = "ModelingToolkit"
@@ -92,19 +93,16 @@ ForwardDiff = "0.10, 1"
 Graphs = "1"
 Interpolations = "0.15, 0.16"
 LinearSolve = "2, 3, 4.2"
-Makie = "0.24"
 ModelingToolkit = "11"
+Makie = "0.24"
 NLsolve = "4"
 NaNMath = "1"
 NonlinearSolve = "4"
-NonlinearSolveBase = "2"
 NyanLexers = "0.4"
 NyanSpectreNetlistParser = "0.6"
 NyanVerilogAParser = "0.3"
 OrderedCollections = "1, 2.0"
 OrdinaryDiffEq = "6, 7.0"
-OrdinaryDiffEqBDF = "2"
-OrdinaryDiffEqNonlinearSolve = "2"
 OrdinaryDiffEqSDIRK = "1, 2"
 PlotlyLight = "0.6, 0.13"
 Polynomials = "4"

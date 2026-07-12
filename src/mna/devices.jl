@@ -1207,13 +1207,7 @@ function limit!(ctx::AnyMNAContext, base_name::Symbol, instance_name::Symbol, p:
     else
         fn(vnew, vold, args...)
     end
-    # "active" = the limiter (or the initjct seed) moved the evaluation point
-    # off the probe voltage. The in-step transient corrector adopts limit_w
-    # only for active branches; when inert (w == vnew bit-exactly, pnjlim's
-    # passthrough) the Newton step already solves the g_lim row exactly.
-    w_val = extract_value(w)
-    active = w_val != extract_value(vnew)
-    record_limit_w!(ctx, lidx, w_val, active)
+    record_limit_w!(ctx, lidx, extract_value(w))
 
     # Linear tracking row: g_lim = x_lim - (V_p - V_n) = 0
     stamp_G!(ctx, lidx, lidx, 1.0)

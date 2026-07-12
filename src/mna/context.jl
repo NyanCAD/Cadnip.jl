@@ -238,12 +238,6 @@ mutable struct MNAContext
     # record_limit_w! / limit!). The PCNR corrector copies these into the
     # state so they become vold for the next iteration.
     limit_w::Vector{Float64}
-    # Whether the limiter actually changed the evaluation point this pass
-    # (w != vnew), per branch. The in-step transient corrector only adopts
-    # limit_w for active branches: when the limiter is inert, the Newton step
-    # already solves the linear g_lim row exactly (x_lim = V_branch), and
-    # overwriting it with the lagged limit_w would corrupt the accepted state.
-    limit_active::Vector{Bool}
 
     # Breakpoint times collected from time-dependent sources (PWL/PULSE/SIN),
     # expanded into solver tstops by the tran! constructors. Recomputed from
@@ -296,7 +290,6 @@ function MNAContext()
         Tuple{Int,Int}[],   # limit_branches
         Float64[],          # limit_init
         Float64[],          # limit_w (recorded limited voltages)
-        Bool[],             # limit_active (limiter changed eval point this pass)
         BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
         false,              # initjct
@@ -705,7 +698,6 @@ function alloc_limit!(ctx::MNAContext, name::Symbol, p::Int, n::Int; init::Float
     push!(ctx.limit_branches, (p, n))
     push!(ctx.limit_init, init)
     push!(ctx.limit_w, init)
-    push!(ctx.limit_active, false)
     return LimitIndex(ctx.n_limits)
 end
 
@@ -725,20 +717,16 @@ function alloc_limit!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol,
 end
 
 """
-    record_limit_w!(ctx, lidx::LimitIndex, w::Float64, active::Bool=true)
+    record_limit_w!(ctx, lidx::LimitIndex, w::Float64)
 
 Record the limited voltage a device actually evaluated at during this
-stamping pass, and whether the limiter changed the evaluation point
-(`active`, i.e. `w != vnew`). The PCNR corrector copies recorded values
-into the state after the predict step, so they become `vold` for the next
-iteration; the in-step transient corrector consults `active` to skip
-inert branches (see `limit_active`). Multiple records on the same variable
-within one pass are allowed (VA OldGet/NewSet multi-site pattern) — the
-last record wins.
+stamping pass. The PCNR corrector copies recorded values into the state
+after the predict step, so they become `vold` for the next iteration.
+Multiple records on the same variable within one pass are allowed
+(VA OldGet/NewSet multi-site pattern) — the last record wins.
 """
-@inline function record_limit_w!(ctx::MNAContext, lidx::LimitIndex, w::Float64, active::Bool=true)
+@inline function record_limit_w!(ctx::MNAContext, lidx::LimitIndex, w::Float64)
     ctx.limit_w[lidx.k] = w
-    ctx.limit_active[lidx.k] = active
     return nothing
 end
 
@@ -1121,7 +1109,6 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.limit_branches)
     empty!(ctx.limit_init)
     empty!(ctx.limit_w)
-    empty!(ctx.limit_active)
 
     # Breakpoints are recomputed from scratch every build (not a cache)
     empty!(ctx.breakpoints)
@@ -1178,7 +1165,6 @@ function clear!(ctx::MNAContext)
     empty!(ctx.limit_branches)
     empty!(ctx.limit_init)
     empty!(ctx.limit_w)
-    empty!(ctx.limit_active)
     empty!(ctx.breakpoints)
     ctx.finalized = false
     return nothing

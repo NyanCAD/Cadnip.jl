@@ -23,16 +23,10 @@ using Cadnip.MNA: alloc_limit!, get_limit_idx, has_limit, LimitIndex
 using Cadnip.MNA: pnjlim, limit!, record_limit_w!
 using Cadnip.MNA: ZERO_VECTOR
 using Cadnip.MNA: MNASpec, MNACircuit, solve_dc
-using Cadnip.MNA: SinWave, CedarPCNRCorrect
-using Cadnip.MNA: CedarPCNR, NonlinearSolveAlg
 import Cadnip.MNA as MNA
 
 using Cadnip
-using Cadnip: dc!, tran!, pcnr_fbdf  # explicit import to avoid Julia 1.12 conflict
-using OrdinaryDiffEqBDF: FBDF
-using OrdinaryDiffEqSDIRK: TRBDF2, ImplicitEuler
-using OrdinaryDiffEq.OrdinaryDiffEqCore: COEFFICIENT_MULTISTEP, DIRK
-using Cadnip.MNA.ADTypes: AutoFiniteDiff
+using Cadnip: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
 
 #==============================================================================#
 # Shared builders for the structural/DC tests below (top-level, not nested in
@@ -389,149 +383,6 @@ end
 
         @test sol_tran.retcode == ReturnCode.Success
         @test sol_tran[:out][end] ≈ sol_dc[:out] atol=1e-3
-    end
-
-    #==========================================================================#
-    # In-step transient limiting via NonlinearSolveAlg (pcnr_fbdf)
-    #
-    # These exercise CedarPCNR as the per-stage nonlinear solver of FBDF (see
-    # src/mna/pcnr_nlsolve.jl): the SPICE predict/correct loop now runs inside
-    # every timestep, not only at DC init.
-    #==========================================================================#
-
-    # A half-wave rectifier whose series diode switches on/off each cycle - the
-    # in-step-limiting case. Native Diode so the test stays off the heavy VA
-    # precompile path. `spec.mode`/`t` are threaded so the SIN source advances.
-    function halfwave_rect(params, spec, t::Real=0.0; x=ZERO_VECTOR, ctx=nothing, limit::Bool=true)
-        if ctx === nothing
-            ctx = MNAContext()
-        else
-            reset_for_restamping!(ctx)
-        end
-        vin = get_node!(ctx, :vin)
-        out = get_node!(ctx, :out)
-        stamp!(VoltageSource(0.0; tran=SinWave(0.0, 10.0, 50.0), name=:V1), ctx, vin, 0, t, spec.mode)
-        stamp!(Diode(Is=1e-14, Vt=0.026, limit=limit, name=:D1), ctx, vin, out; x=x)
-        stamp!(Capacitor(1e-6), ctx, out, 0)
-        stamp!(Resistor(10_000.0), ctx, out, 0)
-        return ctx
-    end
-
-    @testset "corrector affine maps (params-tuple canary)" begin
-        # Build a workspace for a single-limit circuit and drive CedarPCNRCorrect
-        # with a hand-built stage params tuple, checking both the FBDF (identity)
-        # and DIRK (u = tmp + γ·z) affine maps, gated on the active flag.
-        spec = MNASpec(mode=:dcop)
-        ctx = MNA._detect_structure(rectifier_lim, (;), spec)
-        cs = MNA.compile_structure(rectifier_lim, (;), spec; ctx=ctx)
-        ws = MNA.create_workspace(cs; ctx=ctx)
-        @test cs.n_limits == 1
-        n = system_size(cs)
-        lim0 = n - 1
-
-        # The bridge's ODE stage params (11-tuple). Only tmp(1), γ(3),
-        # method(8), ws(9) are read by the corrector; the rest are placeholders.
-        mktuple(method, γ, tmp) = (tmp, zeros(n), γ, 1.0, 0.0, zeros(n), 1.0, method, ws, 1e-6, nothing)
-        correct! = CedarPCNRCorrect()
-
-        # Active branch: FBDF identity map copies limit_w straight in.
-        ws.dctx.limit_w[1] = 0.42
-        ws.dctx.limit_active[1] = true
-        u = zeros(n); u[lim0 + 1] = 99.0
-        correct!(u, copy(u), mktuple(COEFFICIENT_MULTISTEP, 0.5, zeros(n)))
-        @test u[lim0 + 1] == 0.42
-
-        # Inert branch: value left untouched (Newton's g_lim solution stands).
-        ws.dctx.limit_active[1] = false
-        u = zeros(n); u[lim0 + 1] = 99.0
-        correct!(u, copy(u), mktuple(COEFFICIENT_MULTISTEP, 0.5, zeros(n)))
-        @test u[lim0 + 1] == 99.0
-
-        # Active branch, DIRK map: z_lim = (w - tmp_lim) / γ.
-        ws.dctx.limit_active[1] = true
-        tmp = zeros(n); tmp[lim0 + 1] = 0.1; γ = 0.25
-        u = zeros(n); u[lim0 + 1] = 99.0
-        correct!(u, copy(u), mktuple(DIRK, γ, tmp))
-        @test u[lim0 + 1] ≈ (0.42 - 0.1) / γ
-    end
-
-    @testset "pcnr_fbdf: full-Newton stage solve, same trajectory" begin
-        tspan = (0.0, 0.04)  # two 50Hz cycles
-        kw = (; abstol=1e-9, reltol=1e-6, dense=false)
-
-        sol_ida  = tran!(MNACircuit(halfwave_rect), tspan; kw...)
-        sol_fbdf = tran!(MNACircuit(halfwave_rect), tspan; solver=FBDF(autodiff=AutoFiniteDiff()), kw...)
-        sol_pcnr = tran!(MNACircuit(halfwave_rect), tspan; solver=pcnr_fbdf(), kw...)
-
-        @test sol_ida.retcode  == ReturnCode.Success
-        @test sol_fbdf.retcode == ReturnCode.Success
-        @test sol_pcnr.retcode == ReturnCode.Success
-
-        # pcnr_fbdf's full Newton (fresh J every iteration) converges each stage
-        # in no more iterations than FBDF's modified Newton (frozen-W reuse).
-        # NB: this is the full-Newton effect, not the limiting corrector, which
-        # is inert during warm stepping (see doc/pcnr_plan.md).
-        @test sol_pcnr.stats.nnonliniter <= sol_fbdf.stats.nnonliniter
-
-        # Same trajectory as the IDA reference (name-based access at the load
-        # node), at least as accurate as plain FBDF.
-        ts = range(1e-3, 0.039; length=25)
-        err_pcnr = maximum(abs(sol_pcnr(t; idxs=2) - sol_ida(t; idxs=2)) for t in ts)
-        @test err_pcnr < 0.02
-        @test sol_pcnr[:out][end] ≈ sol_ida[:out][end] atol=1e-2
-    end
-
-    @testset "SDIRK stepper drives PCNR (DIRK affine branch)" begin
-        # CedarPCNR as the stage solver of an SDIRK method exercises the
-        # u = tmp + γ·z affine map (vs FBDF's identity). The corrector is inert
-        # during stepping (warm starts), so this validates the solver
-        # integration + trajectory, not the limiter firing.
-        tspan = (0.0, 0.04)
-        kw = (; abstol=1e-6, reltol=1e-4, dense=false)
-        sol_ida = tran!(MNACircuit(halfwave_rect), tspan; kw...)
-        for S in (TRBDF2, ImplicitEuler)
-            solver = S(autodiff=AutoFiniteDiff(), nlsolve=NonlinearSolveAlg(CedarPCNR()))
-            sol = tran!(MNACircuit(halfwave_rect), tspan; solver=solver, kw...)
-            @test sol.retcode == ReturnCode.Success
-            ts = range(1e-3, 0.039; length=15)
-            @test maximum(abs(sol(t; idxs=2) - sol_ida(t; idxs=2)) for t in ts) < 0.03
-        end
-    end
-
-    @testset "inert on unlimited circuits (n_limits == 0)" begin
-        # Pure RC: no limiting variables, so pcnr_fbdf's corrector early-returns
-        # and the result must track plain FBDF exactly.
-        function rc(params, spec, t::Real=0.0; x=ZERO_VECTOR, ctx=nothing)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-            vin = get_node!(ctx, :vin)
-            out = get_node!(ctx, :out)
-            stamp!(VoltageSource(1.0; name=:V1), ctx, vin, 0)
-            stamp!(Resistor(1000.0), ctx, vin, out)
-            stamp!(Capacitor(1e-6), ctx, out, 0)
-            return ctx
-        end
-        kw = (; abstol=1e-10, reltol=1e-8, dense=false)
-        sol_f = tran!(MNACircuit(rc), (0.0, 5e-3); solver=FBDF(autodiff=AutoFiniteDiff()), kw...)
-        sol_p = tran!(MNACircuit(rc), (0.0, 5e-3); solver=pcnr_fbdf(), kw...)
-        @test sol_p.retcode == ReturnCode.Success
-        @test sol_p[:out][end] ≈ sol_f[:out][end] rtol=1e-6
-        @test sol_p[:out][end] ≈ 1.0 atol=1e-3  # cap charged to source
-    end
-
-    @testset "sweep compatibility" begin
-        # CircuitSweep + pcnr_fbdf: the augmented system size must flow through
-        # the per-point rebuild without special handling.
-        cs = Cadnip.CircuitSweep(halfwave_rect, Cadnip.Sweep(dummy=[1.0, 2.0]))
-        results = collect(tran!(cs, (0.0, 0.02); solver=pcnr_fbdf(),
-                                abstol=1e-9, reltol=1e-6, dense=false))
-        @test length(results) == 2
-        for (_, sol) in results
-            @test sol.retcode == ReturnCode.Success
-        end
     end
 
 end

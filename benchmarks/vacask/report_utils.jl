@@ -19,11 +19,10 @@ struct BenchmarkResult
     allocs::Int
     timepoints::Int
     rejected::Int
-    nr_iters::Int   # nonlinear (Newton) iterations; 0 = not reported
     error_msg::String
 end
 
-BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, 0, 0, error_msg)
+BenchmarkResult(name, solver, status, error_msg="") = BenchmarkResult(name, solver, status, NaN, NaN, NaN, NaN, 0, 0, 0, error_msg)
 
 # Label used for rows sourced from the real VACASK simulator (run_vacask.sh).
 const VACASK_REF_SOLVER = "VACASK"
@@ -49,9 +48,8 @@ function load_vacask_reference()
         t === nothing && continue
         tp = something(tryparse(Int, cols[3]), 0)
         rej = something(tryparse(Int, cols[4]), 0)
-        iters = something(tryparse(Int, cols[5]), 0)
         push!(refs, BenchmarkResult(name, VACASK_REF_SOLVER, :success,
-                                    t, t, t, NaN, 0, tp, rej, iters, ""))
+                                    t, t, t, NaN, 0, tp, rej, ""))
     end
     return refs
 end
@@ -98,16 +96,13 @@ function generate_markdown(results::Vector{BenchmarkResult}; title::String="VACA
     # Summary table with all solvers
     println(io, "## Summary")
     println(io)
-    println(io, "| Benchmark | Solver | Status | Median Time | Timepoints | Rejected | NR iters | Iters/step | Memory |")
-    println(io, "|-----------|--------|--------|-------------|------------|----------|----------|------------|--------|")
+    println(io, "| Benchmark | Solver | Status | Median Time | Timepoints | Rejected | Memory |")
+    println(io, "|-----------|--------|--------|-------------|------------|----------|--------|")
 
     for r in results
         status_emoji = r.status == :success ? "✅" : r.status == :skipped ? "⏭️" : "❌"
         rejected_str = r.rejected >= 0 ? string(r.rejected) : "-"
-        iters_str = r.nr_iters > 0 ? string(r.nr_iters) : "-"
-        iters_per_step = (r.nr_iters > 0 && r.timepoints > 0) ?
-            @sprintf("%.2f", r.nr_iters / r.timepoints) : "-"
-        println(io, "| $(r.name) | $(r.solver) | $(status_emoji) | $(format_time(r.median_time)) | $(r.timepoints > 0 ? r.timepoints : "-") | $(rejected_str) | $(iters_str) | $(iters_per_step) | $(format_memory(r.memory)) |")
+        println(io, "| $(r.name) | $(r.solver) | $(status_emoji) | $(format_time(r.median_time)) | $(r.timepoints > 0 ? r.timepoints : "-") | $(rejected_str) | $(format_memory(r.memory)) |")
     end
     println(io)
 
@@ -125,11 +120,10 @@ function generate_markdown(results::Vector{BenchmarkResult}; title::String="VACA
         successful = filter(r -> r.status == :success, bench_results)
 
         if !isempty(successful)
-            println(io, "| Solver | Median | Min | Max | Rejected | NR iters | Memory |")
-            println(io, "|--------|--------|-----|-----|----------|----------|--------|")
+            println(io, "| Solver | Median | Min | Max | Rejected | Memory |")
+            println(io, "|--------|--------|-----|-----|----------|--------|")
             for r in successful
-                iters_str = r.nr_iters > 0 ? string(r.nr_iters) : "-"
-                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(r.rejected) | $(iters_str) | $(format_memory(r.memory)) |")
+                println(io, "| $(r.solver) | $(format_time(r.median_time)) | $(format_time(r.min_time)) | $(format_time(r.max_time)) | $(r.rejected) | $(format_memory(r.memory)) |")
             end
             println(io)
 
