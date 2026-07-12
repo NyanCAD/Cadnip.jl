@@ -1013,8 +1013,8 @@ function parse_voltage_or_current(ps, isvoltage)
                 @trynext take(ps, EQ)
             end
             @trynext expr = parse_expression(ps)
-            # TODO Phase
-            push!(vals, EXPR(ACSource(ac, eq, expr)))
+            acphase = !eol(ps) && !is_kw(kind(nt(ps))) ? (@trynext parse_expression(ps)) : nothing
+            push!(vals, EXPR(ACSource(ac, eq, expr, acphase)))
         elseif is_source_type(kind(nt(ps)))
             @trynext fn = parse_tran_fn(ps)
             push!(vals, fn)

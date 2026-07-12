@@ -300,8 +300,7 @@ struct ACSource <: AbstractInstanceNode
     kw::EXPR{Keyword}
     eq::Maybe{EXPR{Notation}}
     acmag::EXPR
-    # TODO
-    # acphase::Union{Nothing, EXPR}
+    acphase::Union{Nothing, EXPR}
 end
 
 struct DCSource <: AbstractInstanceNode
