@@ -257,13 +257,25 @@ the `pcnr_fbdf` speedup is a full-Newton effect, not active limiting.**
 Instrumenting the corrector (counting `limit_active` adoptions) shows *zero*
 activations across every transient case tried — the switching half-wave
 rectifier (adaptive and forced-dt), the graetz bridge at `dtmax=1e-6` (50014
-corrector calls, 0 adoptions), the single BJT, and the darlington. The cause
-is fundamental: the integrator's predictor warm-starts each step so close to
-the solution that the junction moves less than `2·vt` between Newton
-iterations, so `pnjlim` passes through every time. Junction limiting is a
-*cold-start* mechanism (the junction swinging from 0/vcrit to its bias) — i.e.
-DC/init, which `_dc_pcnr_newton` already covers. Once warm-stepping there is
-nothing to limit.
+corrector calls, 0 adoptions), the single BJT, the darlington, **and an
+adaptive WPD-style tolerance sweep** (graetz + mul, no forced `dtmax`, reltol
+1e-3…1e-6, where the solver takes large steps) — still 0 activations at every
+point. So it is not merely that forced tiny steps hide the effect; big
+adaptive steps do not trigger it either.
+
+The reason is structural, and it is a direct consequence of the recorded-`w`
+formulation. The limiter's `vold` *is* the state variable `x_lim`, tied to
+`V_branch` by the algebraic `g_lim` row. At the start of every step the
+integrator's predictor extrapolates `x_lim` **in lockstep with the node
+voltages**, so the first Newton iteration already has `vnew ≈ vold` and
+`pnjlim` passes through — regardless of step size. Classical SPICE limiting
+fires precisely because *its* `vold` is the previous Newton *iteration's*
+value (never extrapolated forward); by promoting `vold` to a DAE state we let
+the ODE predictor do limiting's job, which makes in-step limiting inert **by
+construction** under any predictor/corrector integrator. Junction limiting
+still matters where there is no predictor history — the DC/init cold start
+(the junction swinging from 0/vcrit to its bias) — which `_dc_pcnr_newton`
+already covers.
 
 The only thing `pcnr_fbdf` did differently from plain `FBDF` was the Newton
 *variant*: `PCNRSolver.step!` refactored `J = −(G + c·C)` every iteration
