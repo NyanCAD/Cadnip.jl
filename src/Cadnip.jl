@@ -15,6 +15,7 @@ export @dyn, @requires, @provides, @isckt_or
 export solve
 # In-step PCNR transient limiting (src/mna/pcnr_nlsolve.jl)
 export pcnr_fbdf, CedarPCNR, PCNRSolver
+export pcnr_activations, reset_pcnr_activations!
 
 # MNA SPICE codegen exports
 export @sp_str, @spc_str

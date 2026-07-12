@@ -54,6 +54,7 @@ using OrdinaryDiffEqNonlinearSolve: NonlinearSolveAlg
 using OrdinaryDiffEqBDF: FBDF
 
 export PCNRSolver, CedarPCNR, pcnr_fbdf
+export pcnr_activations, reset_pcnr_activations!
 
 #==============================================================================#
 # Section A: generic PCNR algorithm (upstreamable; no Cadnip types)
@@ -69,25 +70,38 @@ the correction hook.
 
 Each iteration:
 
- 1. evaluate the residual `prob.f(fu, u, p)` and the Jacobian
-    `jac!(J, u, p)` at the current iterate,
- 2. take a plain Newton step `u ← u − J \\ fu` (**predict**), then
+ 1. evaluate the residual `prob.f(fu, u, p)` at the current iterate (which,
+    for a re-stamping simulator, also refreshes the matrices `jac!` reads),
+ 2. take a Newton step `u ← u − J \\ fu` (**predict**), reusing the cached
+    factorization unless a fresh Jacobian is needed (see below), then
  3. call `correct!(u_proposed, u_prev, p)`, which may overwrite components
     of the proposed iterate (**correct**) — e.g. replace junction-limiting
-    variables with the limited voltages the model evaluation recorded.
+    variables with the limited voltages the model evaluation recorded — and
+    returns whether it changed anything.
 
 The correction runs *between* iterations, not inside the linearized solve:
 a limiting equation solved simultaneously with the circuit equations tracks
 the new iterate to first order and never fires (see doc/pcnr_plan.md,
-"v1 design"). With an identity `correct!` this is plain Newton.
+"v1 design"). With an identity `correct!` (returning `false`) this is Newton.
+
+**Modified Newton by default.** The factorization is computed once at the
+start of each stage solve and reused for that stage's remaining iterations
+(a Newton-chord step), refreshed when `always_new=true` or when `correct!`
+reported it changed the previous iterate (the evaluation point moved). On
+multi-iteration-per-step solves this skips most factorizations versus full
+Newton while re-linearizing at every step's operating point (robust on hard
+switching, unlike reusing across steps). Pass `always_new=true` for
+from-scratch full Newton (refactor every iteration).
 
 # Arguments
-- `correct!`: `(u_proposed, u_prev, p) -> nothing`, mutates `u_proposed`.
+- `correct!`: `(u_proposed, u_prev, p) -> Bool`, mutates `u_proposed` and
+  returns whether it changed it.
 - `jac!`: `(J, u, p) -> nothing`, the Jacobian of `prob.f` at `u`. Required —
   this algorithm never uses AD or `prob.f.jac` (SPICE-style simulators
-  re-linearize on every iteration as a side effect of residual evaluation).
+  refresh the linearization as a side effect of residual evaluation).
 - `jac_prototype`: a matrix with the Jacobian's sparsity pattern, or a
   callable `(u0, p) -> matrix`.
+- `always_new`: refactor on every iteration (full Newton). Default `false`.
 
 Designed to be driven either standalone (`init`/`step!`) or as the inner
 algorithm of `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg`, which gives
@@ -98,10 +112,12 @@ struct PCNRSolver{C, J, P} <: NonlinearSolveBase.AbstractNonlinearSolveAlgorithm
     correct!::C
     jac!::J
     jac_prototype::P
+    always_new::Bool
 end
 
-function PCNRSolver(correct!; jac!, jac_prototype, name::Symbol=:PCNRSolver)
-    return PCNRSolver(name, correct!, jac!, jac_prototype)
+function PCNRSolver(correct!; jac!, jac_prototype, name::Symbol=:PCNRSolver,
+                    always_new::Bool=false)
+    return PCNRSolver(name, correct!, jac!, jac_prototype, always_new)
 end
 
 _materialize_prototype(proto::AbstractMatrix, u0, p) = copy(proto)
@@ -126,6 +142,9 @@ mutable struct PCNRSolverCache{PR, A, T, M, L, P} <:
     trace::Any
     abstol::Any
     reltol::Any
+    # Whether the corrector changed the previous iterate — if so, the
+    # evaluation point moved and the next iteration refactors J.
+    corrector_fired::Bool
 end
 
 NonlinearSolveBase.get_abstol(cache::PCNRSolverCache) = cache.abstol
@@ -144,14 +163,11 @@ function SciMLBase.__init(prob::SciMLBase.NonlinearProblem, alg::PCNRSolver, arg
                            NLStats(0, 0, 0, 0, 0), 0, maxiters,
                            ReturnCode.Default, false,
                            NonlinearSolveBase.get_timer_output(), nothing,
-                           abstol, reltol)
+                           abstol, reltol, false)
 end
 
 function InternalAPI.step!(cache::PCNRSolverCache; recompute_jacobian=nothing,
                            kwargs...)
-    # `recompute_jacobian` is deliberately ignored: the residual evaluation
-    # re-stamps the system anyway, so a fresh Jacobian is free — and PCNR's
-    # convergence argument assumes evaluation-point linearization.
     prob = cache.prob
     alg = cache.alg
     u = cache.u
@@ -159,13 +175,27 @@ function InternalAPI.step!(cache::PCNRSolverCache; recompute_jacobian=nothing,
 
     prob.f(cache.fu, u, cache.p)
     cache.stats.nf += 1
-    alg.jac!(cache.J, u, cache.p)
-    cache.stats.njacs += 1
 
     ok = all(isfinite, cache.fu)
     if ok
-        # PREDICT: cached factorization, numeric-only refactor (pattern fixed).
-        cache.lincache.A = cache.J
+        # Modified Newton (Newton-chord) by default: refactor once at the
+        # start of each stage solve (`nsteps == 0`, which the driver's
+        # per-stage `reinit!` re-arms) and reuse that factorization for the
+        # rest of the stage's iterations. On multi-iteration-per-step circuits
+        # this skips most factorizations versus full Newton, and it stays
+        # robust because every step re-linearizes at its own operating point —
+        # reusing across *stages* purely on the stepper's `recompute_jacobian`
+        # signal proved too stale on hard switching (dt underflow). Also
+        # refactor when `always_new` is set (full Newton) or when the corrector
+        # changed the previous iterate (evaluation point moved → re-linearize).
+        need_jac = alg.always_new || cache.corrector_fired || cache.nsteps == 0
+        _ = recompute_jacobian  # bridge signal unused; nsteps drives refresh
+        if need_jac
+            alg.jac!(cache.J, u, cache.p)
+            cache.stats.njacs += 1
+            cache.lincache.A = cache.J   # marks the factorization stale
+        end
+        # PREDICT: reuse the KLU factorization unless `A` was just replaced.
         cache.lincache.b = cache.fu
         δ = try
             solve!(cache.lincache).u
@@ -193,8 +223,10 @@ function InternalAPI.step!(cache::PCNRSolverCache; recompute_jacobian=nothing,
         return nothing
     end
 
-    # CORRECT: the hook may overwrite components of the proposed iterate.
-    alg.correct!(u, cache.uprev, cache.p)
+    # CORRECT: the hook may overwrite components of the proposed iterate; it
+    # returns whether it changed anything so the next iteration knows to
+    # re-linearize (the evaluation point moved).
+    cache.corrector_fired = alg.correct!(u, cache.uprev, cache.p)::Bool
     return nothing
 end
 
@@ -205,6 +237,9 @@ function InternalAPI.reinit!(cache::PCNRSolverCache; u0=nothing, p=nothing,
     cache.nsteps = 0
     cache.force_stop = false
     cache.retcode = ReturnCode.Default
+    # A new stage starts with recompute_jacobian driving the first refactor;
+    # don't carry a stale "corrector fired" across the reinit.
+    cache.corrector_fired = false
     InternalAPI.reinit!(cache.stats)
     return cache
 end
@@ -262,28 +297,54 @@ avoids the lag at the source. At a true fixed point every limiter is inert
 For FBDF (`COEFFICIENT_MULTISTEP`) the stage variable is `u(t+dt)` itself;
 for DIRK methods the stage variable `z` maps through `u = tmp + γ·z`, so the
 overwrite is applied in `z`-space.
+
+Returns `true` iff it adopted at least one branch (the limiter fired this
+pass), so `PCNRSolver.step!` re-linearizes on the next iteration and only
+then. When the limiter is inert — which is almost always the case during warm
+transient stepping, where the predictor keeps each iteration within `2·vt` —
+this returns `false`, the factorization is reused, and the stage solve costs
+exactly what the stepper's default modified Newton would. Adopted activations
+are tallied in `PCNR_ACTIVATIONS` (see `pcnr_activations`).
 """
 struct CedarPCNRCorrect end
+
+# Diagnostic tally of in-step limiter activations. Incremented once per stage
+# iteration on which the corrector adopts at least one branch. Since limiting
+# is inert during warm stepping, this reads 0 on typical transient runs — the
+# way to *see* that the in-step corrector never fires. Reset/read with
+# `reset_pcnr_activations!` / `pcnr_activations`.
+const PCNR_ACTIVATIONS = Ref(0)
+reset_pcnr_activations!() = (PCNR_ACTIVATIONS[] = 0; nothing)
+pcnr_activations() = PCNR_ACTIVATIONS[]
 
 function (::CedarPCNRCorrect)(u, uprev, p)
     ws = _stage_ws(p)
     L = ws.structure.n_limits
-    L == 0 && return nothing
+    L == 0 && return false
     limit_w = ws.dctx.limit_w
     limit_active = ws.dctx.limit_active
     lim0 = length(u) - L
+    fired = false
     if _stage_method(p) === COEFFICIENT_MULTISTEP
-        # FBDF: stage variable is u(t+dt) itself, so the map is the identity —
-        # the same active-aware adopt the DC loop uses.
-        _pcnr_adopt_limits!(u, limit_w, limit_active, lim0, L)
+        # FBDF: stage variable is u(t+dt) itself (identity map).
+        @inbounds for k in 1:L
+            if limit_active[k]
+                u[lim0 + k] = limit_w[k]
+                fired = true
+            end
+        end
     else
         tmp = _stage_tmp(p)
         γ = _stage_γ(p)
         @inbounds for k in 1:L
-            limit_active[k] && (u[lim0 + k] = (limit_w[k] - tmp[lim0 + k]) / γ)
+            if limit_active[k]
+                u[lim0 + k] = (limit_w[k] - tmp[lim0 + k]) / γ
+                fired = true
+            end
         end
     end
-    return nothing
+    fired && (PCNR_ACTIVATIONS[] += 1)
+    return fired
 end
 
 """
@@ -321,24 +382,30 @@ limiting: recorded-`w` corrector + `−(G + c·C)` stage Jacobian, both reading
 the `EvalWorkspace` that Cadnip's `ODEProblem` carries as `prob.p`.
 Stateless — safe to construct anywhere, reusable across circuits.
 """
-CedarPCNR() = PCNRSolver(CedarPCNRCorrect();
-                         jac! = CedarPCNRStageJac(),
-                         jac_prototype = _cedar_pcnr_prototype,
-                         name = :CedarPCNR)
+CedarPCNR(; always_new::Bool=false) =
+    PCNRSolver(CedarPCNRCorrect();
+               jac! = CedarPCNRStageJac(),
+               jac_prototype = _cedar_pcnr_prototype,
+               name = :CedarPCNR,
+               always_new = always_new)
 
 """
-    pcnr_fbdf(; nlsolve_kwargs=(;), kwargs...)
+    pcnr_fbdf(; always_new=false, nlsolve_kwargs=(;), kwargs...)
 
-`FBDF` configured for SPICE-style in-step junction limiting:
+`FBDF` with its per-stage nonlinear solve driven by `CedarPCNR`:
 `FBDF(nlsolve = NonlinearSolveAlg(CedarPCNR()); kwargs...)`.
 
-Use as `tran!(circuit, tspan; solver=pcnr_fbdf())`. On circuits with no
-limiting variables the corrector is inert and this behaves as plain FBDF
-with a restamp-every-iteration Newton. `nlsolve_kwargs` are forwarded to
-`NonlinearSolveAlg` (`κ`, `max_iter`, `fast_convergence_cutoff`, ...).
+Use as `tran!(circuit, tspan; solver=pcnr_fbdf())`. The stage solve is a
+modified Newton that factorizes once per step and reuses it for that step's
+iterations, so multi-iteration steps skip most factorizations versus full
+Newton while staying robust on hard switching. The junction-limiting corrector
+is inert during warm stepping (see `pcnr_activations`) and only forces a
+re-linearization if a junction swings hard in a single step. Pass
+`always_new=true` for from-scratch full Newton. `nlsolve_kwargs` are forwarded
+to `NonlinearSolveAlg` (`κ`, `max_iter`, `fast_convergence_cutoff`, ...).
 """
-function pcnr_fbdf(; nlsolve_kwargs=(;), kwargs...)
+function pcnr_fbdf(; always_new::Bool=false, nlsolve_kwargs=(;), kwargs...)
     return FBDF(; autodiff=ADTypes.AutoFiniteDiff(),
-                nlsolve=NonlinearSolveAlg(CedarPCNR(); nlsolve_kwargs...),
+                nlsolve=NonlinearSolveAlg(CedarPCNR(; always_new); nlsolve_kwargs...),
                 kwargs...)
 end

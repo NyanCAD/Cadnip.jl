@@ -543,23 +543,19 @@ The default IDA solver is configured for circuit simulation with:
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
 - For circuits with time-dependent sources (SIN, PWL), use `explicit_jacobian=false`.
 
-# `pcnr_fbdf`: full-Newton FBDF with a dormant in-step limiting corrector
+# `pcnr_fbdf`: FBDF with a dormant in-step junction-limiting corrector
 `solver=pcnr_fbdf()` runs FBDF with its per-stage nonlinear solve delegated to
-a full-Newton PCNR algorithm (`NonlinearSolveAlg(CedarPCNR())`; see
-src/mna/pcnr_nlsolve.jl) that restamps and refactors the Jacobian on every
-iteration, versus FBDF's default modified Newton (frozen-W reuse). On
-diode-switching circuits (rectifiers, multipliers) this converges in ~1
-iteration/step and is ~2× faster warm; on tightly-coupled multi-junction
-circuits (BJT chains) it is roughly neutral, so it is opt-in, not the default.
-IDA (the default) cannot use it — its Newton loop is C.
-
-The SPICE-style predict/correct junction-limiting corrector rides along but is
-*inert during normal stepping* (measured): the integrator's predictor
-warm-starts each step within `2·vt`, so `pnjlim` never fires. It is a dormant
-safety net that engages only if a junction swings hard in a single step; the
-speedup above is the full-Newton stage solve, not active limiting. Cold-start
-limiting (DC/init) is handled separately by the DC PCNR loop. On unlimited
-circuits `pcnr_fbdf` is plain full-Newton FBDF.
+`NonlinearSolveAlg(CedarPCNR())` (see src/mna/pcnr_nlsolve.jl). The stage solve
+is a modified Newton that factorizes once per step and reuses it for that
+step's iterations, so multi-iteration steps skip factorizations versus full
+Newton while re-linearizing at each step (robust on hard switching). The
+junction-limiting corrector is inert during warm stepping — the predictor
+keeps each Newton iteration within `2·vt`, so `pnjlim` never fires
+(`pcnr_activations()` reports the count) — and only forces a re-linearization
+if a junction swings hard in a single step; cold-start limiting (DC/init) is
+handled separately by the DC PCNR loop. IDA (the default) cannot use this —
+its Newton loop is C. Pass `pcnr_fbdf(always_new=true)` for from-scratch full
+Newton (refactor every iteration; usually slower at scale).
 
 # Example
 ```julia

@@ -55,6 +55,7 @@ function run_benchmark(solver; dt=2e-9, maxiters=10_000_000)
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
+    Cadnip.reset_pcnr_activations!()
     sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3, maxiters=maxiters, dense=false)
 
     println("\n=== Results ($solver_name) ===")
@@ -62,6 +63,7 @@ function run_benchmark(solver; dt=2e-9, maxiters=10_000_000)
     @printf("Expected:    ~%d\n", round(Int, (tspan[2] - tspan[1]) / dt) + 1)
     @printf("NR iters:    %d\n", sol.stats.nnonliniter)
     @printf("Iter/step:   %.2f\n", sol.stats.nnonliniter / length(sol.t))
+    @printf("PCNR limiter activations: %d\n", Cadnip.pcnr_activations())
     display(bench)
     println()
 

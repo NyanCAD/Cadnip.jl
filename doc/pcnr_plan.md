@@ -265,21 +265,34 @@ iterations, so `pnjlim` passes through every time. Junction limiting is a
 DC/init, which `_dc_pcnr_newton` already covers. Once warm-stepping there is
 nothing to limit.
 
-So what `pcnr_fbdf` actually buys over plain `FBDF` is **full Newton vs
-modified Newton**: `PCNRSolver.step!` restamps and refactors `J = −(G + c·C)`
-every iteration, whereas FBDF's `NLNewton` reuses a frozen `W` (refreshed only
-on γdt drift). Measured: graetz **1.00** iters/step vs FBDF's 1.21 (≈2×
-faster warm, KLU symbolic-reuse makes the per-iteration refactor a
-numeric-only cost); darlington **1.13** vs 1.34; RC and single-BJT identical.
-The earlier "40% fewer iterations from in-step limiting" and "darlington costs
-iterations (3.87 i/s)" readings were mischaracterised — the former is the
-full-Newton effect, the latter a rejection/JIT artifact of a one-period run.
-The PCNR limiting corrector rides along as a **dormant safety net**: correct,
-tested, and ready to engage if a junction ever swings hard in a single step
-(huge dt, an unguarded discontinuity), but not the source of the measured
-speedup. This is also the concrete form of the "per-iteration KLU refactor
-vs frozen-W reuse" tradeoff flagged in Risks — a net win on the diode
-circuits, roughly neutral on the coupled BJT.
+The only thing `pcnr_fbdf` did differently from plain `FBDF` was the Newton
+*variant*: `PCNRSolver.step!` refactored `J = −(G + c·C)` every iteration
+(full Newton), whereas FBDF's `NLNewton` reuses a frozen `W`. And at full
+benchmark scale that full-Newton refactor is a **net loss on every circuit**:
+graetz 5.76 s vs FBDF's 4.92 s, mul 2.86 s vs 2.49 s, darlington a
+catastrophic 36.2 s vs 18.2 s (fewer iters/step but far more wall time, and
+on darlington more rejections too). The fewer iterations never pay for the
+per-iteration factorization. Short warm runs had suggested the opposite; the
+full-scale CI benchmark is the truth.
+
+**Fix — modified Newton, factorize once per step.** Since the corrector is
+inert, there is no reason to refactor every iteration. `PCNRSolver` now does a
+Newton-chord step: it factorizes once at the start of each stage solve
+(`nsteps == 0`, re-armed by the driver's per-stage `reinit!`) and reuses that
+factorization for the stage's remaining iterations, so multi-iteration steps
+skip most factorizations versus full Newton. It re-linearizes at every step's
+operating point, which keeps it robust — an earlier attempt to reuse *across*
+steps (keying only off the stepper's `recompute_jacobian`) went `Unstable`
+with dt underflow on a switching rectifier, because the Jacobian went too
+stale. It also refactors on `always_new=true` (full Newton) or when `correct!`
+reports it changed the previous iterate (limiter fired → evaluation point
+moved). The limiting corrector remains a **dormant safety net** that only
+engages — and only then pays for a re-linearization — if a junction swings
+hard in a single step. The `CedarPCNRCorrect` hook tallies activations in
+`PCNR_ACTIVATIONS` (`pcnr_activations()` / `reset_pcnr_activations!()`), and
+the vacask `runme.jl` scripts print the count — so "the corrector never fired"
+is visible in the benchmark output itself, not only via external
+instrumentation.
 
 **Measured (Newton iterations per accepted step; short runs, Julia 1.12).**
 FBDF+PCNR reaches the SPICE ideal of ~1 iteration/step on the diode circuits,
