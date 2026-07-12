@@ -2435,7 +2435,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             dc_val = cg_expr!(state, val.dcval)
         elseif val isa SNode{SP.ACSource}
             ac_mag = cg_expr!(state, val.acmag)
-            # Note: acphase not currently supported in parser
+            ac_phase = val.acphase !== nothing ? cg_expr!(state, val.acphase) : nothing
         elseif val isa SNode{SP.TranSource}
             tran_source = val
         end

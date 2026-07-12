@@ -48,3 +48,17 @@ Researching what is out there and trying it out is worthwile.
 The most nebulous and least important at this stage: copying features from other simulators
 
 # Progress
+
+## AC source phase (`V1 ... AC mag phase`)
+
+NyanSpectreNetlistParser's `ACSource` node only captured magnitude; phase was
+parsed-and-discarded (`# TODO acphase` in forms.jl), so `ac.jl` had to
+document phase as an unsupported limitation even though the MNA codegen
+already had a `ac_phase` slot wired to `mag * exp(im * phase_deg * π/180)` —
+it just always saw `nothing`. Added `acphase::Union{Nothing, EXPR}` to
+`ACSource` and an optional trailing-expression parse (guarded by
+`!is_kw`, so it doesn't eat a following `SIN(...)`/keyword), then threaded
+it through `sema_visit_ids!` and both SPICE `cg_mna_instance!` call sites in
+Cadnip. Added a `test/ac.jl` case asserting a 90 phase source resolves to
+`+j`. The Spectre path already supported `acphase=` as a named param, so this
+was SPICE-only.

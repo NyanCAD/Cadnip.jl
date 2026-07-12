@@ -70,6 +70,20 @@ an_L3 = ControlSystemsBase.freqrespv(G, ωs)
 @test V_L3 ≈ an_L3
 
 #==============================================================================#
+# AC source phase (V1 ... AC mag phase)
+#==============================================================================#
+
+const acphase_circuit = sp"""
+* AC source with explicit phase
+V1 vin 0 AC 1 90
+R1 vin 0 1k
+"""i
+
+acphase_sol = ac!(MNACircuit(acphase_circuit))
+# A 90 degree phase shift rotates the unit phasor from 1+0im to 0+1im
+@test all(Cadnip.freqresp(acphase_sol, :vin, [1.0, 10.0]) .≈ 1.0im)
+
+#==============================================================================#
 # Limitations - Functionality Not Yet Implemented in MNA AC
 #==============================================================================#
 

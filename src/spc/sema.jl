@@ -231,7 +231,7 @@ end
 
 function sema_visit_ids!(f, expr::SNode{SP.ACSource})
     sema_visit_ids!(f, expr.acmag)
-    # Note: acphase is not currently supported in the parser
+    expr.acphase !== nothing && sema_visit_ids!(f, expr.acphase)
 end
 
 function sema_visit_ids!(f, expr::Union{SNode{SC.FunctionCall}, SNode{SP.FunctionCall}})

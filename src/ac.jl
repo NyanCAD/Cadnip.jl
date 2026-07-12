@@ -23,16 +23,12 @@
 #    Device voltages can be computed as node differences:
 #      `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`
 #
-# 2. AC source phase: Only magnitude is supported (`V1 in 0 AC 1`). Phase
-#    specification (`V1 in 0 AC 1 45`) is parsed but ignored because
-#    NyanSpectreNetlistParser's ACSource node doesn't expose the acphase field.
-#
-# 3. Noise analysis: The `noise!()` function is not implemented. Requires:
+# 2. Noise analysis: The `noise!()` function is not implemented. Requires:
 #    - Per-device noise source modeling (thermal, shot, flicker)
 #    - Noise correlation matrix assembly
 #    - Output noise spectral density computation
 #
-# 4. Combined AC+transient sources: When a source has both AC and transient
+# 3. Combined AC+transient sources: When a source has both AC and transient
 #    specifications (e.g., `V1 in 0 AC 1 SIN(0 1 1k)`), only the transient
 #    source is generated. Use separate sources or AC-only specification.
 #
