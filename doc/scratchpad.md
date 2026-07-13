@@ -40,7 +40,7 @@ Or explore how different solvers perform on different problems.
 
 One of the big selling points of CedarSim and Cadnip is that we have access to the whole Julia ecosystem, and in particular SciML.
 Basically anything that benefits from differentiability of the simulator.
-There were ideas of design optimization, surrogates, inverse design, and more rigorous alternatives to Monte-Carlo.
+There were ideas of design optimization, surrogates, inverse design, GPU acceleration, and more rigorous alternatives to Monte-Carlo.
 Researching what is out there and trying it out is worthwile.
 
 ## Features
