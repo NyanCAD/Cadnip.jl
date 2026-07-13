@@ -84,6 +84,46 @@ acphase_sol = ac!(MNACircuit(acphase_circuit))
 @test all(Cadnip.freqresp(acphase_sol, :vin, [1.0, 10.0]) .≈ 1.0im)
 
 #==============================================================================#
+# Combined AC + transient sources (V1 ... AC mag phase SIN(...)/PWL(...)/PULSE(...))
+#==============================================================================#
+
+# A source can carry both an AC spec (for ac!) and a transient spec (for
+# tran!) at once; the AC phasor must still reach b_ac even though a
+# transient function is also attached.
+const acsin_circuit = sp"""
+V1 vin 0 AC 1 90 SIN(0 1 1k)
+R1 vin 0 1k
+"""i
+
+acsin_sol = ac!(MNACircuit(acsin_circuit))
+@test all(Cadnip.freqresp(acsin_sol, :vin, [1.0, 10.0]) .≈ 1.0im)
+
+# The transient spec is unaffected by the AC spec: tran! still follows SIN.
+tran_sol = tran!(MNACircuit(acsin_circuit), (0.0, 1e-3))
+@test tran_sol(0.0, idxs=:vin) ≈ 0.0 atol=1e-9
+@test tran_sol(250e-6, idxs=:vin) ≈ 1.0 atol=1e-3  # quarter period peak of a 1kHz sine
+
+#==============================================================================#
+# Spectre AC sources (vsource/isource mag=/phase=)
+#==============================================================================#
+
+const spectre_ac_circuit = spc"""
+v1 (vin 0) vsource dc=0 mag=1 phase=90
+r1 (vin 0) resistor r=1k
+"""i
+
+spectre_ac_sol = ac!(MNACircuit(spectre_ac_circuit))
+@test all(Cadnip.freqresp(spectre_ac_sol, :vin, [1.0, 10.0]) .≈ 1.0im)
+
+const spectre_ac_isource_circuit = spc"""
+i1 (vin 0) isource mag=1
+r1 (vin 0) resistor r=1
+"""i
+
+spectre_ac_isource_sol = ac!(MNACircuit(spectre_ac_isource_circuit))
+@test all(Cadnip.freqresp(spectre_ac_isource_sol, :vin, [1.0, 10.0]) .≈ 1.0 + 0.0im)
+
+#==============================================================================#
 # Limitations - Functionality Not Yet Implemented in MNA AC
 #==============================================================================#
 

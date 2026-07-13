@@ -62,3 +62,35 @@ it through `sema_visit_ids!` and both SPICE `cg_mna_instance!` call sites in
 Cadnip. Added a `test/ac.jl` case asserting a 90 phase source resolves to
 `+j`. The Spectre path already supported `acphase=` as a named param, so this
 was SPICE-only.
+
+## Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
+
+Two related gaps in `src/spc/codegen.jl`'s MNA `cg_mna_instance!`, both from
+`ac.jl`'s documented limitations list:
+
+1. **SPICE `V1 ... AC mag phase SIN(...)`** (or PWL/PULSE): the transient
+   branches built `VoltageSource`/`CurrentSource` without ever passing the
+   `ac=` kwarg, even though the constructor and `stamp!` (`src/mna/devices.jl`)
+   have supported simultaneous `dc`/`ac`/`tran` fields all along — `ac!()`
+   reads `.ac` into `b_ac` independently of whatever `.tran` closure is
+   attached. So a source with both specs silently dropped the AC one. Fixed
+   by threading `ac_expr` through every transient-source branch (PWL
+   zero-alloc + fallback, SIN, PULSE, and the unknown-type fallback) for both
+   voltage and current sources.
+
+2. **Spectre `vsource`/`isource` had no AC support at all** in the MNA
+   backend (`master == "vsource"/"isource"` in `cg_mna_instance!`) — despite
+   the doc note above claiming otherwise (that turned out to refer to the old
+   DAECompiler-era `cg_instance!`/`cg_spice_instance!` path, not the current
+   MNA codegen; grepping for `"mag"`/`"phase"` param names outside test files
+   turned up nothing). `ac!()` on a Spectre netlist using `vsource dc=... mag=...`
+   would just get `ac=0+0im` always. Added `_cg_spectre_ac_expr` (mirrors the
+   SPICE `mag * exp(im * phase_deg * π/180)` construction, reading Spectre's
+   `mag=`/`phase=` params) and threaded it through both masters' DC/PWL/SIN
+   (vsource) and DC/PWL (isource) branches.
+
+Added `test/ac.jl` cases: a SPICE source with both `AC 1 90` and `SIN(0 1 1k)`
+(checks `ac!` sees the phasor and `tran!` still follows the sine), plus
+Spectre `vsource mag=1 phase=90` and `isource mag=1` cases. Verified against
+`test/basic.jl`, `test/transients.jl`, `test/mna/core.jl` (356/356), and
+`test/mna/subckt_scoping.jl` with no regressions.

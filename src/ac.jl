@@ -28,10 +28,6 @@
 #    - Noise correlation matrix assembly
 #    - Output noise spectral density computation
 #
-# 3. Combined AC+transient sources: When a source has both AC and transient
-#    specifications (e.g., `V1 in 0 AC 1 SIN(0 1 1k)`), only the transient
-#    source is generated. Use separate sources or AC-only specification.
-#
 # Bode plots: Use RobustAndOptimalControl to convert DescriptorStateSpace to
 # standard StateSpace: `bode(ss(ac[:vout]), ωs)`
 #==============================================================================#
