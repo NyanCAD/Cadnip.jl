@@ -51,14 +51,8 @@ The most nebulous and least important at this stage: copying features from other
 
 ## AC source phase (`V1 ... AC mag phase`)
 
-NyanSpectreNetlistParser's `ACSource` node only captured magnitude; phase was
-parsed-and-discarded (`# TODO acphase` in forms.jl), so `ac.jl` had to
-document phase as an unsupported limitation even though the MNA codegen
-already had a `ac_phase` slot wired to `mag * exp(im * phase_deg * π/180)` —
-it just always saw `nothing`. Added `acphase::Union{Nothing, EXPR}` to
-`ACSource` and an optional trailing-expression parse (guarded by
-`!is_kw`, so it doesn't eat a following `SIN(...)`/keyword), then threaded
-it through `sema_visit_ids!` and both SPICE `cg_mna_instance!` call sites in
-Cadnip. Added a `test/ac.jl` case asserting a 90 phase source resolves to
-`+j`. The Spectre path already supported `acphase=` as a named param, so this
-was SPICE-only.
+Added SPICE `AC mag phase` parsing (previously discarded) and threaded it through to the MNA codegen's already-present `ac_phase` slot; see commit history / PR #214 for details.
+
+## Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
+
+Fixed SPICE sources with both an AC and transient spec silently dropping the AC part, and added missing AC (`mag=`/`phase=`) support to Spectre's `vsource`/`isource` in the MNA backend; see commit history / PR #215 for details.
