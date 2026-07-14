@@ -56,3 +56,7 @@ Added SPICE `AC mag phase` parsing (previously discarded) and threaded it throug
 ## Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
 
 Fixed SPICE sources with both an AC and transient spec silently dropping the AC part, and added missing AC (`mag=`/`phase=`) support to Spectre's `vsource`/`isource` in the MNA backend; see commit history / PR #215 for details.
+
+## Cleanup: drop dead backward-compat aliases
+
+Removed unused deprecated aliases (`MNACircuitProblem`, the legacy 4-arg `MNACircuit(builder, params, spec, tspan)` constructor, `AnyStampContext`, `branches_have_same_alloc_count`) and a stale self-contradictory `MNAData` docstring note; none were referenced anywhere in the tree.

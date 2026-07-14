@@ -662,7 +662,3 @@ and zero-copy restamping (DirectStampContext).
 """
 const AnyMNAContext = Union{MNAContext, DirectStampContext}
 export AnyMNAContext
-
-# Alias for backward compatibility
-const AnyStampContext = AnyMNAContext
-export AnyStampContext
