@@ -453,6 +453,11 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 name = LSymbol(param.name)
                 push!(get!(()->[], scope.options, name), scope.global_position=>param)
             end
+        elseif isa(stmt, SNode{SP.TempStatement})
+            # `.temp <value>` is equivalent to `.option temp=<value>`; funnel it
+            # through the same option channel so codegen threads it into MNASpec.
+            # Later definitions win via the `[end]` lookup in codegen.
+            push!(get!(()->[], scope.options, :temp), scope.global_position=>stmt)
         elseif isa(stmt, SNode{SP.ParamStatement})
             for param in stmt.params
                 name = LSymbol(param.name)
@@ -528,8 +533,16 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                     sema_include!(scope, includee)
                 end
             end
-        elseif isa(stmt, SNode{SP.Tran}) || isa(stmt, SNode{SP.EndStatement})
-            # Ignore for Sema purposes
+        elseif isa(stmt, SNode{SP.Tran}) || isa(stmt, SNode{SP.EndStatement}) ||
+               isa(stmt, SNode{SP.ACStatement}) || isa(stmt, SNode{SP.DCStatement}) ||
+               isa(stmt, SNode{SP.PrintStatement}) || isa(stmt, SNode{SP.WidthStatement}) ||
+               isa(stmt, SNode{SP.ICStatement}) || isa(stmt, SNode{SP.MeasurePointStatement}) ||
+               isa(stmt, SNode{SP.MeasureRangeStatement}) ||
+               isa(stmt, SNode{SP.DataStatement}) || isa(stmt, SNode{SP.CSParamStatement})
+            # Analysis (.ac/.dc/.tran), output (.print/.width/.meas), and
+            # initial-condition/data (.ic/.data/.csparam) control cards carry no
+            # information the MNA netlist builder consumes. Ignore them rather
+            # than crashing; the frequency/time sweep is driven by ac!/tran!.
         elseif isa(stmt, SNode{SP.IfBlock})
             depth = length(scope.condition_stack)
             for case in stmt.cases

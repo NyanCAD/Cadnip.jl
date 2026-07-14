@@ -589,8 +589,10 @@ end
     @test_broken isapprox_deftol(sol[:vcc], -10.0)
 end
 
-# Currently errors at sema stage - .temp directive handling calls error()
-#=
+# `.temp <value>` is funneled through the same option channel as `.option
+# temp=<value>` (see sema.jl), so it shares the same (currently broken)
+# temper-in-.param propagation. What it no longer does is crash at the sema
+# stage.
 @testset "SPICE parameter scope (.temp)" begin
     # Test .temp directive
     spice_code = """
@@ -602,9 +604,8 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo = temper = 10 (from .temp)
-    @test isapprox_deftol(sol[:vcc], -10.0)
+    @test_broken isapprox_deftol(sol[:vcc], -10.0)
 end
-=#
 
 @testset "SPICE parameter scope (default temper)" begin
     # Test that the default temper is 27
@@ -617,6 +618,32 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # Default temper = 27
     @test isapprox_deftol(sol[:vcc], -27.0)
+end
+
+# Analysis (.ac/.dc/.tran), output (.print/.width), and initial-condition
+# (.ic) control cards used to crash the semantic analysis stage with
+# `@show stmt; error()`. They carry no information the MNA netlist builder
+# consumes, so they must be ignored, not fatal.
+@testset "Control/analysis dot-cards are ignored, not fatal" begin
+    # A trivial resistive divider (out = 5 * 1k/(1k+1k) = 2.5V) sprinkled with
+    # control cards the builder does not consume.
+    base = """
+    * control cards
+    V1 vcc 0 DC 5
+    R1 vcc out 1k
+    R2 out 0 1k
+    """
+    for card in (
+        ".ac dec 10 1 1e6",
+        ".dc V1 0 5 0.1",
+        ".print dc v(out)",
+        ".width out=80",
+        ".ic v(out)=1",
+    )
+        spice_code = base * card * "\n"
+        ctx, sol = solve_mna_spice_code(spice_code)
+        @test isapprox_deftol(sol[:out], 2.5)
+    end
 end
 
 # Currently errors at runtime - instance param referencing other params not scoped correctly
