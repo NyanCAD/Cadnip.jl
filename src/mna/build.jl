@@ -18,9 +18,6 @@ Assembled MNA data (matrices and metadata) ready for analysis.
 Contains the sparse G and C matrices and RHS vector b representing:
     G*x + C*dx/dt = b
 
-Note: Previously named `MNAData`. The name was changed to avoid confusion with
-SciML's "System" types. `MNAData` is kept as a deprecated alias.
-
 # Fields
 - `G::SparseMatrixCSC{T,Int}`: Conductance matrix (resistive/algebraic part)
 - `C::SparseMatrixCSC{T,Int}`: Capacitance matrix (reactive/differential part)

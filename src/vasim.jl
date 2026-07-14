@@ -1900,9 +1900,6 @@ function branches_have_same_allocs(ifex::Expr)
     return true
 end
 
-# Keep old function name as alias for backward compatibility
-branches_have_same_alloc_count(ifex::Expr) = branches_have_same_allocs(ifex)
-
 """
     hoist_conditional_stamps(ifex::Expr) -> (hoisted_exprs, transformed_ifex)
 
