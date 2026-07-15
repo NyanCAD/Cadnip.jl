@@ -148,7 +148,17 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     ESDIRK family (Kvaerno5/KenCarp4/TRBDF2). They don't: all four go
 #     `:Unstable` at nearly every tolerance on both diode circuits, doing
 #     *worse* than KenCarp4's partial success on `mul` - not added anywhere.
-#   - IDA and FBDF are robust on every case.
+#   - IDA is robust on every case; FBDF is robust on every case except
+#     `darlington`, where it converges at the loosest reltol=1e-3 (9381
+#     steps) but goes `:Unstable` at every tighter tolerance (`dt` forced
+#     below floating-point epsilon during the sharp BJT turn-on/turn-off
+#     edges) - confirmed via a local Cadnip-only sweep (no min-reltol cutoff
+#     needed: the failures are cheap/clean, not slow/hanging like Rodas6P on
+#     `mul` below, so there's no runtime reason to bound it, just an
+#     accuracy ceiling). Left in `SOLVERS` unconditionally since the
+#     `run_cadnip_sweep`/`analyze` pipeline already excludes non-`Success`
+#     runs from the plotted curve rather than erroring - FBDF just shows a
+#     single point on `darlington`'s work-precision diagram.
 #   - Rodas6P on `mul` degrades catastrophically (not just fails) below
 #     reltol=1e-5: it took 451s/6.4M steps to *finish* reltol=1e-6 (vs
 #     KenCarp4's 2.2s/43775 steps at the same tolerance) and then hung

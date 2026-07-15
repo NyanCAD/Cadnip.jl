@@ -41,16 +41,22 @@ gracefully with tolerance. Autonomous/digital circuits (ring oscillator, digital
 multiplier) are deliberately avoided: their phase error accumulates without bound, so
 the WPD curve saturates at O(1) and "falls off a cliff".
 
-| Case     | What                                       | Golden |
-|----------|--------------------------------------------|--------|
-| `filter` | 3rd-order Butterworth LC ladder (linear)   | analytic (exact) |
-| `rc`     | RC network driven by a pulse train (linear)| analytic (exact) |
-| `graetz` | Graetz bridge full-wave rectifier (diodes) | VACASK (tight) |
-| `mul`    | Diode voltage multiplier (stiff, diodes)   | Cadnip IDA (tight) |
+| Case         | What                                           | Golden |
+|--------------|-------------------------------------------------|--------|
+| `filter`     | 3rd-order Butterworth LC ladder (linear)         | analytic (exact) |
+| `rc`         | RC network driven by a pulse train (linear)      | analytic (exact) |
+| `graetz`     | Graetz bridge full-wave rectifier (diodes)       | VACASK (tight) |
+| `mul`        | Diode voltage multiplier (stiff, diodes)         | self |
+| `darlington` | Darlington pair BJT switch (multi-junction)      | self |
 
 `filter` is a smooth drive; `rc` adds sharp source edges (Cadnip gets `tstops` at the
 pulse breakpoints, as SPICE engines break at source breakpoints internally); `graetz`
-and `mul` add the diode nonlinearity, `mul` being markedly stiffer.
+and `mul` add the diode nonlinearity, `mul` being markedly stiffer; `darlington` swaps
+diodes for cascaded BJTs (three junctions each) switched by a fast pulse train - see
+`benchmarks/vacask/README.md`'s "Darlington pair switch" section for why it has no
+upstream Xyce/Gnucap/Ngspice numbers to lean on, which is also why it follows `mul`'s
+`self`-golden precedent rather than assuming a shared VACASK/Cadnip golden is fair here
+too.
 
 ## Precision / golden reference
 
@@ -103,12 +109,29 @@ Not a blanket linear/nonlinear split — viability was checked empirically per c
 `Success`, or one that doesn't reach `t1`) is excluded rather than plotted as a false
 data point:
 
-| Case     | Solvers                        |
-|----------|---------------------------------|
-| `filter` | IDA, FBDF, Rodas6P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
-| `rc`     | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
-| `graetz` | IDA, FBDF, Rodas5P, RadauIIA5 |
-| `mul`    | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P |
+| Case         | Solvers                        |
+|--------------|---------------------------------|
+| `filter`     | IDA, FBDF, Rodas6P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
+| `rc`         | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
+| `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5 |
+| `mul`        | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P |
+| `darlington` | IDA, FBDF |
+
+- **`darlington` keeps the solver set deliberately minimal (IDA, FBDF) rather
+  than repeating the full survey done for the other three circuits.** It's a
+  general-purpose addition (see `benchmarks/vacask/README.md`), not a case
+  built to probe solver families, so it only carries the two solvers already
+  documented as robust everywhere else in this suite. Confirmed locally: IDA
+  converges cleanly across the whole `reltols` sweep (1e-3 down to 1e-9, step
+  counts scaling sensibly from 2361 to 30355). FBDF converges only at the
+  loosest reltol=1e-3 (9381 steps) and goes `:Unstable` at every tighter
+  tolerance — `dt` forced below floating-point epsilon during the BJT's sharp
+  turn-on/turn-off edges. That's a clean, cheap failure (unlike Rodas6P's
+  slow degradation on `mul` below), so it needs no `min_reltol` guard: it
+  just contributes a single point to `darlington`'s work-precision plot. The
+  `self`-golden VACASK-side numbers were not run locally in this session (no
+  VACASK binary available in this environment) — they come from the CI
+  `work-precision` job, which fetches VACASK before running `run_wpd.jl`.
 
 - **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
   alternative to backward Euler; both get stuck in the diode's stiff turn-on
