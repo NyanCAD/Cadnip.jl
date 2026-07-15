@@ -481,98 +481,105 @@ function _dc_pcnr_newton(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractV
     L == 0 && return u0, false, 0
     lim0 = n - L
 
+    # The predict phase is plain Newton on the augmented system; we delegate it
+    # to NonlinearSolve's `NewtonRaphson`, which runs the corrector hook (see
+    # `NewtonRaphson(; corrector=...)`) at the seam between the state update and
+    # the residual re-evaluation. Everything device-specific stays here: the
+    # companion Jacobian (`cs.G`, not AD), the recorded-`w` corrector, cold-start
+    # seeding + `initjct`, and the settle-and-reverify post-pass.
     u = copy(u0)
-    F = zeros(n)
-    # Cached linear solve: the sparsity pattern of cs.G is fixed across
-    # iterations, so factor symbolically once (KLU reuse_symbolic) and only
-    # refactor numerically each iteration — a from-scratch `cs.G \ F` per
-    # iteration re-runs the symbolic ordering every time.
-    linalg = cs.G isa SparseMatrixCSC ? KLUFactorization() : nothing
-    lincache = init(LinearProblem(cs.G, F), linalg)
 
-    # Cold start: seed limiting variables from their allocation-time inits,
-    # and arm the initjct signal (ngspice MODEINITJCT) so the first stamping
-    # evaluates limited devices at their seeds (e.g. vcrit) instead of at
-    # the cold probe voltages — see limit!. Armed immediately before the
-    # try/finally so nothing can throw while the flag is set.
-    if iszero(u0)
-        for k in 1:L
+    # Cold start: seed limiting variables from their allocation-time inits so
+    # the first stamping evaluates limited devices at their seeds (e.g. vcrit)
+    # instead of at the cold probe voltages — see limit!.
+    cold = iszero(u0)
+    if cold
+        @inbounds for k in 1:L
             u[lim0 + k] = cs.limit_init[k]
         end
-        ws.dctx.initjct = true
     end
 
-    try
-    for iter in 1:maxiters
-        # Stamp at the (corrected) iterate; cs.G is the Jacobian of the
-        # companion formulation, ws.dctx.b the matching RHS.
-        fast_rebuild!(ws, cs, u, 0.0)
-        ws.dctx.initjct = false  # only the first stamping of a cold start
-        mul!(F, cs.G, u)
-        F .-= ws.dctx.b
-        all(isfinite, F) || return u, false, iter - 1
+    # residual!/jacobian! mirror _dc_newton_compiled: F = G*u - b with the
+    # companion Jacobian G supplied explicitly (no AD). `p` is the EvalWorkspace,
+    # so the corrector can reach `ws.dctx.limit_w` without a spec object.
+    function residual!(F, uu, p)
+        fast_rebuild!(p, cs, uu, 0.0)
+        mul!(F, cs.G, uu)
+        F .-= p.dctx.b
+        return nothing
+    end
+    function jacobian!(J, uu, p)
+        fast_rebuild!(p, cs, uu, 0.0)
+        copyto!(J, cs.G)
+        return nothing
+    end
 
-        # Residual includes the g_lim rows, so convergence implies both KCL
-        # and x_lim == V_branch (i.e. no active limiting) — SPICE's "no
-        # limiting applied" convergence condition falls out automatically.
-        if norm(F) < abstol
-            # Settle the limit slots: the corrector normally runs after the
-            # predict step, so x_lim lags one iterate behind (x_lim = V from
-            # the *previous* stamping) and |F| carries |ΔV_last| in the g_lim
-            # rows even though KCL converged quadratically. Reaching this
-            # branch implies the limiter was inert on the stamping above
-            # (pnjlim's pass-through returns vnew bit-exactly), so this
-            # iteration's recorded limit_w already equals the branch voltages
-            # — adopting it lag-free settles the g_lim rows exactly.
-            # Re-verify so downstream consumers with tighter tolerances
-            # (transient CheckInit) see a consistent state.
-            limit_w = ws.dctx.limit_w
-            @inbounds for k in 1:L
-                u[lim0 + k] = limit_w[k]
-            end
-            fast_rebuild!(ws, cs, u, 0.0)
-            mul!(F, cs.G, u)
-            F .-= ws.dctx.b
-            if norm(F) < abstol
-                return u, true, iter - 1
-            end
-            # else: settled state regressed (still-active limiting edge
-            # case) — fall through and keep iterating from it.
-        end
-
-        # PREDICT: plain Newton step on the augmented system, reusing the
-        # cached factorization (numeric-only refactor; pattern is fixed).
-        lincache.A = cs.G
-        lincache.b = F
-        δ = try
-            solve!(lincache).u
-        catch err
-            err isa LinearAlgebra.SingularException && return u, false, iter - 1
-            rethrow()
-        end
-        all(isfinite, δ) || return u, false, iter - 1
-
-        # CORRECT: adopt the recorded limited voltages — the values the
-        # devices actually evaluated at during this iteration's stamping
-        # (via limit!/record_limit_w!) — so they become vold for the next
-        # iteration. Spec-free: the simulator needs no knowledge of any
-        # device's limiter function.
-        @inbounds for i in 1:n
-            u[i] -= δ[i]
-        end
-        limit_w = ws.dctx.limit_w
+    # CORRECT: adopt the recorded limited voltages — the values the devices
+    # actually evaluated at during the *previous* stamping (via
+    # limit!/record_limit_w!) — into the trailing limit slots, so they become
+    # vold for the next iteration. Spec-free: the simulator needs no knowledge
+    # of any device's limiter function.
+    #
+    # Clearing `initjct` here (rather than in residual!) is deliberate: the
+    # upstream loop evaluates the residual at init and the Jacobian at the start
+    # of step 1, both of which must see the cold-start seed. The corrector fires
+    # after step 1's update but before its residual, so this is the first point
+    # where the seed linearization is complete — clearing here keeps the MODEINITJCT
+    # bypass active for exactly that first residual+Jacobian pair, matching the
+    # hand-rolled loop's first iterate. Idempotent on later steps.
+    function corrector!(uu, _u_prev, p)
+        limit_w = p.dctx.limit_w
         @inbounds for k in 1:L
-            u[lim0 + k] = limit_w[k]
+            uu[lim0 + k] = limit_w[k]
         end
+        p.dctx.initjct = false
+        return nothing
     end
 
-    return u, false, maxiters
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=cs.G)
+    nlprob = NonlinearProblem(nlfunc, u, ws)
+
+    # Arm the initjct signal (ngspice MODEINITJCT) just before the solve so the
+    # first (cold) stamping bypasses the limiter; the corrector clears it after
+    # the first step. try/finally guarantees the arm never outlives this solve —
+    # the workspace is reused by the fallback tiers and transient stepping, and
+    # a stuck flag would silently pin every limited device at its seed.
+    ws.dctx.initjct = cold
+    local sol
+    try
+        sol = solve(nlprob, NewtonRaphson(autodiff=nothing, corrector=corrector!);
+                    abstol=abstol, maxiters=maxiters)
     finally
-        # The initjct arm must never outlive this solve — the workspace is
-        # reused by the fallback tiers and by transient stepping, and a
-        # stuck flag would silently pin every limited device at its seed.
         ws.dctx.initjct = false
     end
+
+    iters = sol.stats.nsteps
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+    converged || return sol.u, false, iters
+
+    # Settle the limit slots: the corrector runs after the predict step, so
+    # x_lim lags one iterate behind (x_lim = V from the *previous* stamping) and
+    # |F| carries |ΔV_last| in the g_lim rows even though KCL converged
+    # quadratically. Convergence implies the limiter was inert on the final
+    # stamping (pnjlim's pass-through returns vnew bit-exactly), so the recorded
+    # limit_w already equals the branch voltages — adopting it lag-free settles
+    # the g_lim rows exactly. Re-verify so downstream consumers with tighter
+    # tolerances (transient CheckInit) see a consistent state.
+    u = copy(sol.u)
+    limit_w = ws.dctx.limit_w
+    @inbounds for k in 1:L
+        u[lim0 + k] = limit_w[k]
+    end
+    F = zeros(n)
+    fast_rebuild!(ws, cs, u, 0.0)
+    mul!(F, cs.G, u)
+    F .-= ws.dctx.b
+    if norm(F) < abstol
+        return u, true, iters
+    end
+    # Settled state regressed (still-active limiting edge case) — return the
+    # solver's converged iterate as-is.
+    return sol.u, true, iters
 end
 
 #==============================================================================#
