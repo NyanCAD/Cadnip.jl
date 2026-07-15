@@ -209,17 +209,30 @@ On failure it falls through to the unchanged standard chain
 > limiter is inline VA. It was replaced by the recorded-`w` scheme above to
 > keep one system; `pnjlim` survives as the limiter function itself.
 
-### Scope: DC and transient initialization. In-step transient: investigated and rejected.
+### Scope: DC and transient initialization. In-step transient: built, and its activation condition found structurally unsatisfiable.
 
 The corrector runs in `_dc_pcnr_newton`, i.e. for `dc!` and for transient
 *initialization* (`CedarDCOp`/`CedarTranOp` route through
 `_dc_solve_with_fallbacks`). SPICE also applies pnjlim on every NR iteration
 inside every timestep (`vold` seeded from the previous timepoint); Cadnip
 does not, and — unlike the DC case — this is not a missing feature. It was
-built and benchmarked (2026-07), and found to be structurally unable to help.
-During stepping the limit variables ride along inertly (see the equivalence
-argument below); the paragraphs below explain why that inertness cannot be
-engineered away.
+built and benchmarked (2026-07).
+
+**What was actually shown, precisely.** This is not a claim that limiting
+partway through a transient step would provide no benefit if it fired — that
+question was never tested and is not what the argument below addresses. What
+was shown is narrower and mechanical: the *classical* limiting mechanism —
+compare the newly proposed branch voltage against a `vold` carried from
+somewhere else, and only pass through unmodified when they already agree —
+never has a chance to distinguish anything during a warm-started step,
+because both quantities it's comparing are forced to the same value before
+the comparison ever happens (see below). The corrector's *detection
+condition* is structurally unsatisfiable there, not observed-and-found-
+useless. During stepping the limit variables ride along inertly as a
+consequence of that; the paragraphs below explain why that specific inertness
+cannot be engineered away by tuning the corrector, and why it says nothing
+about the discontinuity-reinitialization case ("Open question" below), where
+the same detection condition is not forced.
 
 **What was tried.** `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg` lets an
 implicit stepper delegate its stage solve to any NonlinearSolve.jl algorithm,
@@ -279,11 +292,13 @@ regression for zero functional benefit.
 
 **Conclusion.** *Warm-started* in-step limiting — a normal predictor-then-
 correct step, which is what every step of a driven transient is once the
-integrator is past its first point — is inert by construction, for the reason
-above, under any predictor/corrector ODE/DAE integrator that extrapolates the
-limiting state the same way it extrapolates everything else. That covers
-every step tested here (see "Open question" below for the one class of step
-that was *not* tested). The DC/init corrector is unaffected and remains the
+integrator is past its first point — has its activation condition forced
+unsatisfiable by construction, for the reason above, under any
+predictor/corrector ODE/DAE integrator that extrapolates the limiting state
+the same way it extrapolates everything else. That is a statement about the
+mechanism never getting to fire, not a statement about limiting being useless
+there if it could; it covers every step tested here (see "Open question"
+below for the one class of step that was *not* tested). The DC/init corrector is unaffected and remains the
 proven, working place for PCNR in this codebase: there is no predictor there,
 so `vold` genuinely lags. Sundials IDA (today's `tran!` default) could never
 have used the in-step mechanism anyway — its Newton loop is C — so no
