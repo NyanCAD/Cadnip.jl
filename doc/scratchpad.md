@@ -2,6 +2,8 @@ This file is for humans and agents to share ideas to work on and progress made.
 
 Don't take big tasks head on, break them up in planning docs and prerequisite groundwork until they seem easy.
 
+Spread your effort across different pillars.
+
 # Things to work on
 
 ## Cleanup
