@@ -115,22 +115,32 @@ data point:
 | `rc`         | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
 | `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5 |
 | `mul`        | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P |
-| `darlington` | IDA, FBDF |
+| `darlington` | IDA, FBDF, Rodas6P, RadauIIA5 (5th-order FIRK) |
 
-- **`darlington` keeps the solver set deliberately minimal (IDA, FBDF) rather
-  than repeating the full survey done for the other three circuits.** It's a
-  general-purpose addition (see `benchmarks/vacask/README.md`), not a case
-  built to probe solver families, so it only carries the two solvers already
-  documented as robust everywhere else in this suite. Confirmed locally: IDA
-  converges cleanly across the whole `reltols` sweep (1e-3 down to 1e-9, step
-  counts scaling sensibly from 2361 to 30355). FBDF converges only at the
-  loosest reltol=1e-3 (9381 steps) and goes `:Unstable` at every tighter
-  tolerance — `dt` forced below floating-point epsilon during the BJT's sharp
-  turn-on/turn-off edges. That's a clean, cheap failure (unlike Rodas6P's
-  slow degradation on `mul` below), so it needs no `min_reltol` guard: it
-  just contributes a single point to `darlington`'s work-precision plot. The
-  `self`-golden VACASK-side numbers were not run locally in this session (no
-  VACASK binary available in this environment) — they come from the CI
+- **`darlington` got IDA/FBDF first, then a real (if narrower) solver survey
+  once asked directly whether any non-BDF solver had actually been tried —
+  it hadn't.** It's a general-purpose addition (see
+  `benchmarks/vacask/README.md`), not a case built from scratch to probe
+  solver families, so the follow-up reused the five candidates the broader
+  4-case survey below had already flagged as sometimes-viable on nonlinear
+  circuits rather than repeating the full 12-candidate sweep. Confirmed
+  locally: IDA converges cleanly across the whole `reltols` sweep (1e-3 down
+  to 1e-9, step counts scaling sensibly from 2361 to 30355). FBDF converges
+  only at the loosest reltol=1e-3 (9381 steps) and goes `:Unstable` at every
+  tighter tolerance — `dt` forced below floating-point epsilon during the
+  BJT's sharp turn-on/turn-off edges; that's a clean, cheap failure (unlike
+  Rodas6P's slow degradation on `mul` below), so it needs no `min_reltol`
+  guard, it just contributes a single point to the plot. Rodas6P is fully
+  robust (`:Success` at every reltol) and strictly dominates Rodas5P on step
+  count there, so it alone joins `SOLVERS` (same call as `filter`).
+  RadauIIA5 is the cheapest solver at tight tolerance by a wide margin but
+  has a two-tolerance outlier (`:Unstable` at reltol=1e-3 and 1e-5 only,
+  `:Success` everywhere else) — added anyway since failed points are already
+  excluded from the plotted curve. Kvaerno5 and KenCarp4 both go `:Unstable`
+  at every tested reltol — excluded. Full numbers and the exact candidate
+  list are in `run_wpd.jl`'s `SOLVERS` comment and in "Solver survey" below.
+  The `self`-golden VACASK-side numbers were not run locally in this session
+  (no VACASK binary available in this environment) — they come from the CI
   `work-precision` job, which fetches VACASK before running `run_wpd.jl`.
 
 - **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
@@ -287,6 +297,30 @@ what's already folded into the table above:
   with real stage-derivative coupling (Rosenbrock, SDIRK/ESDIRK, FIRK)
   either stalls in the diode's stiff turn-on or goes unstable once the
   100kHz switching kicks in.
+
+**`darlington` follow-up (added later, narrower survey).** When `darlington`
+was added, it initially shipped with only IDA/FBDF (the two solvers "robust
+on every case" above), on the reasoning that it's a general-purpose addition
+rather than a case meant to probe solver families — not an actual empirical
+check. Asked directly whether any non-BDF solver had been tried, the answer
+was no, so the five candidates the broader sweep above had already flagged as
+sometimes-viable on nonlinear circuits (Rodas5P, Rodas6P, Kvaerno5,
+RadauIIA5, KenCarp4 — not the full 12-candidate list, since ABDF2/DFBDF/
+TRBDF2/QNDF/true-SDIRK were already established as strictly worse or
+unsuitable across every other nonlinear case) were run against `darlington`'s
+full `reltols` sweep. Results (exact step counts in `run_wpd.jl`'s `SOLVERS`
+comment): Rodas5P and Rodas6P are both fully robust (`:Success` at every
+reltol 1e-3 through 1e-9), with Rodas6P strictly dominating on step count at
+every single point - same call as `filter`, Rodas6P alone joins `SOLVERS`.
+RadauIIA5 is the cheapest solver at tight tolerance by a wide margin but has
+a two-tolerance outlier (`:Unstable` specifically at reltol=1e-3 and 1e-5,
+`:Success` at every other point including both looser 1e-4 and tighter 1e-6
+through 1e-9) - non-monotonic in a way that wasn't investigated further, but
+added anyway since the pipeline already excludes failed points from the
+plotted curve. Kvaerno5 and KenCarp4 both go `:Unstable` at every reltol
+tested - the BJT's stiff switching edge stalls them the same way the diode
+circuits' turn-on does, and unlike `mul`, KenCarp4 gets no partial win here -
+both excluded.
 
 ## Findings about VACASK
 

@@ -113,23 +113,37 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 
 # (name, constructor, min_reltol) per case. Not a blanket linear/nonlinear split -
 # solver viability varies by circuit, confirmed empirically (see
-# ../wpd/README.md "Solver survey" for the full 4-case x 12-candidate sweep this
-# was drawn from):
-#   - Kvaerno3/Kvaerno5 (SDIRK) get stuck in the diode's stiff turn-on transient on
-#     BOTH diode circuits (thousands of steps without leaving t~0) - used only on
-#     the linear cases.
+# ../wpd/README.md "Solver survey" for the full candidate sweep this was drawn
+# from, across filter/rc/graetz/mul plus a later darlington-only follow-up):
+#   - Kvaerno3/Kvaerno5 (SDIRK) get stuck in the stiff turn-on/turn-off
+#     transient on all three nonlinear cases - `graetz`/`mul` (diodes) AND
+#     `darlington` (BJTs: `:Unstable` at reltol 1e-3/1e-5/1e-7, burning up to
+#     34118 steps without making it past t~2e-6 of the 2e-5 tspan at the
+#     worst point) - used only on the linear cases.
 #   - Rodas5P works on `graetz` (correct rectified output at reltol 1e-3/1e-6,
 #     :Unstable only at the tightest 1e-9, already excluded by the retcode filter)
 #     but hangs on `mul` (its faster 100kHz cascaded-diode switching is far
-#     stiffer) even at the loosest reltol=1e-3 - excluded there.
+#     stiffer) even at the loosest reltol=1e-3 - excluded there. On `darlington`
+#     it's fully robust (`:Success` at every reltol 1e-3 through 1e-9) but
+#     Rodas6P dominates it there (see below), so it's left out in favor of
+#     Rodas6P alone, same call as `filter`.
 #   - RadauIIA5 (5th-order FIRK) matches or beats Rodas5P's accuracy-per-step on
 #     the linear cases and on `graetz` at loose/medium reltol, going :Unstable
 #     only past reltol=1e-5 there - added to filter/rc/graetz. Like Kvaerno5 it
-#     is not viable on `mul` (:Unstable at every reltol) - excluded there.
+#     is not viable on `mul` (:Unstable at every reltol) - excluded there. On
+#     `darlington` it's the cheapest solver at tight tolerance by a wide margin
+#     (5821 steps at reltol=1e-9 vs IDA's 30355 and Rodas6P's 547386) but has a
+#     two-tolerance outlier: `:Unstable` specifically at reltol=1e-3 and 1e-5,
+#     `:Success` at every other point tested (1e-4, 1e-6, 1e-7, 1e-8, 1e-9) -
+#     not investigated further (non-monotonic in reltol, unlike `rc`'s single-
+#     tolerance outlier below); added anyway since the pipeline already drops
+#     failed points from the plotted curve rather than erroring on them.
 #   - KenCarp4 (ESDIRK) fails everywhere on `graetz` but is one of two
 #     non-DAE solvers to produce any correct points on `mul` (reltol
 #     1e-3/1e-5, accuracy on par with IDA) before it too hits the 100kHz
-#     switching wall - added to `mul` alone for that partial coverage.
+#     switching wall - added to `mul` alone for that partial coverage. On
+#     `darlington` it gets none of that partial win: `:Unstable` at every
+#     reltol tested (1e-3/1e-5/1e-7) - excluded there too.
 #   - Rodas5P vs Rodas6P (6th-order, newest of the Rodas family) is
 #     genuinely case-dependent, not a strict order: Rodas5P is more
 #     accurate at every reltol on `rc` (though Rodas6P takes fewer steps
@@ -138,7 +152,10 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     `graetz` they cross over (Rodas5P wins loose reltol, Rodas6P wins
 #     medium, tied at 1e-7) - Rodas5P kept since the crossover favors it at
 #     the more commonly-used loose end; on `mul` Rodas6P is more accurate
-#     and reaches one more tolerance point - used there instead of Rodas5P.
+#     and reaches one more tolerance point - used there instead of Rodas5P;
+#     on `darlington` Rodas6P strictly dominates too (fewer steps than
+#     Rodas5P at all 7 reltols, e.g. 547386 vs 758645 at reltol=1e-9) -
+#     same call as `filter`.
 #     Net: each case gets whichever one wins there, never both (one
 #     Rosenbrock representative per case).
 #   - True (implicit-first-stage) SDIRK - SDIRK2, Cash4, Hairer4, Hairer42 -
@@ -172,7 +189,7 @@ const SOLVERS = Dict(
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
-    "darlington" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0)],
+    "darlington" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
 )
 solvers_for(case) = SOLVERS[case]
 
