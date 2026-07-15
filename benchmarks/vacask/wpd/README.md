@@ -113,9 +113,14 @@ data point:
 |--------------|---------------------------------|
 | `filter`     | IDA, FBDF, Rodas6P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
 | `rc`         | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
-| `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5 |
-| `mul`        | IDA, FBDF, KenCarp4 (4th-order ESDIRK), Rodas6P |
-| `darlington` | IDA, FBDF, Rodas6P, RadauIIA5 (5th-order FIRK) |
+| `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5, Kvaerno3/Kvaerno5/KenCarp4 (all `smooth_est=false`) |
+| `mul`        | IDA, FBDF, KenCarp4 (`smooth_est=false`), Rodas6P |
+| `darlington` | IDA, FBDF, Rodas6P, RadauIIA5, Kvaerno5/KenCarp4 (`smooth_est=false`) |
+
+`smooth_est=false` is a fix discovered after the fact (see "Kvaerno3/Kvaerno5/
+KenCarp4 needed `smooth_est=false`, not exclusion" below) — it's not a
+per-case tuning knob, it's what makes these algorithms usable on any of the
+nonlinear MNA circuits at all.
 
 - **`darlington` got IDA/FBDF first, then a real (if narrower) solver survey
   once asked directly whether any non-BDF solver had actually been tried —
@@ -136,18 +141,45 @@ data point:
   RadauIIA5 is the cheapest solver at tight tolerance by a wide margin but
   has a two-tolerance outlier (`:Unstable` at reltol=1e-3 and 1e-5 only,
   `:Success` everywhere else) — added anyway since failed points are already
-  excluded from the plotted curve. Kvaerno5 and KenCarp4 both go `:Unstable`
-  at every tested reltol — excluded. Full numbers and the exact candidate
-  list are in `run_wpd.jl`'s `SOLVERS` comment and in "Solver survey" below.
-  The `self`-golden VACASK-side numbers were not run locally in this session
-  (no VACASK binary available in this environment) — they come from the CI
-  `work-precision` job, which fetches VACASK before running `run_wpd.jl`.
+  excluded from the plotted curve. Kvaerno5 and KenCarp4 at their *default*
+  `smooth_est=true` both go `:Unstable` at every tested reltol — with
+  `smooth_est=false` (see below) both were re-tested and now join `SOLVERS`
+  (KenCarp4 across the entire reltol range, Kvaerno5 through 1e-8). Full
+  numbers and the exact candidate list are in `run_wpd.jl`'s `SOLVERS`
+  comment and in "Solver survey" below. The `self`-golden VACASK-side
+  numbers were not run locally in this session (no VACASK binary available
+  in this environment) — they come from the CI `work-precision` job, which
+  fetches VACASK before running `run_wpd.jl`.
 
-- **Kvaerno3/Kvaerno5 stall on both diode circuits.** Tried as a higher-order
-  alternative to backward Euler; both get stuck in the diode's stiff turn-on
-  transient on `graetz` and `mul` (thousands of steps without leaving `t≈0`), so no
-  SDIRK method is used on the diode cases — only on the linear `filter`/`rc`, where
-  Kvaerno5 works well and converges cleanly.
+- **Kvaerno3/Kvaerno5/KenCarp4 needed `smooth_est=false`, not exclusion —
+  the diode/BJT turn-on itself was never the actual problem.** Originally
+  documented as "stall on both diode circuits" and excluded outright. Root
+  cause, found by reading `OrdinaryDiffEqSDIRK`'s shared ESDIRK step
+  (`generic_imex_perform_step.jl`): the local error estimate branches on
+  `isnewton(nlsolver) && alg.smooth_est` (true by default for all three) —
+  when true, the raw embedded-difference error estimate is run through an
+  *extra linear solve* against the cached iteration matrix
+  `W = -(G + C/(γdt))` ("smoothing," a real stiff-ODE technique). Confirmed
+  directly on `darlington` with nothing else changed (no bridge, no custom
+  Jacobian): a corrector-activation trace showed Newton itself converging
+  cleanly (`θ≈0.3`, nowhere near the `θ>2` divergence threshold) on *every*
+  rejected retry, while `dt` shrank by exactly 1/5 each retry forever, down
+  past `1e-23`, without ever advancing `t` — the smoothed estimate itself
+  never shrinks properly as `dt→0` for MNA's mixed differential/algebraic
+  mass-matrix structure (`C` has zero rows for non-capacitive nodes, so
+  `W`'s scaling is inhomogeneous across rows as `1/(γdt)→∞`). Also ruled
+  out: Jacobian source (native already uses an explicit analytic `jac!=-G`,
+  not autodiff — the earlier `AutoFiniteDiff` vs `AutoForwardDiff` test
+  never actually varied the Jacobian at all) and the W-construction formula
+  (`jacobian2W!`'s generic combination is algebraically identical to the
+  bridge's hand-rolled one). `Kvaerno5(smooth_est=false)` alone reproduces
+  success. With the fix: full `:Success` on `graetz` for all three
+  (Kvaerno3/Kvaerno5/KenCarp4) across the bounded range checked (reltol 1e-3
+  to 1e-5); on `darlington`, KenCarp4 is fully `:Success` across the *entire*
+  reltol range (1e-3 to 1e-9) and Kvaerno5 through 1e-8. `mul` stays the
+  exception — it really is the stiffest case: Kvaerno5 only succeeds at the
+  single loosest reltol, and Kvaerno3 hits a `maxiters` bound at every
+  tested reltol including the loosest, reaching only ~10% of the tspan.
 - **The best single Rosenbrock variant is genuinely case-dependent — no
   strict order.** Head-to-head at matching tolerances:
   - `rc`: Rodas5P is more accurate at all 4 tolerances tested (e.g.
@@ -317,10 +349,13 @@ a two-tolerance outlier (`:Unstable` specifically at reltol=1e-3 and 1e-5,
 `:Success` at every other point including both looser 1e-4 and tighter 1e-6
 through 1e-9) - non-monotonic in a way that wasn't investigated further, but
 added anyway since the pipeline already excludes failed points from the
-plotted curve. Kvaerno5 and KenCarp4 both go `:Unstable` at every reltol
-tested - the BJT's stiff switching edge stalls them the same way the diode
-circuits' turn-on does, and unlike `mul`, KenCarp4 gets no partial win here -
-both excluded.
+plotted curve. Kvaerno5 and KenCarp4 at their default `smooth_est=true` both
+go `:Unstable` at every reltol tested - the BJT's stiff switching edge
+stalls them the same way the diode circuits' turn-on does. This turned out
+to be the wrong conclusion, not the final one: see "Kvaerno3/Kvaerno5/
+KenCarp4 needed `smooth_est=false`, not exclusion" above - with the fix,
+KenCarp4 is fully `:Success` across `darlington`'s entire reltol range and
+Kvaerno5 through 1e-8, both now in `SOLVERS`.
 
 ## Findings about VACASK
 
