@@ -188,6 +188,13 @@ function cg_expr!(state::CodegenState, cs::Union{SNode{SC.UnaryOp}, SNode{SP.Una
     return Expr(:call, op, cg_expr!(state, cs.operand))
 end
 
+# Options can be set either via `.option name=value` (a `Parameter` node with a
+# `.val` field) or, for temperature, via the standalone `.temp value` directive
+# (a `TempStatement` node whose value lives in `.temp`). Normalize both to the
+# underlying value expression node.
+_option_value_node(p::SNode{SP.Parameter}) = p.val
+_option_value_node(p::SNode{SP.TempStatement}) = p.temp
+
 function cg_expr!(state::CodegenState, id::Symbol)
     if id == Symbol("true")
         true
@@ -520,7 +527,7 @@ function codegen!(state::CodegenState)
         end
         temp_expr  = :(old_options.temp)
         if haskey(state.sema.options, :temp)
-            temp_expr = :($(Cadnip.isdefault)(old_options.temp) ? $(cg_expr!(state, state.sema.options[:temp][end][2].val)) : $temp_expr)
+            temp_expr = :($(Cadnip.isdefault)(old_options.temp) ? $(cg_expr!(state, _option_value_node(state.sema.options[:temp][end][2]))) : $temp_expr)
         end
         push!(ret.args, quote
             old_options = $(Cadnip.options)[]
@@ -2790,7 +2797,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
 
     # Handle temperature option - update spec if temp is set
     if haskey(state.sema.options, :temp)
-        temp_expr = cg_expr!(state, state.sema.options[:temp][end][2].val)
+        temp_expr = cg_expr!(state, _option_value_node(state.sema.options[:temp][end][2]))
         push!(block.args, :(spec = $(MNASpec)(temp=$temp_expr, mode=spec.mode)))
     end
 

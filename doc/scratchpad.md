@@ -60,3 +60,7 @@ Fixed SPICE sources with both an AC and transient spec silently dropping the AC 
 ## Cleanup: drop dead backward-compat aliases
 
 Removed unused deprecated aliases (`MNACircuitProblem`, the legacy 4-arg `MNACircuit(builder, params, spec, tspan)` constructor, `AnyStampContext`, `branches_have_same_alloc_count`) and a stale self-contradictory `MNAData` docstring note; none were referenced anywhere in the tree.
+
+## Control/analysis dot-cards no longer crash sema
+
+`.ac`/`.dc`/`.print`/`.width`/`.ic`/`.meas`/`.data`/`.csparam` (and `.temp`) previously hit the `@show stmt; error()` fallthrough in `sema!` — only `.tran` was ignored; now these builder-irrelevant control cards are ignored, and `.temp <value>` is funneled through the same option channel as `.option temp=<value>`.
