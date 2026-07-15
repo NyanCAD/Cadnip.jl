@@ -56,10 +56,12 @@ Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "graetz", "cedarsim", "
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "mul", "cedarsim", "runme.sp"); name=:mul_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "rc", "cedarsim", "runme.sp"); name=:rc_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(HERE, "filter.sp"); name=:filter_circuit))
+Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "darlington", "cedarsim", "runme.sp"); name=:darlington_circuit))
 
 const BUILDERS = Dict(
     "graetz" => graetz_circuit, "mul" => mul_circuit,
     "rc" => rc_circuit, "filter" => filter_circuit,
+    "darlington" => darlington_circuit,
 )
 
 #------------------------------------------------------------------------------#
@@ -160,6 +162,7 @@ const SOLVERS = Dict(
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
+    "darlington" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0)],
 )
 solvers_for(case) = SOLVERS[case]
 
@@ -238,6 +241,24 @@ function sim_body(case::String)
         c2 (n1 0) c c=1.3333333333333333
         l3 (n1 vout) l l=0.5
         r4 (vout 0) r r=1
+        """
+    elseif case == "darlington"
+        return "Darlington pair switch\n" * """
+        load "spice/resistor.osdi"
+        load "spice/capacitor.osdi"
+        load "spice/sn/bjt.osdi"
+        model r sp_resistor
+        model c sp_capacitor
+        model vsource vsource
+        model qmod sp_bjt ( bf=100 is=1e-15 cje=10p cjc=5p tf=0.3n )
+        vcc (vcc 0) vsource dc=5
+        vs (vin 0) vsource dc=0 type="pulse" val0=0 val1=3 rise=10n fall=10n width=0.99u period=2u
+        rb (vin b1) r r=10k
+        q1 (coll b1 b2 0) qmod
+        q2 (coll b2 0 0) qmod
+        rbleed (b2 0) r r=10k
+        rl (vcc coll) r r=1k
+        cl (coll 0) c c=100p
         """
     else
         error("unknown case $case")
