@@ -230,6 +230,12 @@ function main()
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"),
         SOLVERS_NONLINEAR)
 
+    # Darlington Pair - nonlinear (BJTs), the multi-junction switching
+    # stress case (three junctions per sp_bjt), needs robust DAE solver
+    add_benchmark!("Darlington Pair",
+        joinpath(BENCHMARK_DIR, "darlington", "cedarsim", "runme.jl"),
+        SOLVERS_NONLINEAR)
+
     # Ring Oscillator - IDA only (needs tuned settings for oscillation)
     add_benchmark!("Ring Oscillator (PSP103)",
         joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"),

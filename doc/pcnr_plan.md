@@ -209,29 +209,148 @@ On failure it falls through to the unchanged standard chain
 > limiter is inline VA. It was replaced by the recorded-`w` scheme above to
 > keep one system; `pnjlim` survives as the limiter function itself.
 
-### Scope: DC and transient initialization now; in-step transient later
+### Scope: DC and transient initialization. In-step transient: built, and its activation condition found structurally unsatisfiable.
 
-The corrector currently runs in `_dc_pcnr_newton`, i.e. for `dc!` and for
-transient *initialization* (`CedarDCOp`/`CedarTranOp` route through
+The corrector runs in `_dc_pcnr_newton`, i.e. for `dc!` and for transient
+*initialization* (`CedarDCOp`/`CedarTranOp` route through
 `_dc_solve_with_fallbacks`). SPICE also applies pnjlim on every NR iteration
-inside every timestep (`vold` seeded from the previous timepoint); we don't
-yet — during stepping the limit variables ride along inertly (see the
-equivalence argument below). In-step limiting matters most for switching
-circuits and sharp source edges; the integrator's predictor and timestep
-control cover much of the rest.
+inside every timestep (`vold` seeded from the previous timepoint); Cadnip
+does not, and — unlike the DC case — this is not a missing feature. It was
+built and benchmarked (2026-07).
 
-The path to in-step limiting is `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg`:
-implicit steppers can delegate their stage solves to any NonlinearSolve.jl
-algorithm, so packaging the PCNR loop as an `AbstractNonlinearSolveAlgorithm`
-gives `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` — SPICE-style
-limiting inside every timestep with **zero OrdinaryDiffEq changes**. This
-supersedes the "post-iteration hook in NLNewton" idea in the upstreaming
-table as the primary transient route. Wrinkles: the stage solve works in a
-transformed variable (γ-scaled stage, not `x` directly), so the corrector
-must map its limit slots through that affine relation; the refine specs
-already reach the algorithm via `CompiledStructure` in `prob.p`. Sundials
-IDA (today's `tran!` default) can never participate — its Newton loop is C —
-so limiting-sensitive circuits would move to FBDF to benefit.
+**What was actually shown, precisely.** This is not a claim that limiting
+partway through a transient step would provide no benefit if it fired — that
+question was never tested and is not what the argument below addresses. What
+was shown is narrower and mechanical: the *classical* limiting mechanism —
+compare the newly proposed branch voltage against a `vold` carried from
+somewhere else, and only pass through unmodified when they already agree —
+never has a chance to distinguish anything during a warm-started step,
+because both quantities it's comparing are forced to the same value before
+the comparison ever happens (see below). The corrector's *detection
+condition* is structurally unsatisfiable there, not observed-and-found-
+useless. During stepping the limit variables ride along inertly as a
+consequence of that; the paragraphs below explain why that specific inertness
+cannot be engineered away by tuning the corrector, and why it says nothing
+about the discontinuity-reinitialization case ("Open question" below), where
+the same detection condition is not forced.
+
+**What was tried.** `OrdinaryDiffEqNonlinearSolve.NonlinearSolveAlg` lets an
+implicit stepper delegate its stage solve to any NonlinearSolve.jl algorithm,
+so the PCNR predict/correct loop was packaged as an
+`AbstractNonlinearSolveAlgorithm` and driven as
+`FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` — zero OrdinaryDiffEq
+changes, with the corrector's `u = tmp + γ·z` affine remap for DIRK stages
+(FBDF's own stage variable needed no remap, being `u(t+dt)` directly) and an
+active-branch skip so an inert corrector never lags the accepted state.
+
+**Why it doesn't fire — mechanism, checked against source, not just asserted.**
+The recorded-`w` formulation makes the limiter's `vold` a genuine DAE state
+(`x_lim`, tied to the branch voltage by the linear row
+`g_lim = x_lim − V_branch = 0`). The claim below is *not* "the predictor
+happens to track `V_branch` accurately" — accuracy is irrelevant to it. It's a
+structural equality, and it was verified directly against FBDF's predictor
+code (`OrdinaryDiffEqBDF/src/bdf_utils.jl`, `_eval_lagrange_oop` /
+`_eval_lagrange_iip!`, the "evaluate Lagrange interpolant through `u_history`
+at Θ=1" step in `perform_step!`): the predicted state is
+`Σⱼ Lⱼ(θ)·u_history[j]`, where `Lⱼ` is a *scalar* Lagrange weight — a function
+only of past time abscissas, never of which state component it multiplies —
+applied identically, componentwise, to every past accepted state vector.
+Since `x_lim` and `V_branch` are numerically *identical* at every past
+accepted timepoint (that is what "accepted" means: `g_lim` was solved to
+residual tolerance), the same linear functional applied to pointwise-identical
+inputs produces pointwise-identical outputs:
+`predicted(x_lim) == predicted(V_branch)`, exactly (up to roundoff), no matter
+how sharp or discontinuous the true `V_branch(t)` actually is — a bad
+prediction is still the *same* bad prediction for both components. So
+`vold ≈ vnew` before the stage solve's first Newton iteration even runs, and
+`pnjlim` passes through, independent of step size. (This componentwise-linear
+structure is standard Nordsieck/polynomial-predictor theory for any linear
+multistep DAE integrator, and Sundials IDA's C Newton loop is documented to
+use the same shape of predictor — but that claim was verified against source
+only for FBDF here, not re-derived from Sundials' C code.) Classical SPICE
+limiting escapes this because its `vold` is the previous *Newton iteration's*
+value within a single step, never an inter-step predictor's extrapolation.
+
+This mechanism argument was then checked empirically, not just derived (a
+corrector-activation counter, instrumented across the switching half-wave
+rectifier, the Graetz bridge, a BJT chain, and — crucially — an adaptive
+work-precision-style sweep with no forced step size at reltol 1e-3 down to
+1e-6, so large steps were available): the corrector adopted zero limit values
+in every run. Not "rarely" — never. Big adaptive steps do not help, because
+the predictor keeps pace with them too. The two lines of evidence agree: the
+source-level argument explains *why* the counter reads zero, not just that it
+does.
+
+**Cost, not just no-benefit.** The wrapped stage solve was also measured
+slower than plain `FBDF` on every benchmark circuit (Graetz, the diode
+multiplier, a BJT chain), even after switching the wrapper to a
+modified-Newton (factor-once-per-step) strategy to minimize the tax — because
+a dormant corrector still forces the per-step machinery of a second
+`NonlinearProblem`/cache through `NonlinearSolveAlg`, with no compensating
+win. So this is not "harmless but unused": shipping it would be a net
+regression for zero functional benefit.
+
+**Conclusion.** *Warm-started* in-step limiting — a normal predictor-then-
+correct step, which is what every step of a driven transient is once the
+integrator is past its first point — has its activation condition forced
+unsatisfiable by construction, for the reason above, under any
+predictor/corrector ODE/DAE integrator that extrapolates the limiting state
+the same way it extrapolates everything else. That is a statement about the
+mechanism never getting to fire, not a statement about limiting being useless
+there if it could; it covers every step tested here (see "Open question"
+below for the one class of step that was *not* tested). The DC/init corrector is unaffected and remains the
+proven, working place for PCNR in this codebase: there is no predictor there,
+so `vold` genuinely lags. Sundials IDA (today's `tran!` default) could never
+have used the in-step mechanism anyway — its Newton loop is C — so no
+solver-selection tradeoff was ever on the table.
+
+### Open question: discontinuity-triggered reinitialization (not investigated)
+
+The inertness argument above rests on one premise: the predictor step is a
+*linear extrapolation from history that was already consistent* (`x_lim`
+equal to `V_branch` at every point in the window). That premise could fail at
+a genuine reinitialization — a point where the integrator throws away its
+history and re-solves for consistent algebraic variables via Newton, rather
+than extrapolating. A Newton re-solve is not a linear functional of past
+history, so the "identical inputs ⇒ identical outputs" argument does not
+apply to it, and such a re-solve is structurally much closer to DC init
+(where PCNR demonstrably helps) than to warm-started stepping (where it
+demonstrably doesn't).
+
+**This was not tested, and — checked against source while writing this up —
+is not even exercised by Cadnip today.** `tran!`'s breakpoint mechanism
+(`src/mna/breakpoints.jl`, fed into `d_discontinuities`) only nudges `t` by
+one ULP past the source edge and forces an FSAL/Jacobian refresh
+(`OrdinaryDiffEqCore`'s `update_fsal!`/`shift_past_discontinuity!`); it never
+touches `integrator.derivative_discontinuity` or calls `initialize_dae!`. So
+every breakpoint hit in the benchmarks above was still a normal warm predictor
+step, just a forced one — consistent with, not an exception to, the zero-
+activation result.
+
+OrdinaryDiffEqBDF does expose a real hook for the other case:
+`derivative_discontinuity!(integrator, true)` (settable from a
+`DiscreteCallback`) makes `reinitFBDF!`
+(`OrdinaryDiffEqBDF/src/bdf_utils.jl`) wipe FBDF's history and restart at
+order 1, and — per `OrdinaryDiffEqBDF`'s own `dae_derivative_discontinuity_tests.jl`
+— pairing it with a DAE initialization algorithm that actually re-solves
+algebraic variables (`BrownFullBasicInit`) triggers a genuine
+`initialize_dae!` Newton solve on the next step. Two concrete obstacles before
+this is worth building, not just noting:
+
+1. Nothing in Cadnip wires a callback to call `derivative_discontinuity!` at
+   breakpoints today — this would be new plumbing, not a flag flip.
+2. The specific init algorithm the OrdinaryDiffEqBDF test uses to trigger the
+   Newton re-solve, `BrownFullBasicInit`, is already known broken for
+   Cadnip's mass-matrix ODE formulation — see `src/mna/dcop.jl`'s `CedarDCOp`
+   docstring, which is why `tran!` uses `ShampineCollocationInit` instead.
+   Whether `ShampineCollocationInit`'s Newton loop breaks the same
+   history-consistency premise, and whether PCNR's corrector could be wired
+   into it at all, is unresearched.
+
+Not pursued in this branch. Flagged here because it is a genuinely different
+mechanism from the one that was built and found inert above — not covered by
+that negative result — and worth its own investigation before either
+building it or ruling it out.
 
 ### Why no Schur factorization is needed (and what that costs)
 
@@ -610,8 +729,8 @@ upstream as follows:
 
 | piece | target | shape | status/blockers |
 |---|---|---|---|
-| Post-step correction hook + PCNR algorithm | **NonlinearSolveBase / NonlinearSolveFirstOrder** | The single required API is a `correct!(u_proposed, u_prev, p)` hook run between the Newton update and the next residual evaluation. The pilot-vs-SPICE variant choice is *invisible to the solver* — it lives inside the callback (algorithm-owned refine closures vs a copy from a problem-recorded buffer). Ship the published algorithm as the hook's flagship instantiation: `PCNR(limit_idxs, refine_fns; inits)` per Aadithya et al., documented and tested against the paper's diode example — the citable, self-contained shape that's easiest to land. Cadnip consumes the same hook with its recorded-`w` callback (production models can't expose refine functions; their limiter is inline — which is itself the argument that the hook, not the named algorithm, is the right API boundary). | Notably, the recorded-`w` formulation **shrank** the upstream footprint: its Jacobian's lim columns are empty (block lower-triangular), so plain `NewtonDescent` is already optimal and the previously-planned `PCNRDescent` Schur descent is only relevant to the paper-pure variant — keep it as an optional companion to the flagship, not a requirement. Compat already narrowed to `NonlinearSolve = "4"`. |
-| Corrector inside implicit ODE steps | **OrdinaryDiffEqNonlinearSolve** | primary route needs **no upstream change**: package PCNR as an `AbstractNonlinearSolveAlgorithm` and pass `FBDF(nlsolve=NonlinearSolveAlg(PCNRSolver(...)))` (see "Scope" section). A post-iteration hook in `NLNewton` remains the fallback idea if the `NonlinearSolveAlg` bridge proves too indirect (stage-variable mapping) | Corrector must map limit slots through the γ-scaled stage variable. |
+| Post-step correction hook + PCNR algorithm | **NonlinearSolveBase / NonlinearSolveFirstOrder** | The single required API is a `correct!(u_proposed, u_prev, p)` hook run between the Newton update and the next residual evaluation. The pilot-vs-SPICE variant choice is *invisible to the solver* — it lives inside the callback (algorithm-owned refine closures vs a copy from a problem-recorded buffer). Ship the published algorithm as the hook's flagship instantiation: `PCNR(limit_idxs, refine_fns; inits)` per Aadithya et al., documented and tested against the paper's diode example — the citable, self-contained shape that's easiest to land. Cadnip consumes the same hook with its recorded-`w` callback (production models can't expose refine functions; their limiter is inline — which is itself the argument that the hook, not the named algorithm, is the right API boundary). | Notably, the recorded-`w` formulation **shrank** the upstream footprint: its Jacobian's lim columns are empty (block lower-triangular), so plain `NewtonDescent` is already optimal and the previously-planned `PCNRDescent` Schur descent is only relevant to the paper-pure variant — keep it as an optional companion to the flagship, not a requirement. Compat already narrowed to `NonlinearSolve = "4"`. **Termination-mode caveat (2026-07, found while evaluating whether `_dc_pcnr_newton` could migrate to a hypothetical upstream hook once it exists):** `correct!` mutates `u_proposed` only *after* the Newton update, so a termination check against the residual `fu` computed at the *start* of that same iteration is systematically one correction behind — exactly the "x_lim lags one iterate behind" lag `_dc_pcnr_newton`'s settle step (§ "Getting to 7") works around. That settle step is therefore not a Cadnip-specific wart; it's the generic price of pairing a post-update corrector with residual-based termination, and any hook consumer using `AbsNormTerminationMode`-style checks will hit it too. An increment-based termination check (comparing successive *corrected* iterates, `‖u_proposed − u_prev‖`) sidesteps it — this is, in effect, what the abandoned in-step bridge did (`ndz = ‖z − nlcache.u‖` in `OrdinaryDiffEqNonlinearSolve`'s stage loop), and no settle-equivalent was needed there. So: `_dc_pcnr_newton` is not a drop-in replacement for the upstream algorithm the moment it lands — either the upstream `PCNR` algorithm ships with (or documents needing) increment-based termination, or a Cadnip caller wraps `solve!` with its own settle-and-reverify pass, same as today. No pressure to actually do this migration — `_dc_pcnr_newton` works, is tuned to ~7 iterations, and is fully tested; this is a note for whoever attempts it. |
+| Corrector inside *warm-started* implicit ODE steps | *(dropped)* | Not pursued upstream — tried locally via `AbstractNonlinearSolveAlgorithm` + `NonlinearSolveAlg` and found structurally inert for every step tested (see "Scope" section): the predictor's Lagrange-interpolant extrapolation (verified against FBDF source) is a componentwise-identical linear functional of past history, and `x_lim`/`V_branch` are numerically identical throughout that history, so the predicted values are forced equal too — `vold ≈ vnew` before the stage solve's first iteration, corrector never fires, independent of step size. Not a `NonlinearSolveAlg`-specific limitation — any predictor-based in-step wiring hits the same wall, *for a warm-started step*. | N/A — no further work planned for the warm-started case. The untested adjacent case (a genuine discontinuity-triggered DAE reinitialization, which is not a linear-history extrapolation and so isn't covered by this argument) is flagged as an open question in "Scope", not ruled out — see "Open question: discontinuity-triggered reinitialization". |
 | Limiting in IDA | **Sundials.jl** | not possible — IDA's Newton loop is C and unhookable | v1's formulation (limiting fused into the residual/Jacobian) is the *only* PCNR variant that works under IDA. This is a strong argument for keeping the v1 formulation permanently, even after upstream hooks exist. |
 | `$limit` semantics & experience | **VADistiller / VACASK** (Bürmen, codeberg) | no model changes needed — the models drive the design; report the per-branch state-keying convention and any model bugs found | coordination only |
 | `$limit` parsing | **NyanVerilogAParser.jl** | already parses (vasim receives the args today) | none expected |

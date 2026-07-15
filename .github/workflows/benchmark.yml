@@ -42,10 +42,10 @@ jobs:
 
       - name: Run real VACASK reference benchmarks
         run: |
-          # Run every case including the slow c6288. The four small cases are
+          # Run every case including the slow c6288. The five small cases are
           # folded into run_benchmarks.jl's comparison tables; c6288 (which has
           # no Cadnip counterpart yet) is published in the standalone table.
-          CASES="rc graetz mul ring c6288" benchmarks/vacask/run_vacask.sh vacask_reference.md
+          CASES="rc graetz mul darlington ring c6288" benchmarks/vacask/run_vacask.sh vacask_reference.md
 
       - name: Run VACASK benchmarks
         env:

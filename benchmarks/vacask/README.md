@@ -32,7 +32,7 @@ The tables below were measured by the VACASK authors on an AMD Threadripper 7970
 benchmarks/vacask/run_vacask.sh results.md
 ```
 
-The script downloads a prebuilt VACASK release (pinned to `0.3.3-dev`, which ships the PSP103.4 and SPICE-distilled OSDI models used here), then runs the official [`benchmark.py`](benchmark.py) methodology (1 warmup + 5 timed runs, averaged) on every case and writes a markdown table of wall-clock time, timepoints, rejected timepoints, and NR iterations. Set `VACASK_DIR` to point at an already-extracted release to skip the download, or `CASES="rc graetz mul ring"` to skip the slow c6288 case.
+The script downloads a prebuilt VACASK release (pinned to `0.3.3-dev`, which ships the PSP103.4 and SPICE-distilled OSDI models used here), then runs the official [`benchmark.py`](benchmark.py) methodology (1 warmup + 5 timed runs, averaged) on every case and writes a markdown table of wall-clock time, timepoints, rejected timepoints, and NR iterations. Set `VACASK_DIR` to point at an already-extracted release to skip the download, or `CASES="rc graetz mul darlington ring"` to skip the slow c6288 case.
 
 Absolute timings depend on the machine, but the timepoint and iteration counts should match the upstream tables closely (the released binary reproduces the same algorithms).
 
@@ -70,6 +70,9 @@ A voltage multiplier (4 diodes, 4 capacitors) with a series resistor at its inpu
 |Gnucap     | 9.94           |520797     |739      |2300992    |
 |Ngspice    | 1.16           |500467     |957      |1019733    |
 |VACASK     | 0.97           |500056     |3        |1001233    |
+
+## Darlington pair switch (darlington)
+Two cascaded NPN BJTs (Q1's emitter feeding Q2's base) switched between cutoff and saturation by a 500kHz pulse train, with a shared 1k collector load and 100pF load cap. A general multi-junction switching stress case — each BJT carries three junctions (vbe, vbc, vsub) — added directly to this Cadnip repo rather than sourced from the upstream VACASK benchmark set, so there is no Xyce/Gnucap/Ngspice comparison table here, only the Cadnip-vs-VACASK numbers `run_vacask.sh`/`run_benchmarks.jl` produce on the same machine.
 
 ## 9 stage CMOS ring oscillator (ring)
 This is a ring oscillator with 9 CMOS inverters (18 transistors) powered by 1.2V. The timestep was limited to 50ps. Xyce `timeint reltol` option was set to 5e-3 to make the number of computed timepoints roughly equal to that of VACASK. 

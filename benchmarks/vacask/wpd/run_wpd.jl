@@ -34,7 +34,7 @@ using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P, Rodas6P
-using OrdinaryDiffEqSDIRK: Kvaerno5, KenCarp4
+using OrdinaryDiffEqSDIRK: Kvaerno3, Kvaerno5, KenCarp4
 using OrdinaryDiffEqFIRK: RadauIIA5
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
@@ -56,10 +56,12 @@ Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "graetz", "cedarsim", "
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "mul", "cedarsim", "runme.sp"); name=:mul_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "rc", "cedarsim", "runme.sp"); name=:rc_circuit))
 Base.include(@__MODULE__, SpiceFile(joinpath(HERE, "filter.sp"); name=:filter_circuit))
+Base.include(@__MODULE__, SpiceFile(joinpath(VACASK_DIR, "darlington", "cedarsim", "runme.sp"); name=:darlington_circuit))
 
 const BUILDERS = Dict(
     "graetz" => graetz_circuit, "mul" => mul_circuit,
     "rc" => rc_circuit, "filter" => filter_circuit,
+    "darlington" => darlington_circuit,
 )
 
 #------------------------------------------------------------------------------#
@@ -108,26 +110,100 @@ mk_rodas6p()  = Rodas6P(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_kvaerno5() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_radau()    = RadauIIA5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
+# `smooth_est=false` variants - see the SOLVERS comment below for why these
+# exist as separate constructors rather than changing the defaults above:
+# filter/rc never needed this (Kvaerno5 already works fine there), so the
+# plain constructors stay untouched for them.
+mk_kvaerno3_rawest() = Kvaerno3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
+mk_kvaerno5_rawest() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
+mk_kencarp4_rawest() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
 
 # (name, constructor, min_reltol) per case. Not a blanket linear/nonlinear split -
 # solver viability varies by circuit, confirmed empirically (see
-# ../wpd/README.md "Solver survey" for the full 4-case x 12-candidate sweep this
-# was drawn from):
-#   - Kvaerno3/Kvaerno5 (SDIRK) get stuck in the diode's stiff turn-on transient on
-#     BOTH diode circuits (thousands of steps without leaving t~0) - used only on
-#     the linear cases.
+# ../wpd/README.md "Solver survey" for the full candidate sweep this was drawn
+# from, across filter/rc/graetz/mul plus a later darlington-only follow-up):
+#   - **`smooth_est=false` unlocks the whole Kvaerno/KenCarp (ESDIRK) family
+#     on the nonlinear cases - this was the actual bug, not the diode/BJT
+#     turn-on itself.** Root-caused by reading `OrdinaryDiffEqSDIRK`'s shared
+#     ESDIRK step implementation (`generic_imex_perform_step.jl`): the local
+#     error estimate branches on `isnewton(nlsolver) && alg.smooth_est`
+#     (`smooth_est=true` is every one of these algorithms' default) - when
+#     true, the raw embedded-difference vector is run through an *extra
+#     linear solve* against the cached iteration matrix
+#     `W = -(G + C/(γdt))` ("smoothing", a real Hairer/Wanner technique for
+#     damping noisy error estimates on stiff problems). Confirmed directly
+#     (`darlington`, native `NLNewton`, nothing else changed): the `dt`
+#     sequence at the failure point shrinks by exactly 1/5 every rejected
+#     retry, forever, down past `1e-23` before the integrator gives up -
+#     while a corrector-activation trace showed Newton itself converges
+#     cleanly (`θ≈0.3`, nowhere near the `θ>2` divergence threshold) on
+#     *every single one* of those rejected attempts. So the failure was
+#     never in the nonlinear solve - it's the smoothed estimate itself that
+#     never shrinks properly as `dt→0` for this circuit's structure (MNA's
+#     mass matrix `C` has zero rows for non-capacitive/algebraic nodes -
+#     `W`'s scaling is genuinely inhomogeneous across rows as `1/(γdt)→∞`,
+#     exactly the kind of thing an extra ill-conditioned solve can turn
+#     into a spurious non-vanishing LTE). `Kvaerno5(smooth_est=false)` on
+#     the *native* path (no bridge, no PCNR, nothing else touched) alone
+#     reproduces success - conclusively isolating `smooth_est` as the cause,
+#     not Jacobian source (native already uses an explicit analytic
+#     `jac!=-G`, not autodiff - confirmed by reading `solve.jl`'s
+#     `ODEFunction` construction - so the earlier `AutoFiniteDiff` vs
+#     `AutoForwardDiff` test never actually varied the Jacobian at all) and
+#     not the W-construction formula (`jacobian2W!`'s generic combination
+#     `-(mass_matrix/(γdt)) + J` is algebraically identical to
+#     `CedarPCNRStageJac`'s hand-rolled `-(G + c·C)` - same inputs, same
+#     formula, verified by reading both). The `_rawest` constructors above
+#     (`mk_kvaerno3_rawest`, `mk_kvaerno5_rawest`, `mk_kencarp4_rawest`) are
+#     the fix - see below for what it unlocks per case.
+#   - Kvaerno3/Kvaerno5 (SDIRK) with the *default* `smooth_est=true` get
+#     stuck in the stiff turn-on/turn-off transient on all three nonlinear
+#     cases - `graetz`/`mul` (diodes) AND `darlington` (BJTs: `:Unstable` at
+#     reltol 1e-3/1e-5/1e-7, burning up to 34118 steps without making it
+#     past t~2e-6 of the 2e-5 tspan at the worst point). With
+#     `smooth_est=false`: full `:Success` on `graetz` at every reltol
+#     checked (1e-3 to 1e-5, a bounded exploration - see `min_reltol=1e-5`
+#     on both in `SOLVERS`, not verified tighter); on `darlington`, full
+#     `:Success` from 1e-3 through 1e-8 (`min_reltol=1e-8` excludes just the
+#     one failure at the tightest 1e-9). `mul` stays the exception: Kvaerno5
+#     only succeeds at the single loosest reltol=1e-3 before hitting the
+#     `maxiters=1e6` bound without finishing (not a clean failure like
+#     before, just genuinely slow - not worth the one marginal point, so
+#     not added), and Kvaerno3 hits the same `maxiters` bound at *every*
+#     tested reltol including 1e-3, reaching only ~10% of the tspan - `mul`
+#     really is the stiffest case in this suite, `smooth_est` or not.
+#     Kvaerno3 is left out of `darlington`'s `SOLVERS` (redundant with the
+#     cheaper Kvaerno5 there, same reasoning as the TRBDF2/QNDF calls
+#     below).
 #   - Rodas5P works on `graetz` (correct rectified output at reltol 1e-3/1e-6,
 #     :Unstable only at the tightest 1e-9, already excluded by the retcode filter)
 #     but hangs on `mul` (its faster 100kHz cascaded-diode switching is far
-#     stiffer) even at the loosest reltol=1e-3 - excluded there.
+#     stiffer) even at the loosest reltol=1e-3 - excluded there. On `darlington`
+#     it's fully robust (`:Success` at every reltol 1e-3 through 1e-9) but
+#     Rodas6P dominates it there (see below), so it's left out in favor of
+#     Rodas6P alone, same call as `filter`.
 #   - RadauIIA5 (5th-order FIRK) matches or beats Rodas5P's accuracy-per-step on
 #     the linear cases and on `graetz` at loose/medium reltol, going :Unstable
 #     only past reltol=1e-5 there - added to filter/rc/graetz. Like Kvaerno5 it
-#     is not viable on `mul` (:Unstable at every reltol) - excluded there.
-#   - KenCarp4 (ESDIRK) fails everywhere on `graetz` but is one of two
-#     non-DAE solvers to produce any correct points on `mul` (reltol
-#     1e-3/1e-5, accuracy on par with IDA) before it too hits the 100kHz
-#     switching wall - added to `mul` alone for that partial coverage.
+#     is not viable on `mul` (:Unstable at every reltol) - excluded there. On
+#     `darlington` it's the cheapest solver at tight tolerance by a wide margin
+#     (5821 steps at reltol=1e-9 vs IDA's 30355 and Rodas6P's 547386) but has a
+#     two-tolerance outlier: `:Unstable` specifically at reltol=1e-3 and 1e-5,
+#     `:Success` at every other point tested (1e-4, 1e-6, 1e-7, 1e-8, 1e-9) -
+#     not investigated further (non-monotonic in reltol, unlike `rc`'s single-
+#     tolerance outlier below); added anyway since the pipeline already drops
+#     failed points from the plotted curve rather than erroring on them.
+#   - KenCarp4 (ESDIRK) with the *default* `smooth_est=true` fails
+#     everywhere on `graetz`, gets only partial coverage on `mul` (reltol
+#     1e-3/1e-5 before hitting the 100kHz switching wall), and is fully
+#     `:Unstable` on `darlington`. With `smooth_est=false` it's the biggest
+#     winner of the fix: fully `:Success` and cheap on `graetz` (707-1410
+#     steps at reltol 1e-3 to 1e-5, the bounded range checked), fully
+#     `:Success` and cheap on `mul` too (4864-12857 steps, same range -
+#     `mk_kencarp4_rawest` replaces the old unconditional `mk_kencarp4` in
+#     `mul`'s `SOLVERS` entry), and the *only* nonlinear-case solver that's
+#     fully `:Success` across `darlington`'s *entire* reltol range, 1e-3
+#     through 1e-9 - no `min_reltol` needed there at all.
 #   - Rodas5P vs Rodas6P (6th-order, newest of the Rodas family) is
 #     genuinely case-dependent, not a strict order: Rodas5P is more
 #     accurate at every reltol on `rc` (though Rodas6P takes fewer steps
@@ -136,7 +212,10 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     `graetz` they cross over (Rodas5P wins loose reltol, Rodas6P wins
 #     medium, tied at 1e-7) - Rodas5P kept since the crossover favors it at
 #     the more commonly-used loose end; on `mul` Rodas6P is more accurate
-#     and reaches one more tolerance point - used there instead of Rodas5P.
+#     and reaches one more tolerance point - used there instead of Rodas5P;
+#     on `darlington` Rodas6P strictly dominates too (fewer steps than
+#     Rodas5P at all 7 reltols, e.g. 547386 vs 758645 at reltol=1e-9) -
+#     same call as `filter`.
 #     Net: each case gets whichever one wins there, never both (one
 #     Rosenbrock representative per case).
 #   - True (implicit-first-stage) SDIRK - SDIRK2, Cash4, Hairer4, Hairer42 -
@@ -146,7 +225,18 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 #     ESDIRK family (Kvaerno5/KenCarp4/TRBDF2). They don't: all four go
 #     `:Unstable` at nearly every tolerance on both diode circuits, doing
 #     *worse* than KenCarp4's partial success on `mul` - not added anywhere.
-#   - IDA and FBDF are robust on every case.
+#   - IDA is robust on every case; FBDF is robust on every case except
+#     `darlington`, where it converges at the loosest reltol=1e-3 (9381
+#     steps) but goes `:Unstable` at every tighter tolerance (`dt` forced
+#     below floating-point epsilon during the sharp BJT turn-on/turn-off
+#     edges) - confirmed via a local Cadnip-only sweep (no min-reltol cutoff
+#     needed: the failures are cheap/clean, not slow/hanging like Rodas6P on
+#     `mul` below, so there's no runtime reason to bound it, just an
+#     accuracy ceiling). Left in `SOLVERS` unconditionally since the
+#     `run_cadnip_sweep`/`analyze` pipeline already excludes non-`Success`
+#     runs from the plotted curve rather than erroring - FBDF just shows a
+#     single point on `darlington`'s work-precision diagram (KenCarp4 with
+#     `smooth_est=false`, above, now covers the full range instead).
 #   - Rodas6P on `mul` degrades catastrophically (not just fails) below
 #     reltol=1e-5: it took 451s/6.4M steps to *finish* reltol=1e-6 (vs
 #     KenCarp4's 2.2s/43775 steps at the same tolerance) and then hung
@@ -158,8 +248,11 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 const SOLVERS = Dict(
     "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
-    "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0)],
-    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
+    "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0),
+                 ("Kvaerno3", mk_kvaerno3_rawest, 1e-5), ("Kvaerno5", mk_kvaerno5_rawest, 1e-5), ("KenCarp4", mk_kencarp4_rawest, 1e-5)],
+    "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4_rawest, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
+    "darlington" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("RadauIIA5", mk_radau, 0.0),
+                      ("Kvaerno5", mk_kvaerno5_rawest, 1e-8), ("KenCarp4", mk_kencarp4_rawest, 0.0)],
 )
 solvers_for(case) = SOLVERS[case]
 
@@ -238,6 +331,24 @@ function sim_body(case::String)
         c2 (n1 0) c c=1.3333333333333333
         l3 (n1 vout) l l=0.5
         r4 (vout 0) r r=1
+        """
+    elseif case == "darlington"
+        return "Darlington pair switch\n" * """
+        load "spice/resistor.osdi"
+        load "spice/capacitor.osdi"
+        load "spice/sn/bjt.osdi"
+        model r sp_resistor
+        model c sp_capacitor
+        model vsource vsource
+        model qmod sp_bjt ( bf=100 is=1e-15 cje=10p cjc=5p tf=0.3n )
+        vcc (vcc 0) vsource dc=5
+        vs (vin 0) vsource dc=0 type="pulse" val0=0 val1=3 rise=10n fall=10n width=0.99u period=2u
+        rb (vin b1) r r=10k
+        q1 (coll b1 b2 0) qmod
+        q2 (coll b2 0 0) qmod
+        rbleed (b2 0) r r=10k
+        rl (vcc coll) r r=1k
+        cl (coll 0) c c=100p
         """
     else
         error("unknown case $case")

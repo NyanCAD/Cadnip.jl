@@ -34,14 +34,14 @@
 #   VACASK_URL   release tarball URL
 #   CACHE_DIR    where to cache the download (default: ~/.cache/cadnip-vacask)
 #   RUNS         number of timed runs (default 5)
-#   CASES        space-separated case list (default: rc graetz mul ring c6288)
+#   CASES        space-separated case list (default: rc graetz mul darlington ring c6288)
 #==============================================================================#
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RUNS="${RUNS:-5}"
-CASES="${CASES:-rc graetz mul ring c6288}"
+CASES="${CASES:-rc graetz mul darlington ring c6288}"
 OUT="${1:-}"
 
 #------------------------------------------------------------------------------#
@@ -89,6 +89,7 @@ declare -A NAMES=(
     [rc]="RC Circuit"
     [graetz]="Graetz Bridge"
     [mul]="Voltage Multiplier"
+    [darlington]="Darlington Pair"
     [ring]="Ring Oscillator (PSP103)"
     [c6288]="C6288 Multiplier"
 )

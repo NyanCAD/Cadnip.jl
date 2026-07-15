@@ -47,6 +47,13 @@
       "_golden_self_comment": "Was 'cadnip' (VACASK scored against a foreign Cadnip golden, which is what produced the misleading '~1.3e-4 floor VACASK can't reach' framing - VACASK actually converges to within ~1e-6 of ITSELF at reltol=1e-9 across tran_maxord/tran_lteratio/abstol variations, so that gap was never a VACASK accuracy problem). 'self' now scores each simulator against its own tight run; the two goldens' mutual disagreement is reported as an explicit open item instead.",
       "_vacask_override_comment": "VACASK's reltol-only sweep aborts (min-timestep) below reltol=1e-5. mul's source is a smooth sine (vs type=sine), not a pulse - there's no edge to resolve, so forcing a fixed maxstep the way rc needs it would just be a crutch masking whether reltol-driven stepping actually works, not a fair test of the engine. The override leaves maxstep unbounded (reltol/vntol alone drive step size) and method/maxord at the benchmark's standard tran_method=gear/tran_maxord=5 (VACASK's best, same as every other case - NOT the throughput sim's fixed-order gear2, which was chosen there for raw speed, not accuracy). It only adds the real throughput sim's NR/LTE tuning (nr_residualcheck, tran_lteratio, tran_itl from mul/vacask/runme.sim, never exercised by the plain reltol sweep) - legitimate robustness tuning, not artificial fine-stepping or a lower-order handicap. Now also applied to mul's own VACASK golden (run_vacask_sweep passes it to the tight run too), since without it the golden aborts exactly like the sweep did.",
       "vacask_override": {"extra_opts": "nr_residualcheck=0 tran_lteratio=3.5 tran_itl=50"}
+    },
+    "darlington": {
+      "title": "Darlington pair switch (nonlinear BJT, multi-junction)",
+      "tspan": [0.0, 2e-5],
+      "output": ["coll"],
+      "golden": "self",
+      "_golden_self_comment": "Cadnip-only case (no upstream Xyce/Gnucap/Ngspice numbers, see benchmarks/vacask/README.md), so there's no precedent for whether a shared VACASK/Cadnip golden is trustworthy here. Following mul's precedent rather than assuming it: each simulator is scored against its own tight reference, with mutual agreement reported separately as an open item."
     }
   }
 }
