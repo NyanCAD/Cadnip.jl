@@ -34,7 +34,7 @@ using Cadnip.MNA
 using Sundials: IDA
 using OrdinaryDiffEqBDF: FBDF
 using OrdinaryDiffEqRosenbrock: Rodas5P, Rodas6P
-using OrdinaryDiffEqSDIRK: Kvaerno3, Kvaerno5, KenCarp4
+using OrdinaryDiffEqSDIRK: Kvaerno5, KenCarp4
 using OrdinaryDiffEqFIRK: RadauIIA5
 using ADTypes: AutoFiniteDiff
 using LinearSolve: KLUFactorization
@@ -114,7 +114,6 @@ mk_kencarp4() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff())
 # exist as separate constructors rather than changing the defaults above:
 # filter/rc never needed this (Kvaerno5 already works fine there), so the
 # plain constructors stay untouched for them.
-mk_kvaerno3_rawest() = Kvaerno3(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
 mk_kvaerno5_rawest() = Kvaerno5(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
 mk_kencarp4_rawest() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFiniteDiff(), smooth_est=false)
 
@@ -154,27 +153,27 @@ mk_kencarp4_rawest() = KenCarp4(linsolve=KLUFactorization(), autodiff=AutoFinite
 #     `-(mass_matrix/(γdt)) + J` is algebraically identical to
 #     `CedarPCNRStageJac`'s hand-rolled `-(G + c·C)` - same inputs, same
 #     formula, verified by reading both). The `_rawest` constructors above
-#     (`mk_kvaerno3_rawest`, `mk_kvaerno5_rawest`, `mk_kencarp4_rawest`) are
-#     the fix - see below for what it unlocks per case.
-#   - Kvaerno3/Kvaerno5 (SDIRK) with the *default* `smooth_est=true` get
-#     stuck in the stiff turn-on/turn-off transient on all three nonlinear
-#     cases - `graetz`/`mul` (diodes) AND `darlington` (BJTs: `:Unstable` at
+#     (`mk_kvaerno5_rawest`, `mk_kencarp4_rawest`) are the fix - see below
+#     for what it unlocks per case.
+#   - Kvaerno5 (SDIRK) with the *default* `smooth_est=true` gets stuck in the
+#     stiff turn-on/turn-off transient on all three nonlinear cases -
+#     `graetz`/`mul` (diodes) AND `darlington` (BJTs: `:Unstable` at
 #     reltol 1e-3/1e-5/1e-7, burning up to 34118 steps without making it
 #     past t~2e-6 of the 2e-5 tspan at the worst point). With
 #     `smooth_est=false`: full `:Success` on `graetz` at every reltol
 #     checked (1e-3 to 1e-5, a bounded exploration - see `min_reltol=1e-5`
-#     on both in `SOLVERS`, not verified tighter); on `darlington`, full
+#     in `SOLVERS`, not verified tighter); on `darlington`, full
 #     `:Success` from 1e-3 through 1e-8 (`min_reltol=1e-8` excludes just the
 #     one failure at the tightest 1e-9). `mul` stays the exception: Kvaerno5
 #     only succeeds at the single loosest reltol=1e-3 before hitting the
-#     `maxiters=1e6` bound without finishing (not a clean failure like
-#     before, just genuinely slow - not worth the one marginal point, so
-#     not added), and Kvaerno3 hits the same `maxiters` bound at *every*
-#     tested reltol including 1e-3, reaching only ~10% of the tspan - `mul`
-#     really is the stiffest case in this suite, `smooth_est` or not.
-#     Kvaerno3 is left out of `darlington`'s `SOLVERS` (redundant with the
-#     cheaper Kvaerno5 there, same reasoning as the TRBDF2/QNDF calls
-#     below).
+#     `maxiters` bound without finishing (not a clean failure like before,
+#     just genuinely slow - not worth the one marginal point, so not added) -
+#     `mul` really is the stiffest case in this suite, `smooth_est` or not.
+#     (Kvaerno3 was surveyed alongside Kvaerno5 but dropped from the suite:
+#     it's dominated by Kvaerno5 everywhere it runs - same viability pattern
+#     but strictly more steps/runtime, e.g. on `graetz` it was the single
+#     most expensive series here at ~760k steps/28s at reltol=1e-5 - so it
+#     added cost and a redundant curve without adding information.)
 #   - Rodas5P works on `graetz` (correct rectified output at reltol 1e-3/1e-6,
 #     :Unstable only at the tightest 1e-9, already excluded by the retcode filter)
 #     but hangs on `mul` (its faster 100kHz cascaded-diode switching is far
@@ -249,7 +248,7 @@ const SOLVERS = Dict(
     "filter" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "rc"     => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("Kvaerno5", mk_kvaerno5, 0.0), ("RadauIIA5", mk_radau, 0.0)],
     "graetz" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas5P", mk_rodas5p, 0.0), ("RadauIIA5", mk_radau, 0.0),
-                 ("Kvaerno3", mk_kvaerno3_rawest, 1e-5), ("Kvaerno5", mk_kvaerno5_rawest, 1e-5), ("KenCarp4", mk_kencarp4_rawest, 1e-5)],
+                 ("Kvaerno5", mk_kvaerno5_rawest, 1e-5), ("KenCarp4", mk_kencarp4_rawest, 1e-5)],
     "mul"    => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("KenCarp4", mk_kencarp4_rawest, 0.0), ("Rodas6P", mk_rodas6p, 1e-5)],
     "darlington" => [("IDA", mk_ida, 0.0), ("FBDF", mk_fbdf, 0.0), ("Rodas6P", mk_rodas6p, 0.0), ("RadauIIA5", mk_radau, 0.0),
                       ("Kvaerno5", mk_kvaerno5_rawest, 1e-8), ("KenCarp4", mk_kencarp4_rawest, 0.0)],
@@ -260,8 +259,8 @@ solvers_for(case) = SOLVERS[case]
 # Helpers
 #------------------------------------------------------------------------------#
 # Step cap for the reltol sweep. Sized to sit well above every solver's largest
-# *successful* run in this suite (the current worst is graetz Kvaerno3 at
-# reltol=1e-5, ~760k accepted steps) while still killing a stuck solve quickly.
+# *successful* run in this suite (the current worst is darlington Rodas6P at
+# reltol=1e-9, ~550k accepted steps) while still killing a stuck solve quickly.
 # The old 50_000_000 let a single pathological point churn for ~19 min before
 # bailing out (darlington FBDF at reltol=1e-6 walked to the 50M ceiling having
 # covered 0.2% of the tspan), which alone pushed the CI job past its 60-minute
