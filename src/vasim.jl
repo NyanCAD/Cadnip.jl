@@ -3055,11 +3055,6 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
-    # Generate voltage-dependent charge detection block (runs with plain Float64 values)
-    # Detection must run BEFORE dual_creation to avoid capturing JacobianTag duals
-    # Results are cached in ctx.charge_is_vdep so stamp_code only checks the cache
-    detection_block = Expr(:block)
-
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
     # Now handles both terminal nodes and internal nodes
     stamp_code = Expr(:block)
@@ -3094,9 +3089,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # For MNAContext, the full name is built from components
         charge_base_name = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
 
-        # NOTE: Detection now happens inline during stamp evaluation (not in detection_block)
-        # by comparing capacitance values across multiple runs with different random operating points.
-        # See detect_or_cached! in contrib.jl for the new approach.
+        # NOTE: Detection happens inline during stamp evaluation, by comparing
+        # capacitance values across multiple runs with different random operating
+        # points. See detect_or_cached! in contrib.jl.
 
         branch_stamp = quote
             # Evaluate the branch current. Per the Verilog-A LRM, $mfactor scales
@@ -3666,10 +3661,6 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Must run AFTER float_node_assignment (node symbols are Float64)
         # and BEFORE dual_creation (which overwrites them with JacobianTag duals)
         $(to_julia.extra_stamps...)
-
-        # Run voltage-dependent charge detection (with plain Float64 values)
-        # Results are cached in ctx.charge_is_vdep for later use in stamp_code
-        $detection_block
 
         # Reset detection counter for stamp_code phase (DirectStampContext uses counter-based access)
         Cadnip.MNA.reset_detection_counter!(ctx)

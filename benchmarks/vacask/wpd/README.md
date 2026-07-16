@@ -113,14 +113,18 @@ data point:
 |--------------|---------------------------------|
 | `filter`     | IDA, FBDF, Rodas6P, Kvaerno5 (5th-order L-stable ESDIRK), RadauIIA5 (5th-order FIRK) |
 | `rc`         | IDA, FBDF, Rodas5P, Kvaerno5, RadauIIA5 |
-| `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5, Kvaerno3/Kvaerno5/KenCarp4 (all `smooth_est=false`) |
+| `graetz`     | IDA, FBDF, Rodas5P, RadauIIA5, Kvaerno5/KenCarp4 (both `smooth_est=false`) |
 | `mul`        | IDA, FBDF, KenCarp4 (`smooth_est=false`), Rodas6P |
 | `darlington` | IDA, FBDF, Rodas6P, RadauIIA5, Kvaerno5/KenCarp4 (`smooth_est=false`) |
 
-`smooth_est=false` is a fix discovered after the fact (see "Kvaerno3/Kvaerno5/
-KenCarp4 needed `smooth_est=false`, not exclusion" below) — it's not a
-per-case tuning knob, it's what makes these algorithms usable on any of the
-nonlinear MNA circuits at all.
+`smooth_est=false` is a fix discovered after the fact (see "Kvaerno5/KenCarp4
+needed `smooth_est=false`, not exclusion" below) — it's not a per-case tuning
+knob, it's what makes these algorithms usable on any of the nonlinear MNA
+circuits at all. (Kvaerno3 was surveyed alongside Kvaerno5 with the same fix
+but is not in the suite: it's dominated by Kvaerno5 everywhere it runs — same
+viability, strictly more steps/runtime, e.g. the single most expensive `graetz`
+series at ~760k steps / 28s at reltol=1e-5 — so it added cost and a redundant
+curve without adding information.)
 
 - **`darlington` got IDA/FBDF first, then a real (if narrower) solver survey
   once asked directly whether any non-BDF solver had actually been tried —
@@ -151,7 +155,7 @@ nonlinear MNA circuits at all.
   in this environment) — they come from the CI `work-precision` job, which
   fetches VACASK before running `run_wpd.jl`.
 
-- **Kvaerno3/Kvaerno5/KenCarp4 needed `smooth_est=false`, not exclusion —
+- **Kvaerno5/KenCarp4 needed `smooth_est=false`, not exclusion —
   the diode/BJT turn-on itself was never the actual problem.** Originally
   documented as "stall on both diode circuits" and excluded outright. Root
   cause, found by reading `OrdinaryDiffEqSDIRK`'s shared ESDIRK step
@@ -173,13 +177,13 @@ nonlinear MNA circuits at all.
   never actually varied the Jacobian at all) and the W-construction formula
   (`jacobian2W!`'s generic combination is algebraically identical to the
   bridge's hand-rolled one). `Kvaerno5(smooth_est=false)` alone reproduces
-  success. With the fix: full `:Success` on `graetz` for all three
-  (Kvaerno3/Kvaerno5/KenCarp4) across the bounded range checked (reltol 1e-3
-  to 1e-5); on `darlington`, KenCarp4 is fully `:Success` across the *entire*
-  reltol range (1e-3 to 1e-9) and Kvaerno5 through 1e-8. `mul` stays the
-  exception — it really is the stiffest case: Kvaerno5 only succeeds at the
-  single loosest reltol, and Kvaerno3 hits a `maxiters` bound at every
-  tested reltol including the loosest, reaching only ~10% of the tspan.
+  success. With the fix: full `:Success` on `graetz` for both
+  (Kvaerno5/KenCarp4) across the bounded range checked (reltol 1e-3 to 1e-5);
+  on `darlington`, KenCarp4 is fully `:Success` across the *entire* reltol
+  range (1e-3 to 1e-9) and Kvaerno5 through 1e-8. `mul` stays the exception —
+  it really is the stiffest case: Kvaerno5 only succeeds at the single loosest
+  reltol. (Kvaerno3, surveyed with the same fix, is dominated by Kvaerno5
+  everywhere and left out of the suite — see the table note above.)
 - **The best single Rosenbrock variant is genuinely case-dependent — no
   strict order.** Head-to-head at matching tolerances:
   - `rc`: Rodas5P is more accurate at all 4 tolerances tested (e.g.
@@ -352,8 +356,8 @@ added anyway since the pipeline already excludes failed points from the
 plotted curve. Kvaerno5 and KenCarp4 at their default `smooth_est=true` both
 go `:Unstable` at every reltol tested - the BJT's stiff switching edge
 stalls them the same way the diode circuits' turn-on does. This turned out
-to be the wrong conclusion, not the final one: see "Kvaerno3/Kvaerno5/
-KenCarp4 needed `smooth_est=false`, not exclusion" above - with the fix,
+to be the wrong conclusion, not the final one: see "Kvaerno5/KenCarp4
+needed `smooth_est=false`, not exclusion" above - with the fix,
 KenCarp4 is fully `:Success` across `darlington`'s entire reltol range and
 Kvaerno5 through 1e-8, both now in `SOLVERS`.
 

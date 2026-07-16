@@ -57,3 +57,4 @@ The most nebulous and least important at this stage: copying features from other
 - Cleanup: drop dead `netlist_utils.jl` composition operators
 - Control/analysis dot-cards no longer crash sema
 - Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
+- Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
