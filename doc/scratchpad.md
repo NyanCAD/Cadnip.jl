@@ -56,3 +56,4 @@ The most nebulous and least important at this stage: copying features from other
 - Cleanup: drop dead backward-compat aliases
 - Cleanup: drop dead `netlist_utils.jl` composition operators
 - Control/analysis dot-cards no longer crash sema
+- Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
