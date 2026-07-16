@@ -259,6 +259,17 @@ solvers_for(case) = SOLVERS[case]
 #------------------------------------------------------------------------------#
 # Helpers
 #------------------------------------------------------------------------------#
+# Step cap for the reltol sweep. Sized to sit well above every solver's largest
+# *successful* run in this suite (the current worst is graetz Kvaerno3 at
+# reltol=1e-5, ~760k accepted steps) while still killing a stuck solve quickly.
+# The old 50_000_000 let a single pathological point churn for ~19 min before
+# bailing out (darlington FBDF at reltol=1e-6 walked to the 50M ceiling having
+# covered 0.2% of the tspan), which alone pushed the CI job past its 60-minute
+# timeout. A run that needs >2M steps here is diverging, not converging - cap it
+# and record the MaxIters skip instead of waiting it out. Does not change any
+# accepted point (all finish far below this); only bounds the runaways.
+const SWEEP_MAXITERS = 2_000_000
+
 setup(builder) = (c = MNACircuit(builder); MNA.assemble!(c); c)
 
 function output_signal(sol, out_nodes)
@@ -436,7 +447,7 @@ function run_cadnip_sweep(case, spec)
             # auto_tstops=true (tran!'s default) derives PULSE/PWL/SIN source
             # breakpoints automatically - no more hand-derived case_tstops.
             sol = tran!(c, (t0, t1); abstol=a, reltol=r, solver=sfn(),
-                        dense=false, maxiters=50_000_000)
+                        dense=false, maxiters=SWEEP_MAXITERS)
             # A solver can bail out early (e.g. retcode :Unstable) without
             # throwing. Only accept runs that actually reached t1 - otherwise
             # the truncated waveform is not comparable to the others and
@@ -455,7 +466,7 @@ function run_cadnip_sweep(case, spec)
                        sol.t, output_signal(sol, out_nodes))
             ct = setup(builder)
             bench = @benchmark tran!($ct, ($t0, $t1); abstol=$a, reltol=$r, solver=$(sfn()),
-                                     dense=false, maxiters=50_000_000) samples=3 evals=1 seconds=120
+                                     dense=false, maxiters=$SWEEP_MAXITERS) samples=3 evals=1 seconds=120
             tmed = median(bench.times) / 1e9
             println(summary, "$sname,$r,$tmed,$steps,$rejects,$nniter,$(sol.retcode)")
             @printf("%.3fs steps=%d\n", tmed, steps)
