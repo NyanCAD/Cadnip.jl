@@ -151,8 +151,7 @@ Tag ordering rules ensure ForwardDiff.Tag{F,V} is inner to our tags.
 """
 @inline function is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real)::Bool
     # Extract charge from contribution - returns the reactive part
-    # NOTE: Detection runs BEFORE dual_creation (see vasim.jl detection_block)
-    # so contrib_fn receives plain Float64 values, not JacobianTag duals
+    # NOTE: contrib_fn is called with plain Float64 values, not JacobianTag duals
     function extract_charge(Vpn)
         result = contrib_fn(Vpn)
         if result isa Dual{ContributionTag}
@@ -257,25 +256,6 @@ See doc/voltage_dependent_capacitor_detection_bug.md for details.
     end
 end
 
-# Legacy signature for backward compatibility (used by stamp_reactive_with_detection!)
-@inline function detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
-    cache = ctx.charge_is_vdep
-    pos = ctx.charge_detection_pos
-    ctx.charge_detection_pos = pos + 1
-
-    if pos > length(cache)
-        # First time: run detection and cache result
-        result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
-        push!(cache, result)
-        push!(ctx.charge_Q_values, 0.0)
-        push!(ctx.charge_V_values, 0.0)
-        return result
-    else
-        # Subsequent runs: return cached result
-        return cache[pos]
-    end
-end
-
 """
     detect_or_cached!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol, V_branch::Real, Q::Real) -> Bool
 
@@ -297,13 +277,6 @@ Detection was done during the MNAContext build phase.
 This just returns the cached result (V_branch and Q are ignored).
 """
 @inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, V_branch::Real, Q::Real)::Bool
-    pos = dctx.charge_detection_pos
-    dctx.charge_detection_pos = pos + 1
-    return dctx.charge_is_vdep[pos]
-end
-
-# Legacy signature for DirectStampContext (used by stamp_reactive_with_detection!)
-@inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
     pos = dctx.charge_detection_pos
     dctx.charge_detection_pos = pos + 1
     return dctx.charge_is_vdep[pos]
@@ -351,8 +324,8 @@ end
 """
     reset_detection_counter!(ctx)
 
-Reset the charge detection counter for the stamping phase.
-Called between detection_block and stamp_code in generated VA stamp methods.
+Reset the charge detection counter before the stamping phase, so counter-based
+cache access (`detect_or_cached!`) lines up in generated VA stamp methods.
 """
 @inline reset_detection_counter!(ctx::MNAContext) = (ctx.charge_detection_pos = 1; nothing)
 @inline reset_detection_counter!(dctx::DirectStampContext) = (dctx.charge_detection_pos = 1; nothing)
@@ -1123,89 +1096,6 @@ end
 
 stamp_charge_state!(dctx::DirectStampContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String) =
     stamp_charge_state!(dctx, p, n, q_fn, x, Symbol(charge_name))
-
-#==============================================================================#
-# Automatic Detection and Stamping for VA Code Generation
-#==============================================================================#
-
-export stamp_reactive_with_detection!
-
-"""
-    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, charge_name) -> Bool
-
-Detect if a contribution has voltage-dependent capacitance and stamp accordingly.
-
-This function is designed for use by VA code generation. It:
-1. Detects if the contribution has voltage-dependent capacitance
-2. If voltage-dependent: uses charge formulation (stamp_charge_state!)
-3. If constant capacitance: uses standard C matrix stamping
-
-# Arguments
-- `ctx`: MNA context
-- `p`, `n`: Branch nodes
-- `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
-- `x`: Current solution vector
-- `charge_name`: Name for charge variable (used if voltage-dependent)
-
-# Returns
-- `true` if charge formulation was used (voltage-dependent)
-- `false` if standard C matrix stamping was used (constant capacitance)
-
-# Example
-```julia
-# In generated VA stamp code:
-contrib_fn = V -> V/R + va_ddt(C * V^2)  # Voltage-dependent capacitor
-
-used_charge = stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, :Q_branch)
-# Returns true, allocated charge variable, and stamped charge formulation
-```
-"""
-function stamp_reactive_with_detection!(
-    ctx::MNAContext,
-    p::Int, n::Int,
-    contrib_fn,
-    x::AbstractVector,
-    charge_name::Symbol
-)
-    # Get operating point
-    Vp = p == 0 ? 0.0 : (length(x) >= p ? x[p] : 0.0)
-    Vn = n == 0 ? 0.0 : (length(x) >= n ? x[n] : 0.0)
-
-    # Detect voltage dependence
-    is_vdep = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
-
-    if is_vdep
-        # Extract charge function from contribution
-        # contrib_fn(V) returns I which may include va_ddt(Q(V))
-        # We need to extract Q(V) for stamp_charge_state!
-        q_fn = V -> begin
-            result = contrib_fn(V)
-            if result isa Dual{ContributionTag}
-                # Extract charge from reactive part
-                return value(partials(result, 1))
-            else
-                return 0.0
-            end
-        end
-
-        stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
-        return true
-    else
-        # Use standard C matrix stamping
-        result = evaluate_contribution(contrib_fn, Vp, Vn)
-
-        if result.has_reactive
-            stamp_C!(ctx, p, p, result.dq_dVp)
-            stamp_C!(ctx, p, n, result.dq_dVn)
-            stamp_C!(ctx, n, p, -result.dq_dVp)
-            stamp_C!(ctx, n, n, -result.dq_dVn)
-        end
-        return false
-    end
-end
-
-stamp_reactive_with_detection!(ctx::MNAContext, p::Int, n::Int, contrib_fn, x::AbstractVector, name::String) =
-    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, Symbol(name))
 
 #==============================================================================#
 # DirectStampContext Methods
