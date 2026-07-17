@@ -408,6 +408,12 @@ impl<'a> Parser<'a> {
             INCLUDE => self.parse_include(cp),
             HDL => self.parse_hdl(cp),
             PRINT => self.parse_print(cp),
+            DATA => self.parse_data(cp),
+            IC => self.parse_ic(cp),
+            IF => self.parse_if(cp),
+            LIB => self.parse_lib(cp),
+            ENDL => self.parse_endl(cp),
+            MEASURE => self.parse_measure(cp),
             _ => self.error(), // remaining dot commands not yet ported
         }
     }
@@ -557,7 +563,13 @@ impl<'a> Parser<'a> {
             IDENTIFIER_LINEAR_INDUCTOR => self.parse_rcl(SyntaxKind::Inductor),
             IDENTIFIER_VOLTAGE => self.parse_v_or_i(SyntaxKind::Voltage),
             IDENTIFIER_CURRENT => self.parse_v_or_i(SyntaxKind::Current),
-            IDENTIFIER_SUBCIRCUIT_CALL => self.parse_subckt_call(),
+            IDENTIFIER_SUBCIRCUIT_CALL => self.parse_subckt_call(SyntaxKind::SubcktCall),
+            IDENTIFIER_OSDI => self.parse_subckt_call(SyntaxKind::OSDIDevice),
+            IDENTIFIER_VOLTAGE_CONTROLLED_VOLTAGE => self.parse_controlled(true),
+            IDENTIFIER_VOLTAGE_CONTROLLED_CURRENT => self.parse_controlled(true),
+            IDENTIFIER_CURRENT_CONTROLLED_CURRENT => self.parse_controlled(false),
+            IDENTIFIER_CURRENT_CONTROLLED_VOLTAGE => self.parse_controlled(false),
+            IDENTIFIER_SWITCH => self.parse_switch(),
             IDENTIFIER_DIODE => self.parse_diode(),
             IDENTIFIER_MOSFET => self.parse_mosfet(),
             IDENTIFIER_BIPOLAR_TRANSISTOR => self.parse_bipolar_transistor(),
@@ -634,9 +646,9 @@ impl<'a> Parser<'a> {
     /// parameters) is emitted as a bare `Identifier`, matching Julia's
     /// `model_after` extraction; the "model before params" case needs no special
     /// handling since the popped node keeps its `HierarchialNode` kind/position.
-    fn parse_subckt_call(&mut self) -> PResult {
+    fn parse_subckt_call(&mut self, kind: SyntaxKind) -> PResult {
         let cp = self.checkpoint();
-        self.wrapped(cp, SyntaxKind::SubcktCall, |p| {
+        self.wrapped(cp, kind, |p| {
             p.parse_hierarchial_node()?; // name
             let mut node_count = 0;
             while p.nnt.kind != EQ
@@ -1028,6 +1040,426 @@ impl<'a> Parser<'a> {
                 p.parse_expression()?;
             }
             p.accept_newline()
+        })
+    }
+
+    /// E/F/G/H controlled sources: `name pos neg <ctrl-spec> nl`. `in_is_voltage`
+    /// selects the `VoltageControl` (E/G) vs `CurrentControl` (F/H) branch — the
+    /// Rust stand-in for Julia's `ControlledSource{in,out}` type param, which
+    /// only ever gates control-type dispatch (`in`), never the CST shape of
+    /// `out`. POLY(...) and TABLE(...) branches are shared across all four.
+    fn parse_controlled(&mut self, in_is_voltage: bool) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::ControlledSource, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // pos
+            p.parse_hierarchial_node()?; // neg
+            if p.nt.kind == POLY {
+                let cpv = p.checkpoint();
+                p.wrapped(cpv, SyntaxKind::PolyControl, |p| {
+                    p.take_kw(&[POLY])?;
+                    p.take_literal()?; // dimensions: the N in POLY(N)
+                    while !p.eol() {
+                        p.parse_expression()?; // control nodes + coefficients
+                    }
+                    Ok(())
+                })?;
+            } else if p.nt.kind == TABLE {
+                let cpv = p.checkpoint();
+                p.wrapped(cpv, SyntaxKind::TableControl, |p| {
+                    p.take_kw(&[TABLE])?;
+                    p.parse_expression()?;
+                    if p.nt.kind == EQ {
+                        p.accept(&[EQ])?;
+                    }
+                    while !p.eol() {
+                        p.parse_expression()?; // (x,y) pairs
+                    }
+                    Ok(())
+                })?;
+            } else if in_is_voltage {
+                let cpv = p.checkpoint();
+                p.wrapped(cpv, SyntaxKind::VoltageControl, |p| {
+                    if p.nnt.kind != EQ {
+                        p.parse_hierarchial_node()?; // cpos
+                    }
+                    if p.nnt.kind != EQ {
+                        p.parse_hierarchial_node()?; // cneg
+                    }
+                    if p.nnt.kind != EQ {
+                        p.parse_expression()?; // val (can be nonlinear: value=)
+                    }
+                    p.parse_parameter_list()
+                })?;
+            } else {
+                let cpv = p.checkpoint();
+                p.wrapped(cpv, SyntaxKind::CurrentControl, |p| {
+                    if p.nnt.kind != EQ {
+                        p.parse_hierarchial_node()?; // vnam
+                    }
+                    if p.nnt.kind != EQ {
+                        p.parse_expression()?; // val (can be nonlinear: value=)
+                    }
+                    p.parse_parameter_list()
+                })?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    /// S / W (ngspice switch): `name nd1 nd2 cnd1 cnd2 model (ON|OFF) nl`.
+    fn parse_switch(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::Switch, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // nd1
+            p.parse_hierarchial_node()?; // nd2
+            p.parse_hierarchial_node()?; // cnd1
+            p.parse_hierarchial_node()?; // cnd2
+            p.parse_hierarchial_node()?; // model
+            p.take_kw_any()?; // onoff
+            p.accept_newline()
+        })
+    }
+
+    /// `.ic v(a)=1.5 v(b:c)=0 ...` — a list of `name(arg)=val` entries.
+    ///
+    /// Note: `ICEntry` has no `@trysetup` of its own in Julia (unlike
+    /// `Parameter`); a failure partway through an entry is *not* wrapped as its
+    /// own `Incomplete{ICEntry}` — it propagates straight out to the enclosing
+    /// `ICStatement`'s `Incomplete`. So each entry is only wrapped (via
+    /// `wrap_at`) once every field has succeeded.
+    fn parse_ic(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::ICStatement, |p| {
+            p.take_kw(&[IC])?;
+            while !p.eol() {
+                let cpe = p.checkpoint();
+                p.take_identifier()?; // name
+                p.take(&[LPAREN])?;
+                p.parse_ic_statement()?; // arg
+                p.take(&[RPAREN])?;
+                p.take(&[EQ])?;
+                p.parse_expression()?; // val
+                p.wrap_at(cpe, SyntaxKind::ICEntry);
+            }
+            p.accept_newline()
+        })
+    }
+
+    /// The `arg` inside `.ic name(arg)=val`: a bare number/identifier, a
+    /// `WildCard` (`*` or `<number>*`), or a `Coloned` range (`ident:ident`).
+    ///
+    /// Faithful to Julia: the guarded branches (`kind(nt(ps)) == ...` checked
+    /// right before each `take*`) can't actually fail, so they're plain `?`.
+    /// The lone unguarded call — `r = take_identifier(ps)` after a `:` — is a
+    /// raw (non-`@trynext`) call in Julia, so its failure is *not* propagated;
+    /// we mirror that by ignoring its `Result` and still emitting `Coloned`.
+    fn parse_ic_statement(&mut self) -> PResult {
+        if self.nt.kind == STAR {
+            let cp = self.checkpoint();
+            self.take(&[STAR])?;
+            self.wrap_at(cp, SyntaxKind::WildCard);
+            Ok(())
+        } else if self.nt.kind == NUMBER {
+            let cp = self.checkpoint();
+            self.take_literal()?;
+            if self.nt.kind == STAR {
+                self.take(&[STAR])?;
+                self.wrap_at(cp, SyntaxKind::WildCard);
+            }
+            Ok(())
+        } else if self.nt.kind.is_ident() {
+            let cp = self.checkpoint();
+            self.take_identifier()?;
+            if self.nt.kind == COLON {
+                self.take(&[COLON])?;
+                let _ = self.take_identifier(); // not propagated, matches Julia
+                self.wrap_at(cp, SyntaxKind::Coloned);
+            }
+            Ok(())
+        } else {
+            self.error()
+        }
+    }
+
+    fn parse_endl(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::EndlStatement, |p| {
+            p.take_kw(&[ENDL])?;
+            if p.nt.kind.is_ident() {
+                p.take_identifier()?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    /// `.lib` has two forms, distinguished by whether the token *after* the
+    /// name/path (`nnt`, since `kw` has just been consumed) is an identifier:
+    /// - section/block form: `.lib name ... .endl` (`LibStatement`) — `nnt` is
+    ///   NOT an identifier (typically the trailing newline).
+    /// - include form: `.lib [string|identifier] identifier` (`LibInclude`) —
+    ///   `nnt` IS an identifier (the section name on the same line).
+    fn parse_lib(&mut self, cp: Checkpoint) -> PResult {
+        let r = (|p: &mut Self| -> Result<SyntaxKind, ()> {
+            p.take_kw(&[LIB])?;
+            if !p.nnt.kind.is_ident() {
+                p.take_identifier()?; // name
+                p.accept_newline()?; // nl
+                loop {
+                    if p.nt.kind == ENDMARKER {
+                        return Err(()); // reached EOF before `.endl`
+                    }
+                    if p.nt.kind == DOT {
+                        let cp2 = p.checkpoint();
+                        p.bump(SyntaxKind::Notation); // dot2
+                        if p.nt.kind == ENDL {
+                            p.parse_endl(cp2)?;
+                            break;
+                        } else {
+                            let _ = p.parse_dot_body(cp2); // @donext: body errors are contained
+                        }
+                    } else {
+                        let _ = p.parse_spice_toplevel(); // @donext: body errors are contained
+                    }
+                }
+                Ok(SyntaxKind::LibStatement)
+            } else {
+                p.take_path()?; // path
+                p.take_identifier()?; // name
+                p.accept_newline()?; // nl
+                Ok(SyntaxKind::LibInclude)
+            }
+        })(self);
+        match r {
+            Ok(kind) => {
+                self.wrap_at(cp, kind);
+                Ok(())
+            }
+            Err(()) => {
+                self.wrap_at(cp, SyntaxKind::Incomplete);
+                Err(())
+            }
+        }
+    }
+
+    fn parse_data(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::DataStatement, |p| {
+            p.take_kw(&[DATA])?;
+            p.take_identifier()?; // blockname
+
+            let mut n_rows = 0usize;
+            while p.nt.kind.is_ident() {
+                p.take_identifier()?; // row_names (inlined EXPRList)
+                n_rows += 1;
+            }
+
+            while !p.eol() {
+                for _ in 0..n_rows {
+                    p.take_literal()?; // values (inlined EXPRList)
+                }
+            }
+
+            p.accept_newline()?; // nl
+            p.take(&[DOT])?; // dot2
+            p.take_kw(&[ENDDATA])?; // endkw
+            p.accept_newline() // nl2
+        })
+    }
+
+    /// `(cond)` — the parenthesized condition of an `.if`/`.elseif`.
+    fn parse_condition(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::Condition, |p| {
+            p.accept(&[LPAREN])?;
+            p.parse_expression()?;
+            p.accept(&[RPAREN])
+        })
+    }
+
+    /// One `.if`/`.elseif`/`.else` case: `dot kw condition? nl stmts*`, up to
+    /// (but not consuming) the next `.else`/`.elseif`/`.endif`/EOF. `cp` must be
+    /// the checkpoint captured *before* the leading dot, which the caller has
+    /// already bumped (mirrors `parse_dot`/`parse_dot_body`'s convention, and
+    /// Julia's `dot` argument being an already-parsed token).
+    fn parse_ifelse_block(&mut self, cp: Checkpoint, kws: &[TokenKind]) -> PResult {
+        self.wrapped(cp, SyntaxKind::IfElseCase, |p| {
+            let kw_kind = p.nt.kind;
+            p.take_kw(kws)?;
+            if kw_kind == IF || kw_kind == ELSEIF {
+                p.parse_condition()?;
+            }
+            p.accept_newline()?;
+            loop {
+                if p.nt.kind == DOT && matches!(p.nnt.kind, ELSE | ELSEIF | ENDIF) {
+                    break;
+                }
+                if p.nt.kind == ENDMARKER {
+                    break;
+                }
+                let _ = p.parse_spice_toplevel();
+            }
+            Ok(())
+        })
+    }
+
+    /// `.if (cond) nl stmts* (.elseif (cond) nl stmts*)* (.else nl stmts*)?
+    /// .endif nl`. `cp` is the checkpoint before the already-consumed leading
+    /// dot (the `IF` case of `parse_dot_body`).
+    fn parse_if(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::IfBlock, |p| {
+            p.parse_ifelse_block(cp, &[IF])?;
+            loop {
+                if p.nt.kind != DOT {
+                    return p.error(); // reached EOF before `.endif`
+                }
+                let cp2 = p.checkpoint();
+                p.take(&[DOT])?;
+                if p.nt.kind == ENDIF {
+                    p.take_kw(&[ENDIF])?;
+                    break;
+                }
+                p.parse_ifelse_block(cp2, &[ELSE, ELSEIF])?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    // --- .measure ---
+
+    /// `name` — a bare identifier, or (in dialects/contexts where the lexer
+    /// can produce one) a quoted `StringLiteral`.
+    fn parse_measure_name(&mut self) -> PResult {
+        if self.nt.kind == STRING {
+            self.take_string()
+        } else {
+            self.take_identifier()
+        }
+    }
+
+    /// Common `.meas[ure] <analysis> <name>` prefix shared by the point and
+    /// range forms; failure here is reported as a single `Incomplete` at `cp`
+    /// (mirrors `parse_measure`'s own `@trysetup MeasurePointStatement dot`
+    /// error path, which fires regardless of which form would have followed).
+    fn parse_measure(&mut self, cp: Checkpoint) -> PResult {
+        if self.take_kw(&[MEASURE]).is_err()
+            || self.take_kw(&[AC, DC, OP, TRAN, TF, NOISE]).is_err()
+            || self.parse_measure_name().is_err()
+        {
+            self.wrap_at(cp, SyntaxKind::Incomplete);
+            return Err(());
+        }
+        if matches!(self.nt.kind, FIND | DERIV | PARAMETERS | WHEN | AT) {
+            self.parse_measure_point(cp)
+        } else {
+            self.parse_measure_range(cp)
+        }
+    }
+
+    /// Point along the abscissa: `[FIND|DERIV|PARAM <expr>] [WHEN <expr> |
+    /// AT=<expr>] [RISE|FALL|CROSS=<n>] [TD=<val>]`.
+    fn parse_measure_point(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::MeasurePointStatement, |p| {
+            if matches!(p.nt.kind, FIND | DERIV | PARAMETERS) {
+                let cpf = p.checkpoint();
+                p.wrapped(cpf, SyntaxKind::FindDerivParam, |p| {
+                    p.take_kw(&[FIND, DERIV, PARAMETERS])?;
+                    if p.nt.kind == EQ {
+                        p.take(&[EQ])?;
+                    }
+                    p.parse_expression()
+                })?;
+            }
+            if matches!(p.nt.kind, WHEN | AT) {
+                if p.nt.kind == AT {
+                    let cpa = p.checkpoint();
+                    p.wrapped(cpa, SyntaxKind::At, |p| {
+                        p.take_kw(&[AT])?;
+                        p.take(&[EQ])?;
+                        p.parse_expression()
+                    })?;
+                } else {
+                    let cpw = p.checkpoint();
+                    p.wrapped(cpw, SyntaxKind::When, |p| {
+                        p.take_kw(&[WHEN])?;
+                        p.parse_expression()
+                    })?;
+                }
+            }
+            if matches!(p.nt.kind, RISE | FALL | CROSS) {
+                p.parse_risefallcross()?;
+            }
+            if p.nt.kind == TD {
+                p.parse_td()?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    /// Range over the abscissa: `[AVG|MAX|MIN|PP|RMS|INTEG <expr>] [TRIG
+    /// ...] [TARG ...]`.
+    fn parse_measure_range(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::MeasureRangeStatement, |p| {
+            if matches!(p.nt.kind, AVG | MAX | MIN | PP | RMS | INTEG) {
+                let cpa = p.checkpoint();
+                p.wrapped(cpa, SyntaxKind::AvgMaxMinPPRmsInteg, |p| {
+                    p.take_kw_any()?;
+                    p.parse_expression()
+                })?;
+            }
+            if p.nt.kind == TRIG {
+                p.parse_trig_targ()?;
+            }
+            if p.nt.kind == TARG {
+                p.parse_trig_targ()?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    /// `TRIG|TARG <lhs> [VAL=<rhs>] [TD=<val>] [RISE|FALL|CROSS=<n>]`.
+    fn parse_trig_targ(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::TrigTarg, |p| {
+            p.take_kw(&[TRIG, TARG])?;
+            p.parse_expression()?; // lhs
+            if p.nt.kind == VAL {
+                let cpv = p.checkpoint();
+                p.wrapped(cpv, SyntaxKind::Val_, |p| {
+                    p.take_kw_any()?;
+                    p.take(&[EQ])?;
+                    p.parse_expression()
+                })?;
+            }
+            if p.nt.kind == TD {
+                p.parse_td()?;
+            }
+            if matches!(p.nt.kind, RISE | FALL | CROSS) {
+                p.parse_risefallcross()?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `RISE|FALL|CROSS=<count>|LAST`.
+    fn parse_risefallcross(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::RiseFallCross, |p| {
+            p.take_kw(&[RISE, FALL, CROSS])?;
+            p.take(&[EQ])?;
+            if p.nt.kind == LAST {
+                p.take_kw_any()
+            } else {
+                p.take_literal()
+            }
+        })
+    }
+
+    /// `TD=<expr>`.
+    fn parse_td(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::TD_, |p| {
+            p.take_kw(&[TD])?;
+            p.take(&[EQ])?;
+            p.parse_expression()
         })
     }
 }
