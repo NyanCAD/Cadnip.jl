@@ -64,6 +64,17 @@ fn dump_rec(
     depth: usize,
     out: &mut String,
 ) {
+    // `LiteralExpr`/`NameRef` are transparent expression wrappers: dump their
+    // inner token in place, so the output matches Julia's bare terminal (keeps
+    // the differential parity while the Rust AST stays uniformly node-based).
+    if let NodeOrToken::Node(n) = &elem {
+        if matches!(n.kind(), SyntaxKind::LiteralExpr | SyntaxKind::NameRef) {
+            for child in n.children_with_tokens() {
+                dump_rec(child, depth, out);
+            }
+            return;
+        }
+    }
     let span = match content_span(&elem) {
         Some(s) => s,
         None => return, // trivia / zero-content: skip (and, for nodes, its subtree has no content)

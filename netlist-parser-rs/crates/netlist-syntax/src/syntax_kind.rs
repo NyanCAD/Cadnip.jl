@@ -394,6 +394,13 @@ pub enum SyntaxKind {
     Square,
     FunctionCall,
     FunctionArgs,
+    /// Wrapper node around a literal token used as an expression (rust-analyzer
+    /// `Literal` pattern). Dumped transparently as its inner token so the
+    /// differential stays byte-exact against Julia's bare terminal.
+    LiteralExpr,
+    /// Wrapper node around a bare identifier used as an expression (rust-analyzer
+    /// `PathExpr`/`NameRef` pattern). Dumped transparently as its inner token.
+    NameRef,
 
     // Analysis / dot-command + measure forms (breadth phase).
     Tran,
@@ -532,6 +539,8 @@ impl SyntaxKind {
             Square => "Square",
             FunctionCall => "FunctionCall",
             FunctionArgs => "FunctionArgs",
+            LiteralExpr => "LiteralExpr",
+            NameRef => "NameRef",
             Tran => "Tran",
             PrintStatement => "PrintStatement",
             ICStatement => "ICStatement",

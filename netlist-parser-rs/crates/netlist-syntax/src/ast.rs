@@ -85,9 +85,11 @@ pub enum Expr {
     Prime(Prime),
     Square(Square),
     Hier(HierarchialNode),
-    /// A leaf literal/identifier token (`NumberLiteral`, `Literal`,
-    /// `StringLiteral`, `Identifier`, `Keyword`, `Operator`).
-    Token(SyntaxToken),
+    /// A literal (`NumberLiteral`/`Literal`/`StringLiteral`) wrapped in a
+    /// `LiteralExpr` node.
+    Literal(LiteralExpr),
+    /// A bare identifier used as an expression, wrapped in a `NameRef` node.
+    Name(NameRef),
 }
 
 impl Expr {
@@ -103,19 +105,13 @@ impl Expr {
                 SyntaxKind::Prime => Some(Expr::Prime(Prime(n))),
                 SyntaxKind::Square => Some(Expr::Square(Square(n))),
                 SyntaxKind::HierarchialNode => Some(Expr::Hier(HierarchialNode(n))),
+                SyntaxKind::LiteralExpr => Some(Expr::Literal(LiteralExpr(n))),
+                SyntaxKind::NameRef => Some(Expr::Name(NameRef(n))),
                 _ => None,
             },
-            NodeOrToken::Token(t) => match t.kind() {
-                // Note: `Operator` is intentionally NOT an expression leaf — it
-                // only appears inside Binary/Unary nodes, where treating it as a
-                // child expression would shift `lhs`/`rhs` positions.
-                SyntaxKind::NumberLiteral
-                | SyntaxKind::Literal
-                | SyntaxKind::StringLiteral
-                | SyntaxKind::Identifier
-                | SyntaxKind::Keyword => Some(Expr::Token(t)),
-                _ => None,
-            },
+            // Expression leaves are always wrapped in nodes (LiteralExpr /
+            // NameRef / HierarchialNode), so there are no bare-token exprs.
+            NodeOrToken::Token(_) => None,
         }
     }
 
@@ -131,8 +127,33 @@ impl Expr {
             Expr::Prime(n) => n.text(),
             Expr::Square(n) => n.text(),
             Expr::Hier(n) => n.text(),
-            Expr::Token(t) => t.text().to_string(),
+            Expr::Literal(n) => n.text(),
+            Expr::Name(n) => n.text(),
         }
+    }
+}
+
+ast_node!(LiteralExpr);
+impl LiteralExpr {
+    /// The inner literal token (`NumberLiteral`, `Literal`, or `StringLiteral`).
+    pub fn token(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| {
+                matches!(
+                    t.kind(),
+                    SyntaxKind::NumberLiteral | SyntaxKind::Literal | SyntaxKind::StringLiteral
+                )
+            })
+    }
+}
+
+ast_node!(NameRef);
+impl NameRef {
+    /// The inner identifier token.
+    pub fn token(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
     }
 }
 
@@ -609,6 +630,24 @@ mod tests {
             Expr::Binary(inner) => assert_eq!(inner.op().unwrap().text(), "*"),
             other => panic!("expected nested binary, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn expr_is_uniformly_node_based() {
+        // A literal, a bare identifier, and a dotted name are all node-based Expr
+        // variants (no bare-token expressions).
+        let r = root("* t\n.param a = 1k\n.param b = foo\n.param c = x.y\n");
+        let vals: Vec<_> = r
+            .statements()
+            .filter_map(ParamStatement::cast)
+            .filter_map(|p| p.params().next()?.value())
+            .collect();
+        assert!(matches!(vals[0], Expr::Literal(_)), "1k is a Literal");
+        match &vals[1] {
+            Expr::Name(n) => assert_eq!(n.token().unwrap().text(), "foo"),
+            other => panic!("expected NameRef, got {other:?}"),
+        }
+        assert!(matches!(vals[2], Expr::Hier(_)), "x.y is a HierarchialNode");
     }
 
     #[test]

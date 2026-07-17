@@ -872,7 +872,13 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> PResult {
         if self.nt.kind.is_number() || self.nt.kind.is_literal() {
-            return self.take_literal();
+            // Wrap the literal token in a `LiteralExpr` node so expressions are
+            // uniformly node-based (rust-analyzer `Literal` pattern). The dumper
+            // renders it transparently as its inner token, so parity holds.
+            let cp = self.checkpoint();
+            self.take_literal()?;
+            self.wrap_at(cp, SyntaxKind::LiteralExpr);
+            return Ok(());
         }
         if self.nt.kind.is_ident() {
             let cp = self.checkpoint();
@@ -884,6 +890,9 @@ impl<'a> Parser<'a> {
                 self.wrap_at(cp, SyntaxKind::NodeName);
                 return self.wrapped(cp, SyntaxKind::HierarchialNode, |p| p.parse_subnodes());
             }
+            // Bare identifier expression → wrap in a `NameRef` node (uniform
+            // node-based Expr); dumped transparently as its inner token.
+            self.wrap_at(cp, SyntaxKind::NameRef);
             return Ok(());
         }
         if self.nt.kind == STRING {
