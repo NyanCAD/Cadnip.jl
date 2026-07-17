@@ -3,12 +3,14 @@
 //! accessors, giving Rust the same ergonomics as the Julia parser's `forms.jl`
 //! structs + `RedTree` named-field access.
 //!
-//! Note on literals: in this CST, terminals (`NumberLiteral`, `Identifier`,
-//! `Notation`, ...) are leaf *tokens*, not nodes. So an "expression" position
-//! can be a node (`BinaryExpression`, ...) or a token (`NumberLiteral`); the
-//! [`Expr`] enum unifies both. Accessors for same-typed positional fields
-//! (e.g. a device's `name`/`pos`/`neg`, all `HierarchialNode`) select by child
-//! order, matching the Julia field layout.
+//! Expressions are uniformly node-based: literal and bare-identifier leaves are
+//! wrapped in `LiteralExpr`/`NameRef` nodes (the rust-analyzer `Literal`/
+//! `NameRef` pattern) so the [`Expr`] enum has no bare-token variant. Those
+//! wrappers are rendered transparently by the dumper, so the differential stays
+//! byte-exact against Julia while the AST stays idiomatic. Accessors for
+//! same-typed positional fields (e.g. a device's `name`/`pos`/`neg`, all
+//! `HierarchialNode`) select by child order — the rowan convention for a fixed
+//! number of repeated same-kind children — matching the Julia field layout.
 
 use crate::syntax_kind::{SyntaxKind, SyntaxNode, SyntaxToken};
 use rowan::NodeOrToken;
@@ -160,6 +162,15 @@ impl NameRef {
 /// Expression children of `parent`, in order (nodes and literal tokens).
 fn expr_children(parent: &SyntaxNode) -> impl Iterator<Item = Expr> + '_ {
     parent.children_with_tokens().filter_map(Expr::cast_element)
+}
+
+/// Direct child tokens of a given kind (for fields the parser emits as bare
+/// tokens rather than wrapped nodes — e.g. `.tran`/`.data` numeric values).
+fn tokens(parent: &SyntaxNode, kind: SyntaxKind) -> impl Iterator<Item = SyntaxToken> + '_ {
+    parent
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(move |t| t.kind() == kind)
 }
 
 /// The expression appearing after an `=` (`Notation`) token — a value in a
@@ -571,6 +582,509 @@ impl Square {
     }
 }
 
+// --- remaining instances / source specs ---
+
+ast_node!(Behavioral);
+impl Behavioral {
+    pub fn name(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    pub fn pos(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 1)
+    }
+    pub fn neg(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 2)
+    }
+    pub fn params(&self) -> impl Iterator<Item = Parameter> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(OSDIDevice);
+impl OSDIDevice {
+    pub fn name(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    /// Connection nodes and (positional) model name.
+    pub fn nodes(&self) -> impl Iterator<Item = HierarchialNode> + '_ {
+        support::all::<HierarchialNode>(&self.0).skip(1)
+    }
+    pub fn params(&self) -> impl Iterator<Item = Parameter> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(Switch);
+impl Switch {
+    pub fn name(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    /// nd1, nd2, cnd1, cnd2, model — all `HierarchialNode`s in order.
+    pub fn nodes(&self) -> impl Iterator<Item = HierarchialNode> + '_ {
+        support::all::<HierarchialNode>(&self.0).skip(1)
+    }
+    /// The `ON`/`OFF` keyword.
+    pub fn state(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Keyword)
+    }
+}
+
+ast_node!(ControlledSource);
+impl ControlledSource {
+    pub fn name(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    pub fn pos(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 1)
+    }
+    pub fn neg(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 2)
+    }
+    /// The control spec: a `VoltageControl`/`CurrentControl`/`PolyControl`/
+    /// `TableControl` node.
+    pub fn control(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::VoltageControl
+                    | SyntaxKind::CurrentControl
+                    | SyntaxKind::PolyControl
+                    | SyntaxKind::TableControl
+            )
+        })
+    }
+}
+
+ast_node!(VoltageControl);
+impl VoltageControl {
+    /// Control-node connections (cpos, cneg).
+    pub fn control_nodes(&self) -> impl Iterator<Item = HierarchialNode> + '_ {
+        support::all(&self.0)
+    }
+    pub fn params(&self) -> impl Iterator<Item = Parameter> + '_ {
+        support::all(&self.0)
+    }
+    /// Nonlinear value expression, if given as a non-parameter.
+    pub fn value(&self) -> Option<Expr> {
+        expr_children(&self.0).find(|e| !matches!(e, Expr::Hier(_)))
+    }
+}
+
+ast_node!(CurrentControl);
+impl CurrentControl {
+    /// Controlling source name.
+    pub fn vnam(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    pub fn params(&self) -> impl Iterator<Item = Parameter> + '_ {
+        support::all(&self.0)
+    }
+    pub fn value(&self) -> Option<Expr> {
+        expr_children(&self.0).find(|e| !matches!(e, Expr::Hier(_)))
+    }
+}
+
+ast_node!(PolyControl);
+impl PolyControl {
+    /// The `N` dimension of `POLY(N)`.
+    pub fn dimensions(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::NumberLiteral)
+    }
+    /// Control nodes and coefficients.
+    pub fn args(&self) -> impl Iterator<Item = Expr> + '_ {
+        expr_children(&self.0)
+    }
+}
+
+ast_node!(TableControl);
+impl TableControl {
+    /// The controlling expression.
+    pub fn expr(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    /// The (x, y) table points and any following expressions.
+    pub fn args(&self) -> impl Iterator<Item = Expr> + '_ {
+        expr_children(&self.0).skip(1)
+    }
+}
+
+ast_node!(DCSource);
+impl DCSource {
+    pub fn value(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(ACSource);
+impl ACSource {
+    pub fn magnitude(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    pub fn phase(&self) -> Option<Expr> {
+        expr_children(&self.0).nth(1)
+    }
+}
+
+ast_node!(TranSource);
+impl TranSource {
+    /// The source-function keyword (`PULSE`/`SIN`/`PWL`/...).
+    pub fn function(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Keyword)
+    }
+    pub fn values(&self) -> impl Iterator<Item = Expr> + '_ {
+        expr_children(&self.0)
+    }
+}
+
+// --- analysis + simple dot-commands ---
+
+ast_node!(DCStatement);
+impl DCStatement {
+    pub fn commands(&self) -> impl Iterator<Item = DCCommand> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(DCCommand);
+impl DCCommand {
+    pub fn source(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+    pub fn start(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    pub fn stop(&self) -> Option<Expr> {
+        expr_children(&self.0).nth(1)
+    }
+    pub fn step(&self) -> Option<Expr> {
+        expr_children(&self.0).nth(2)
+    }
+}
+
+ast_node!(ACStatement);
+impl ACStatement {
+    pub fn command(&self) -> Option<ACCommand> {
+        support::child(&self.0)
+    }
+}
+
+ast_node!(ACCommand);
+impl ACCommand {
+    pub fn variation(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+    pub fn points(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    pub fn fstart(&self) -> Option<Expr> {
+        expr_children(&self.0).nth(1)
+    }
+    pub fn fstop(&self) -> Option<Expr> {
+        expr_children(&self.0).nth(2)
+    }
+}
+
+ast_node!(Tran);
+impl Tran {
+    /// The numeric time arguments (tstep/tstop/tstart/tmax), in order.
+    pub fn values(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        tokens(&self.0, SyntaxKind::NumberLiteral)
+    }
+    /// The optional `uic` flag.
+    pub fn uic(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+}
+
+ast_node!(TempStatement);
+impl TempStatement {
+    pub fn value(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(GlobalStatement);
+impl GlobalStatement {
+    pub fn nodes(&self) -> impl Iterator<Item = HierarchialNode> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(IncludeStatement);
+impl IncludeStatement {
+    pub fn path(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::StringLiteral)
+    }
+}
+
+ast_node!(HDLStatement);
+impl HDLStatement {
+    pub fn path(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::StringLiteral)
+    }
+}
+
+ast_node!(EndStatement);
+ast_node!(EndlStatement);
+impl EndlStatement {
+    /// The optional library-section identifier.
+    pub fn id(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+}
+
+ast_node!(LibInclude);
+impl LibInclude {
+    pub fn path(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::StringLiteral)
+    }
+    pub fn section(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+}
+
+ast_node!(LibStatement);
+impl LibStatement {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+    /// Statements inside the `.lib`/`.endl` block.
+    pub fn statements(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        self.0.children().filter(|n| n.kind() != SyntaxKind::EndlStatement)
+    }
+    pub fn end(&self) -> Option<EndlStatement> {
+        support::child(&self.0)
+    }
+}
+
+ast_node!(DevMod);
+impl DevMod {
+    /// The distribution identifier (after `dev/`).
+    pub fn distribution(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+    pub fn value(&self) -> Option<Expr> {
+        value_after_eq(&self.0)
+    }
+}
+
+// --- .ic / .nodeset / .data ---
+
+ast_node!(ICStatement);
+impl ICStatement {
+    pub fn entries(&self) -> impl Iterator<Item = ICEntry> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(ICEntry);
+impl ICEntry {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Identifier)
+    }
+    /// The node argument inside the parentheses.
+    pub fn arg(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    pub fn value(&self) -> Option<Expr> {
+        value_after_eq(&self.0)
+    }
+}
+
+ast_node!(WildCard);
+impl WildCard {
+    /// The optional value before the `*`.
+    pub fn value(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(Coloned);
+impl Coloned {
+    pub fn left(&self) -> Option<SyntaxToken> {
+        tokens(&self.0, SyntaxKind::Identifier).next()
+    }
+    pub fn right(&self) -> Option<SyntaxToken> {
+        tokens(&self.0, SyntaxKind::Identifier).nth(1)
+    }
+}
+
+ast_node!(DataStatement);
+impl DataStatement {
+    /// The data block name.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        tokens(&self.0, SyntaxKind::Identifier).next()
+    }
+    /// Column names.
+    pub fn columns(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        tokens(&self.0, SyntaxKind::Identifier).skip(1)
+    }
+    /// Row values (flattened).
+    pub fn values(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        tokens(&self.0, SyntaxKind::NumberLiteral)
+    }
+}
+
+// --- .if / .else / .endif ---
+
+ast_node!(IfBlock);
+impl IfBlock {
+    pub fn cases(&self) -> impl Iterator<Item = IfElseCase> + '_ {
+        support::all(&self.0)
+    }
+}
+
+ast_node!(IfElseCase);
+impl IfElseCase {
+    /// The `IF`/`ELSE`/`ELSEIF` keyword.
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Keyword)
+    }
+    pub fn condition(&self) -> Option<Condition> {
+        support::child(&self.0)
+    }
+    /// Body statements in this branch.
+    pub fn body(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        self.0.children().filter(|n| n.kind() != SyntaxKind::Condition)
+    }
+}
+
+ast_node!(Condition);
+impl Condition {
+    pub fn expr(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+// --- Xyce .step / .func ---
+
+macro_rules! named_expr_list {
+    ($name:ident) => {
+        ast_node!($name);
+        impl $name {
+            /// The command word (e.g. `step`, `func`).
+            pub fn command(&self) -> Option<SyntaxToken> {
+                support::token(&self.0, SyntaxKind::Identifier)
+            }
+            pub fn args(&self) -> impl Iterator<Item = Expr> + '_ {
+                expr_children(&self.0)
+            }
+        }
+    };
+}
+named_expr_list!(StepStatement);
+named_expr_list!(FuncStatement);
+
+// --- .measure family ---
+
+ast_node!(MeasurePointStatement);
+impl MeasurePointStatement {
+    /// The analysis-type keyword (`TRAN`/`AC`/...) - the 2nd keyword after `.meas`.
+    pub fn analysis(&self) -> Option<SyntaxToken> {
+        tokens(&self.0, SyntaxKind::Keyword).nth(1)
+    }
+    pub fn find_deriv_param(&self) -> Option<FindDerivParam> {
+        support::child(&self.0)
+    }
+    pub fn td(&self) -> Option<TD_> {
+        support::child(&self.0)
+    }
+    pub fn rise_fall_cross(&self) -> Option<RiseFallCross> {
+        support::child(&self.0)
+    }
+}
+
+ast_node!(MeasureRangeStatement);
+impl MeasureRangeStatement {
+    pub fn analysis(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::Keyword)
+    }
+    pub fn agg(&self) -> Option<AvgMaxMinPPRmsInteg> {
+        support::child(&self.0)
+    }
+    pub fn trig(&self) -> Option<TrigTarg> {
+        support::all::<TrigTarg>(&self.0).next()
+    }
+    pub fn targ(&self) -> Option<TrigTarg> {
+        support::all::<TrigTarg>(&self.0).nth(1)
+    }
+}
+
+ast_node!(FindDerivParam);
+impl FindDerivParam {
+    pub fn body(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(When);
+impl When {
+    pub fn body(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(At);
+impl At {
+    pub fn body(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(RiseFallCross);
+impl RiseFallCross {
+    /// The count value or `LAST` keyword.
+    pub fn value(&self) -> Option<SyntaxToken> {
+        support::token(&self.0, SyntaxKind::NumberLiteral)
+            .or_else(|| support::token(&self.0, SyntaxKind::Keyword))
+    }
+}
+
+ast_node!(TD_);
+impl TD_ {
+    pub fn value(&self) -> Option<Expr> {
+        value_after_eq(&self.0)
+    }
+}
+
+ast_node!(AvgMaxMinPPRmsInteg);
+impl AvgMaxMinPPRmsInteg {
+    pub fn body(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+}
+
+ast_node!(Val_);
+impl Val_ {
+    pub fn value(&self) -> Option<Expr> {
+        value_after_eq(&self.0)
+    }
+}
+
+ast_node!(TrigTarg);
+impl TrigTarg {
+    pub fn lhs(&self) -> Option<Expr> {
+        expr_children(&self.0).next()
+    }
+    pub fn val(&self) -> Option<Val_> {
+        support::child(&self.0)
+    }
+    pub fn td(&self) -> Option<TD_> {
+        support::child(&self.0)
+    }
+    pub fn rise_fall_cross(&self) -> Option<RiseFallCross> {
+        support::child(&self.0)
+    }
+}
+
+// --- out-of-spike forms: castable, no field accessors ---
+// (present as SyntaxKinds but not produced by the current parser, or error
+// nodes; provided for completeness so every node kind can be `cast`.)
+ast_node!(Incomplete);
+ast_node!(SParameterElement);
+ast_node!(JuliaDevice);
+ast_node!(JuliaEscape);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,6 +1162,56 @@ mod tests {
             other => panic!("expected NameRef, got {other:?}"),
         }
         assert!(matches!(vals[2], Expr::Hier(_)), "x.y is a HierarchialNode");
+    }
+
+    #[test]
+    fn dc_command_fields() {
+        let r = root("* t\n.dc V1 0 5 0.5\n");
+        let dc = r.statements().find_map(DCStatement::cast).unwrap();
+        let cmd = dc.commands().next().unwrap();
+        assert_eq!(cmd.source().unwrap().text(), "V1");
+        assert_eq!(cmd.start().unwrap().text(), "0");
+        assert_eq!(cmd.stop().unwrap().text(), "5");
+        assert_eq!(cmd.step().unwrap().text(), "0.5");
+    }
+
+    #[test]
+    fn tran_and_sources() {
+        let r = root("* t\nV1 in 0 DC 5 SIN(0 1 1k)\n.tran 1n 100n 0 uic\n");
+        let v = r.statements().find_map(Voltage::cast).unwrap();
+        let srcs: Vec<_> = v.sources().collect();
+        assert!(srcs.iter().any(|n| n.kind() == SyntaxKind::DCSource));
+        let tran = TranSource::cast(
+            srcs.iter().find(|n| n.kind() == SyntaxKind::TranSource).unwrap().clone(),
+        )
+        .unwrap();
+        assert_eq!(tran.function().unwrap().text(), "SIN");
+        assert_eq!(tran.values().count(), 3);
+        let t = r.statements().find_map(Tran::cast).unwrap();
+        assert_eq!(t.values().count(), 3);
+        assert_eq!(t.uic().unwrap().text(), "uic");
+    }
+
+    #[test]
+    fn if_block_and_measure() {
+        let r = root("* t\n.if (a>1)\nR1 a b 1k\n.endif\n.meas tran m FIND v(a) AT=5m\n");
+        let ib = r.statements().find_map(IfBlock::cast).unwrap();
+        let case = ib.cases().next().unwrap();
+        assert_eq!(case.keyword().unwrap().text(), "if");
+        assert!(case.condition().is_some());
+        assert!(case.body().any(|n| n.kind() == SyntaxKind::Resistor));
+        let m = r.statements().find_map(MeasurePointStatement::cast).unwrap();
+        assert_eq!(m.analysis().unwrap().text(), "tran");
+        assert!(m.find_deriv_param().is_some());
+    }
+
+    #[test]
+    fn controlled_source_fields() {
+        let r = root("* t\nE1 out 0 in 0 2\n");
+        let e = r.statements().find_map(ControlledSource::cast).unwrap();
+        assert_eq!(e.name().unwrap().text(), "E1");
+        let ctrl = e.control().unwrap();
+        assert_eq!(ctrl.kind(), SyntaxKind::VoltageControl);
     }
 
     #[test]
