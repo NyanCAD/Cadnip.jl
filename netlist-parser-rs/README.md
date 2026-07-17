@@ -65,6 +65,37 @@ cargo run -p netlist-syntax --bin dump_cst <file.sp>   # print the canonical CST
 cd crates/netlist-py && VIRTUAL_ENV=<venv> maturin develop && python -m pytest tests/
 ```
 
+### Test layers & coverage
+
+Tests exercise every stage of the pipeline:
+
+- **Lexer** — the Julia `tokenize.jl` token table ported as a Rust unit test,
+  plus operator/dialect/edge tests (all operators, dialect device letters,
+  base specifiers, continuations, unterminated strings, julia-escape).
+- **Parser/CST** — 57 differential tests byte-exact vs the Julia parser,
+  including the parser package's own SPICE example netlists.
+- **Reconstruct-source** — round-trip losslessness (`tree.text() == source`)
+  over the whole corpus.
+- **Error recovery** — a robustness suite of malformed inputs that must parse
+  without panicking and stay lossless.
+- **Real SPICE** — coverage netlists (`cov_*.sp`) are validated as runnable
+  ngspice via `tools/validate_ngspice.sh`.
+
+Measure coverage with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov):
+
+```bash
+cargo llvm-cov --no-cfg-coverage -p netlist-syntax --ignore-filename-regex 'bin/' --summary-only
+```
+
+Current: ~90% regions / ~94% lines of `netlist-syntax`. The remainder is code
+that is **not reachable from valid ngspice** and is exercised only at the lexer
+level or is intentionally dead: Verilog-A/Spectre operators (`<<`/`>>`/`<+`/
+`~&`/…) that the parser's `prec()` doesn't accept, non-ngspice dialect paths
+(hspice/pspice/xyce), the disabled julia-escape feature, `dump_label` arms for
+forms the SPICE parser never produces, and the `A`/`O`/`Z` device-letter arms
+that are dead because `is_instance_first_char` omits them (faithful to Julia).
+These close out as Spectre/Verilog-A and the other dialects are ported.
+
 ### Differential testing
 
 The validation gate: the Rust CST dump must byte-match the Julia parser's dump.

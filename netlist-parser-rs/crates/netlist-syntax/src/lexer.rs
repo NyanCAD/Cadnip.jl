@@ -844,3 +844,137 @@ mod token_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod operator_dialect_tests {
+    //! Coverage for operator, dialect, and edge-case lexing that isn't reachable
+    //! through valid ngspice at the parser level (Verilog-A operators panic
+    //! `prec()`), but is exercised here at the lexer level with mixed inputs.
+    use crate::lexer::{Dialect, Lexer};
+    use crate::syntax_kind::TokenKind::{self, *};
+
+    fn kinds_d(src: &str, d: Dialect) -> Vec<TokenKind> {
+        Lexer::tokenize(src, d, false, false, false)
+            .into_iter()
+            .map(|t| t.kind)
+            .filter(|k| !k.is_triv() && *k != ENDMARKER)
+            .collect()
+    }
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        kinds_d(src, Dialect::Ngspice)
+    }
+
+    #[test]
+    fn all_operators_in_expression_context() {
+        // Braces put the lexer in expression mode so operator chars lex as
+        // operators rather than instance-name characters.
+        let cases: &[(&str, &[TokenKind])] = &[
+            ("{a<<b}", &[LBRACE, IDENTIFIER, LBITSHIFT, IDENTIFIER, RBRACE]),
+            ("{a>>b}", &[LBRACE, IDENTIFIER, RBITSHIFT, IDENTIFIER, RBRACE]),
+            ("{a<<<b}", &[LBRACE, IDENTIFIER, LBITSHIFT_A, IDENTIFIER, RBRACE]),
+            ("{a>>>b}", &[LBRACE, IDENTIFIER, RRBITSHIFT_A, IDENTIFIER, RBRACE]),
+            ("{a<=b}", &[LBRACE, IDENTIFIER, LESS_EQ, IDENTIFIER, RBRACE]),
+            ("{a>=b}", &[LBRACE, IDENTIFIER, GREATER_EQ, IDENTIFIER, RBRACE]),
+            ("{a<b}", &[LBRACE, IDENTIFIER, LESS, IDENTIFIER, RBRACE]),
+            ("{a>b}", &[LBRACE, IDENTIFIER, GREATER, IDENTIFIER, RBRACE]),
+            ("{a<+b}", &[LBRACE, IDENTIFIER, CASSIGN, IDENTIFIER, RBRACE]),
+            ("{a==b}", &[LBRACE, IDENTIFIER, EQEQ, IDENTIFIER, RBRACE]),
+            ("{a===b}", &[LBRACE, IDENTIFIER, EQEQEQ, IDENTIFIER, RBRACE]),
+            ("{a!=b}", &[LBRACE, IDENTIFIER, NOT_EQ, IDENTIFIER, RBRACE]),
+            ("{a!==b}", &[LBRACE, IDENTIFIER, NOT_IS, IDENTIFIER, RBRACE]),
+            ("{!a}", &[LBRACE, NOT, IDENTIFIER, RBRACE]),
+            ("{a&&b}", &[LBRACE, IDENTIFIER, LAZY_AND, IDENTIFIER, RBRACE]),
+            ("{a||b}", &[LBRACE, IDENTIFIER, LAZY_OR, IDENTIFIER, RBRACE]),
+            ("{a&b}", &[LBRACE, IDENTIFIER, AND, IDENTIFIER, RBRACE]),
+            ("{a|b}", &[LBRACE, IDENTIFIER, OR, IDENTIFIER, RBRACE]),
+            ("{a^b}", &[LBRACE, IDENTIFIER, XOR, IDENTIFIER, RBRACE]),
+            ("{~a}", &[LBRACE, TILDE, IDENTIFIER, RBRACE]),
+            ("{a^~b}", &[LBRACE, IDENTIFIER, XOR_TILDE, IDENTIFIER, RBRACE]),
+            ("{a~^b}", &[LBRACE, IDENTIFIER, TILDE_XOR, IDENTIFIER, RBRACE]),
+            ("{a~&b}", &[LBRACE, IDENTIFIER, TILDE_AND, IDENTIFIER, RBRACE]),
+            ("{a~|b}", &[LBRACE, IDENTIFIER, TILD_OR, IDENTIFIER, RBRACE]),
+            ("{a%b}", &[LBRACE, IDENTIFIER, PERCENT, IDENTIFIER, RBRACE]),
+            ("{a**b}", &[LBRACE, IDENTIFIER, STAR_STAR, IDENTIFIER, RBRACE]),
+            ("{a?b:c}", &[LBRACE, IDENTIFIER, CONDITIONAL, IDENTIFIER, COLON, IDENTIFIER, RBRACE]),
+            ("{a/b}", &[LBRACE, IDENTIFIER, SLASH, IDENTIFIER, RBRACE]),
+        ];
+        for (src, expected) in cases {
+            assert_eq!(&kinds(src), expected, "tokenizing {src:?}");
+        }
+    }
+
+    #[test]
+    fn misc_single_char_tokens() {
+        assert_eq!(kinds("@foo"), vec![AT_SIGN, IDENTIFIER]);
+        assert_eq!(kinds("`foo"), vec![BACKTICK, IDENTIFIER]);
+        // `$ ...` is a trailing comment; `;...` too.
+        assert_eq!(kinds("1 $ tail"), vec![NUMBER]);
+    }
+
+    #[test]
+    fn dialect_instance_letters() {
+        // hspice: P=port, S=s-parameter, W=transmission line.
+        assert_eq!(kinds_d("P1 a b tl", Dialect::Hspice)[0], IDENTIFIER_PORT);
+        assert_eq!(kinds_d("S1 a b m", Dialect::Hspice)[0], IDENTIFIER_S_PARAMETER_ELEMENT);
+        assert_eq!(kinds_d("W1 a b tl", Dialect::Hspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        // ngspice: P=transmission line (CPL), W=switch, Y=transmission, N=OSDI.
+        assert_eq!(kinds_d("P1 a b", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        assert_eq!(kinds_d("W1 a b", Dialect::Ngspice)[0], IDENTIFIER_SWITCH);
+        assert_eq!(kinds_d("Y1 a b", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        assert_eq!(kinds_d("N1 a b m", Dialect::Ngspice)[0], IDENTIFIER_OSDI);
+        // xyce: Y=OSDI.
+        assert_eq!(kinds_d("Y1 a b m", Dialect::Xyce)[0], IDENTIFIER_OSDI);
+        // other instance letters (J JFET, K mutual, T/U tline).
+        assert_eq!(kinds_d("J1 a b m", Dialect::Ngspice)[0], IDENTIFIER_JFET);
+        assert_eq!(kinds_d("K1 l1 l2 1", Dialect::Ngspice)[0], IDENTIFIER_LINEAR_MUTUAL_INDUCTOR);
+        assert_eq!(kinds_d("T1 a b c d", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        assert_eq!(kinds_d("U1 a b", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        // NB: 'A', 'O', 'Z' are absent from is_instance_first_char (faithful to
+        // Julia), so `lex_instance`'s O/Z arms are dead — these lex as plain
+        // identifiers, not devices.
+        assert_eq!(kinds_d("O1 a b", Dialect::Ngspice)[0], IDENTIFIER);
+        assert_eq!(kinds_d("Z1 a b", Dialect::Ngspice)[0], IDENTIFIER);
+    }
+
+    #[test]
+    fn pspice_logic_literal() {
+        // pspice `'0`/`'1` logic literals lex as numbers.
+        assert_eq!(kinds_d("{'0}", Dialect::Pspice), vec![LBRACE, NUMBER, RBRACE]);
+    }
+
+    #[test]
+    fn number_logic_base_specifiers() {
+        // logic base (`4'b1010` covered elsewhere); a number followed by a logic
+        // char base like `1'x`.
+        assert_eq!(kinds("2'x0"), vec![NUMBER]);
+    }
+
+    #[test]
+    fn backslash_continuation_and_escaped_ident() {
+        // `\` + newline is an escaped newline (trivia); a lone `\foo` is an
+        // escaped identifier.
+        let toks: Vec<_> = Lexer::tokenize("a \\\nb", Dialect::Ngspice, false, false, false)
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert!(toks.contains(&ESCD_NEWLINE), "expected ESCD_NEWLINE in {toks:?}");
+        assert_eq!(kinds("\\foo"), vec![IDENTIFIER]);
+    }
+
+    #[test]
+    fn unterminated_string_after_include() {
+        // After .include, an unterminated quote is an EOF_STRING.
+        let toks = kinds(".include \"foo");
+        assert!(toks.contains(&EOF_STRING), "expected EOF_STRING in {toks:?}");
+    }
+
+    #[test]
+    fn julia_escape_begin() {
+        // With julia-escape enabled, `$(` opens a JULIA_ESCAPE_BEGIN.
+        let toks: Vec<_> = Lexer::tokenize("{$(", Dialect::Ngspice, false, true, false)
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert!(toks.contains(&JULIA_ESCAPE_BEGIN), "expected JULIA_ESCAPE_BEGIN in {toks:?}");
+    }
+}
