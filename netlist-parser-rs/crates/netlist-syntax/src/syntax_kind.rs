@@ -57,6 +57,7 @@ pub enum TokenKind {
     IDENTIFIER_TRANSMISSION_LINE,
     IDENTIFIER_SUBCIRCUIT_CALL,
     IDENTIFIER_UNKNOWN_INSTANCE,
+    IDENTIFIER_XSPICE,
     end_identifiers,
 
     BASE_SPEC,
@@ -423,6 +424,14 @@ pub enum SyntaxKind {
     GlobalParamStatement,
     NodeSetStatement,
 
+    // Device types unimplemented in the Julia parser but accepted by
+    // ngspice/Xyce (validated against those simulators).
+    MutualInductor,
+    JFET,
+    TransmissionLine,
+    Mesfet,
+    XspiceDevice,
+
     #[doc(hidden)]
     __Last,
 }
@@ -546,6 +555,11 @@ impl SyntaxKind {
             FuncStatement => "FuncStatement",
             GlobalParamStatement => "GlobalParamStatement",
             NodeSetStatement => "NodeSetStatement",
+            MutualInductor => "MutualInductor",
+            JFET => "JFET",
+            TransmissionLine => "TransmissionLine",
+            Mesfet => "Mesfet",
+            XspiceDevice => "XspiceDevice",
             __Last => "__Last",
         }
     }

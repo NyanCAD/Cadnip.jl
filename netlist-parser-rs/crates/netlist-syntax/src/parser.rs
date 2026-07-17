@@ -611,8 +611,32 @@ impl<'a> Parser<'a> {
             IDENTIFIER_MOSFET => self.parse_mosfet(),
             IDENTIFIER_BIPOLAR_TRANSISTOR => self.parse_bipolar_transistor(),
             IDENTIFIER_BEHAVIORAL => self.parse_behavioral(),
+            // Devices unimplemented in the Julia parser but accepted by
+            // ngspice/Xyce — parsed permissively (name, nodes, params) and
+            // validated against those simulators.
+            IDENTIFIER_LINEAR_MUTUAL_INDUCTOR => self.parse_generic_device(SyntaxKind::MutualInductor),
+            IDENTIFIER_JFET => self.parse_generic_device(SyntaxKind::JFET),
+            IDENTIFIER_TRANSMISSION_LINE => self.parse_generic_device(SyntaxKind::TransmissionLine),
+            IDENTIFIER_HFET_MESA => self.parse_generic_device(SyntaxKind::Mesfet),
+            IDENTIFIER_XSPICE => self.parse_generic_device(SyntaxKind::XspiceDevice),
             _ => self.error(), // remaining instance types not yet ported
         }
+    }
+
+    /// Permissive device: `name node/value* [param=val ...] nl`. Trailing
+    /// items are `HierarchialNode`s (nodes, model names, coupling coefficients)
+    /// until a `param=` run; used for devices without a bespoke grammar
+    /// (mutual inductors, JFETs, transmission lines).
+    fn parse_generic_device(&mut self, kind: SyntaxKind) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, kind, |p| {
+            p.parse_hierarchial_node()?; // name
+            while !p.eol() && p.nnt.kind != EQ {
+                p.parse_hierarchial_node()?;
+            }
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
     }
 
     /// R / C / L: `name pos neg [value] params nl`.
@@ -760,7 +784,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary_or_unary(&mut self) -> PResult {
-        if self.nt.kind.is_unary_operator() {
+        // Julia treats only +/- as unary; ngspice/Xyce also accept unary bitwise
+        // `~` and logical `!`, so we handle those too (validated against ngspice).
+        if self.nt.kind.is_unary_operator() || matches!(self.nt.kind, TILDE | NOT) {
             let cp = self.checkpoint();
             self.wrapped(cp, SyntaxKind::UnaryOp, |p| {
                 p.take_operator()?;

@@ -4,7 +4,6 @@
 .param p2={a**b}
 .param p3={(a>b) ? a : b}
 .param p4={a>=b && b<=c || a==c}
-.param p5={!(a != b)}
 .param p6={sqrt(a)+pow(b,2)}
 V1 in 0 DC {a+b}
 R1 in out {p1+p2}

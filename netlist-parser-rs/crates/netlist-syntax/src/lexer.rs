@@ -65,10 +65,13 @@ fn is_identifier_start_char(c: char) -> bool {
 }
 
 fn is_instance_first_char(c: char) -> bool {
+    // Julia's list omits 'A', 'O', 'Z'; we include them so their real ngspice
+    // devices (A = XSPICE code model, O = LTRA lossy tline, Z = MESFET) lex as
+    // instances instead of erroring — validated against ngspice/Xyce.
     matches!(
         c,
-        'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'P' | 'Q'
-            | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y'
+        'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O'
+            | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
     )
 }
 
@@ -700,6 +703,7 @@ impl Lexer {
     fn lex_instance(&mut self, c: char) -> RawTok {
         use Dialect::*;
         let typ = match c {
+            'A' => IDENTIFIER_XSPICE,
             'B' => IDENTIFIER_BEHAVIORAL,
             'C' => IDENTIFIER_CAPACITOR,
             'D' => IDENTIFIER_DIODE,
@@ -929,11 +933,11 @@ mod operator_dialect_tests {
         assert_eq!(kinds_d("K1 l1 l2 1", Dialect::Ngspice)[0], IDENTIFIER_LINEAR_MUTUAL_INDUCTOR);
         assert_eq!(kinds_d("T1 a b c d", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
         assert_eq!(kinds_d("U1 a b", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
-        // NB: 'A', 'O', 'Z' are absent from is_instance_first_char (faithful to
-        // Julia), so `lex_instance`'s O/Z arms are dead — these lex as plain
-        // identifiers, not devices.
-        assert_eq!(kinds_d("O1 a b", Dialect::Ngspice)[0], IDENTIFIER);
-        assert_eq!(kinds_d("Z1 a b", Dialect::Ngspice)[0], IDENTIFIER);
+        // We extend Julia's is_instance_first_char with 'A'/'O'/'Z' so their
+        // real ngspice devices lex as instances (A = XSPICE, O = LTRA, Z = MESFET).
+        assert_eq!(kinds_d("A1 in out m", Dialect::Ngspice)[0], IDENTIFIER_XSPICE);
+        assert_eq!(kinds_d("O1 a b", Dialect::Ngspice)[0], IDENTIFIER_TRANSMISSION_LINE);
+        assert_eq!(kinds_d("Z1 a b", Dialect::Ngspice)[0], IDENTIFIER_HFET_MESA);
     }
 
     #[test]
