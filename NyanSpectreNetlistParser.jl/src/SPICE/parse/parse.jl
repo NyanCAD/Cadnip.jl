@@ -35,7 +35,7 @@ function parse_dot(ps, dot)
         name == "step" && return parse_named_expr_list(ps, dot, StepStatement)
         (name == "func" || name == "function") && return parse_named_expr_list(ps, dot, FuncStatement)
         name == "global_param" && return parse_named_param_list(ps, dot, GlobalParamStatement)
-        name == "nodeset" && return parse_named_param_list(ps, dot, NodeSetStatement)
+        name == "nodeset" && return parse_nodeset(ps, dot)
     end
     @case kind(nt(ps)) begin
         DC => parse_dc(ps, dot)
@@ -823,6 +823,23 @@ function parse_named_param_list(ps, dot, T)
     @trynext params = parse_parameter_list(ps)
     @trynext nl = accept_newline(ps)
     return EXPR(T(dot, cmd, params, nl))
+end
+
+# `.nodeset V(node)=val ...` — IC-like (parens are trivia here, so `node` may be
+# numeric). Kept in sync with netlist-parser-rs.
+function parse_nodeset(ps, dot)
+    @trysetup NodeSetStatement dot
+    @trynext cmd = take_identifier(ps)
+    entries = EXPRList{NodeSetEntry}()
+    while !eol(ps)
+        @trynext func = take_identifier(ps)
+        @trynext node = parse_node(ps)
+        @trynext eq = accept(ps, EQ)
+        @trynext val = parse_expression(ps)
+        push!(entries, EXPR(NodeSetEntry(func, node, eq, val)))
+    end
+    @trynext nl = accept_newline(ps)
+    return EXPR(NodeSetStatement(dot, cmd, entries, nl))
 end
 
 function parse_temp(ps, dot)

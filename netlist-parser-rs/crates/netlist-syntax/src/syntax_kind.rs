@@ -423,6 +423,7 @@ pub enum SyntaxKind {
     FuncStatement,
     GlobalParamStatement,
     NodeSetStatement,
+    NodeSetEntry,
 
     // Device types unimplemented in the Julia parser but accepted by
     // ngspice/Xyce (validated against those simulators).
@@ -555,6 +556,7 @@ impl SyntaxKind {
             FuncStatement => "FuncStatement",
             GlobalParamStatement => "GlobalParamStatement",
             NodeSetStatement => "NodeSetStatement",
+            NodeSetEntry => "NodeSetEntry",
             MutualInductor => "MutualInductor",
             JFET => "JFET",
             TransmissionLine => "TransmissionLine",

@@ -421,7 +421,7 @@ impl<'a> Parser<'a> {
                 "step" => self.parse_named_expr_list(cp, SyntaxKind::StepStatement),
                 "func" | "function" => self.parse_named_expr_list(cp, SyntaxKind::FuncStatement),
                 "global_param" => self.parse_named_param_list(cp, SyntaxKind::GlobalParamStatement),
-                "nodeset" => self.parse_named_param_list(cp, SyntaxKind::NodeSetStatement),
+                "nodeset" => self.parse_nodeset(cp),
                 _ => self.error(),
             },
             _ => self.error(), // remaining dot commands not yet ported
@@ -439,6 +439,25 @@ impl<'a> Parser<'a> {
         self.wrapped(cp, kind, |p| {
             p.take_identifier()?; // command word (e.g. global_param / nodeset)
             p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    /// `.nodeset V(node)=val ...` — an IC-like command (Xyce). Outside
+    /// expression mode the parens are trivia, so each entry is `func node = val`
+    /// where `node` may be numeric. Kept in sync with the Julia parser.
+    fn parse_nodeset(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::NodeSetStatement, |p| {
+            p.take_identifier()?; // command word "nodeset"
+            while !p.eol() {
+                let cpe = p.checkpoint();
+                p.wrapped(cpe, SyntaxKind::NodeSetEntry, |p| {
+                    p.take_identifier()?; // V / I
+                    p.parse_node()?; // node (identifier or number)
+                    p.accept(&[EQ])?;
+                    p.parse_expression() // value
+                })?;
+            }
             p.accept_newline()
         })
     }

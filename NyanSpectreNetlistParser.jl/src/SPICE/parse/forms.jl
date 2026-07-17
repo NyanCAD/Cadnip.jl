@@ -520,10 +520,17 @@ struct GlobalParamStatement <: AbstractASTNode
     nl::EXPR{Notation}
 end
 
+struct NodeSetEntry <: AbstractASTNode
+    func::EXPR{Identifier}
+    node::EXPR{NodeName}
+    eq::EXPR{Notation}
+    val::EXPR
+end
+
 struct NodeSetStatement <: AbstractASTNode
     dot::EXPR{Notation}
     cmd::EXPR{Identifier}
-    params::EXPRList{Parameter}
+    entries::EXPRList{NodeSetEntry}
     nl::EXPR{Notation}
 end
 

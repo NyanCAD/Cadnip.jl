@@ -105,6 +105,7 @@ diff_tests! {
     // ngspice/Xyce extensions synced into both parsers (in parity, not exempt).
     ext_devices         => "ext_devices",
     ext_xyce_cmds       => "ext_xyce_cmds",
+    ext_nodeset         => "ext_nodeset",
 }
 
 // Xyce-dialect parity (Y = OSDI). Validated against Xyce (tools/validate_xyce.sh)

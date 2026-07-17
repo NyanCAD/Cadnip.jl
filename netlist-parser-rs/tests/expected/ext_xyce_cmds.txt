@@ -225,10 +225,10 @@ SPICENetlistSource 0-396
   NodeSetStatement 360-378
     Notation 360-361
     Identifier 361-368
-    Parameter 369-370
+    NodeSetEntry 369-377
       Identifier 369-370
-    Parameter 371-377
-      Identifier 371-374
+      NodeName 371-374
+        Identifier 371-374
       Notation 375-376
       NumberLiteral 376-377
     Notation 377-378
