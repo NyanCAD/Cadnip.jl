@@ -1,0 +1,13 @@
+[package]
+name = "netlist-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rowan.workspace = true
+
+[[bin]]
+name = "dump_cst"
+path = "src/bin/dump_cst.rs"

@@ -1,0 +1,11 @@
+language = "C"
+include_guard = "NETLIST_PARSER_H"
+tab_width = 4
+style = "type"
+cpp_compat = true
+
+[export]
+prefix = ""
+
+[parse]
+parse_deps = false
