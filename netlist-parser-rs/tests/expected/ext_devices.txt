@@ -61,9 +61,7 @@ SPICENetlistSource 0-359
     HierarchialNode 81-83
       NodeName 81-83
         Identifier 81-83
-    HierarchialNode 84-87
-      NodeName 84-87
-        NumberLiteral 84-87
+    NumberLiteral 84-87
     Notation 87-88
   JFET 88-104
     HierarchialNode 88-90

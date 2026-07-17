@@ -459,31 +459,42 @@ struct SubcktCall <: AbstractInstanceNode
 end
 
 # --- ngspice/Xyce extensions (kept in sync with netlist-parser-rs) ---
-# Permissive device: name, trailing nodes/values, params. Used for devices
-# without a bespoke grammar (mutual inductors, JFETs, transmission lines,
-# MESFETs, XSPICE code-model devices), validated against ngspice/Xyce.
+# K coupled inductors: name, inductor references, trailing coupling coefficient.
 struct MutualInductor <: AbstractInstanceNode
     name::EXPR{HierarchialNode}
-    nodes::EXPRList{HierarchialNode}
-    params::EXPRList{Parameter}
+    inductors::EXPRList{HierarchialNode}
+    coupling::EXPR
     nl::EXPR{Notation}
 end
 
+# J (JFET) / Z (MESFET): name nd ng ns model [area] [OFF] [params].
 struct JFET <: AbstractInstanceNode
     name::EXPR{HierarchialNode}
-    nodes::EXPRList{HierarchialNode}
-    params::EXPRList{Parameter}
-    nl::EXPR{Notation}
-end
-
-struct TransmissionLine <: AbstractInstanceNode
-    name::EXPR{HierarchialNode}
-    nodes::EXPRList{HierarchialNode}
+    drain::EXPR{HierarchialNode}
+    gate::EXPR{HierarchialNode}
+    source::EXPR{HierarchialNode}
+    model::EXPR{HierarchialNode}
+    area::Maybe{EXPR}
+    off::Maybe{EXPR{Keyword}}
     params::EXPRList{Parameter}
     nl::EXPR{Notation}
 end
 
 struct Mesfet <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    drain::EXPR{HierarchialNode}
+    gate::EXPR{HierarchialNode}
+    source::EXPR{HierarchialNode}
+    model::EXPR{HierarchialNode}
+    area::Maybe{EXPR}
+    off::Maybe{EXPR{Keyword}}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+# Permissive device (name, trailing nodes/values, params): transmission lines
+# (T/O/U/P/Y all lex to one kind) and XSPICE `A` (irregular syntax).
+struct TransmissionLine <: AbstractInstanceNode
     name::EXPR{HierarchialNode}
     nodes::EXPRList{HierarchialNode}
     params::EXPRList{Parameter}

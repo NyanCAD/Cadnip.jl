@@ -896,10 +896,43 @@ function unimplemented_instance_error(ps)
     return error!(ps, UnexpectedToken)
 end
 
+# K (mutual inductor): name, inductor references, trailing coupling coefficient.
+# Kept in sync with netlist-parser-rs.
+function parse_mutual_inductor(ps)
+    @trysetup MutualInductor
+    @trynext name = parse_hierarchial_node(ps)
+    inductors = EXPRList{HierarchialNode}()
+    while !eol(ps) && kind(nnt(ps)) != NEWLINE && kind(nnt(ps)) != ENDMARKER
+        push!(inductors, @trynext parse_hierarchial_node(ps))
+    end
+    @trynext coupling = parse_expression(ps)
+    @trynext nl = accept_newline(ps)
+    return EXPR(MutualInductor(name, inductors, coupling, nl))
+end
+
+# J (JFET) / Z (MESFET): name nd ng ns model [area] [OFF] [params].
+function parse_fet(ps, T)
+    @trysetup T
+    @trynext name = parse_hierarchial_node(ps)
+    @trynext drain = parse_hierarchial_node(ps)
+    @trynext gate = parse_hierarchial_node(ps)
+    @trynext source = parse_hierarchial_node(ps)
+    @trynext model = parse_hierarchial_node(ps)
+    area = nothing
+    if !eol(ps) && kind(nt(ps)) != OFF && kind(nnt(ps)) != EQ
+        @trynext area = parse_expression(ps)
+    end
+    off = nothing
+    if kind(nt(ps)) == OFF
+        @trynext off = take_kw(ps, OFF)
+    end
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
+    return EXPR(T(name, drain, gate, source, model, area, off, params, nl))
+end
+
 # Permissive device: name, trailing nodes/values (until a `param=` run), params.
-# For devices without a bespoke grammar (mutual inductors, JFETs, transmission
-# lines, MESFETs, XSPICE) — kept in sync with netlist-parser-rs, validated
-# against ngspice/Xyce.
+# For transmission lines (T/O/U/P/Y — one lexer kind) and XSPICE `A`.
 function parse_generic_device(ps, T)
     @trysetup T
     @trynext name = parse_hierarchial_node(ps)
@@ -925,9 +958,9 @@ function parse_instance(ps)
         IDENTIFIER_CURRENT_CONTROLLED_CURRENT => parse_controlled(ControlledSource{:C, :C}, ps)
         IDENTIFIER_CURRENT_CONTROLLED_VOLTAGE => parse_controlled(ControlledSource{:C, :V}, ps)
         IDENTIFIER_CURRENT                    => parse_current(ps)
-        IDENTIFIER_JFET                       => parse_generic_device(ps, JFET)
-        IDENTIFIER_HFET_MESA                  => parse_generic_device(ps, Mesfet)
-        IDENTIFIER_LINEAR_MUTUAL_INDUCTOR     => parse_generic_device(ps, MutualInductor)
+        IDENTIFIER_JFET                       => parse_fet(ps, JFET)
+        IDENTIFIER_HFET_MESA                  => parse_fet(ps, Mesfet)
+        IDENTIFIER_LINEAR_MUTUAL_INDUCTOR     => parse_mutual_inductor(ps)
         IDENTIFIER_LINEAR_INDUCTOR            => parse_inductor(ps)
         IDENTIFIER_MOSFET                     => parse_mosfet(ps)
         IDENTIFIER_OSDI                       => parse_subckt_call(ps, OSDIDevice) # kinda a subckt call

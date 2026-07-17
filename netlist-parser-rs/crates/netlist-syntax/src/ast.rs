@@ -498,11 +498,61 @@ macro_rules! generic_device {
         }
     };
 }
-generic_device!(MutualInductor);
-generic_device!(JFET);
+// T/O/U/P/Y and A stay generic (lexer collapses the tline letters; XSPICE is
+// irregular).
 generic_device!(TransmissionLine);
-generic_device!(Mesfet);
 generic_device!(XspiceDevice);
+
+ast_node!(MutualInductor);
+impl MutualInductor {
+    pub fn name(&self) -> Option<HierarchialNode> {
+        support::nth(&self.0, 0)
+    }
+    /// The coupled inductor references.
+    pub fn inductors(&self) -> impl Iterator<Item = HierarchialNode> + '_ {
+        support::all::<HierarchialNode>(&self.0).skip(1)
+    }
+    /// The coupling coefficient (trailing value).
+    pub fn coupling(&self) -> Option<Expr> {
+        expr_children(&self.0).find(|e| !matches!(e, Expr::Hier(_)))
+    }
+}
+
+macro_rules! fet_device {
+    ($name:ident) => {
+        ast_node!($name);
+        impl $name {
+            pub fn name(&self) -> Option<HierarchialNode> {
+                support::nth(&self.0, 0)
+            }
+            pub fn drain(&self) -> Option<HierarchialNode> {
+                support::nth(&self.0, 1)
+            }
+            pub fn gate(&self) -> Option<HierarchialNode> {
+                support::nth(&self.0, 2)
+            }
+            pub fn source(&self) -> Option<HierarchialNode> {
+                support::nth(&self.0, 3)
+            }
+            pub fn model(&self) -> Option<HierarchialNode> {
+                support::nth(&self.0, 4)
+            }
+            /// Optional positional area value.
+            pub fn area(&self) -> Option<Expr> {
+                value_after_hier(&self.0, 5)
+            }
+            /// The optional `OFF` flag.
+            pub fn off(&self) -> Option<SyntaxToken> {
+                support::token(&self.0, SyntaxKind::Keyword)
+            }
+            pub fn params(&self) -> impl Iterator<Item = Parameter> + '_ {
+                support::all(&self.0)
+            }
+        }
+    };
+}
+fet_device!(JFET);
+fet_device!(Mesfet);
 
 // --- expressions ---
 
@@ -1203,6 +1253,26 @@ mod tests {
         let m = r.statements().find_map(MeasurePointStatement::cast).unwrap();
         assert_eq!(m.analysis().unwrap().text(), "tran");
         assert!(m.find_deriv_param().is_some());
+    }
+
+    #[test]
+    fn bespoke_fet_and_mutual_inductor() {
+        let r = root("* t\nJ1 d g s jmod 2.0 off\nL1 a b 1u\nL2 c e 1u\nK1 L1 L2 0.9\n");
+        let j = r.statements().find_map(JFET::cast).unwrap();
+        assert_eq!(j.drain().unwrap().text(), "d");
+        assert_eq!(j.gate().unwrap().text(), "g");
+        assert_eq!(j.source().unwrap().text(), "s");
+        assert_eq!(j.model().unwrap().text(), "jmod");
+        assert_eq!(j.area().unwrap().text(), "2.0");
+        assert_eq!(j.off().unwrap().text(), "off");
+
+        let k = r.statements().find_map(MutualInductor::cast).unwrap();
+        assert_eq!(k.name().unwrap().text(), "K1");
+        let inds: Vec<_> = k.inductors().collect();
+        assert_eq!(inds.len(), 2);
+        assert_eq!(inds[0].text(), "L1");
+        assert_eq!(inds[1].text(), "L2");
+        assert_eq!(k.coupling().unwrap().text(), "0.9");
     }
 
     #[test]

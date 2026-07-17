@@ -638,13 +638,53 @@ impl<'a> Parser<'a> {
             // Devices unimplemented in the Julia parser but accepted by
             // ngspice/Xyce — parsed permissively (name, nodes, params) and
             // validated against those simulators.
-            IDENTIFIER_LINEAR_MUTUAL_INDUCTOR => self.parse_generic_device(SyntaxKind::MutualInductor),
-            IDENTIFIER_JFET => self.parse_generic_device(SyntaxKind::JFET),
+            IDENTIFIER_LINEAR_MUTUAL_INDUCTOR => self.parse_mutual_inductor(),
+            IDENTIFIER_JFET => self.parse_fet(SyntaxKind::JFET),
+            IDENTIFIER_HFET_MESA => self.parse_fet(SyntaxKind::Mesfet),
+            // T/O/U/P/Y all lex to IDENTIFIER_TRANSMISSION_LINE, so their
+            // distinct structures can't be told apart here — kept generic.
             IDENTIFIER_TRANSMISSION_LINE => self.parse_generic_device(SyntaxKind::TransmissionLine),
-            IDENTIFIER_HFET_MESA => self.parse_generic_device(SyntaxKind::Mesfet),
+            // XSPICE `A` has irregular port/code-model syntax — kept generic.
             IDENTIFIER_XSPICE => self.parse_generic_device(SyntaxKind::XspiceDevice),
             _ => self.error(), // remaining instance types not yet ported
         }
+    }
+
+    /// K (mutual inductor): `name Lx Ly ... coupling`. All but the trailing
+    /// coupling value are inductor references. ngspice: `Kxxx Lyyy Lzzz value`.
+    fn parse_mutual_inductor(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::MutualInductor, |p| {
+            p.parse_hierarchial_node()?; // name
+            // Inductor references: every hier node except the last token, which
+            // is the coupling coefficient.
+            while !p.eol() && p.nnt.kind != NEWLINE && p.nnt.kind != ENDMARKER {
+                p.parse_hierarchial_node()?;
+            }
+            p.parse_expression()?; // coupling coefficient
+            p.accept_newline()
+        })
+    }
+
+    /// J (JFET) / Z (MESFET): `name nd ng ns model [area] [OFF] [params] nl`.
+    fn parse_fet(&mut self, kind: SyntaxKind) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, kind, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // drain
+            p.parse_hierarchial_node()?; // gate
+            p.parse_hierarchial_node()?; // source
+            p.parse_hierarchial_node()?; // model
+            // Optional positional area (a value, not a `param=`), then OFF flag.
+            if !p.eol() && p.nt.kind != OFF && p.nnt.kind != EQ {
+                p.parse_expression()?; // area
+            }
+            if p.nt.kind == OFF {
+                p.take_kw(&[OFF])?; // off flag
+            }
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
     }
 
     /// Permissive device: `name node/value* [param=val ...] nl`. Trailing
