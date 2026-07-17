@@ -1,0 +1,9 @@
+SpectreNetlistSource 138-166
+  Shell 138-166
+    Identifier 138-143
+    Keyword 144-149
+    Parameter 150-165
+      Identifier 150-159
+      Notation 159-160
+      Identifier 160-165
+    Notation 165-166

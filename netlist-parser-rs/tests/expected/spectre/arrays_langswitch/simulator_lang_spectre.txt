@@ -1,0 +1,26 @@
+SpectreNetlistSource 120-182
+  Simulator 120-159
+    Keyword 120-129
+    Keyword 130-134
+    Notation 134-135
+    Keyword 135-142
+    Parameter 143-158
+      Identifier 143-154
+      Notation 154-155
+      Identifier 155-158
+    Notation 158-159
+  Instance 159-182
+    Identifier 159-161
+    SNodeList 162-167
+      Notation 162-163
+      SNode 163-164
+        NumberLiteral 163-164
+      SNode 165-166
+        NumberLiteral 165-166
+      Notation 166-167
+    Identifier 168-176
+    Parameter 177-181
+      Identifier 177-178
+      Notation 178-179
+      NumberLiteral 179-181
+    Notation 181-182

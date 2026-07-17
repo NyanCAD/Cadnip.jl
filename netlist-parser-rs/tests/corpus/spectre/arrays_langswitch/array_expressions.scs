@@ -1,0 +1,4 @@
+// mixes constants, params, unary exprs and parenthesised exprs in a vector
+// (spectre_reference.txt:3176-3179, 3589-3593)
+parameters x=1 var=2
+parameters name=[ 0 var +3 -2 (var) var (var+1u) (var-(1-x)) ]

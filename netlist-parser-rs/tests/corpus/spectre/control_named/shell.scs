@@ -1,0 +1,3 @@
+// shell statement: pass parameter=value settings to the shell control
+// ref: spectre_reference.txt:9926  Name shell parameter=value ...
+Runit shell parameter=value

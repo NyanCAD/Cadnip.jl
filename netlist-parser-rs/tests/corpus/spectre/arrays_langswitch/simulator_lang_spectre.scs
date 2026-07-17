@@ -1,0 +1,4 @@
+// simulator lang command with the insensitive language directive
+// (spectre_reference.txt:1706, 1827-1831, 1998-2001)
+simulator lang=spectre insensitive=yes
+r2 (1 0) resistor r=1k

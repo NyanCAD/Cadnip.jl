@@ -1,0 +1,5 @@
+// ERROR: unparenthesised binary expression in a vector; the '*' after 'p2'
+// is neither a paren, unary op, ident, nor literal, so parse_array errors.
+// Manual requires such exprs be parenthesised (spectre_reference.txt:3589-3593).
+parameters p2=3
+parameters bad=[0 p2*p2 1]

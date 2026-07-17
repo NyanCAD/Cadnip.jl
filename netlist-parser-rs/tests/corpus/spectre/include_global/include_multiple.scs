@@ -1,0 +1,5 @@
+// several include statements, as in the manual's include example
+include "cmos.mod"
+include "opamp.ckt"
+// a section-qualified library reference alongside plain includes
+include "corners.scs" section=fast

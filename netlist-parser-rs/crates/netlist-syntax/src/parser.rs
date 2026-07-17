@@ -47,6 +47,14 @@ pub struct Parser<'a> {
 
     builder: GreenNodeBuilder<'static>,
     errored: bool,
+
+    /// Set by `parse_simulator` when a `simulator lang=spectre` switches the
+    /// active dialect back to Spectre. Mirrors `ParseState.lang_swapped`.
+    lang_swapped: bool,
+    /// When true, `parse_region` stops after the statement that sets
+    /// `lang_swapped` (the `simulator lang=spectre` line), handing control back
+    /// to the Spectre driver. Mirrors `ParseState.return_on_language_change`.
+    return_on_language_change: bool,
 }
 
 fn to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
@@ -56,6 +64,29 @@ fn to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
 impl<'a> Parser<'a> {
     fn new(src: &'a str, dialect: Dialect) -> Self {
         let raw = Lexer::tokenize(src, dialect, false, false, true);
+        Self::from_raw(src, raw, GreenNodeBuilder::new(), false)
+    }
+
+    /// Construct a parser for a SPICE region beginning at byte `start_byte`,
+    /// writing into a *shared* `builder` (so the SPICE subtree nests inside the
+    /// enclosing Spectre `SpectreNetlistSource`). Used by `parse_spice_region`.
+    fn new_region(
+        src: &'a str,
+        dialect: Dialect,
+        builder: GreenNodeBuilder<'static>,
+        start_byte: u32,
+        return_on_language_change: bool,
+    ) -> Self {
+        let raw = Lexer::tokenize_from(src, dialect, false, false, true, start_byte);
+        Self::from_raw(src, raw, builder, return_on_language_change)
+    }
+
+    fn from_raw(
+        src: &'a str,
+        raw: Vec<RawTok>,
+        builder: GreenNodeBuilder<'static>,
+        return_on_language_change: bool,
+    ) -> Self {
         let mut p = Parser {
             src,
             raw,
@@ -64,12 +95,25 @@ impl<'a> Parser<'a> {
             nt: Sig { idx: 0, kind: ERROR },
             nnt: Sig { idx: 0, kind: ERROR },
             emit_idx: 0,
-            builder: GreenNodeBuilder::new(),
+            builder,
             errored: false,
+            lang_swapped: false,
+            return_on_language_change,
         };
         p.nt = p.next_sig();
         p.nnt = p.next_sig();
         p
+    }
+
+    /// The next byte that will be emitted into the builder (= end of the last
+    /// emitted token). Used to hand a contiguous byte boundary to the other
+    /// dialect at a language switch, so the combined tree tiles the source.
+    fn next_emit_byte(&self) -> u32 {
+        if self.emit_idx < self.raw.len() {
+            self.raw[self.emit_idx].start
+        } else {
+            self.src.len() as u32
+        }
     }
 
     // --- token layer (parserstate.jl) ---
@@ -371,14 +415,54 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// Parse a SPICE region into a `SPICENetlistSource` node in the shared
+    /// builder, stopping either at end-of-input or (when
+    /// `return_on_language_change`) right after a `simulator lang=spectre`
+    /// switches the dialect back. Returns the byte offset at which parsing
+    /// stopped (the next byte the Spectre driver should resume emitting from).
+    /// Mirrors `SPICENetlistCSTParser.parse`.
+    fn parse_region(&mut self) -> u32 {
+        self.builder.start_node(to_raw(SyntaxKind::SPICENetlistSource));
+        while self.nt.kind != ENDMARKER {
+            let _ = self.parse_spice_toplevel();
+            if self.return_on_language_change && self.lang_swapped {
+                break;
+            }
+        }
+        if self.nt.kind == ENDMARKER {
+            self.flush_trivia(self.raw.len()); // trailing trivia at true EOF
+        }
+        self.builder.finish_node();
+        self.next_emit_byte()
+    }
+
     fn parse_spice_toplevel(&mut self) -> PResult {
         match self.nt.kind {
+            SIMULATOR => self.parse_simulator(),
             DOT => self.parse_dot(),
             TITLE_LINE => self.parse_title_implicit(),
             NEWLINE => self.error(),
             k if k.is_ident() => self.parse_instance(),
             _ => self.error(),
         }
+    }
+
+    /// `simulator lang=<spectre|spice> [params] nl`. Setting `lang_swapped` when
+    /// the target dialect is Spectre lets `parse_region` hand control back.
+    /// Mirrors the SPICE `parse_simulator` (parse.jl).
+    fn parse_simulator(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::Simulator, |p| {
+            p.take_kw(&[SIMULATOR])?;
+            p.take_kw(&[LANG])?;
+            p.take(&[EQ])?;
+            if p.nt.kind == SPECTRE {
+                p.lang_swapped = true;
+            }
+            p.take_kw(&[SPECTRE, SPICE])?;
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
     }
 
     fn parse_title_implicit(&mut self) -> PResult {
@@ -1605,4 +1689,21 @@ pub fn parse(src: &str, dialect: Dialect) -> SyntaxNode {
     let mut p = Parser::new(src, dialect);
     p.parse_toplevel();
     SyntaxNode::new_root(p.builder.finish())
+}
+
+/// Parse a SPICE region (for `simulator lang=` switching) into the *shared*
+/// `builder`, starting at byte `start_byte`. Emits a `SPICENetlistSource` node.
+/// Returns `(builder, stop_byte, errored)` where `stop_byte` is where the
+/// Spectre driver should resume. Mirrors the SPICE-side of the Julia
+/// `SpectreNetlistCSTParser.parse` handoff.
+pub(crate) fn parse_spice_region(
+    src: &str,
+    dialect: Dialect,
+    builder: GreenNodeBuilder<'static>,
+    start_byte: u32,
+    return_on_language_change: bool,
+) -> (GreenNodeBuilder<'static>, u32, bool) {
+    let mut p = Parser::new_region(src, dialect, builder, start_byte, return_on_language_change);
+    let stop = p.parse_region();
+    (p.builder, stop, p.errored)
 }

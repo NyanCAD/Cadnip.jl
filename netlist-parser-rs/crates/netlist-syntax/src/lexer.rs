@@ -167,7 +167,32 @@ impl Lexer {
         enable_julia_escape: bool,
         implicit_title: bool,
     ) -> Vec<RawTok> {
+        Self::tokenize_from(src, dialect, strict, enable_julia_escape, implicit_title, 0)
+    }
+
+    /// Tokenize the buffer starting at byte offset `start_byte`, emitting
+    /// absolute byte offsets (keyed to the full `src`). Used for the SPICE side
+    /// of `simulator lang=` language switching: a SPICE region begins mid-file
+    /// but the implicit-title machinery must apply to that region's *first* line
+    /// (`SPICENetlistCSTParser.parse` seeds a fresh `ParseState` seeked to the
+    /// switch point). `start_byte` must be a char boundary.
+    pub fn tokenize_from(
+        src: &str,
+        dialect: Dialect,
+        strict: bool,
+        enable_julia_escape: bool,
+        implicit_title: bool,
+        start_byte: u32,
+    ) -> Vec<RawTok> {
         let mut lx = Lexer::new(src, dialect, strict, enable_julia_escape, implicit_title);
+        let ci = lx
+            .offs
+            .iter()
+            .position(|&b| b as u32 == start_byte)
+            .unwrap_or(lx.chars.len());
+        lx.i = ci;
+        lx.tok_start = start_byte as usize;
+        lx.tok_start_ci = ci;
         let mut out = Vec::new();
         loop {
             let t = lx.next_token();

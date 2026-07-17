@@ -1,0 +1,4 @@
+// verbatim manual example: expressions used as vector elements
+// (spectre_reference.txt:3586-3593)
+parameters p1=1 p2=3
+dc_sweep dc param=p1 values=[0.5 1 +p2 (sqrt(p2*p2)) ]

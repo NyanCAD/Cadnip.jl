@@ -1,0 +1,4 @@
+// alter statement: change a single parameter value
+// ref: spectre_reference.txt:2684  SetTemp alter param=temp value=27
+SetTemp alter param=temp value=27
+change2 alter param=temp value=0

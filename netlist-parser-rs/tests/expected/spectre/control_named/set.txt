@@ -1,0 +1,17 @@
+SpectreNetlistSource 125-163
+  Set 125-163
+    Identifier 125-130
+    Keyword 131-134
+    Parameter 135-145
+      Identifier 135-142
+      Notation 142-143
+      Identifier 143-145
+    Parameter 146-154
+      Identifier 146-151
+      Notation 151-152
+      Identifier 152-154
+    Parameter 155-162
+      Identifier 155-159
+      Notation 159-160
+      Identifier 160-162
+    Notation 162-163

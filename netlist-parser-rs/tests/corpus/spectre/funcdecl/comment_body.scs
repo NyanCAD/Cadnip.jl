@@ -1,0 +1,4 @@
+// trailing // comment after the statement, like the manual example
+real gain( real a, real b ) {
+    return a*exp(b);// exponential gain factor
+}

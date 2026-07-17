@@ -155,9 +155,10 @@ function parse_subckt(ps, inline=nothing)
 end
 
 function parse_paramtest(ps, name)
-    kw = accept_kw(ps, PARAMTEST)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup ParamTest name
+    @trynext kw = accept_kw(ps, PARAMTEST)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(ParamTest(name, kw, params, nl))
 end
 
@@ -184,12 +185,13 @@ function take_node(ps)
 end
 
 function parse_global(ps)
-    kw = take_kw(ps, GLOBAL)
+    @trysetup Global
+    @trynext kw = take_kw(ps, GLOBAL)
     nodes = EXPRList{SNode}()
     while !eol(ps)
-        push!(nodes, parse_node(ps))
+        push!(nodes, @trynext parse_node(ps))
     end
-    nl = accept_newline(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Global(kw, nodes, nl))
 end
 
@@ -216,21 +218,22 @@ function parse_other(ps)
 end
 
 function parse_save_signal(ps)
+    @trysetup SaveSignal
     signalname = nothing
     if kind(nt(ps)) != COLON
-        signalname = parse_node(ps)
+        @trynext signalname = parse_node(ps)
     end
     modifier = nothing
     if kind(nt(ps)) == COLON
-        col = take(ps, COLON)
+        @trynext col = take(ps, COLON)
         if is_save_kw(kind(nt(ps)))
-            mod = take_kw(ps)
+            @trynext mod = take_kw(ps)
         elseif is_number(kind(nt(ps)))
-            mod = take_literal(ps)
+            @trynext mod = take_literal(ps)
         elseif is_ident(kind(nt(ps)))
-            mod = take_identifier(ps)
+            @trynext mod = take_identifier(ps)
         else
-            error!(ps, UnexpectedToken)
+            @trynext mod = error!(ps, UnexpectedToken)
         end
         modifier = EXPR(SaveSignalModifier(col, mod))
     end
@@ -238,123 +241,142 @@ function parse_save_signal(ps)
 end
 
 function parse_save_list(ps)
+    @trysetup SaveSignal
     signals = EXPRList{SaveSignal}() # TODO
     while !eol(ps)
-        signal = parse_save_signal(ps)
+        @trynext signal = parse_save_signal(ps)
         push!(signals, signal)
     end
     return signals
 end
 
 function parse_save(ps)
-    kw = take_kw(ps)
-    signals = parse_save_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Save
+    @trynext kw = take_kw(ps)
+    @trynext signals = parse_save_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Save(kw, signals, nl))
 end
 
 
 function parse_ic_parameter_list(ps)
+    @trysetup ICParameter
     parameters = EXPRList{ICParameter}()
     while !eol(ps)
-        p = parse_ic_parameter(ps)
+        @trynext p = parse_ic_parameter(ps)
         push!(parameters, p)
     end
     return parameters
 end
 
 function parse_ic_parameter(ps)
-    name = parse_node(ps)
-    eq = accept(ps, EQ)
-    val = parse_expression(ps)
+    @trysetup ICParameter
+    @trynext name = parse_node(ps)
+    @trynext eq = accept(ps, EQ)
+    @trynext val = parse_expression(ps)
     return EXPR(ICParameter(name, eq, val))
 end
 
 function parse_ic(ps)
-    kw = take_kw(ps, IC)
-    parameters = parse_ic_parameter_list(ps)
-    nl = take(ps, NEWLINE)
+    @trysetup Ic
+    @trynext kw = take_kw(ps, IC)
+    @trynext parameters = parse_ic_parameter_list(ps)
+    @trynext nl = take(ps, NEWLINE)
     return EXPR(Ic(kw, parameters, nl))
 end
 
 function parse_nodeset(ps)
-    kw = take_kw(ps, NODESET)
-    parameters = parse_parameter_list(ps)
-    nl = take(ps, NEWLINE)
+    @trysetup NodeSet
+    @trynext kw = take_kw(ps, NODESET)
+    @trynext parameters = parse_parameter_list(ps)
+    @trynext nl = take(ps, NEWLINE)
     return EXPR(NodeSet(kw, parameters, nl))
 end
 
 
 
 function parse_altergroup(ps, name)
-    kw = accept_kw(ps, ALTERGROUP)
-    lbrace = accept(ps, LBRACE)
-    nl1 = accept_newline(ps)
+    @trysetup AlterGroup name
+    @trynext kw = accept_kw(ps, ALTERGROUP)
+    @trynext lbrace = accept(ps, LBRACE)
+    @trynext nl1 = accept_newline(ps)
     exprs = EXPRList{Any}()
-    while kind(nt(ps)) != RBRACE
-        push!(exprs, parse_spectrenetlist_source(ps))
+    while kind(nt(ps)) != RBRACE && kind(nt(ps)) != ENDMARKER
+        push!(exprs, @trynext parse_spectrenetlist_source(ps))
     end
-    rbrace = accept(ps, RBRACE)
-    nl2 = accept_newline(ps)
+    @trynext rbrace = accept(ps, RBRACE)
+    @trynext nl2 = accept_newline(ps)
     return EXPR(AlterGroup(name, kw, lbrace, nl1, exprs, rbrace, nl2))
 end
 
 function parse_alter(ps, name)
-    kw = accept_kw(ps, ALTER)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Alter name
+    @trynext kw = accept_kw(ps, ALTER)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Alter(name, kw, params, nl))
 end
 
 
 function parse_check(ps, name)
-    kw = accept_kw(ps, CHECK)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Check name
+    @trynext kw = accept_kw(ps, CHECK)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Check(name, kw, params, nl))
 end
 
 function parse_checklimit(ps, name)
-    kw = accept_kw(ps, CHECKLIMIT)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup CheckLimit name
+    @trynext kw = accept_kw(ps, CHECKLIMIT)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(CheckLimit(name, kw, params, nl))
 end
 
 function parse_info(ps, name)
-    kw = accept_kw(ps, INFO)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Info name
+    @trynext kw = accept_kw(ps, INFO)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Info(name, kw, params, nl))
 end
 
 function parse_options(ps, name)
-    kw = accept_kw(ps, OPTIONS)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Options name
+    @trynext kw = accept_kw(ps, OPTIONS)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Options(name, kw, params, nl))
 end
 
 function parse_set(ps, name)
-    kw = accept_kw(ps, SET)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Set name
+    @trynext kw = accept_kw(ps, SET)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Set(name, kw, params, nl))
 end
 
 function parse_shell(ps, name)
-    kw = accept_kw(ps, SHELL)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Shell name
+    @trynext kw = accept_kw(ps, SHELL)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Shell(name, kw, params, nl))
 end
 
 
 
 function parse_analysis(ps, name, nodelist=nothing)
-    kw = accept_kw(ps)
-    params = parse_parameter_list(ps)
-    nl = accept_newline(ps)
+    @trysetup Analysis
+    @trynext name
+    if nodelist !== nothing
+        @trynext nodelist
+    end
+    @trynext kw = accept_kw(ps)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Analysis(name, nodelist, kw, params, nl))
 end
 
@@ -526,7 +548,7 @@ function parse_primary(ps)
     elseif kind(nt(ps)) == LPAREN
         return parse_paren(ps)
     end
-    if kind(nt(ps)) in (RPAREN, RBRACE, RSQUARE, COMMA, SEMICOLON, BACKTICK, EQ, LATTR, RATTR, ERROR, COLON, ENDMARKER) || is_kw(kind(nt(ps))) || is_operator(kind(nt(ps)))
+    if kind(nt(ps)) in (RPAREN, RBRACE, RSQUARE, COMMA, SEMICOLON, BACKTICK, EQ, LATTR, RATTR, ERROR, COLON, NEWLINE, ENDMARKER) || is_kw(kind(nt(ps))) || is_operator(kind(nt(ps)))
         return error!(ps, UnexpectedToken)
     end
     error("internal error: unreachable $(kind(nt(ps)))")
@@ -567,27 +589,30 @@ function parse_array(ps)
 end
 
 function parse_include(ps)
-    kw = take_kw(ps, INCLUDE)
-    str = take_string(ps)
+    @trysetup Include
+    @trynext kw = take_kw(ps, INCLUDE)
+    @trynext str = take_string(ps)
     section = nothing
     if kind(nt(ps)) == SECTION
-        section = parse_include_section(ps)
+        @trynext section = parse_include_section(ps)
     end
-    nl = accept_newline(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(Include(kw, str, section, nl))
 end
 
 function parse_ahdl_include(ps)
-    kw = take_kw(ps, AHDL_INCLUDE)
-    str = take_string(ps)
-    nl = accept_newline(ps)
+    @trysetup AHDLInclude
+    @trynext kw = take_kw(ps, AHDL_INCLUDE)
+    @trynext str = take_string(ps)
+    @trynext nl = accept_newline(ps)
     return EXPR(AHDLInclude(kw, str, nl))
 end
 
 function parse_include_section(ps)
-    kw_sec = take_kw(ps, SECTION)
-    eq = take(ps, EQ)
-    sec = take_identifier(ps)
+    @trysetup IncludeSection
+    @trynext kw_sec = take_kw(ps, SECTION)
+    @trynext eq = take(ps, EQ)
+    @trynext sec = take_identifier(ps)
     return EXPR(IncludeSection(kw_sec, eq, sec))
 end
 
@@ -807,11 +832,11 @@ function prec(opkind::Kind)
         return PREC_LOGICAL
     elseif opkind in (LAZY_AND,)
         return PREC_AND_AND
-    elseif opkind in (OR,)
+    elseif opkind in (OR, TILDE_OR)
         return PREC_OR
     elseif opkind in (XOR, XOR_TILDE, TILDE_XOR)
         return PREC_XOR
-    elseif opkind in (AND,)
+    elseif opkind in (AND, TILDE_AND)
         return PREC_AND
     elseif opkind in (EQEQ, NOT_EQ, EQEQEQ, NOT_EQEQ)
         return PREC_EQ

@@ -127,3 +127,31 @@ fn expression_operators_parse_losslessly() {
         ok(&format!("* t\n.param x = {{{e}}}\n"));
     }
 }
+
+/// Spectre inputs that made the *Julia* reference parser throw before it was
+/// fixed (a lexer `~|` typo, a `mod` undefined-variable, `parse_primary`
+/// `unreachable`, and non-`@trynext` control statements hitting `convert`
+/// errors). Julia now recovers into `Error`/`Incomplete` nodes on all of these,
+/// so they live in the differential corpus proper; this test additionally pins
+/// that the Rust port never panics and stays lossless on them.
+#[test]
+fn spectre_formerly_crashing_inputs_are_lossless() {
+    let cases = [
+        "ic node value\n",              // ic parameter missing '='
+        "nodeset x=\n",                 // parameter value missing
+        "save foo:\n",                  // dangling save-signal ':'
+        "ahdl_include device.va\n",     // ahdl_include filename not a string
+        "include\n",                    // include with no filename
+        "myalt alter param=\n",         // control statement, missing value
+        "tr1 tran stop=\n",             // analysis, missing value
+        "parameters n=a~|b~|c\n",       // '~|' reduction-or, now a real operator
+    ];
+    for src in cases {
+        let tree = netlist_syntax::parse_spectre(src);
+        assert_eq!(
+            tree.text().to_string(),
+            src,
+            "\nlossless round-trip failed for {src:?}"
+        );
+    }
+}

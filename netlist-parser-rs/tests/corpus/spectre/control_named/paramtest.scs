@@ -1,0 +1,4 @@
+// paramtest statement: test parameter values, message via escaped-newline continuation
+// ref: spectre_reference.txt:4045  checkFreqs paramtest errorif=((bw/2-fc)>=0)\ message="..."
+checkFreqs paramtest errorif=((bw/2-fc)>=0) \
+    message="center frequency must be greater than half the bandwidth"

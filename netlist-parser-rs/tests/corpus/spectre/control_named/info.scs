@@ -1,0 +1,5 @@
+// info statement: report parameter extremes
+// ref: spectre_reference.txt:13427  MyAcct1 info what=inst extremes=yes
+MyAcct1 info what=inst extremes=yes
+MyAcct2 info what=models extremes=yes
+printParams info what=output where=logfile

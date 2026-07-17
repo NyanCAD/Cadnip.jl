@@ -1,0 +1,9 @@
+SpectreNetlistSource 118-143
+  Check 118-143
+    Identifier 118-126
+    Keyword 127-132
+    Parameter 133-142
+      Identifier 133-137
+      Notation 137-138
+      Identifier 138-142
+    Notation 142-143

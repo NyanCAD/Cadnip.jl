@@ -1,0 +1,3 @@
+// ERROR: unterminated vector, missing closing ']' before end of line
+// (square brackets enclose a vector, spectre_reference.txt:3159-3160).
+parameters bad=[1 2 3

@@ -4,20 +4,25 @@ A standalone Rust port of the SPICE/Spectre netlist parser that lives inside
 Cadnip.jl (`NyanLexers.jl` + `NyanSpectreNetlistParser.jl`), so C++/Python/other
 consumers can parse netlists without a Julia runtime.
 
-**Status: spike.** One dialect (SPICE), CST-only (no semantic layer). The spike
-validates that a `rowan`-based lossless-CST design reproduces the Julia parser's
-tree *exactly*, and that the layered bindings are ergonomic — before investing in
-the full grammar or a resolved-netlist semantic layer.
+**Status: spike + Spectre.** Two dialects — SPICE and Spectre — CST-only (no
+semantic layer), including the mid-file `simulator lang=` switch that hands off
+between them. The spike validates that a `rowan`-based lossless-CST design
+reproduces the Julia parser's tree *exactly*, and that the layered bindings are
+ergonomic — before investing in the full grammar or a resolved-netlist semantic
+layer.
 
 ## Layout
 
 ```
 crates/
-  netlist-syntax/   core: SyntaxKind, lexer, keyword trie, parser, dump (rowan)
+  netlist-syntax/   core (rowan): shared SyntaxKind + dump; SPICE lexer/keywords/
+                    parser; Spectre lexer/keywords/parser (spectre_*.rs)
   netlist-cabi/     C ABI (cbindgen -> include/netlist_parser.h), cdylib+staticlib
   netlist-py/       PyO3 Python extension (maturin)
 tests/
-  corpus/           SPICE netlists within the spike grammar subset
+  corpus/spice … .sp      SPICE netlists within the spike grammar subset
+  corpus/spectre/**.scs    Spectre netlists (+ one .cir starting in SPICE)
+  corpus/spectre/quarantine  malformed inputs the Julia parser crashes on
   expected/         canonical CST dumps captured from the Julia parser (ground truth)
   regen_expected.sh regenerate expected/ from the Julia parser
 ```
@@ -54,11 +59,55 @@ recovery (malformed lines → `Incomplete`/`Error` nodes, rest of tree intact).
 Out-of-subset dot-commands/devices intentionally produce error nodes; they are
 mechanical breadth work (see below).
 
+## Spectre dialect
+
+The Spectre grammar is a full port of `NyanSpectreNetlistParser.jl`, living in
+its own modules (`spectre_syntax_kind.rs`, `spectre_keywords.rs`,
+`spectre_lexer.rs`, `spectre_parser.rs`) that reuse the shared rowan types and
+canonical dumper. The shared `SyntaxKind` enum is extended with the Spectre-only
+form variants (`SpectreNetlistSource`, `Instance`, `Analysis`, `Save`,
+`AlterGroup`, `If`/`ElseIf`/`Else`, `FunctionDecl`, `Include`, `AHDLInclude`, …);
+each variant's dump label equals its Julia form-struct name so the differential
+compares against dumps of those structs.
+
+Covered: instances (`name (nodes) master params`), `model`, `parameters`,
+`subckt`/`ends` (incl. `inline` + binning), analyses, `save`/`ic`/`nodeset`,
+`global`, the control statements (`alter`/`altergroup`/`check`/`checklimit`/
+`info`/`options`/`set`/`shell`/`paramtest`), `if`/`else if`/`else` conditional
+blocks, `real` function declarations, `include`/`ahdl_include`, arrays
+(`[ … ]`), and the full expression grammar.
+
+The Spectre lexer differs from SPICE in load-bearing ways (all ported faithfully
+and validated against the real Julia parser): identifier chars include `!` and
+`$` (so `vdd!` is one identifier and `a!=b` lexes as `a!` `=` `b`); numbers
+greedily absorb a trailing scale-factor + unit (`23pf`, `0.3MHz`, `6_Ohms` are
+each one number); statements are newline-terminated with a trailing `\`
+continuation (no `+` continuation); comments are `//` and a leading `*` at line
+start (`;` is a real token, used in function decls).
+
+### Language switching (`simulator lang=`)
+
+A netlist can switch dialects mid-file with `simulator lang=spice` /
+`simulator lang=spectre`. The parser handles this with a single shared
+`GreenNodeBuilder` moved between the two dialect parsers at each handoff, so the
+combined tree tiles the source with no gaps (rowan derives offsets by
+accumulating token lengths). Entry point:
+
+```rust
+use netlist_syntax::{parse_spectre, parse_spectre_with, StartLang};
+
+let tree = parse_spectre(src);                              // starts in Spectre
+let tree = parse_spectre_with(src, StartLang::Spice);       // .cir: starts in SPICE
+```
+
+`.scs` files open in Spectre and `.cir` files open in SPICE; either may switch.
+The sticky, directional lang-switch behavior mirrors the Julia parser exactly.
+
 ## Build & test
 
 ```bash
 cargo test                              # unit + differential (vs captured Julia dumps)
-cargo run -p netlist-syntax --bin dump_cst <file.sp>   # print the canonical CST dump
+cargo run -p netlist-syntax --bin dump_cst <file.sp>   # print the canonical CST dump (SPICE)
 ./crates/netlist-cabi/tests/run_c_smoke.sh             # C ABI smoke test
 
 # Python (PyO3, in a venv with maturin):
@@ -72,12 +121,18 @@ Tests exercise every stage of the pipeline:
 - **Lexer** — the Julia `tokenize.jl` token table ported as a Rust unit test,
   plus operator/dialect/edge tests (all operators, dialect device letters,
   base specifiers, continuations, unterminated strings, julia-escape).
-- **Parser/CST** — 57 differential tests byte-exact vs the Julia parser,
+- **Parser/CST (SPICE)** — differential tests byte-exact vs the Julia parser,
   including the parser package's own SPICE example netlists.
+- **Parser/CST (Spectre)** — a differential suite (`spectre_differential.rs`)
+  byte-exact vs the Julia Spectre parser over the whole `corpus/spectre/**` tree
+  (instances, models, analyses, control statements, conditionals, function
+  decls, includes, arrays, and the `simulator lang=` switch), including the
+  parser package's own big `var`/`wave`/analysis reference netlists.
 - **Reconstruct-source** — round-trip losslessness (`tree.text() == source`)
-  over the whole corpus.
+  over the whole corpus, for both dialects.
 - **Error recovery** — a robustness suite of malformed inputs that must parse
-  without panicking and stay lossless.
+  without panicking and stay lossless, including the five quarantined Spectre
+  netlists that *crash* the Julia parser (the Rust port recovers gracefully).
 - **Real SPICE** — coverage netlists (`cov_*.sp`) are validated as runnable
   ngspice via `tools/validate_ngspice.sh`.
 - **Xyce dialect** — `.step`/`.func`/`.global_param`/`.nodeset` and `Y`-devices
@@ -138,9 +193,9 @@ script header).
 
 ### Next (post-spike, opt-in)
 
-- **Breadth:** the remaining ~140 `forms.jl` device/dot-command node types
-  (embarrassingly parallel, each gated by the differential test), then Spectre +
-  the `simulator lang=spice` mid-file switch.
+- **Breadth:** the remaining ~140 SPICE `forms.jl` device/dot-command node types
+  (embarrassingly parallel, each gated by the differential test). Spectre and the
+  `simulator lang=` mid-file switch are done (see above).
 - **Depth:** a semantic layer (number/unit eval, name/scope resolution,
   `.include`, subckt/model/param binding) producing a *resolved* netlist — what
   most C++/Python consumers actually want. CST-only serves editors/linters/
