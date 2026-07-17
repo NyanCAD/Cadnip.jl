@@ -398,7 +398,17 @@ impl<'a> Parser<'a> {
             SUBCKT => self.parse_subckt(cp),
             END => self.parse_end(cp),
             TITLE => self.parse_title_dot(cp),
-            _ => self.error(), // dot commands outside the spike subset
+            DC => self.parse_dc(cp),
+            AC => self.parse_ac(cp),
+            TRAN => self.parse_tran(cp),
+            GLOBAL => self.parse_global(cp),
+            TEMP => self.parse_temp(cp),
+            WIDTH => self.parse_width(cp),
+            OPTIONS => self.parse_options(cp),
+            INCLUDE => self.parse_include(cp),
+            HDL => self.parse_hdl(cp),
+            PRINT => self.parse_print(cp),
+            _ => self.error(), // remaining dot commands not yet ported
         }
     }
 
@@ -548,7 +558,11 @@ impl<'a> Parser<'a> {
             IDENTIFIER_VOLTAGE => self.parse_v_or_i(SyntaxKind::Voltage),
             IDENTIFIER_CURRENT => self.parse_v_or_i(SyntaxKind::Current),
             IDENTIFIER_SUBCIRCUIT_CALL => self.parse_subckt_call(),
-            _ => self.error(), // other instance types outside the spike subset
+            IDENTIFIER_DIODE => self.parse_diode(),
+            IDENTIFIER_MOSFET => self.parse_mosfet(),
+            IDENTIFIER_BIPOLAR_TRANSISTOR => self.parse_bipolar_transistor(),
+            IDENTIFIER_BEHAVIORAL => self.parse_behavioral(),
+            _ => self.error(), // remaining instance types not yet ported
         }
     }
 
@@ -836,6 +850,184 @@ impl<'a> Parser<'a> {
                 p.parse_expression()?;
             }
             p.accept(&[RSQUARE])
+        })
+    }
+
+    // --- instance devices (batch 1) ---
+
+    fn parse_diode(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::Diode, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // pos
+            p.parse_hierarchial_node()?; // neg
+            p.parse_hierarchial_node()?; // model
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_mosfet(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::MOSFET, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // d
+            p.parse_hierarchial_node()?; // g
+            p.parse_hierarchial_node()?; // s
+            p.parse_hierarchial_node()?; // b
+            p.parse_hierarchial_node()?; // model
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_behavioral(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::Behavioral, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // pos
+            p.parse_hierarchial_node()?; // neg
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    /// Q: `name c b e [s] [t] model params nl`. The optional s/t and the model
+    /// are all `HierarchialNode`s in source order, so — as in Julia's post-hoc
+    /// `pop!` — labeling doesn't change the CST; we parse 1–3 trailing nodes.
+    fn parse_bipolar_transistor(&mut self) -> PResult {
+        let cp = self.checkpoint();
+        self.wrapped(cp, SyntaxKind::BipolarTransistor, |p| {
+            p.parse_hierarchial_node()?; // name
+            p.parse_hierarchial_node()?; // c
+            p.parse_hierarchial_node()?; // b
+            p.parse_hierarchial_node()?; // e
+            for _ in 0..3 {
+                p.parse_hierarchial_node()?; // [s] [t] model
+                if !p.nt.kind.is_ident() {
+                    break;
+                }
+                if p.nnt.kind == EQ {
+                    break;
+                }
+            }
+            if p.nt.kind.is_ident() && p.nnt.kind == EQ {
+                p.parse_parameter_list()?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    // --- analysis / dot-command statements (batch 1) ---
+
+    fn parse_dc(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::DCStatement, |p| {
+            p.take_kw(&[DC])?;
+            while !p.eol() {
+                let cpc = p.checkpoint();
+                p.wrapped(cpc, SyntaxKind::DCCommand, |p| {
+                    p.take_identifier()?; // srcname
+                    p.parse_expression()?; // start
+                    p.parse_expression()?; // stop
+                    p.parse_expression() // step
+                })?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    fn parse_ac(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::ACStatement, |p| {
+            p.take_kw(&[AC])?;
+            let cpc = p.checkpoint();
+            p.wrapped(cpc, SyntaxKind::ACCommand, |p| {
+                p.take_identifier()?; // srcname (lin/dec/oct)
+                p.parse_expression()?; // n
+                p.parse_expression()?; // fstart
+                p.parse_expression() // fstop
+            })?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_tran(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::Tran, |p| {
+            p.take_kw(&[TRAN])?;
+            p.take_literal()?; // tstep-or-tstop (required)
+            // up to three further literals (tstop/tstart/tmax) — all
+            // NumberLiterals in source order, so the Julia tstep/tstop
+            // relabeling doesn't affect the CST.
+            for _ in 0..3 {
+                if p.nt.kind.is_literal() {
+                    p.take_literal()?;
+                } else {
+                    break;
+                }
+            }
+            if p.nt.kind.is_ident() {
+                p.take_identifier()?; // uic
+            }
+            p.accept_newline()
+        })
+    }
+
+    fn parse_global(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::GlobalStatement, |p| {
+            p.take_kw(&[GLOBAL])?;
+            while !p.eol() {
+                p.parse_hierarchial_node()?;
+            }
+            p.accept_newline()
+        })
+    }
+
+    fn parse_temp(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::TempStatement, |p| {
+            p.take_kw_any()?;
+            p.parse_expression()?; // temp
+            p.accept_newline()
+        })
+    }
+
+    fn parse_width(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::WidthStatement, |p| {
+            p.take_kw(&[WIDTH])?;
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_options(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::OptionStatement, |p| {
+            p.take_kw(&[OPTIONS])?;
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_include(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::IncludeStatement, |p| {
+            p.take_kw(&[INCLUDE])?;
+            p.take_path()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_hdl(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::HDLStatement, |p| {
+            p.take_kw(&[HDL])?;
+            p.take_path()?;
+            p.accept_newline()
+        })
+    }
+
+    fn parse_print(&mut self, cp: Checkpoint) -> PResult {
+        self.wrapped(cp, SyntaxKind::PrintStatement, |p| {
+            p.take_kw(&[PRINT])?;
+            while !p.eol() {
+                p.parse_expression()?;
+            }
+            p.accept_newline()
         })
     }
 }

@@ -53,4 +53,8 @@ diff_tests! {
     err_binop_rhs       => "err_binop",
     err_missing_rparen  => "err_parens",
     err_ternary_colon   => "err_ternary",
+    // Breadth batch 1: instance devices + analysis/dot-commands.
+    b1_devices          => "b1_dev",
+    b1_dot_commands     => "b1_dots",
+    b1_includes         => "b1_inc",
 }
