@@ -96,4 +96,6 @@ diff_tests! {
     real_sources => "ex_sources",
     real_tran => "ex_tran",
     real_voltage_divider => "ex_voltage_divider",
+    // Coverage netlists (also validated as real ngspice — tools/validate_ngspice.sh).
+    cov_expr_ops        => "cov_expr_ops",
 }

@@ -55,7 +55,7 @@ fn to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str, dialect: Dialect) -> Self {
-        let raw = Lexer::tokenize(src, dialect, false, false);
+        let raw = Lexer::tokenize(src, dialect, false, false, true);
         let mut p = Parser {
             src,
             raw,
