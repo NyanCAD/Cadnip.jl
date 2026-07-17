@@ -4,6 +4,7 @@
 //! entry point is [`parse_spice`]; [`dump::dump`] renders the canonical tree
 //! form used for differential testing against the Julia parser.
 
+pub mod ast;
 pub mod dump;
 pub mod keywords;
 pub mod lexer;

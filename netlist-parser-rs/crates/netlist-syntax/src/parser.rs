@@ -184,7 +184,12 @@ impl<'a> Parser<'a> {
         self.advance();
     }
 
-    fn checkpoint(&self) -> Checkpoint {
+    fn checkpoint(&mut self) -> Checkpoint {
+        // Flush pending leading trivia into the enclosing node *before* marking
+        // the checkpoint, so a node's span starts at its first real token
+        // (rust-analyzer convention). This keeps typed-AST `.text()` clean and
+        // does not affect the canonical dump, which uses content spans.
+        self.flush_trivia(self.nt.idx);
         self.builder.checkpoint()
     }
 
