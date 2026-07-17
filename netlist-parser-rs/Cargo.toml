@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/netlist-syntax",
     "crates/netlist-cabi",
+    "crates/netlist-cxx",
     "crates/netlist-py",
 ]
 

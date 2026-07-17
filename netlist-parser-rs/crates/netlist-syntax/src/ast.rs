@@ -26,23 +26,23 @@ pub trait AstNode: Sized {
     }
 }
 
-mod support {
+pub(crate) mod support {
     use super::*;
 
     /// First child node castable to `N`.
-    pub(super) fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
+    pub(crate) fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
         parent.children().find_map(N::cast)
     }
     /// `n`th child node castable to `N`.
-    pub(super) fn nth<N: AstNode>(parent: &SyntaxNode, n: usize) -> Option<N> {
+    pub(crate) fn nth<N: AstNode>(parent: &SyntaxNode, n: usize) -> Option<N> {
         parent.children().filter_map(N::cast).nth(n)
     }
     /// All child nodes castable to `N`.
-    pub(super) fn all<'a, N: AstNode + 'a>(parent: &'a SyntaxNode) -> impl Iterator<Item = N> + 'a {
+    pub(crate) fn all<'a, N: AstNode + 'a>(parent: &'a SyntaxNode) -> impl Iterator<Item = N> + 'a {
         parent.children().filter_map(N::cast)
     }
     /// First direct child token of the given kind.
-    pub(super) fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
+    pub(crate) fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
         parent
             .children_with_tokens()
             .filter_map(|e| e.into_token())
@@ -71,6 +71,9 @@ macro_rules! ast_node {
         }
     };
 }
+// Re-export so the Spectre typed-AST module (`spectre_ast`) can reuse the same
+// boilerplate generator instead of duplicating it.
+pub(crate) use ast_node;
 
 // --- Expr: a node-or-token expression ---
 

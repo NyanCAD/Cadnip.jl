@@ -13,6 +13,7 @@ pub mod syntax_kind;
 
 // Spectre dialect: separate token layer (token kinds, keyword trie, lexer,
 // parser); the rowan CST kind space in `syntax_kind` is shared.
+pub mod spectre_ast;
 pub mod spectre_keywords;
 pub mod spectre_lexer;
 pub mod spectre_parser;

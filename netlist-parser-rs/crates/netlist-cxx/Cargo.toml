@@ -1,0 +1,16 @@
+[package]
+name = "netlist-cxx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `staticlib` for linking into a C++ project; `rlib` so Rust tests can exercise
+# the projection directly.
+[lib]
+name = "netlist_cxx"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+netlist-syntax = { path = "../netlist-syntax" }
+cxx = "1.0"
