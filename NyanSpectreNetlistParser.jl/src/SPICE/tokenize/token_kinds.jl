@@ -43,6 +43,7 @@ end
         IDENTIFIER_TRANSMISSION_LINE,
         IDENTIFIER_SUBCIRCUIT_CALL,
         IDENTIFIER_UNKNOWN_INSTANCE,
+        IDENTIFIER_XSPICE,
     end_identifiers,
 
     BASE_SPEC, # 'b (but not hex)

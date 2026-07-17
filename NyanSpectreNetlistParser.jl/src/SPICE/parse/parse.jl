@@ -28,6 +28,15 @@ end
 function parse_dot(ps, dot)
     @trysetup AbstractASTNode
     @trynext dot
+    # ngspice/Xyce dot-commands that lex as plain identifiers (not keywords);
+    # dispatch on the identifier text. Kept in sync with netlist-parser-rs.
+    if is_ident(kind(nt(ps)))
+        name = lowercase(String(resolve_identifier(ps, nt(ps))))
+        name == "step" && return parse_named_expr_list(ps, dot, StepStatement)
+        (name == "func" || name == "function") && return parse_named_expr_list(ps, dot, FuncStatement)
+        name == "global_param" && return parse_named_param_list(ps, dot, GlobalParamStatement)
+        name == "nodeset" && return parse_named_param_list(ps, dot, NodeSetStatement)
+    end
     @case kind(nt(ps)) begin
         DC => parse_dc(ps, dot)
         AC => parse_ac(ps, dot)
@@ -551,7 +560,9 @@ function parse_if(ps, dot)
 end
 
 function parse_primary_or_unary(ps)
-    if is_unary_operator(kind(nt(ps)))
+    # ngspice/Xyce also accept unary bitwise `~` and logical `!` (kept in sync
+    # with netlist-parser-rs; validated against ngspice).
+    if is_unary_operator(kind(nt(ps))) || kind(nt(ps)) in (TILDE, NOT)
         parse_unary_op(ps)
     else
         parse_primary(ps)
@@ -792,6 +803,28 @@ function parse_param(ps, dot)
     return EXPR(ParamStatement(dot, kw, params, nl))
 end
 
+# ngspice/Xyce dot-commands dispatched on identifier text (kept in sync with
+# netlist-parser-rs). `.step`/`.func` take an expression list; `.global_param`/
+# `.nodeset` take a parameter list.
+function parse_named_expr_list(ps, dot, T)
+    @trysetup T dot
+    @trynext cmd = take_identifier(ps)
+    args = EXPRList{Any}()
+    while !eol(ps)
+        push!(args, @trynext parse_expression(ps))
+    end
+    @trynext nl = accept_newline(ps)
+    return EXPR(T(dot, cmd, args, nl))
+end
+
+function parse_named_param_list(ps, dot, T)
+    @trysetup T dot
+    @trynext cmd = take_identifier(ps)
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
+    return EXPR(T(dot, cmd, params, nl))
+end
+
 function parse_temp(ps, dot)
     @trysetup TempStatement dot
     @trynext kw = take_kw(ps)
@@ -846,6 +879,22 @@ function unimplemented_instance_error(ps)
     return error!(ps, UnexpectedToken)
 end
 
+# Permissive device: name, trailing nodes/values (until a `param=` run), params.
+# For devices without a bespoke grammar (mutual inductors, JFETs, transmission
+# lines, MESFETs, XSPICE) — kept in sync with netlist-parser-rs, validated
+# against ngspice/Xyce.
+function parse_generic_device(ps, T)
+    @trysetup T
+    @trynext name = parse_hierarchial_node(ps)
+    nodes = EXPRList{HierarchialNode}()
+    while !eol(ps) && kind(nnt(ps)) != EQ
+        push!(nodes, @trynext parse_hierarchial_node(ps))
+    end
+    @trynext params = parse_parameter_list(ps)
+    @trynext nl = accept_newline(ps)
+    return EXPR(T(name, nodes, params, nl))
+end
+
 # Parse an "instance" line
 #
 # The current next token must be an IDENTIFIER.
@@ -859,19 +908,20 @@ function parse_instance(ps)
         IDENTIFIER_CURRENT_CONTROLLED_CURRENT => parse_controlled(ControlledSource{:C, :C}, ps)
         IDENTIFIER_CURRENT_CONTROLLED_VOLTAGE => parse_controlled(ControlledSource{:C, :V}, ps)
         IDENTIFIER_CURRENT                    => parse_current(ps)
-        IDENTIFIER_JFET                       => unimplemented_instance_error(ps) # TODO
-        IDENTIFIER_HFET_MESA                  => unimplemented_instance_error(ps) # TODO
-        IDENTIFIER_LINEAR_MUTUAL_INDUCTOR     => unimplemented_instance_error(ps) # TODO
+        IDENTIFIER_JFET                       => parse_generic_device(ps, JFET)
+        IDENTIFIER_HFET_MESA                  => parse_generic_device(ps, Mesfet)
+        IDENTIFIER_LINEAR_MUTUAL_INDUCTOR     => parse_generic_device(ps, MutualInductor)
         IDENTIFIER_LINEAR_INDUCTOR            => parse_inductor(ps)
         IDENTIFIER_MOSFET                     => parse_mosfet(ps)
         IDENTIFIER_OSDI                       => parse_subckt_call(ps, OSDIDevice) # kinda a subckt call
+        IDENTIFIER_XSPICE                     => parse_generic_device(ps, XspiceDevice)
         IDENTIFIER_PORT                       => unimplemented_instance_error(ps) # TODO
         IDENTIFIER_BIPOLAR_TRANSISTOR         => parse_bipolar_transistor(ps)
         IDENTIFIER_RESISTOR                   => parse_resistor(ps)
         IDENTIFIER_S_PARAMETER_ELEMENT        => parse_s_parameter_element(ps)
         IDENTIFIER_SWITCH                     => parse_switch(ps)
         IDENTIFIER_VOLTAGE                    => parse_voltage(ps)
-        IDENTIFIER_TRANSMISSION_LINE          => unimplemented_instance_error(ps) # TODO
+        IDENTIFIER_TRANSMISSION_LINE          => parse_generic_device(ps, TransmissionLine)
         IDENTIFIER_SUBCIRCUIT_CALL            => parse_subckt_call(ps)
         # TODO: This should be an "unexpected instance type" or "unexpected instance prefix" error
         IDENTIFIER_UNKNOWN_INSTANCE           => unimplemented_instance_error(ps)

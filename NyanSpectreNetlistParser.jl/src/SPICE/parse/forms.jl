@@ -458,6 +458,75 @@ struct SubcktCall <: AbstractInstanceNode
     nl::EXPR{Notation}
 end
 
+# --- ngspice/Xyce extensions (kept in sync with netlist-parser-rs) ---
+# Permissive device: name, trailing nodes/values, params. Used for devices
+# without a bespoke grammar (mutual inductors, JFETs, transmission lines,
+# MESFETs, XSPICE code-model devices), validated against ngspice/Xyce.
+struct MutualInductor <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct JFET <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct TransmissionLine <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct Mesfet <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct XspiceDevice <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+# Xyce dot-commands (dispatched on the identifier text): `.step`, `.func`,
+# `.global_param`, `.nodeset`. `cmd` is the command word (a plain identifier).
+struct StepStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    args::EXPRList
+    nl::EXPR{Notation}
+end
+
+struct FuncStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    args::EXPRList
+    nl::EXPR{Notation}
+end
+
+struct GlobalParamStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct NodeSetStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
 
 struct Subckt <: AbstractBlockASTNode
     dot::EXPR{Notation}

@@ -14,19 +14,23 @@ fn corpus_dir() -> PathBuf {
         .join("../../tests")
 }
 
-fn check(name: &str) {
+fn check_dialect(name: &str, dialect: netlist_syntax::Dialect) {
     let base = corpus_dir();
     let src = fs::read_to_string(base.join("corpus").join(format!("{name}.sp")))
         .unwrap_or_else(|e| panic!("read corpus/{name}.sp: {e}"));
     let expected = fs::read_to_string(base.join("expected").join(format!("{name}.txt")))
         .unwrap_or_else(|e| panic!("read expected/{name}.txt: {e}"));
-    let got = netlist_syntax::dump::dump(&netlist_syntax::parse_spice(&src));
+    let got = netlist_syntax::dump::dump(&netlist_syntax::parse_spice_dialect(&src, dialect));
     assert_eq!(
         got.trim_end(),
         expected.trim_end(),
         "\n=== {name}.sp: Rust dump differs from Julia ground truth ===\n\
          --- rust ---\n{got}\n--- julia ---\n{expected}"
     );
+}
+
+fn check(name: &str) {
+    check_dialect(name, netlist_syntax::Dialect::Ngspice);
 }
 
 macro_rules! diff_tests {
@@ -98,4 +102,14 @@ diff_tests! {
     real_voltage_divider => "ex_voltage_divider",
     // Coverage netlists (also validated as real ngspice — tools/validate_ngspice.sh).
     cov_expr_ops        => "cov_expr_ops",
+    // ngspice/Xyce extensions synced into both parsers (in parity, not exempt).
+    ext_devices         => "ext_devices",
+    ext_xyce_cmds       => "ext_xyce_cmds",
+}
+
+// Xyce-dialect parity (Y = OSDI). Validated against Xyce (tools/validate_xyce.sh)
+// and byte-exact against the Julia parser in :xyce mode.
+#[test]
+fn ext_xyce_y_device() {
+    check_dialect("ext_xyce_y", netlist_syntax::Dialect::Xyce);
 }

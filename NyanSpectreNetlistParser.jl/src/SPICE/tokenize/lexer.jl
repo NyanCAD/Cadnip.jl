@@ -26,7 +26,7 @@ function is_identifier_start_char(c::Char)
     return isletter(c) || c == '_'
 end
 
-is_instance_first_char(c) = c in ('B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y')
+is_instance_first_char(c) = c in ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z')
 
 @inline ishex(c::Char) = isdigit(c) || ('a' <= c <= 'f') || ('A' <= c <= 'F')
 @inline isbinary(c::Char) = c == '0' || c == '1'
@@ -552,7 +552,9 @@ function lex_identifier(l::Lexer{IO_t,T}, c) where {IO_t,T}
 end
 
 function lex_instance(l::Lexer{IO_t,T}, c) where {IO_t,T}
-    typ = if c == 'B'
+    typ = if c == 'A'
+        IDENTIFIER_XSPICE
+    elseif c == 'B'
         IDENTIFIER_BEHAVIORAL
     elseif c == 'C'
         IDENTIFIER_CAPACITOR
