@@ -31,7 +31,6 @@ using Base.ScopedValues
 
 Base.@kwdef struct SimSpec
     time::Float64=0.0
-    ϵω::Float64=0.0
     temp::DefaultOr{Float64}=mkdefault(27.0)
     gmin::DefaultOr{Float64}=mkdefault(1e-12)
     scale::DefaultOr{Float64}=mkdefault(1.0)
