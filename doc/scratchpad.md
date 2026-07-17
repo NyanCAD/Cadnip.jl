@@ -17,6 +17,7 @@ At this stage we don't need any "backwards compatibility"
 
 The original CedarSim is at 5d5ea8d4e7e17fd06f775eddd11f15a4731a4210 and still has stuff that we don't.
 Part of that is tests that we didn't port, part is inapplicable, but there are also some big features (noise etc) and extensions (makie etc).
+For noise, the intended AD-perturbation approach is written up in `doc/noise_analysis_design.md`.
 Its user facing API also feels a bit more thoughtful rather than just grown.
 
 ## Production readiness
