@@ -13,7 +13,12 @@ pub mod syntax_kind;
 pub use lexer::Dialect;
 pub use syntax_kind::{NetlistLang, SyntaxKind, SyntaxNode, SyntaxToken};
 
-/// Parse SPICE source into a lossless rowan CST.
+/// Parse SPICE source into a lossless rowan CST (ngspice dialect).
 pub fn parse_spice(src: &str) -> SyntaxNode {
     parser::parse(src, Dialect::Ngspice)
+}
+
+/// Parse SPICE source under a specific dialect.
+pub fn parse_spice_dialect(src: &str, dialect: Dialect) -> SyntaxNode {
+    parser::parse(src, dialect)
 }

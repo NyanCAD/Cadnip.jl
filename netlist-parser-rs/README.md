@@ -80,6 +80,10 @@ Tests exercise every stage of the pipeline:
   without panicking and stay lossless.
 - **Real SPICE** — coverage netlists (`cov_*.sp`) are validated as runnable
   ngspice via `tools/validate_ngspice.sh`.
+- **Xyce dialect** — `.step`/`.func`/`.global_param`/`.nodeset` and `Y`-devices
+  (`Dialect::Xyce`) are supported beyond the Julia parser and validated against
+  the Xyce simulator (`tools/validate_xyce.sh`, `-syntax`); `tests/xyce.rs`
+  asserts no-error + lossless parse of `tests/xyce/full.cir`.
 
 Measure coverage with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov):
 

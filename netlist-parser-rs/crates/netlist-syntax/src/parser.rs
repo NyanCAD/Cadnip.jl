@@ -414,8 +414,45 @@ impl<'a> Parser<'a> {
             LIB => self.parse_lib(cp),
             ENDL => self.parse_endl(cp),
             MEASURE => self.parse_measure(cp),
+            // Xyce-dialect dot-commands lex as plain identifiers (not keywords in
+            // the Julia lexer); dispatch on the identifier text. These extend
+            // beyond the Julia parser and are validated against Xyce.
+            _ if self.nt.kind.is_ident() => match self.nt_text().to_ascii_lowercase().as_str() {
+                "step" => self.parse_named_expr_list(cp, SyntaxKind::StepStatement),
+                "func" | "function" => self.parse_named_expr_list(cp, SyntaxKind::FuncStatement),
+                "global_param" => self.parse_named_param_list(cp, SyntaxKind::GlobalParamStatement),
+                "nodeset" => self.parse_named_param_list(cp, SyntaxKind::NodeSetStatement),
+                _ => self.error(),
+            },
             _ => self.error(), // remaining dot commands not yet ported
         }
+    }
+
+    /// Text of the current significant token.
+    fn nt_text(&self) -> &str {
+        let t = self.raw[self.nt.idx];
+        &self.src[t.start as usize..t.end as usize]
+    }
+
+    /// Xyce `.<cmd> name=val ...` (like `.param`): command word + parameter list.
+    fn parse_named_param_list(&mut self, cp: Checkpoint, kind: SyntaxKind) -> PResult {
+        self.wrapped(cp, kind, |p| {
+            p.take_identifier()?; // command word (e.g. global_param / nodeset)
+            p.parse_parameter_list()?;
+            p.accept_newline()
+        })
+    }
+
+    /// Xyce `.<cmd> <expr> ...` (e.g. `.step`, `.func`): command word + a
+    /// permissive run of expressions to end of line.
+    fn parse_named_expr_list(&mut self, cp: Checkpoint, kind: SyntaxKind) -> PResult {
+        self.wrapped(cp, kind, |p| {
+            p.take_identifier()?; // command word (e.g. step / func)
+            while !p.eol() {
+                p.parse_expression()?;
+            }
+            p.accept_newline()
+        })
     }
 
     fn parse_title_dot(&mut self, cp: Checkpoint) -> PResult {

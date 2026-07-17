@@ -416,6 +416,13 @@ pub enum SyntaxKind {
     Val_,
     TrigTarg,
 
+    // Xyce-dialect dot-commands (not present in the Julia parser; validated
+    // against the Xyce simulator instead of the differential harness).
+    StepStatement,
+    FuncStatement,
+    GlobalParamStatement,
+    NodeSetStatement,
+
     #[doc(hidden)]
     __Last,
 }
@@ -535,6 +542,10 @@ impl SyntaxKind {
             AvgMaxMinPPRmsInteg => "AvgMaxMinPPRmsInteg",
             Val_ => "Val_",
             TrigTarg => "TrigTarg",
+            StepStatement => "StepStatement",
+            FuncStatement => "FuncStatement",
+            GlobalParamStatement => "GlobalParamStatement",
+            NodeSetStatement => "NodeSetStatement",
             __Last => "__Last",
         }
     }
