@@ -48,6 +48,14 @@ resp_an = ControlSystemsBase.freqrespv(H, ωs)
 
 @test all(Cadnip.freqresp(ac, :vin, ωs) .≈ 1.0) # check directly-observed source
 
+# Hz-based bode helpers on the high-level ACSol: magnitude_db / phase_deg take
+# frequencies in Hz (SPICE .ac convention), so no manual 2π conversion.
+freqs_hz = acdec(20, 0.01, 10)
+@test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_an))
+@test Cadnip.phase_deg(ac, :vout, freqs_hz) ≈ rad2deg.(angle.(resp_an))
+# equivalent to going through freqresp with rad/s by hand
+@test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_sim))
+
 # Convert to ControlSystems state space, compute bode
 # RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion
 mag_sim, phase_sim, w_sim = bode(ss(ac[:vout]), ωs)
