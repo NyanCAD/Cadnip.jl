@@ -4,11 +4,14 @@ include("common.jl")
 
 # MNA imports for parameter tests
 using Cadnip.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using Cadnip.MNA: Resistor, VoltageSource
+using Cadnip.MNA: Resistor, Capacitor, VoltageSource
 
 using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using Cadnip: ParamLens, IdentityLens
 using Cadnip: dc!
+
+# Loading a Makie backend activates CadnipMakieExt, which defines Cadnip.explore.
+import CairoMakie
 
 #==============================================================================#
 # Test 1: Simple parameterized circuit (replaces ParCir struct)
@@ -116,19 +119,44 @@ sol = dc!(circuit)
 @test sol[:I_V] == -5.0
 
 #==============================================================================#
-# Test 4: CairoMakie exploration (skip for MNA - requires different API)
+# Test 4: Makie exploration (CadnipMakieExt)
 #
-# The original test used Cadnip.explore(sol) which expects DAECompiler solution.
-# MNA solutions use a different format. Skip or adapt as needed.
+# `Cadnip.explore(circuit, tspan)` builds an interactive figure with one slider
+# per scalar parameter and a live node-voltage trace per node. Loading a Makie
+# backend (CairoMakie here) activates the extension. We render to a PNG to
+# force the observable/solve/plot pipeline to run end-to-end headlessly.
 #==============================================================================#
 
-# Note: MNA solution exploration would use different API
-# Keeping as placeholder for future MNA visualization support
-# import CairoMakie
-# fig = Cadnip.explore(sol)
-# plots_dir = joinpath(Base.pkgdir(Cadnip), "test", "plots")
-# mkpath(plots_dir)
-# CairoMakie.save(joinpath(plots_dir, "explore.png"), fig)
+# RC low-pass with sweepable Vcc/R/C, driven to a step response over the tspan.
+function build_rc_explore(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+    p = merge((Vcc=5.0, R=1e3, C=1e-6), params)
+    if ctx === nothing
+        ctx = MNAContext()
+    else
+        reset_for_restamping!(ctx)
+    end
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+    stamp!(VoltageSource(p.Vcc; name=:V), ctx, vcc, 0)
+    stamp!(Resistor(p.R), ctx, vcc, out)
+    stamp!(Capacitor(p.C), ctx, out, 0)
+    return ctx
+end
+
+@testset "CadnipMakieExt explore()" begin
+    circuit = MNACircuit(build_rc_explore; Vcc=5.0, R=1e3, C=1e-6)
+    fig = Cadnip.explore(circuit, (0.0, 5e-3))
+    @test fig isa CairoMakie.Makie.Figure
+
+    # Rendering exercises the full lift → alter → tran! → plot pipeline.
+    plot_path = joinpath(mktempdir(), "explore.png")
+    CairoMakie.save(plot_path, fig)
+    @test isfile(plot_path) && filesize(plot_path) > 0
+
+    # No numeric parameters → nothing to sweep → informative error.
+    empty_circuit = MNACircuit(build_rc_explore)
+    @test_throws ErrorException Cadnip.explore(empty_circuit, (0.0, 5e-3))
+end
 
 #==============================================================================#
 # Test 5: SPICE netlist with parameters - using MNA codegen

@@ -68,6 +68,7 @@ path = "NyanSpectreNetlistParser.jl"
 path = "NyanVerilogAParser.jl"
 
 [extensions]
+CadnipMakieExt = "Makie"
 CadnipModelingToolkitExt = "ModelingToolkit"
 CadnipReviseExt = "Revise"
 
