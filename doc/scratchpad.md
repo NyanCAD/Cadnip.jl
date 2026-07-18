@@ -50,13 +50,52 @@ Researching what is out there and trying it out is worthwile.
 
 The most nebulous and least important at this stage: copying features from other simulators
 
-# Progress
+# In flight
 
-- AC source phase (`V1 ... AC mag phase`)
-- Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
-- Cleanup: drop dead backward-compat aliases
-- Cleanup: drop dead `netlist_utils.jl` composition operators
-- Control/analysis dot-cards no longer crash sema
-- Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
-- Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
-- Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
+## Noise simulation
+
+Bring back noise analysis (CedarSim port). Design + research:
+`doc/noise_analysis_design.md`. Approach: noise sources as differentiable
+perturbation inputs riding the existing AC descriptor-state-space machinery,
+collected through a deferred `MNAContext`-only channel that is a no-op on the
+transient hot path (`DirectStampContext`), so DC/transient cost stays at zero.
+
+- [ ] **N0 — Groundwork: noise-source channel.** Add a deferred noise-source
+  list to `MNAContext` (COO-style, mirroring `b_ac_I`/`b_ac_V`). Do *not* add
+  it to `DirectStampContext`. Make the VA `white_noise`/`flicker_noise`
+  builtins (and builtin thermal/shot) ctx-aware: register a source on
+  `MNAContext`, no-op on `DirectStampContext`, always return `0.0` for the
+  value path so DC/transient numerics are byte-identical. Assert zero extra
+  allocations in a transient benchmark.
+- [ ] **N1 — PSD models at the DC bias.** Evaluate per-source spectral density
+  at the operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
+  `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes
+  from the DC solution already computed by the AC path.
+- [ ] **N2 — Transfer functions via the AC system.** Reuse `ac!`'s linearized
+  `(jωC + G)`. Per output+frequency, one adjoint solve
+  `(jωC+G)ᵀ x_adj = e_out` gives the transfer from *every* source at O(1) each
+  (`H_k = x_adjᵀ e_k`); reuse the factorization across sources. (Equivalent to
+  adding each source as a `B` column and reading `freqresp` — the
+  perturbation-input framing — but the adjoint is the efficient evaluation for
+  a single output.)
+- [ ] **N3 — `noise!()` analysis + output.** Output PSD `Σ_k |H_k(jω)|² S_k(ω)`,
+  band integration for total noise, input-referred via the input transfer
+  function. Netlist `.noise` card + name-based access, mirroring `ac!`/`ACSol`.
+- [ ] **N4 — Tests + validation.** Netlist tests (thermal noise of an RC =
+  `4kT·R` shaped by the RC pole; op-amp input-referred noise) cross-checked
+  against ngspice `.noise`, driven through the high-level API.
+- [ ] **N5 (stretch) — differentiable / large-signal.** Differentiate output
+  noise w.r.t. design params (the SciML payoff), and scope cyclostationary
+  (PSS/PAC-style) noise on a periodically-time-varying linearization. Design
+  only for now.
+
+# Done
+
+- [x] AC source phase (`V1 ... AC mag phase`)
+- [x] Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
+- [x] Cleanup: drop dead backward-compat aliases
+- [x] Cleanup: drop dead `netlist_utils.jl` composition operators
+- [x] Control/analysis dot-cards no longer crash sema
+- [x] Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
+- [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
+- [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
