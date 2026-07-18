@@ -31,6 +31,43 @@ It would be good to have tests for the open source PDKs (atm sky130, gf180, ihp)
 Make sure the high level API is actually nice to use by working through mock designs, following the steps an experienced designer would take from hand derivations to post-layout simulations.
 This can result in new examples and tests, gaps in our API, bugfixes, and more.
 
+### AC analysis UX (todo)
+
+We currently ship **two parallel AC result types** with different conventions,
+and the high-level `ac!` only returns one of them. Worth unifying, but it needs
+a deliberate decision because they answer to two different ecosystems:
+
+- `solve_ac` → `ACSolution` (`src/mna/solve.jl`): SPICE-native. Frequencies in
+  **Hz**, `sol[:name]` returns the complex response trajectory,
+  `magnitude_db`/`phase_deg` give a Bode readout. This is the low-level path
+  used by `test/mna/core.jl`.
+- `ac!` → `ACSol` (`src/ac.jl`): a linearized `DescriptorStateSpace`. `freqresp`,
+  `ss`, `bode`, `dss` here implement the **DescriptorSystems / ControlSystems**
+  interfaces, so their convention is angular frequency in **rad/s** — that
+  ecosystem's convention, not ours. `sol[:name]` returns a *SISO subsystem*, not
+  a response vector. This is the path the high-level API and README expose.
+
+The Hz-vs-rad/s split is not an accident: it falls out of `freqresp` being a
+`DescriptorSystems.freqresp` method. Any unification has to keep the
+ControlSystems interop (that's a headline selling point — see the Ecosystem
+pillar) while giving SPICE users a Hz-first surface.
+
+- [ ] Pick a single AC result type. Leaning toward `ACSol` (DSS-backed, strictly
+      more capable — you can get `ss`/`bode`/poles/zeros out of it) and deriving
+      the SPICE-native views from it, then retiring `solve_ac`/`ACSolution`
+      (per CLAUDE.md: no parallel implementations).
+- [ ] Make `sol[:name]` consistent across whatever survives — `ACSolution[:name]`
+      returns a response vector, `ACSol[:name]` returns a subsystem. Same
+      indexing syntax, different return type is a footgun.
+- [ ] Keep `freqresp` in rad/s (ControlSystems contract) but document the
+      convention loudly, and route the SPICE-facing helpers (`magnitude_db`,
+      `phase_deg`, and any future `sol[:name]` trajectory access) through Hz so
+      users never hand-convert. The Hz methods added above are a first step.
+- [ ] Noise analysis (`noise!`) is still a stub (`src/ac.jl` LIMITATION 2);
+      CedarSim had it — see the CedarSim porting pillar.
+- [ ] Hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1):
+      only flat top-level node/current names are observable today.
+
 ## Performance
 
 Take one of our benchmarks where we're lagging behind the competition and do a deep dive on where we lose time.
@@ -51,12 +88,12 @@ The most nebulous and least important at this stage: copying features from other
 
 # Progress
 
-- AC source phase (`V1 ... AC mag phase`)
-- Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
-- Cleanup: drop dead backward-compat aliases
-- Cleanup: drop dead `netlist_utils.jl` composition operators
-- Control/analysis dot-cards no longer crash sema
-- Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
-- Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
-- Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
-- UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
+- [x] AC source phase (`V1 ... AC mag phase`)
+- [x] Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
+- [x] Cleanup: drop dead backward-compat aliases
+- [x] Cleanup: drop dead `netlist_utils.jl` composition operators
+- [x] Control/analysis dot-cards no longer crash sema
+- [x] Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
+- [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
+- [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
+- [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
