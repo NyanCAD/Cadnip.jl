@@ -31,14 +31,6 @@ It would be good to have tests for the open source PDKs (atm sky130, gf180, ihp)
 Make sure the high level API is actually nice to use by working through mock designs, following the steps an experienced designer would take from hand derivations to post-layout simulations.
 This can result in new examples and tests, gaps in our API, bugfixes, and more.
 
-### AC analysis UX (todo)
-
-- [ ] Unify the two AC result types — `solve_ac`→`ACSolution` (SPICE-native, Hz) and `ac!`→`ACSol` (a `DescriptorStateSpace` in rad/s for ControlSystems/DescriptorSystems interop) — into one that keeps the ControlSystems interop but presents a Hz-first surface
-- [ ] Make `sol[:name]` return-type consistent across AC types (`ACSolution` gives a response vector, `ACSol` gives a SISO subsystem)
-- [ ] Route the SPICE-facing AC helpers through Hz while keeping `freqresp` in rad/s per the ControlSystems contract
-- [ ] AC noise analysis (`noise!`, `src/ac.jl` LIMITATION 2) — see `doc/noise_analysis_plan.md`
-- [ ] Hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1)
-
 ## Performance
 
 Take one of our benchmarks where we're lagging behind the competition and do a deep dive on where we lose time.
@@ -68,3 +60,6 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
 - [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
 - [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
+- [ ] AC UX: unify the two AC result types (`ACSolution` Hz vs `ACSol` rad/s) onto one Hz-first surface that keeps the ControlSystems interop — see `doc/ac_result_unification.md`
+- [ ] AC UX: make `sol[:name]` return-type consistent across AC types — see `doc/ac_result_unification.md`
+- [ ] AC UX: hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1) — see `doc/ac_result_unification.md`
