@@ -236,27 +236,8 @@ function tlshow(expr)
     end
 end
 
-function default_name_map(sys)
-    # Collect all top-level nodes that are terminal:
-    top_level_nodes = Set(filter(n -> isempty(propertynames(getproperty(sys, n))), propertynames(sys)))
-    # Strip `node_` from the front if there's no conflicting other node:
-    name_map = Dict{Symbol,String}()
-    for name in top_level_nodes
-        # Only allow variables and observed
-        level = getfield(sys, :result).names[name]
-        (level.var !== nothing || level.obs !== nothing) || continue
-
-        str_name = string(name)
-        if startswith(str_name, "node_") && str_name[6:end] ∉ top_level_nodes
-            str_name = string(str_name[6:end])
-        end
-        # Filter out anything named `gnd` or `0`
-        if str_name ∈ ("0", "gnd", "GND", "node_0", "node_gnd", "node_GND")
-            continue
-        end
-        name_map[name] = str_name
-    end
-    return name_map
-end
-
+# Interactive circuit exploration. The method lives in the Makie package
+# extension (`ext/CadnipMakieExt.jl`); this declares the generic function so the
+# extension can add to it and it is reachable as `Cadnip.explore` once a Makie
+# backend is loaded.
 function explore end

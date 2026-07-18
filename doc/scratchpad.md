@@ -58,3 +58,4 @@ The most nebulous and least important at this stage: copying features from other
 - Control/analysis dot-cards no longer crash sema
 - Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
 - Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
+- Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
