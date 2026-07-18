@@ -16,7 +16,7 @@
 
 use netlist_syntax::ast::AstNode;
 use netlist_syntax::spectre_ast as sast;
-use netlist_syntax::{parse_spectre, SyntaxKind, SyntaxNode, SyntaxToken};
+use netlist_syntax::{parse_spectre_with, StartLang, SyntaxKind, SyntaxNode, SyntaxToken};
 
 #[cxx::bridge(namespace = "netlist")]
 mod ffi {
@@ -114,8 +114,11 @@ mod ffi {
     }
 
     extern "Rust" {
-        /// Parse Spectre source and project it into a flat, owned [`Netlist`].
-        fn parse_spectre_netlist(src: &str) -> Netlist;
+        /// Parse netlist source and project it into a flat, owned `Netlist`.
+        /// `start_spice` selects the starting dialect (`.cir` → true / SPICE,
+        /// `.scs` → false / Spectre); a `simulator lang=` line may still switch
+        /// mid-file.
+        fn parse_netlist(src: &str, start_spice: bool) -> Netlist;
     }
 }
 
@@ -314,8 +317,9 @@ fn collect_errors(root: &SyntaxNode) -> Vec<ffi::ParseError> {
         .collect()
 }
 
-pub fn parse_spectre_netlist(src: &str) -> ffi::Netlist {
-    let root = parse_spectre(src);
+pub fn parse_netlist(src: &str, start_spice: bool) -> ffi::Netlist {
+    let lang = if start_spice { StartLang::Spice } else { StartLang::Spectre };
+    let root = parse_spectre_with(src, lang);
     let errors = collect_errors(&root);
     let source = sast::SpectreNetlistSource::cast(root).expect("root is SpectreNetlistSource");
     let scope = collect_scope(source.statements());
@@ -332,6 +336,11 @@ pub fn parse_spectre_netlist(src: &str) -> ffi::Netlist {
         ahdl_includes: scope.ahdl_includes,
         errors,
     }
+}
+
+/// Back-compat wrapper: parse starting in Spectre.
+pub fn parse_spectre_netlist(src: &str) -> ffi::Netlist {
+    parse_netlist(src, false)
 }
 
 #[cfg(test)]
@@ -392,5 +401,25 @@ mod tests {
         assert_eq!(nl.includes.len(), 1);
         assert_eq!(nl.includes[0].path, "models.scs");
         assert_eq!(nl.includes[0].section, "tt");
+    }
+
+    #[test]
+    fn start_language_dispatch() {
+        // SPICE block, then switch to Spectre, then a Spectre instance.
+        let src = "* title\nR1 a b 1k\nsimulator lang=spectre\nr2 (a b) resistor r=2k\n";
+
+        // Start in SPICE: the leading SPICE block parses cleanly; after the
+        // `simulator lang=spectre` switch, control returns to the Spectre driver
+        // and the trailing Spectre instance r2 projects. (SPICE-device projection
+        // of the leading block is deferred to Task 7 — not asserted here.)
+        let spice = super::parse_netlist(src, /*start_spice=*/ true);
+        assert!(spice.errors.is_empty(), "spice-start should parse cleanly");
+        assert_eq!(spice.instances.len(), 1);
+        assert_eq!(spice.instances[0].name, "r2");
+
+        // Start in Spectre: the same leading SPICE line `R1 a b 1k` is invalid
+        // Spectre and produces error node(s).
+        let spectre = super::parse_netlist(src, /*start_spice=*/ false);
+        assert!(!spectre.errors.is_empty(), "spectre-start should error on the SPICE line");
     }
 }
