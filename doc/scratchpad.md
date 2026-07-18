@@ -19,15 +19,6 @@ The original CedarSim is at 5d5ea8d4e7e17fd06f775eddd11f15a4731a4210 and still h
 Part of that is tests that we didn't port, part is inapplicable, but there are also some big features (noise etc) and extensions (makie etc).
 Its user facing API also feels a bit more thoughtful rather than just grown.
 
-### Noise analysis (todo) — design: `doc/noise_analysis_design.md`
-
-- [ ] N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost)
-- [ ] N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
-- [ ] N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
-- [ ] N3: `noise!()` + `.noise` card — output/total/input-referred, name-based access
-- [ ] N4: validation against ngspice `.noise` through the high-level API
-- [ ] N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
-
 ## Production readiness
 
 Adding more tests and benchmarks to see how we compare to ngspice, vacask, xyce.
@@ -69,3 +60,9 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
 - [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
 - [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
+- [ ] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost) — design: `doc/noise_analysis_design.md`
+- [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
+- [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
+- [ ] Noise N3: `noise!()` + `.noise` card — output/total/input-referred, name-based access
+- [ ] Noise N4: validation against ngspice `.noise` through the high-level API
+- [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
