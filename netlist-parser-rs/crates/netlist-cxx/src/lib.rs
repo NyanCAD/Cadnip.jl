@@ -314,6 +314,9 @@ fn project_spice_param(p: &ast::Parameter) -> ffi::Param {
 /// helper tries expression-node children first (covers `BinaryExpression`, etc.)
 /// then falls back to scanning direct token children for `NumberLiteral`/`Literal`.
 fn ctrl_value_text(node: &SyntaxNode) -> String {
+    // In VoltageControl / CurrentControl / MutualInductor, HierarchialNode children are
+    // control-node names; the first non-HierarchialNode child node is the gain/coupling
+    // expression. (Plain numeric gains are bare tokens, handled by the token fallback below.)
     // Expression-node children first (wraps complex expressions).
     for child in node.children() {
         if !matches!(child.kind(), SyntaxKind::HierarchialNode) {
@@ -681,6 +684,8 @@ fn project_spice_model(m: &ast::Model) -> ffi::SpiceModel {
 /// Project a SPICE `.subckt` definition into a `SpiceSubckt`, recursively
 /// walking the body for nested devices, `.model` cards, and `.subckt` definitions.
 fn project_spice_subckt(s: &ast::Subckt) -> ffi::SpiceSubckt {
+    // NOTE: SpiceSubckt has no `includes` field; .include/.lib inside a .subckt body are
+    // not projected (top-level includes only, matching the C++ include-resolution scope).
     let mut devices = vec![];
     let mut models = vec![];
     let mut subckts = vec![];
