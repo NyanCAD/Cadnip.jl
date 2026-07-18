@@ -316,6 +316,35 @@ fn empty_source() -> ffi::SpiceSource {
     }
 }
 
+/// Build a `SpiceSource` by walking the `DCSource`/`ACSource`/`TranSource`
+/// child nodes yielded by `Voltage::sources()` or `Current::sources()`.
+fn project_spice_source(sources: impl Iterator<Item = SyntaxNode>) -> ffi::SpiceSource {
+    let mut out = empty_source();
+    for src in sources {
+        match src.kind() {
+            SyntaxKind::DCSource => {
+                if let Some(dc) = ast::DCSource::cast(src) {
+                    out.dc = dc.value().map(|e| e.text()).unwrap_or_default();
+                }
+            }
+            SyntaxKind::ACSource => {
+                if let Some(ac) = ast::ACSource::cast(src) {
+                    out.ac_mag = ac.magnitude().map(|e| e.text()).unwrap_or_default();
+                    out.ac_phase = ac.phase().map(|e| e.text()).unwrap_or_default();
+                }
+            }
+            SyntaxKind::TranSource => {
+                if let Some(tran) = ast::TranSource::cast(src) {
+                    out.tran_kind = tok_text(tran.function());
+                    out.tran_args = tran.values().map(|e| e.text()).collect();
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Project a `SPICENetlistSource` node into a `SpiceBlock`.
 /// R/C/L are projected now; other device kinds fall through (`_ => {}`).
 fn project_spice_block(node: SyntaxNode) -> ffi::SpiceBlock {
@@ -370,6 +399,36 @@ fn project_spice_block(node: SyntaxNode) -> ffi::SpiceBlock {
                         ctrl_nodes: vec![],
                         ctrl_value: String::new(),
                         source: empty_source(),
+                    });
+                }
+            }
+            SyntaxKind::Voltage => {
+                if let Some(v) = ast::Voltage::cast(child) {
+                    block.devices.push(ffi::SpiceDevice {
+                        kind: ffi::SpiceDeviceKind::VSource,
+                        name: hier_text(v.name()),
+                        nodes: vec![hier_text(v.pos()), hier_text(v.neg())],
+                        value: String::new(),
+                        model: String::new(),
+                        params: vec![],
+                        ctrl_nodes: vec![],
+                        ctrl_value: String::new(),
+                        source: project_spice_source(v.sources()),
+                    });
+                }
+            }
+            SyntaxKind::Current => {
+                if let Some(i) = ast::Current::cast(child) {
+                    block.devices.push(ffi::SpiceDevice {
+                        kind: ffi::SpiceDeviceKind::ISource,
+                        name: hier_text(i.name()),
+                        nodes: vec![hier_text(i.pos()), hier_text(i.neg())],
+                        value: String::new(),
+                        model: String::new(),
+                        params: vec![],
+                        ctrl_nodes: vec![],
+                        ctrl_value: String::new(),
+                        source: project_spice_source(i.sources()),
                     });
                 }
             }
@@ -596,6 +655,33 @@ mod tests {
         assert_eq!(d[2].name, "L1");
         assert_eq!(d[2].nodes, vec!["a", "b"]);
         assert_eq!(d[2].value, "2n");
+    }
+
+    #[test]
+    fn projects_spice_sources() {
+        let nl = super::parse_netlist(
+            "* t\nV1 1 0 DC 5 AC 1 PULSE(0 5 1m 1u 1u 4m 10m)\nI1 0 2 DC 1m\n",
+            true,
+        );
+        assert!(nl.errors.is_empty(), "unexpected parse errors");
+        assert_eq!(nl.spice_blocks.len(), 1);
+        let d = &nl.spice_blocks[0].devices;
+        // V1
+        let v = d.iter().find(|x| x.name == "V1").unwrap();
+        assert_eq!(v.kind, super::ffi::SpiceDeviceKind::VSource);
+        assert_eq!(v.nodes, vec!["1", "0"]);
+        assert_eq!(v.source.dc, "5");
+        assert_eq!(v.source.ac_mag, "1");
+        assert_eq!(v.source.ac_phase, "");
+        assert_eq!(v.source.tran_kind.to_lowercase(), "pulse");
+        assert_eq!(v.source.tran_args, vec!["0", "5", "1m", "1u", "1u", "4m", "10m"]);
+        // I1
+        let cur = d.iter().find(|x| x.name == "I1").unwrap();
+        assert_eq!(cur.kind, super::ffi::SpiceDeviceKind::ISource);
+        assert_eq!(cur.nodes, vec!["0", "2"]);
+        assert_eq!(cur.source.dc, "1m");
+        assert_eq!(cur.source.tran_kind, "");
+        assert!(cur.source.tran_args.is_empty());
     }
 
     #[test]
