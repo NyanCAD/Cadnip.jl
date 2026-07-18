@@ -33,40 +33,11 @@ This can result in new examples and tests, gaps in our API, bugfixes, and more.
 
 ### AC analysis UX (todo)
 
-We currently ship **two parallel AC result types** with different conventions,
-and the high-level `ac!` only returns one of them. Worth unifying, but it needs
-a deliberate decision because they answer to two different ecosystems:
-
-- `solve_ac` → `ACSolution` (`src/mna/solve.jl`): SPICE-native. Frequencies in
-  **Hz**, `sol[:name]` returns the complex response trajectory,
-  `magnitude_db`/`phase_deg` give a Bode readout. This is the low-level path
-  used by `test/mna/core.jl`.
-- `ac!` → `ACSol` (`src/ac.jl`): a linearized `DescriptorStateSpace`. `freqresp`,
-  `ss`, `bode`, `dss` here implement the **DescriptorSystems / ControlSystems**
-  interfaces, so their convention is angular frequency in **rad/s** — that
-  ecosystem's convention, not ours. `sol[:name]` returns a *SISO subsystem*, not
-  a response vector. This is the path the high-level API and README expose.
-
-The Hz-vs-rad/s split is not an accident: it falls out of `freqresp` being a
-`DescriptorSystems.freqresp` method. Any unification has to keep the
-ControlSystems interop (that's a headline selling point — see the Ecosystem
-pillar) while giving SPICE users a Hz-first surface.
-
-- [ ] Pick a single AC result type. Leaning toward `ACSol` (DSS-backed, strictly
-      more capable — you can get `ss`/`bode`/poles/zeros out of it) and deriving
-      the SPICE-native views from it, then retiring `solve_ac`/`ACSolution`
-      (per CLAUDE.md: no parallel implementations).
-- [ ] Make `sol[:name]` consistent across whatever survives — `ACSolution[:name]`
-      returns a response vector, `ACSol[:name]` returns a subsystem. Same
-      indexing syntax, different return type is a footgun.
-- [ ] Keep `freqresp` in rad/s (ControlSystems contract) but document the
-      convention loudly, and route the SPICE-facing helpers (`magnitude_db`,
-      `phase_deg`, and any future `sol[:name]` trajectory access) through Hz so
-      users never hand-convert. The Hz methods added above are a first step.
-- [ ] Noise analysis (`noise!`) is still a stub (`src/ac.jl` LIMITATION 2);
-      CedarSim had it — see the CedarSim porting pillar.
-- [ ] Hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1):
-      only flat top-level node/current names are observable today.
+- [ ] Unify the two AC result types — `solve_ac`→`ACSolution` (SPICE-native, Hz) and `ac!`→`ACSol` (a `DescriptorStateSpace` in rad/s for ControlSystems/DescriptorSystems interop) — into one that keeps the ControlSystems interop but presents a Hz-first surface
+- [ ] Make `sol[:name]` return-type consistent across AC types (`ACSolution` gives a response vector, `ACSol` gives a SISO subsystem)
+- [ ] Route the SPICE-facing AC helpers through Hz while keeping `freqresp` in rad/s per the ControlSystems contract
+- [ ] AC noise analysis (`noise!`, `src/ac.jl` LIMITATION 2) — see `doc/noise_analysis_plan.md`
+- [ ] Hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1)
 
 ## Performance
 
