@@ -1,5 +1,12 @@
 # VACASK ← Rust Netlist Parser Integration Plan
 
+> **Repo note (extraction):** The Rust parser was extracted from this repo into
+> its own repo — **[`NyanCAD/NetlistParse.rs`](https://github.com/NyanCAD/NetlistParse.rs)**
+> — with full history preserved. The crate workspace now sits at that repo's
+> root (the paths below written as `Cadnip.jl/netlist-parser-rs/...` map to
+> `NetlistParse.rs/...`). Clone it as a sibling of `Cadnip.jl`/`VACASK` and point
+> the Corrosion `NETLIST_RS_DIR` at it.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Feed real SPICE/Spectre netlists into VACASK through the `netlist-cxx` Rust parser — parse → build `ParserTables` → `Circuit::elaborate` → run an analysis — with no Julia runtime.
@@ -16,7 +23,7 @@
 - **File-entry dispatch by extension:** `.sim` → VACASK's own native flex/bison parser (`Parser::parseNetlistFile`, unchanged existing path); `.scs` → Rust parser starting in Spectre; **everything else → Rust parser starting in SPICE** (SPICE being the notoriously inconsistent catch-all). A `simulator lang=` line may still switch dialect mid-file within the Rust path.
 - **No separate neutral-IR crate yet.** Transcribe `netlist::Netlist` → `ParserTables` directly in the adapter. Extract an IR only later when building the circulax elaborator (out of scope here).
 - **Both dialects flow through one parser.** A Spectre netlist may switch to SPICE mid-file via `simulator lang=spice`; the only per-file difference is the *starting* language (see the dialect rule above).
-- Two repos: the Rust crate lives in `Cadnip.jl/netlist-parser-rs/` (branch `rust-parser-spike`); VACASK lives in `../VACASK` (its own git repo — commit there separately, on a feature branch, per its CLAUDE.md).
+- Three repos: the Rust crate lives in its own repo `NyanCAD/NetlistParse.rs` (cloned as `../NetlistParse.rs`, crate at repo root); Cadnip is the Julia reference oracle; VACASK lives in `../VACASK` (its own git repo — commit there separately, on a feature branch, per its CLAUDE.md).
 - VACASK binary lives at `../build.VACASK/Release/simulator/vacask`; the demo/test executables build under the CMake build dir. Run VACASK with `/tmp` as CWD (VACASK CLAUDE.md).
 - Prereq on PATH: `cargo` (`/usr/bin/cargo`) and `cxxbridge` (`~/.cargo/bin/cxxbridge`) — both confirmed present.
 
@@ -199,7 +206,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Corrosion)
 
-set(NETLIST_RS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Cadnip.jl/netlist-parser-rs")
+set(NETLIST_RS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../NetlistParse.rs")
 corrosion_import_crate(MANIFEST_PATH "${NETLIST_RS_DIR}/crates/netlist-cxx/Cargo.toml")
 corrosion_add_cxxbridge(netlist_cxx_bridge
     CRATE netlist_cxx

@@ -1,3 +1,0 @@
-// set statement: adjust narration/reporting flags
-// ref: spectre_reference.txt:9905  Quiet set narrate=no error=no info=no
-Quiet set narrate=no error=no info=no

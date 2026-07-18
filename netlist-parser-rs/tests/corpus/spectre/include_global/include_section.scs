@@ -1,2 +1,0 @@
-// library reference: include only the named section of a library file
-include "file.scs" section=typical

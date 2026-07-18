@@ -1,4 +1,0 @@
-// two real arguments, manual reference example
-real myfunc( real a, real b ) {
-    return a+b*2+sqrt(a*sin(b));
-}

@@ -1,8 +1,0 @@
-// altergroup statement: brace block containing parameter, model, and instance statements
-// ref: spectre_reference.txt:2705  altergroup allows changing device/netlist parameters
-// ref: spectre_reference.txt:2730  a1 altergroup { R1 1 0 Resistor R=5k }
-ag1 altergroup {
-    parameters p1=1 p2=2
-    model myres resistor r1=1e3
-    R1 (1 0) resistor r=r1
-}

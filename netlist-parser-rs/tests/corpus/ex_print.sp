@@ -1,1 +1,0 @@
-.print tran v(nin) v(nout) v(xbp.dif) v(xbp.mit) v(xbp.pos)

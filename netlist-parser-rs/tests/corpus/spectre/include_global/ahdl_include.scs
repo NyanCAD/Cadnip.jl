@@ -1,2 +1,0 @@
-// pull in a Verilog-A / SpectreHDL module source
-ahdl_include "device.va"

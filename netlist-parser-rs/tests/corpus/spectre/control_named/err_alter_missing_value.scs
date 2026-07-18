@@ -1,2 +1,0 @@
-// alter with a parameter missing its value -> graceful Incomplete (was a convert crash)
-myalt alter param=

@@ -1,3 +1,0 @@
-// check statement: check parameter values for instances
-// ref: spectre_reference.txt:8702  ParamChk check what=inst
-ParamChk check what=inst

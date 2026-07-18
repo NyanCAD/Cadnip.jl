@@ -1,5 +1,0 @@
-// checklimit statement: enable/disable named checks via string arrays
-// ref: spectre_reference.txt:8792  Mychecklimit1 checklimit disable=["assert2" "assert5"]
-// ref: spectre_reference.txt:8797  enable/disable combination
-Mychecklimit1 checklimit disable=["assert2" "assert5"]
-Mychecklimit2 checklimit enable=["assert2" "assert6"] disable=["assert7"]

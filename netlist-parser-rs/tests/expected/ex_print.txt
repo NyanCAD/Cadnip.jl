@@ -1,3 +1,0 @@
-SPICENetlistSource 0-59
-  Title 0-59
-    Notation 0-59

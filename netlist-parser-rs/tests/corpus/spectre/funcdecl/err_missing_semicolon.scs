@@ -1,4 +1,0 @@
-// ERROR: return expression is not terminated by ';'
-real bad( real a ) {
-    return a*a
-}

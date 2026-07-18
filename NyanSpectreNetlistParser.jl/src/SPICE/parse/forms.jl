@@ -458,7 +458,7 @@ struct SubcktCall <: AbstractInstanceNode
     nl::EXPR{Notation}
 end
 
-# --- ngspice/Xyce extensions (kept in sync with netlist-parser-rs) ---
+# --- ngspice/Xyce extensions (kept in sync with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs)) ---
 # K coupled inductors: name, inductor references, trailing coupling coefficient.
 struct MutualInductor <: AbstractInstanceNode
     name::EXPR{HierarchialNode}

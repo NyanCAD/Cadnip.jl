@@ -1,5 +1,0 @@
-SpectreNetlistSource 71-111
-  Include 71-111
-    Keyword 71-78
-    StringLiteral 85-110
-    Notation 110-111

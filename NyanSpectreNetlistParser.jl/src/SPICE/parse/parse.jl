@@ -29,7 +29,7 @@ function parse_dot(ps, dot)
     @trysetup AbstractASTNode
     @trynext dot
     # ngspice/Xyce dot-commands that lex as plain identifiers (not keywords);
-    # dispatch on the identifier text. Kept in sync with netlist-parser-rs.
+    # dispatch on the identifier text. Kept in sync with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs).
     if is_ident(kind(nt(ps)))
         name = lowercase(String(resolve_identifier(ps, nt(ps))))
         name == "step" && return parse_named_expr_list(ps, dot, StepStatement)
@@ -561,7 +561,7 @@ end
 
 function parse_primary_or_unary(ps)
     # ngspice/Xyce also accept unary bitwise `~` and logical `!` (kept in sync
-    # with netlist-parser-rs; validated against ngspice).
+    # with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs); validated against ngspice).
     if is_unary_operator(kind(nt(ps))) || kind(nt(ps)) in (TILDE, NOT)
         parse_unary_op(ps)
     else
@@ -804,7 +804,7 @@ function parse_param(ps, dot)
 end
 
 # ngspice/Xyce dot-commands dispatched on identifier text (kept in sync with
-# netlist-parser-rs). `.step`/`.func` take an expression list; `.global_param`/
+# the NetlistParse.rs parser (NyanCAD/NetlistParse.rs)). `.step`/`.func` take an expression list; `.global_param`/
 # `.nodeset` take a parameter list.
 function parse_named_expr_list(ps, dot, T)
     @trysetup T dot
@@ -826,7 +826,7 @@ function parse_named_param_list(ps, dot, T)
 end
 
 # `.nodeset V(node)=val ...` — IC-like (parens are trivia here, so `node` may be
-# numeric). Kept in sync with netlist-parser-rs.
+# numeric). Kept in sync with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs).
 function parse_nodeset(ps, dot)
     @trysetup NodeSetStatement dot
     @trynext cmd = take_identifier(ps)
@@ -897,7 +897,7 @@ function unimplemented_instance_error(ps)
 end
 
 # K (mutual inductor): name, inductor references, trailing coupling coefficient.
-# Kept in sync with netlist-parser-rs.
+# Kept in sync with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs).
 function parse_mutual_inductor(ps)
     @trysetup MutualInductor
     @trynext name = parse_hierarchial_node(ps)

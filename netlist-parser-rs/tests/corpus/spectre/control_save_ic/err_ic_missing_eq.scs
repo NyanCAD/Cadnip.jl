@@ -1,2 +1,0 @@
-// ERROR: ic parameter is missing the '=' between node name and value
-ic vout 2.5

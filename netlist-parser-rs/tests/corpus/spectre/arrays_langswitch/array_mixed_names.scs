@@ -1,5 +1,0 @@
-// mixing numbers and parameter names, plus a builtin constant in parens
-// (spectre_reference.txt:3166-3167, 3176-3178)
-parameters coeff1=0.1 coeff2=0.2
-parameters coeff=[0 coeff1 coeff2 0.5]
-parameters angles=[ 0 (M_PI) (M_PI_2) ]

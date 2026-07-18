@@ -1,2 +1,0 @@
-// ERROR: ahdl_include filename must be a quoted string, not a bare identifier
-ahdl_include device.va

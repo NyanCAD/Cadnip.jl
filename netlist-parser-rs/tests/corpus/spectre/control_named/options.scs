@@ -1,5 +1,0 @@
-// options statement with escaped-newline continuation (trailing backslash)
-// ref: spectre_reference.txt:9371  Examp options rawfmt=psfbin audit=brief temp=30 \ save=lvlpub nestlvl=3
-Examp options rawfmt=psfbin audit=brief temp=30 \
-    save=lvlpub nestlvl=3
-spectre2 options currents=all
