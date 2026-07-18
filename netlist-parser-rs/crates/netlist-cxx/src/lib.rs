@@ -306,6 +306,31 @@ fn project_spice_param(p: &ast::Parameter) -> ffi::Param {
     }
 }
 
+/// Extract the value text from a `VoltageControl` or `CurrentControl` syntax node.
+///
+/// Controlled-source gain/transconductance values are emitted by the parser as
+/// bare `NumberLiteral` tokens rather than wrapped `LiteralExpr` nodes, so the
+/// typed-AST `value()` accessor (which uses `expr_children`) misses them.  This
+/// helper tries expression-node children first (covers `BinaryExpression`, etc.)
+/// then falls back to scanning direct token children for `NumberLiteral`/`Literal`.
+fn ctrl_value_text(node: &SyntaxNode) -> String {
+    // Expression-node children first (wraps complex expressions).
+    for child in node.children() {
+        if !matches!(child.kind(), SyntaxKind::HierarchialNode) {
+            return child.text().to_string();
+        }
+    }
+    // Fall back: bare NumberLiteral or Literal token child.
+    for el in node.children_with_tokens() {
+        if let Some(tok) = el.into_token() {
+            if matches!(tok.kind(), SyntaxKind::NumberLiteral | SyntaxKind::Literal) {
+                return tok.text().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 fn empty_source() -> ffi::SpiceSource {
     ffi::SpiceSource {
         dc: String::new(),
@@ -484,6 +509,154 @@ fn project_spice_device(child: SyntaxNode) -> Option<ffi::SpiceDevice> {
                 source: empty_source(),
             }
         }),
+        // --- Controlled sources (E/F/G/H) ---
+        //
+        // The parser emits a single `ControlledSource` node for all four letters.
+        // The control kind distinguishes voltage- vs current-controlled:
+        //   VoltageControl → E (Vcvs) or G (Vccs)
+        //   CurrentControl → F (Cccs) or H (Ccvs)
+        // The final E-vs-G / F-vs-H disambiguation uses the device-name prefix.
+        // ctrl_nodes: VoltageControl → control_nodes(); CurrentControl → [vnam()]
+        // ctrl_value: gain/transconductance (bare NumberLiteral token in the CST)
+        // POLY/TABLE: captured best-effort as ctrl_value text; full parsing deferred.
+        SyntaxKind::ControlledSource => ast::ControlledSource::cast(child).and_then(|cs| {
+            let name = hier_text(cs.name());
+            let kind = match name.chars().next().map(|c| c.to_ascii_uppercase()) {
+                Some('E') => ffi::SpiceDeviceKind::Vcvs,
+                Some('F') => ffi::SpiceDeviceKind::Cccs,
+                Some('G') => ffi::SpiceDeviceKind::Vccs,
+                Some('H') => ffi::SpiceDeviceKind::Ccvs,
+                _ => return None,
+            };
+            let nodes = vec![hier_text(cs.pos()), hier_text(cs.neg())];
+            let (ctrl_nodes, ctrl_value, params) = match cs.control() {
+                Some(ctrl) => match ctrl.kind() {
+                    SyntaxKind::VoltageControl => {
+                        if let Some(vc) = ast::VoltageControl::cast(ctrl) {
+                            let cnodes: Vec<String> =
+                                vc.control_nodes().map(|n| n.text()).collect();
+                            let cval = ctrl_value_text(vc.syntax());
+                            let ps: Vec<ffi::Param> =
+                                vc.params().map(|p| project_spice_param(&p)).collect();
+                            (cnodes, cval, ps)
+                        } else {
+                            (vec![], String::new(), vec![])
+                        }
+                    }
+                    SyntaxKind::CurrentControl => {
+                        if let Some(cc) = ast::CurrentControl::cast(ctrl) {
+                            let vnam = hier_text(cc.vnam());
+                            let cval = ctrl_value_text(cc.syntax());
+                            let ps: Vec<ffi::Param> =
+                                cc.params().map(|p| project_spice_param(&p)).collect();
+                            (vec![vnam], cval, ps)
+                        } else {
+                            (vec![], String::new(), vec![])
+                        }
+                    }
+                    // POLY/TABLE: capture full node text as ctrl_value (deferred).
+                    _ => (vec![], ctrl.text().to_string(), vec![]),
+                },
+                None => (vec![], String::new(), vec![]),
+            };
+            Some(ffi::SpiceDevice {
+                kind,
+                name,
+                nodes,
+                value: String::new(),
+                model: String::new(),
+                params,
+                ctrl_nodes,
+                ctrl_value,
+                source: empty_source(),
+            })
+        }),
+
+        // --- Mutual inductor (K) ---
+        // nodes = [L1, L2, ...]; coupling value stored in `value`.
+        SyntaxKind::MutualInductor => ast::MutualInductor::cast(child).map(|k| {
+            let nodes: Vec<String> = k.inductors().map(|n| n.text()).collect();
+            let coupling = ctrl_value_text(k.syntax());
+            ffi::SpiceDevice {
+                kind: ffi::SpiceDeviceKind::MutualInductor,
+                name: hier_text(k.name()),
+                nodes,
+                value: coupling,
+                model: String::new(),
+                params: vec![],
+                ctrl_nodes: vec![],
+                ctrl_value: String::new(),
+                source: empty_source(),
+            }
+        }),
+
+        // --- Voltage-controlled / current-controlled switch (S/W) ---
+        // nodes() yields nd1, nd2, cnd1, cnd2, model in order (after name).
+        SyntaxKind::Switch => ast::Switch::cast(child).map(|sw| {
+            let nodes: Vec<String> = sw.nodes().map(|n| n.text()).collect();
+            ffi::SpiceDevice {
+                kind: ffi::SpiceDeviceKind::Switch,
+                name: hier_text(sw.name()),
+                nodes,
+                value: String::new(),
+                model: String::new(),
+                params: vec![],
+                ctrl_nodes: vec![],
+                ctrl_value: String::new(),
+                source: empty_source(),
+            }
+        }),
+
+        // --- Behavioral source (B) ---
+        SyntaxKind::Behavioral => ast::Behavioral::cast(child).map(|b| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Behavioral,
+            name: hier_text(b.name()),
+            nodes: vec![hier_text(b.pos()), hier_text(b.neg())],
+            value: String::new(),
+            model: String::new(),
+            params: b.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+
+        // --- JFET (J) ---
+        // Accessor layout mirrors MOSFET (drain/gate/source/model via fet_device!).
+        SyntaxKind::JFET => ast::JFET::cast(child).map(|j| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Jfet,
+            name: hier_text(j.name()),
+            nodes: vec![hier_text(j.drain()), hier_text(j.gate()), hier_text(j.source())],
+            value: j.area().map(|e| e.text()).unwrap_or_default(),
+            model: hier_text(j.model()),
+            params: j.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+
+        // --- OSDI device (N) ---
+        // nodes() = [conn..., model] (all after name); last is the model reference.
+        // Guard: empty list → no panic.
+        SyntaxKind::OSDIDevice => ast::OSDIDevice::cast(child).map(|n| {
+            let all: Vec<String> = n.nodes().map(|h| h.text()).collect();
+            let (terminals, model) = if all.is_empty() {
+                (Vec::new(), String::new())
+            } else {
+                (all[..all.len() - 1].to_vec(), all[all.len() - 1].clone())
+            };
+            ffi::SpiceDevice {
+                kind: ffi::SpiceDeviceKind::Osdi,
+                name: hier_text(n.name()),
+                nodes: terminals,
+                value: String::new(),
+                model,
+                params: n.params().map(|p| project_spice_param(&p)).collect(),
+                ctrl_nodes: vec![],
+                ctrl_value: String::new(),
+                source: empty_source(),
+            }
+        }),
+
         _ => None,
     }
 }
@@ -559,6 +732,24 @@ fn project_spice_block(node: SyntaxNode) -> ffi::SpiceBlock {
             SyntaxKind::Subckt => {
                 if let Some(s) = ast::Subckt::cast(child) {
                     block.subckts.push(project_spice_subckt(&s));
+                }
+            }
+            // .include "path" → Include { path, section: "" }
+            SyntaxKind::IncludeStatement => {
+                if let Some(inc) = ast::IncludeStatement::cast(child) {
+                    block.includes.push(ffi::Include {
+                        path: unquote(&tok_text(inc.path())),
+                        section: String::new(),
+                    });
+                }
+            }
+            // .lib "path" section  → Include { path, section }
+            SyntaxKind::LibInclude => {
+                if let Some(lib) = ast::LibInclude::cast(child) {
+                    block.includes.push(ffi::Include {
+                        path: unquote(&tok_text(lib.path())),
+                        section: tok_text(lib.section()),
+                    });
                 }
             }
             _ => {
@@ -873,6 +1064,76 @@ mod tests {
             assert!(dev.nodes.is_empty(), "malformed device should have no nodes");
             assert!(dev.model.is_empty(), "malformed device should have no model");
         }
+    }
+
+    /// E/F/G/H controlled sources + .include collected into SpiceBlock.includes.
+    #[test]
+    fn projects_controlled_sources_and_include() {
+        let src = "* t\n\
+            E1 out 0 in 0 2.0\n\
+            G1 o 0 a b 1e-3\n\
+            F1 o 0 vsense 10\n\
+            .include \"models.spice\"\n";
+        let nl = super::parse_netlist(src, true);
+        let b = &nl.spice_blocks[0];
+        // E1 — voltage-controlled voltage source
+        let e = b.devices.iter().find(|x| x.name == "E1").unwrap();
+        assert_eq!(e.kind, super::ffi::SpiceDeviceKind::Vcvs);
+        assert_eq!(e.nodes, vec!["out", "0"]);
+        assert_eq!(e.ctrl_nodes, vec!["in", "0"]);
+        assert_eq!(e.ctrl_value, "2.0");
+        // G1 — voltage-controlled current source
+        let g = b.devices.iter().find(|x| x.name == "G1").unwrap();
+        assert_eq!(g.kind, super::ffi::SpiceDeviceKind::Vccs);
+        assert_eq!(g.ctrl_nodes, vec!["a", "b"]);
+        assert_eq!(g.ctrl_value, "1e-3");
+        // F1 — current-controlled current source
+        let f = b.devices.iter().find(|x| x.name == "F1").unwrap();
+        assert_eq!(f.kind, super::ffi::SpiceDeviceKind::Cccs);
+        assert_eq!(f.ctrl_nodes, vec!["vsense"]);
+        assert_eq!(f.ctrl_value, "10");
+        // include
+        assert_eq!(b.includes.len(), 1);
+        assert_eq!(b.includes[0].path, "models.spice");
+    }
+
+    /// Smoke test: one netlist covering every device kind; checks count + no errors.
+    #[test]
+    fn projects_full_breadth() {
+        let src = "* full breadth\n\
+            R1 a b 1k\n\
+            C1 b 0 1u\n\
+            L1 a b 2n\n\
+            V1 vin 0 DC 5\n\
+            I1 0 vin DC 1m\n\
+            D1 a k dmod\n\
+            M1 d g s b nch w=1u\n\
+            Q1 c b e qmod\n\
+            X1 in out amp\n\
+            E1 out 0 in 0 2.0\n\
+            G1 o 0 a b 1e-3\n\
+            F1 o 0 vsense 10\n\
+            H1 o 0 vsense 5\n\
+            K1 L1 L2 0.9\n\
+            S1 nd1 nd2 cnd1 cnd2 smod ON\n\
+            B1 out 0 V=1+2\n\
+            J1 d g s jmod\n\
+            .model dmod d\n\
+            .subckt amp in out\n R1 in out 1k\n .ends\n\
+            .include \"models.spice\"\n\
+            .lib \"mylib.sp\" tt\n";
+        let nl = super::parse_netlist(src, true);
+        assert!(nl.errors.is_empty(), "unexpected parse errors: {} error(s)", nl.errors.len());
+        let b = &nl.spice_blocks[0];
+        // 17 device lines (R C L V I D M Q X E G F H K S B J)
+        assert_eq!(b.devices.len(), 17, "expected 17 devices, got {}: {:?}",
+            b.devices.len(),
+            b.devices.iter().map(|d| &d.name).collect::<Vec<_>>());
+        // .include + .lib → 2 includes
+        assert_eq!(b.includes.len(), 2);
+        assert_eq!(b.includes[0].path, "models.spice");
+        assert_eq!(b.includes[1].path, "mylib.sp");
+        assert_eq!(b.includes[1].section, "tt");
     }
 
     #[test]
