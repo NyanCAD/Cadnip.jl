@@ -1,33 +1,31 @@
+# Interactive exploration of a transient simulation.
+#
+# `Cadnip.explore(circuit, tspan)` opens a Makie window with one log slider per
+# scalar parameter; dragging a slider re-runs the transient and updates every
+# node-voltage trace live. Loading GLMakie activates the CadnipMakieExt.
 using GLMakie
 using Cadnip
-using Cadnip.SpectreEnvironment
-using OrdinaryDiffEq
-using StructArrays
 
-spice_code = """
-*Third order low pass filter, butterworth, with ω_c = 1
+# Third-order Butterworth low-pass (ω_c = 1), driven by a sine source. The
+# builder reads its element values from `params`, so every one of them becomes a
+# slider in the explorer.
+function butterworth(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+    p = merge((L1=3/2, C2=4/3, L3=1/2, R4=1.0, freq=1.0, amp=1.0), params)
 
-.param L1_val=3/2
-+ C2_val=4/3
-+ L3_val=1/2
-+ R4_val=1
-+ f_val=1
+    ctx === nothing ? (ctx = Cadnip.MNA.MNAContext()) : Cadnip.MNA.reset_for_restamping!(ctx)
+    get = n -> Cadnip.MNA.get_node!(ctx, n)
+    vin, n1, vout = get(:vin), get(:n1), get(:vout)
 
-V1 vin 0 SIN (0, 1, 'f_val')
-L1 vin n1 'L1_val'
-C2 n1 0 'C2_val'
-L3 n1 vout 'L3_val'
-R4 vout 0 'R4_val'
-"""
+    ω = 2π * p.freq
+    Cadnip.MNA.stamp!(Cadnip.MNA.VoltageSource(p.amp * sin(ω * t); name=:V1), ctx, vin, 0)
+    Cadnip.MNA.stamp!(Cadnip.MNA.Inductor(p.L1), ctx, vin, n1)
+    Cadnip.MNA.stamp!(Cadnip.MNA.Capacitor(p.C2), ctx, n1, 0)
+    Cadnip.MNA.stamp!(Cadnip.MNA.Inductor(p.L3), ctx, n1, vout)
+    Cadnip.MNA.stamp!(Cadnip.MNA.Resistor(p.R4), ctx, vout, 0)
+    return ctx
+end
 
-circuit_code = Cadnip.make_spectre_circuit(
-    Cadnip.NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code);
-);
-circuit = eval(circuit_code)
+circuit = MNACircuit(butterworth; L1=3/2, C2=4/3, L3=1/2, R4=1.0, freq=1.0, amp=1.0)
 
-sim = ParamSim(circuit; l1_val=3/2, c2_val=4/3, l3_val=1/2, r4_val=1.0, f_val=1.0)
-sys = CircuitIRODESystem(sim)
-prob = ODEProblem(sys, nothing, (0.0, 100.0), sim)
-sol = solve(prob, FBDF(autodiff=false); initializealg=CedarDCOp())
-
-Cadnip.explore(sol)
+fig = Cadnip.explore(circuit, (0.0, 100.0))
+display(fig)

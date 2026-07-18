@@ -120,6 +120,34 @@ high-level API.
 4. N0 lands with a transient allocation/throughput benchmark asserting no
    regression before any PSD/solver work builds on top.
 
+## Roadmap
+
+- **N0 — Groundwork: noise-source channel.** Add a deferred noise-source list to
+  `MNAContext` (COO-style, mirroring `b_ac_I`/`b_ac_V`); do *not* add it to
+  `DirectStampContext`. Make the VA `white_noise`/`flicker_noise` builtins (and
+  builtin thermal/shot) ctx-aware — register a source on `MNAContext`, no-op on
+  `DirectStampContext`, always return `0.0` in the value path so DC/transient
+  numerics are byte-identical. Land with a transient allocation/throughput
+  benchmark asserting no regression.
+- **N1 — PSD models at the DC bias.** Evaluate per-source spectral density at the
+  operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
+  `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes
+  from the DC solution the AC path already computes.
+- **N2 — Transfer functions via the AC system.** Reuse `ac!`'s linearized
+  `(jωC + G)`; per output+frequency, one adjoint solve `(jωC+G)ᵀ x_adj = e_out`
+  gives the transfer from every source at O(1) each (`H_k = x_adjᵀ e_k`),
+  reusing the factorization across sources.
+- **N3 — `noise!()` analysis + output.** Output PSD `Σ_k |H_k(jω)|² S_k(ω)`, band
+  integration for total noise, input-referred via the input transfer function; a
+  `NoiseSol` mirroring `ACSol` plus a `.noise` netlist card and name-based
+  access.
+- **N4 — Tests + validation.** Netlist tests (thermal noise of an RC = `4kT·R`
+  shaped by the RC pole; op-amp input-referred noise) cross-checked against
+  ngspice `.noise`, driven through the high-level API.
+- **N5 (stretch) — differentiable / large-signal.** Differentiate output noise
+  w.r.t. design params (the SciML payoff), and scope cyclostationary (PSS/PAC)
+  noise on a periodically-time-varying linearization. Design only for now.
+
 ## Prior art in git history
 
 CedarSim/DAECompiler used an `ϵ`-perturbation representation: device models
