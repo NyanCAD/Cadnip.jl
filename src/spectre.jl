@@ -259,29 +259,6 @@ function modelparams(m)
     ntfromstruct(i)
 end
 
-noiseparams(circ::AbstractSim) = noiseparams(circ.circuit)
-function noiseparams(circ)
-    observer = ParamObserver()
-    circ(observer)
-    noiseparams(observer)
-end
-function noiseparams(👀::ParamObserver)
-    t = something(getfield(👀, :type), Nothing)
-    noisefields = filter((fn -> startswith(String(fn), "ϵ"), modelfields(typeof(t)))...)
-    args = getfield(👀, :params)
-    childfields = []
-    for (k, v) in args
-        if typeof(v) <: ParamObserver
-            fields = noiseparams(v)
-            if !isempty(fields)
-                push!(childfields, (k => fields))
-            end
-        end
-    end
-    (; (f => 0.0 for f in noisefields)...,
-        childfields...)
-end
-
 function spice_select_device(devkind, level, version, stmt; dialect=:ngspice)
     if devkind == :d
         return :(SpectreEnvironment.diode)
@@ -364,11 +341,6 @@ end
 Base.show(io::IO, m::ParsedModel) = print(io, "ParsedModel($(m.model), ...)")
 Base.nameof(m::ParsedModel{T}) where T = nameof(T)
 Base.nameof(m::BinnedModel) = nameof(first(m.bins))
-
-modelfields(m) = ()
-modelfields(m::DataType) = fieldnames(m)
-modelfields(::Type{ParsedModel{T}}) where T = modelfields(T)
-modelfields(::Type{BinnedModel{T}}) where T = modelfields(eltype(T))
 
 Base.@assume_effects :foldable function case_adjust_kwargs_fallback(model::Type{T}, kwargs::NamedTuple{Names}) where {Names, T}
     case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
