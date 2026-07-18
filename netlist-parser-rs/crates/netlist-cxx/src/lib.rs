@@ -442,8 +442,12 @@ fn project_spice_device(child: SyntaxNode) -> Option<ffi::SpiceDevice> {
             // terminal connections. A follow-up can refine substrate (4th terminal)
             // vs model disambiguation if needed.
             let all: Vec<String> = q.nodes().map(|n| n.text()).collect();
-            let terminals = all[1..all.len().saturating_sub(1)].to_vec();
-            let model = all.last().cloned().unwrap_or_default();
+            // Guard: a malformed bare `Q1` has len<=1 → slice [1..0] would panic.
+            let (terminals, model) = if all.len() < 2 {
+                (Vec::new(), String::new())
+            } else {
+                (all[1..all.len() - 1].to_vec(), all[all.len() - 1].clone())
+            };
             ffi::SpiceDevice {
                 kind: ffi::SpiceDeviceKind::Bjt,
                 name: hier_text(q.name()),
@@ -462,8 +466,12 @@ fn project_spice_device(child: SyntaxNode) -> Option<ffi::SpiceDevice> {
             // entry (instance name), treat the last as the master reference, and
             // the remainder as the connection nodes.
             let all: Vec<String> = x.nodes().map(|n| n.text()).collect();
-            let conn_nodes = all[1..all.len().saturating_sub(1)].to_vec();
-            let model = all.last().cloned().unwrap_or_default();
+            // Guard: a malformed bare `X1` has len<=1 → slice [1..0] would panic.
+            let (conn_nodes, model) = if all.len() < 2 {
+                (Vec::new(), String::new())
+            } else {
+                (all[1..all.len() - 1].to_vec(), all[all.len() - 1].clone())
+            };
             ffi::SpiceDevice {
                 kind: ffi::SpiceDeviceKind::SubcktCall,
                 name: hier_text(x.name()),
@@ -850,6 +858,21 @@ mod tests {
         assert_eq!(b.subckts[0].ports, vec!["in", "out"]);
         assert_eq!(b.subckts[0].devices.len(), 1);
         assert_eq!(b.subckts[0].devices[0].name, "R1");
+    }
+
+    /// Regression test: malformed BJT/SubcktCall with ≤1 node children must not
+    /// panic. A bare `Q1` and `X1` (no terminals, no model) hit the len<2 guard
+    /// and project with empty nodes and model rather than slicing out-of-bounds.
+    #[test]
+    fn projects_malformed_bjt_subckt_no_panic() {
+        // Bare device names only — parser produces minimal/error AST nodes with
+        // very few HierarchialNode children, exercising the len<2 guard.
+        let nl = super::parse_netlist("* t\nQ1\nX1\n", true);
+        // Must not panic; any devices that project should have empty nodes/model.
+        for dev in &nl.spice_blocks[0].devices {
+            assert!(dev.nodes.is_empty(), "malformed device should have no nodes");
+            assert!(dev.model.is_empty(), "malformed device should have no model");
+        }
     }
 
     #[test]
