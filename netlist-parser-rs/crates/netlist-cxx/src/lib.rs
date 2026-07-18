@@ -119,6 +119,8 @@ mod ffi {
         /// `.scs` → false / Spectre); a `simulator lang=` line may still switch
         /// mid-file.
         fn parse_netlist(src: &str, start_spice: bool) -> Netlist;
+        /// Back-compat: parse starting in the Spectre dialect.
+        fn parse_spectre_netlist(src: &str) -> Netlist;
     }
 }
 
@@ -345,7 +347,7 @@ pub fn parse_spectre_netlist(src: &str) -> ffi::Netlist {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_spectre_netlist;
+    use super::{parse_netlist, parse_spectre_netlist};
 
     #[test]
     fn projects_top_level() {
@@ -412,14 +414,14 @@ mod tests {
         // `simulator lang=spectre` switch, control returns to the Spectre driver
         // and the trailing Spectre instance r2 projects. (SPICE-device projection
         // of the leading block is deferred to Task 7 — not asserted here.)
-        let spice = super::parse_netlist(src, /*start_spice=*/ true);
+        let spice = parse_netlist(src, /*start_spice=*/ true);
         assert!(spice.errors.is_empty(), "spice-start should parse cleanly");
         assert_eq!(spice.instances.len(), 1);
         assert_eq!(spice.instances[0].name, "r2");
 
         // Start in Spectre: the same leading SPICE line `R1 a b 1k` is invalid
         // Spectre and produces error node(s).
-        let spectre = super::parse_netlist(src, /*start_spice=*/ false);
+        let spectre = parse_netlist(src, /*start_spice=*/ false);
         assert!(!spectre.errors.is_empty(), "spectre-start should error on the SPICE line");
     }
 }
