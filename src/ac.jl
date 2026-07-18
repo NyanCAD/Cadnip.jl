@@ -35,7 +35,7 @@
 using DescriptorSystems
 using LinearAlgebra
 
-export ac!, acdec, freqresp
+export ac!, acdec, freqresp, magnitude_db, phase_deg
 
 abstract type FreqSol end
 
@@ -208,6 +208,34 @@ function DescriptorSystems.freqresp(ac::ACSol, name::Symbol, ωs::AbstractVector
 end
 
 """
+    magnitude_db(ac::ACSol, name::Symbol, freqs::AbstractVector{<:Real}) -> Vector{Float64}
+
+Magnitude in dB (`20·log₁₀|H|`) of node/current `name` across `freqs`, which are
+given in **hertz** (as returned by [`acdec`](@ref)), matching SPICE `.ac`
+conventions. This mirrors [`magnitude_db(::ACSolution, ::Symbol)`](@ref) for the
+high-level `ac!` result, so you no longer need to convert to rad/s by hand.
+
+```julia
+ac = ac!(circuit)
+f  = acdec(20, 1, 1e6)            # 1 Hz … 1 MHz, in Hz
+mag = magnitude_db(ac, :vout, f)  # dB, no 2π conversion needed
+```
+"""
+function MNA.magnitude_db(ac::ACSol, name::Symbol, freqs::AbstractVector{<:Real})
+    return 20 .* log10.(abs.(freqresp(ac, name, 2π .* freqs)))
+end
+
+"""
+    phase_deg(ac::ACSol, name::Symbol, freqs::AbstractVector{<:Real}) -> Vector{Float64}
+
+Phase in degrees of node/current `name` across `freqs` (in **hertz**). Companion
+to [`magnitude_db(::ACSol, ::Symbol, ::AbstractVector)`](@ref); see it for units.
+"""
+function MNA.phase_deg(ac::ACSol, name::Symbol, freqs::AbstractVector{<:Real})
+    return rad2deg.(angle.(freqresp(ac, name, 2π .* freqs)))
+end
+
+"""
     _get_node_index(ac::ACSol, node::Symbol) -> Int
 
 Get the system index for a node by name. Returns 0 for ground.
@@ -292,7 +320,9 @@ with `nd` points per decade.  Equivalent to the SPICE command:
 
     .ac dec nd fstart fstop
 
-Return value is a vector in hertz per second.
+Return value is a vector of frequencies in hertz (Hz). Pass it straight to
+[`magnitude_db`](@ref)/[`phase_deg`](@ref); for [`freqresp`](@ref) (which takes
+angular frequency in rad/s) convert first with `2π .* acdec(...)`.
 """
 function acdec(nd, fstart, fstop)
     fstart = log10(fstart)

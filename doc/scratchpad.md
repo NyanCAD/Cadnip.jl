@@ -60,6 +60,10 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
 - [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
 - [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
+- [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
+- [ ] AC UX: unify the two AC result types (`ACSolution` Hz vs `ACSol` rad/s) onto one Hz-first surface that keeps the ControlSystems interop — see `doc/ac_result_unification.md`
+- [ ] AC UX: make `sol[:name]` return-type consistent across AC types — see `doc/ac_result_unification.md`
+- [ ] AC UX: hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1) — see `doc/ac_result_unification.md`
 - [ ] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost) — design: `doc/noise_analysis_design.md`
 - [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
 - [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
