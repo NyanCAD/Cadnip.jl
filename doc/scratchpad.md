@@ -51,11 +51,15 @@ The most nebulous and least important at this stage: copying features from other
 
 # Progress
 
-- AC source phase (`V1 ... AC mag phase`)
-- Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
-- Cleanup: drop dead backward-compat aliases
-- Cleanup: drop dead `netlist_utils.jl` composition operators
-- Control/analysis dot-cards no longer crash sema
-- Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
-- Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
-- Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
+- [x] AC source phase (`V1 ... AC mag phase`)
+- [x] Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
+- [x] Cleanup: drop dead backward-compat aliases
+- [x] Cleanup: drop dead `netlist_utils.jl` composition operators
+- [x] Control/analysis dot-cards no longer crash sema
+- [x] Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
+- [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
+- [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
+- [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
+- [ ] AC UX: unify the two AC result types (`ACSolution` Hz vs `ACSol` rad/s) onto one Hz-first surface that keeps the ControlSystems interop — see `doc/ac_result_unification.md`
+- [ ] AC UX: make `sol[:name]` return-type consistent across AC types — see `doc/ac_result_unification.md`
+- [ ] AC UX: hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1) — see `doc/ac_result_unification.md`

@@ -98,12 +98,23 @@ and work transparently in both top-level and function-body contexts.
 ```julia
 sol = dc!(circuit)                             # DC operating point
 sol = tran!(circuit, (0.0, 1e-3))              # Transient
-sol = ac!(circuit, freqs)                      # AC small-signal
+ac  = ac!(circuit)                             # AC small-signal (linearized DSS)
 result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 ```
 
 `dc!(cs::CircuitSweep)` returns a `SweepResult` that iterates `(params, sol)`
 pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`.
+
+`ac!(circuit)` returns an `ACSol` — a linearized descriptor state-space system
+about the DC operating point — that you evaluate at chosen frequencies:
+
+```julia
+ac = ac!(circuit)
+f  = acdec(20, 1, 1e6)                          # 1 Hz … 1 MHz, in Hz (SPICE .ac dec)
+mag = magnitude_db(ac, :vout, f)                # magnitude in dB
+phs = phase_deg(ac, :vout, f)                   # phase in degrees
+H   = freqresp(ac, :vout, 2π .* f)              # raw complex response (ω in rad/s)
+```
 
 ### Two-tier model resolution
 
