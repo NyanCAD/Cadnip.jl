@@ -345,8 +345,194 @@ fn project_spice_source(sources: impl Iterator<Item = SyntaxNode>) -> ffi::Spice
     out
 }
 
+/// Project a single SPICE device `SyntaxNode` into a `SpiceDevice`, or return
+/// `None` for non-device nodes (statements, `.model`, `.subckt`, …).
+///
+/// This helper is shared by `project_spice_block` and `project_spice_subckt`
+/// so that subckt bodies receive the same device coverage as the top-level block.
+fn project_spice_device(child: SyntaxNode) -> Option<ffi::SpiceDevice> {
+    match child.kind() {
+        SyntaxKind::Resistor => ast::Resistor::cast(child).map(|r| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Resistor,
+            name: hier_text(r.name()),
+            nodes: vec![hier_text(r.pos()), hier_text(r.neg())],
+            value: r.value().map(|e| e.text()).unwrap_or_default(),
+            model: String::new(),
+            params: r.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+        SyntaxKind::Capacitor => ast::Capacitor::cast(child).map(|c| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Capacitor,
+            name: hier_text(c.name()),
+            nodes: vec![hier_text(c.pos()), hier_text(c.neg())],
+            value: c.value().map(|e| e.text()).unwrap_or_default(),
+            model: String::new(),
+            params: c.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+        SyntaxKind::Inductor => ast::Inductor::cast(child).map(|l| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Inductor,
+            name: hier_text(l.name()),
+            nodes: vec![hier_text(l.pos()), hier_text(l.neg())],
+            value: l.value().map(|e| e.text()).unwrap_or_default(),
+            model: String::new(),
+            params: l.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+        SyntaxKind::Voltage => ast::Voltage::cast(child).map(|v| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::VSource,
+            name: hier_text(v.name()),
+            nodes: vec![hier_text(v.pos()), hier_text(v.neg())],
+            value: String::new(),
+            model: String::new(),
+            params: vec![],
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: project_spice_source(v.sources()),
+        }),
+        SyntaxKind::Current => ast::Current::cast(child).map(|i| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::ISource,
+            name: hier_text(i.name()),
+            nodes: vec![hier_text(i.pos()), hier_text(i.neg())],
+            value: String::new(),
+            model: String::new(),
+            params: vec![],
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: project_spice_source(i.sources()),
+        }),
+        SyntaxKind::Diode => ast::Diode::cast(child).map(|d| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Diode,
+            name: hier_text(d.name()),
+            nodes: vec![hier_text(d.pos()), hier_text(d.neg())],
+            value: String::new(),
+            model: hier_text(d.model()),
+            params: d.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+        SyntaxKind::MOSFET => ast::MOSFET::cast(child).map(|m| ffi::SpiceDevice {
+            kind: ffi::SpiceDeviceKind::Mosfet,
+            name: hier_text(m.name()),
+            nodes: vec![
+                hier_text(m.drain()),
+                hier_text(m.gate()),
+                hier_text(m.source()),
+                hier_text(m.bulk()),
+            ],
+            value: String::new(),
+            model: hier_text(m.model()),
+            params: m.params().map(|p| project_spice_param(&p)).collect(),
+            ctrl_nodes: vec![],
+            ctrl_value: String::new(),
+            source: empty_source(),
+        }),
+        SyntaxKind::BipolarTransistor => ast::BipolarTransistor::cast(child).map(|q| {
+            // `nodes()` yields ALL HierarchialNode children in source order:
+            // [instance-name, c, b, e, [s,] model] — mirroring ngspice syntax
+            // `Q <c> <b> <e> [<s>] <model>`. Skip the first entry (instance name),
+            // treat the last entry as the model reference, and the remainder as
+            // terminal connections. A follow-up can refine substrate (4th terminal)
+            // vs model disambiguation if needed.
+            let all: Vec<String> = q.nodes().map(|n| n.text()).collect();
+            let terminals = all[1..all.len().saturating_sub(1)].to_vec();
+            let model = all.last().cloned().unwrap_or_default();
+            ffi::SpiceDevice {
+                kind: ffi::SpiceDeviceKind::Bjt,
+                name: hier_text(q.name()),
+                nodes: terminals,
+                value: String::new(),
+                model,
+                params: q.params().map(|p| project_spice_param(&p)).collect(),
+                ctrl_nodes: vec![],
+                ctrl_value: String::new(),
+                source: empty_source(),
+            }
+        }),
+        SyntaxKind::SubcktCall => ast::SubcktCall::cast(child).map(|x| {
+            // `nodes()` yields ALL HierarchialNode children in source order:
+            // [instance-name, conn1, conn2, ..., master-subckt]. Skip the first
+            // entry (instance name), treat the last as the master reference, and
+            // the remainder as the connection nodes.
+            let all: Vec<String> = x.nodes().map(|n| n.text()).collect();
+            let conn_nodes = all[1..all.len().saturating_sub(1)].to_vec();
+            let model = all.last().cloned().unwrap_or_default();
+            ffi::SpiceDevice {
+                kind: ffi::SpiceDeviceKind::SubcktCall,
+                name: hier_text(x.name()),
+                nodes: conn_nodes,
+                value: String::new(),
+                model,
+                params: x.params().map(|p| project_spice_param(&p)).collect(),
+                ctrl_nodes: vec![],
+                ctrl_value: String::new(),
+                source: empty_source(),
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Project a SPICE `.model` card into a `SpiceModel`.
+/// Extracts `level` from the params list if present (case-insensitive match).
+fn project_spice_model(m: &ast::Model) -> ffi::SpiceModel {
+    let params: Vec<ffi::Param> = m.params().map(|p| project_spice_param(&p)).collect();
+    let level = params
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case("level"))
+        .map(|p| p.value.clone())
+        .unwrap_or_default();
+    ffi::SpiceModel {
+        name: hier_text(m.name()),
+        model_type: tok_text(m.model_type()),
+        level,
+        params,
+    }
+}
+
+/// Project a SPICE `.subckt` definition into a `SpiceSubckt`, recursively
+/// walking the body for nested devices, `.model` cards, and `.subckt` definitions.
+fn project_spice_subckt(s: &ast::Subckt) -> ffi::SpiceSubckt {
+    let mut devices = vec![];
+    let mut models = vec![];
+    let mut subckts = vec![];
+    for child in s.body() {
+        match child.kind() {
+            SyntaxKind::Model => {
+                if let Some(m) = ast::Model::cast(child) {
+                    models.push(project_spice_model(&m));
+                }
+            }
+            SyntaxKind::Subckt => {
+                if let Some(sub) = ast::Subckt::cast(child) {
+                    subckts.push(project_spice_subckt(&sub));
+                }
+            }
+            _ => {
+                if let Some(dev) = project_spice_device(child) {
+                    devices.push(dev);
+                }
+            }
+        }
+    }
+    ffi::SpiceSubckt {
+        name: tok_text(s.name()),
+        ports: s.ports().map(|p| p.text()).collect(),
+        params: s.params().map(|p| project_spice_param(&p)).collect(),
+        devices,
+        models,
+        subckts,
+    }
+}
+
 /// Project a `SPICENetlistSource` node into a `SpiceBlock`.
-/// R/C/L are projected now; other device kinds fall through (`_ => {}`).
 fn project_spice_block(node: SyntaxNode) -> ffi::SpiceBlock {
     let mut block = ffi::SpiceBlock {
         params: vec![],
@@ -357,82 +543,21 @@ fn project_spice_block(node: SyntaxNode) -> ffi::SpiceBlock {
     };
     for child in node.children() {
         match child.kind() {
-            SyntaxKind::Resistor => {
-                if let Some(r) = ast::Resistor::cast(child) {
-                    block.devices.push(ffi::SpiceDevice {
-                        kind: ffi::SpiceDeviceKind::Resistor,
-                        name: hier_text(r.name()),
-                        nodes: vec![hier_text(r.pos()), hier_text(r.neg())],
-                        value: r.value().map(|e| e.text()).unwrap_or_default(),
-                        model: String::new(),
-                        params: r.params().map(|p| project_spice_param(&p)).collect(),
-                        ctrl_nodes: vec![],
-                        ctrl_value: String::new(),
-                        source: empty_source(),
-                    });
+            SyntaxKind::Model => {
+                if let Some(m) = ast::Model::cast(child) {
+                    block.models.push(project_spice_model(&m));
                 }
             }
-            SyntaxKind::Capacitor => {
-                if let Some(c) = ast::Capacitor::cast(child) {
-                    block.devices.push(ffi::SpiceDevice {
-                        kind: ffi::SpiceDeviceKind::Capacitor,
-                        name: hier_text(c.name()),
-                        nodes: vec![hier_text(c.pos()), hier_text(c.neg())],
-                        value: c.value().map(|e| e.text()).unwrap_or_default(),
-                        model: String::new(),
-                        params: c.params().map(|p| project_spice_param(&p)).collect(),
-                        ctrl_nodes: vec![],
-                        ctrl_value: String::new(),
-                        source: empty_source(),
-                    });
+            SyntaxKind::Subckt => {
+                if let Some(s) = ast::Subckt::cast(child) {
+                    block.subckts.push(project_spice_subckt(&s));
                 }
             }
-            SyntaxKind::Inductor => {
-                if let Some(l) = ast::Inductor::cast(child) {
-                    block.devices.push(ffi::SpiceDevice {
-                        kind: ffi::SpiceDeviceKind::Inductor,
-                        name: hier_text(l.name()),
-                        nodes: vec![hier_text(l.pos()), hier_text(l.neg())],
-                        value: l.value().map(|e| e.text()).unwrap_or_default(),
-                        model: String::new(),
-                        params: l.params().map(|p| project_spice_param(&p)).collect(),
-                        ctrl_nodes: vec![],
-                        ctrl_value: String::new(),
-                        source: empty_source(),
-                    });
+            _ => {
+                if let Some(dev) = project_spice_device(child) {
+                    block.devices.push(dev);
                 }
             }
-            SyntaxKind::Voltage => {
-                if let Some(v) = ast::Voltage::cast(child) {
-                    block.devices.push(ffi::SpiceDevice {
-                        kind: ffi::SpiceDeviceKind::VSource,
-                        name: hier_text(v.name()),
-                        nodes: vec![hier_text(v.pos()), hier_text(v.neg())],
-                        value: String::new(),
-                        model: String::new(),
-                        params: vec![],
-                        ctrl_nodes: vec![],
-                        ctrl_value: String::new(),
-                        source: project_spice_source(v.sources()),
-                    });
-                }
-            }
-            SyntaxKind::Current => {
-                if let Some(i) = ast::Current::cast(child) {
-                    block.devices.push(ffi::SpiceDevice {
-                        kind: ffi::SpiceDeviceKind::ISource,
-                        name: hier_text(i.name()),
-                        nodes: vec![hier_text(i.pos()), hier_text(i.neg())],
-                        value: String::new(),
-                        model: String::new(),
-                        params: vec![],
-                        ctrl_nodes: vec![],
-                        ctrl_value: String::new(),
-                        source: project_spice_source(i.sources()),
-                    });
-                }
-            }
-            _ => {}
         }
     }
     block
@@ -682,6 +807,49 @@ mod tests {
         assert_eq!(cur.source.dc, "1m");
         assert_eq!(cur.source.tran_kind, "");
         assert!(cur.source.tran_args.is_empty());
+    }
+
+    #[test]
+    fn projects_spice_semiconductors_and_subckt() {
+        let src = "* t\n\
+            D1 a k dmod\n\
+            M1 d g s b nch w=1u l=0.1u\n\
+            Q1 c b e qmod\n\
+            X1 in out amp gain=2\n\
+            .model dmod d is=1e-14\n\
+            .subckt amp in out\n R1 in out 1k\n .ends\n";
+        let nl = super::parse_netlist(src, true);
+        let b = &nl.spice_blocks[0];
+        // MOSFET
+        let m = b.devices.iter().find(|x| x.name == "M1").unwrap();
+        assert_eq!(m.kind, super::ffi::SpiceDeviceKind::Mosfet);
+        assert_eq!(m.nodes, vec!["d", "g", "s", "b"]);
+        assert_eq!(m.model, "nch");
+        // Diode
+        let d = b.devices.iter().find(|x| x.name == "D1").unwrap();
+        assert_eq!(d.kind, super::ffi::SpiceDeviceKind::Diode);
+        assert_eq!(d.nodes, vec!["a", "k"]);
+        assert_eq!(d.model, "dmod");
+        // BJT: nodes() = [Q1, c, b, e, qmod]; skip name, last is model
+        let q = b.devices.iter().find(|x| x.name == "Q1").unwrap();
+        assert_eq!(q.kind, super::ffi::SpiceDeviceKind::Bjt);
+        assert_eq!(q.nodes, vec!["c", "b", "e"]);
+        assert_eq!(q.model, "qmod");
+        // SubcktCall: nodes() = [X1, in, out, amp]; skip name, last is master
+        let x = b.devices.iter().find(|x| x.name == "X1").unwrap();
+        assert_eq!(x.kind, super::ffi::SpiceDeviceKind::SubcktCall);
+        assert_eq!(x.nodes, vec!["in", "out"]);
+        assert_eq!(x.model, "amp");
+        // .model card
+        assert_eq!(b.models.len(), 1);
+        assert_eq!(b.models[0].name, "dmod");
+        assert_eq!(b.models[0].model_type, "d");
+        // .subckt definition
+        assert_eq!(b.subckts.len(), 1);
+        assert_eq!(b.subckts[0].name, "amp");
+        assert_eq!(b.subckts[0].ports, vec!["in", "out"]);
+        assert_eq!(b.subckts[0].devices.len(), 1);
+        assert_eq!(b.subckts[0].devices[0].name, "R1");
     }
 
     #[test]
