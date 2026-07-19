@@ -105,15 +105,33 @@ result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 `dc!(cs::CircuitSweep)` returns a `SweepResult` that iterates `(params, sol)`
 pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`.
 
-`ac!(circuit)` returns an `ACSol` — a linearized descriptor state-space system
-about the DC operating point — that you evaluate at chosen frequencies:
+`ac!(circuit, freqs)` returns an `ACSol` — a linearized descriptor state-space
+system about the DC operating point, carrying the Hz frequency grid you asked
+for. Name-based access is the SPICE-native readout (same `sol[:name]` meaning as
+DC/transient), and Hz helpers need no manual 2π conversion:
+
+```julia
+f   = acdec(20, 1, 1e6)                         # 1 Hz … 1 MHz, in Hz (SPICE .ac dec)
+ac  = ac!(circuit, f)
+resp = ac[:vout]                                # complex response over the grid
+mag  = magnitude_db(ac, :vout)                  # magnitude in dB
+phs  = phase_deg(ac, :vout)                     # phase in degrees
+```
+
+`freqresp` evaluates at arbitrary angular frequencies (ω in rad/s — the
+ControlSystems convention), and needs no stored grid:
 
 ```julia
 ac = ac!(circuit)
-f  = acdec(20, 1, 1e6)                          # 1 Hz … 1 MHz, in Hz (SPICE .ac dec)
-mag = magnitude_db(ac, :vout, f)                # magnitude in dB
-phs = phase_deg(ac, :vout, f)                   # phase in degrees
-H   = freqresp(ac, :vout, 2π .* f)              # raw complex response (ω in rad/s)
+H  = freqresp(ac, :vout, 2π .* f)               # raw complex response
+```
+
+For the ControlSystems / DescriptorSystems interop, `subsystem(ac, :name)`
+returns the SISO descriptor system for `ss`, `bode`, poles/zeros:
+
+```julia
+using RobustAndOptimalControl                   # ss(::DescriptorStateSpace)
+mag, phase, w = bode(ss(subsystem(ac, :vout)), 2π .* f)
 ```
 
 ### Two-tier model resolution

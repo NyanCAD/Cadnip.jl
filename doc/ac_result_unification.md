@@ -41,13 +41,25 @@ views from it, then retiring `solve_ac`/`ACSolution`. Concretely:
 - Port `test/mna/core.jl`'s `solve_ac` call sites to the unified type.
 - Delete `ACSolution`, `solve_ac`, and the now-duplicated accessors.
 
-### 2. Make `sol[:name]` return-type consistent
+### 2. Make `sol[:name]` return-type consistent — **done**
 
-`ACSolution[:name]` returns a response vector; `ACSol[:name]` returns a SISO
-subsystem. Same indexing syntax, different return type is a footgun. Pick one
-meaning (a response vector reads as the natural SPICE answer; expose the
-subsystem via an explicit accessor such as `subsystem(ac, :name)` or the
-existing `ac[:name]` kept only if it clearly means "control-systems object").
+`ACSolution[:name]` returned a response vector; `ACSol[:name]` returned a SISO
+subsystem. Same indexing syntax, different return type was a footgun. Resolved:
+
+- `ACSol[:name]` now returns a complex **response vector** over the analysis's
+  Hz grid — the natural SPICE answer, matching `ACSolution[:name]`. To carry the
+  grid, `ac!` gained an optional `freqs` argument: `ac!(circuit, acdec(...))`.
+  Without a grid, `ac[:name]` errors and points at `freqresp`.
+- The SISO descriptor subsystem moved to the explicit accessor
+  `subsystem(ac, :name)` (control-systems object → `ss`/`bode`/poles/zeros).
+- `magnitude_db(ac, :name)` / `phase_deg(ac, :name)` two-arg forms read the
+  stored grid; the three-arg Hz forms remain.
+- `ACSolution[:name]` also now resolves branch currents, not just node voltages,
+  so both types index alike.
+
+Still open for the full unification (sub-task 1): retiring `ACSolution`/`solve_ac`
+onto a single type. The two `[:name]` surfaces now agree, so that retirement is a
+mechanical follow-up rather than a behavior change.
 
 ### 3. Hz-first helpers, rad/s only where the contract demands it
 

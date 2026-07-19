@@ -32,11 +32,14 @@ ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, im
 circuit_code = Cadnip.make_mna_circuit(ast)
 circuit_fn = eval(circuit_code)
 
-# Create MNACircuit with parameters
+# Create MNACircuit with parameters. Passing the Hz grid to ac! makes the
+# SPICE-native name-based readout (ac[:name], 2-arg magnitude_db/phase_deg)
+# resolve over that grid.
 circ = MNACircuit(circuit_fn; res=R4_val)
-ac = ac!(circ)
+freqs_hz = acdec(20, 0.01, 10) # equivalent to spice .ac dec 10 0.01 10
+ac = ac!(circ, freqs_hz)
 
-ωs = 2π .* acdec(20, 0.01, 10) # equivalent to spice .ac dec 10 0.01 10
+ωs = 2π .* freqs_hz
 resp_sim = Cadnip.freqresp(ac, :vout, ωs) # compute frequency response
 
 # analytic
@@ -48,17 +51,30 @@ resp_an = ControlSystemsBase.freqrespv(H, ωs)
 
 @test all(Cadnip.freqresp(ac, :vin, ωs) .≈ 1.0) # check directly-observed source
 
-# Hz-based bode helpers on the high-level ACSol: magnitude_db / phase_deg take
-# frequencies in Hz (SPICE .ac convention), so no manual 2π conversion.
-freqs_hz = acdec(20, 0.01, 10)
+# SPICE-native name-based access: ac[:name] returns the complex response over the
+# stored Hz grid, matching ACSolution[:name] (return-type consistency).
+@test ac[:vout] ≈ resp_sim
+@test all(ac[:vin] .≈ 1.0)
+
+# Hz-based bode helpers on the high-level ACSol. The 2-arg forms use the stored
+# grid; the 3-arg forms take frequencies in Hz (SPICE .ac convention), so no
+# manual 2π conversion in either case.
+@test Cadnip.magnitude_db(ac, :vout) ≈ 20 .* log10.(abs.(resp_an))
+@test Cadnip.phase_deg(ac, :vout) ≈ rad2deg.(angle.(resp_an))
 @test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_an))
 @test Cadnip.phase_deg(ac, :vout, freqs_hz) ≈ rad2deg.(angle.(resp_an))
 # equivalent to going through freqresp with rad/s by hand
 @test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_sim))
 
-# Convert to ControlSystems state space, compute bode
-# RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion
-mag_sim, phase_sim, w_sim = bode(ss(ac[:vout]), ωs)
+# An ACSol without a frequency grid has no ac[:name] readout — use freqresp.
+ac_nogrid = ac!(circ)
+@test_throws ErrorException ac_nogrid[:vout]
+@test Cadnip.freqresp(ac_nogrid, :vout, ωs) ≈ resp_sim
+
+# The descriptor-state-space subsystem is now an explicit accessor (subsystem),
+# not ac[:name]. Convert to ControlSystems state space and compute bode.
+# RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion.
+mag_sim, phase_sim, w_sim = bode(ss(subsystem(ac, :vout)), ωs)
 mag_an, phase_an, w_an = bode(H, ωs)
 
 @test mag_sim ≈ mag_an

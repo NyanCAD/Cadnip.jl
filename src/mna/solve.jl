@@ -260,22 +260,36 @@ struct ACSolution
 end
 
 """
+    _ac_index(sol::ACSolution, name::Symbol) -> Int
+
+System index of node voltage or branch current `name`. Node names resolve first,
+then current names (offset by `n_nodes`). Errors if unknown.
+"""
+function _ac_index(sol::ACSolution, name::Symbol)
+    idx = findfirst(==(name), sol.node_names)
+    idx === nothing || return idx
+    idx = findfirst(==(name), sol.current_names)
+    idx === nothing && error("Unknown node or current: $name. Available nodes: " *
+                             "$(sol.node_names), currents: $(sol.current_names)")
+    return sol.n_nodes + idx
+end
+
+"""
     sol[name::Symbol]
 
-Name-based access to an AC solution — returns the complex trajectory across
-all frequencies. `sol[name, freq_idx]` returns the complex value at one frequency.
+Name-based access to an AC solution — returns the complex trajectory (node
+voltage or branch current) across all frequencies. `sol[name, freq_idx]` returns
+the complex value at one frequency.
 """
 function Base.getindex(sol::ACSolution, name::Symbol)
     (name === :gnd || name === Symbol("0")) && return zeros(ComplexF64, length(sol.freqs))
-    idx = findfirst(==(name), sol.node_names)
-    idx === nothing && error("Unknown node: $name")
+    idx = _ac_index(sol, name)
     return [x[idx] for x in sol.x]
 end
 
 function Base.getindex(sol::ACSolution, name::Symbol, freq_idx::Int)
     (name === :gnd || name === Symbol("0")) && return 0.0 + 0.0im
-    idx = findfirst(==(name), sol.node_names)
-    idx === nothing && error("Unknown node: $name")
+    idx = _ac_index(sol, name)
     return sol.x[freq_idx][idx]
 end
 

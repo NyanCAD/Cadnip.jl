@@ -18,8 +18,8 @@
 # 1. Hierarchical device observables: Cannot observe internal device variables via
 #    hierarchical path syntax (e.g., `sys.l3.V`). Only top-level node voltages and
 #    branch currents are accessible via symbol names:
-#      - Node voltages: `freqresp(ac, :vout, ωs)` or `ac[:vout]`
-#      - Branch currents: `freqresp(ac, :I_V1, ωs)` or `ac[:I_V1]`
+#      - Node voltages: `ac[:vout]` (over the grid) or `freqresp(ac, :vout, ωs)`
+#      - Branch currents: `ac[:I_V1]` or `freqresp(ac, :I_V1, ωs)`
 #    Device voltages can be computed as node differences:
 #      `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`
 #
@@ -29,13 +29,13 @@
 #    - Output noise spectral density computation
 #
 # Bode plots: Use RobustAndOptimalControl to convert DescriptorStateSpace to
-# standard StateSpace: `bode(ss(ac[:vout]), ωs)`
+# standard StateSpace: `bode(ss(subsystem(ac, :vout)), ωs)`
 #==============================================================================#
 
 using DescriptorSystems
 using LinearAlgebra
 
-export ac!, acdec, freqresp, magnitude_db, phase_deg
+export ac!, acdec, freqresp, magnitude_db, phase_deg, subsystem
 
 abstract type FreqSol end
 
@@ -44,7 +44,8 @@ abstract type FreqSol end
 
 AC small-signal solution for MNA circuits.
 
-Contains the linearized descriptor state-space system and DC operating point.
+Contains the linearized descriptor state-space system and DC operating point,
+plus the optional Hz frequency grid the analysis was requested over.
 
 # Fields
 - `dss`: DescriptorStateSpace system (E·dx = A·x + B·u, y = C·x)
@@ -52,12 +53,19 @@ Contains the linearized descriptor state-space system and DC operating point.
 - `node_names`: Names of voltage nodes
 - `current_names`: Names of current variables
 - `n_nodes`: Number of voltage nodes
+- `freqs`: Frequency grid in **hertz** (SPICE `.ac` convention); empty when the
+  analysis was run without one
 
 # Usage
 ```julia
+# With a frequency grid: name-based access returns the SPICE-native response.
+ac_sol = ac!(circuit, acdec(20, 0.01, 10))   # freqs in Hz
+resp = ac_sol[:vout]                          # complex response over the grid
+
+# Without a grid: evaluate at chosen angular frequencies via freqresp.
 ac_sol = ac!(circuit)
-ωs = 2π .* acdec(20, 0.01, 10)  # frequencies in rad/s
-resp = freqresp(ac_sol, :vout, ωs)  # frequency response at node :vout
+ωs = 2π .* acdec(20, 0.01, 10)                # rad/s (ControlSystems contract)
+resp = freqresp(ac_sol, :vout, ωs)
 ```
 """
 struct ACSol <: FreqSol
@@ -66,10 +74,11 @@ struct ACSol <: FreqSol
     node_names::Vector{Symbol}
     current_names::Vector{Symbol}
     n_nodes::Int
+    freqs::Vector{Float64}
 end
 
 """
-    ac!(circuit::MNA.MNACircuit; gmin=1e-12) -> ACSol
+    ac!(circuit::MNA.MNACircuit, freqs=Float64[]; gmin=1e-12) -> ACSol
 
 Perform AC small-signal analysis on an MNA circuit.
 
@@ -81,20 +90,24 @@ Perform AC small-signal analysis on an MNA circuit.
 
 # Arguments
 - `circuit::MNACircuit`: Circuit with builder function and parameters
+- `freqs`: Frequency grid in **hertz** (SPICE `.ac` convention, e.g.
+  `acdec(20, 1, 1e6)`). When supplied, name-based access `ac[:name]` and the
+  two-argument `magnitude_db(ac, :name)` / `phase_deg(ac, :name)` return the
+  response over this grid. Optional — omit it and evaluate at arbitrary angular
+  frequencies via [`freqresp`](@ref) instead.
 - `gmin`: Minimum conductance for numerical stability
 
 # Returns
-`ACSol` containing the linearized DSS system and DC solution.
+`ACSol` containing the linearized DSS system, DC solution, and frequency grid.
 
 # Example
 ```julia
 circuit = MNACircuit(build_filter; R=1000.0, C=1e-6)
-ac_sol = ac!(circuit)
-ωs = 2π .* acdec(20, 0.01, 10)
-resp = freqresp(ac_sol, :vout, ωs)
+ac_sol = ac!(circuit, acdec(20, 0.01, 10))   # freqs in Hz
+resp = ac_sol[:vout]                          # response over the grid
 ```
 """
-function ac!(circuit::MNA.MNACircuit; gmin=1e-12)
+function ac!(circuit::MNA.MNACircuit, freqs::AbstractVector{<:Real}=Float64[]; gmin=1e-12)
     # Build circuit with structure discovery
     ctx = MNA.MNAContext()
     circuit.builder(circuit.params, circuit.spec, 0.0; x=MNA.ZERO_VECTOR, ctx=ctx)
@@ -144,7 +157,8 @@ function ac!(circuit::MNA.MNACircuit; gmin=1e-12)
 
     dss_sys = dss(-G, C, B, C_out, D)
 
-    return ACSol(dss_sys, dc_x, copy(ctx.node_names), copy(ctx.current_names), ctx.n_nodes)
+    return ACSol(dss_sys, dc_x, copy(ctx.node_names), copy(ctx.current_names),
+                 ctx.n_nodes, collect(Float64, freqs))
 end
 
 """
@@ -236,6 +250,27 @@ function MNA.phase_deg(ac::ACSol, name::Symbol, freqs::AbstractVector{<:Real})
 end
 
 """
+    magnitude_db(ac::ACSol, name::Symbol) -> Vector{Float64}
+
+Magnitude in dB of node/current `name` over the frequency grid the analysis was
+built with (`ac!(circuit, freqs)`). Mirrors
+[`magnitude_db(::ACSolution, ::Symbol)`](@ref); errors if `ac` carries no grid.
+"""
+function MNA.magnitude_db(ac::ACSol, name::Symbol)
+    return 20 .* log10.(abs.(ac[name]))
+end
+
+"""
+    phase_deg(ac::ACSol, name::Symbol) -> Vector{Float64}
+
+Phase in degrees of node/current `name` over the frequency grid the analysis was
+built with (`ac!(circuit, freqs)`). Errors if `ac` carries no grid.
+"""
+function MNA.phase_deg(ac::ACSol, name::Symbol)
+    return rad2deg.(angle.(ac[name]))
+end
+
+"""
     _get_node_index(ac::ACSol, node::Symbol) -> Int
 
 Get the system index for a node by name. Returns 0 for ground.
@@ -280,23 +315,50 @@ function _get_index(ac::ACSol, name::Symbol)
 end
 
 """
-    Base.getindex(ac::ACSol, name::Symbol) -> DescriptorStateSpace
+    ac[name::Symbol] -> Vector{ComplexF64}
 
-Get the descriptor state-space subsystem for observing a specific node voltage
-or branch current.
+Name-based access to an AC solution: the complex response at node voltage or
+branch current `name` over the frequency grid the analysis was built with
+(`ac!(circuit, freqs)`). This is the SPICE-native readout and matches
+[`ACSolution`](@ref)'s `sol[:name]`, so the two AC result types index alike.
 
-This returns a SISO (single-input single-output) system from AC excitation
-to the specified output.
+For the descriptor-state-space (ControlSystems) object of an output, use
+[`subsystem`](@ref) instead. For evaluation at arbitrary angular frequencies
+(without a stored grid), use [`freqresp`](@ref).
+
+# Example
+```julia
+ac = ac!(circuit, acdec(20, 1, 1e6))   # freqs in Hz
+resp = ac[:vout]                        # complex response over the grid
+iv1  = ac[:I_V1]                        # source-current response
+```
+"""
+function Base.getindex(ac::ACSol, name::Symbol)
+    if isempty(ac.freqs)
+        error("ACSol has no frequency grid: `ac[:$name]` needs one. Call " *
+              "`ac!(circuit, freqs)` with a Hz grid (e.g. `acdec(20, 1, 1e6)`), " *
+              "or use `freqresp(ac, :$name, ωs)` with angular frequencies.")
+    end
+    return freqresp(ac, name, 2π .* ac.freqs)
+end
+
+"""
+    subsystem(ac::ACSol, name::Symbol) -> DescriptorStateSpace
+
+Descriptor-state-space subsystem for observing a specific node voltage or branch
+current: a SISO (single-input single-output) system from AC excitation to the
+named output. Use it for the ControlSystems / DescriptorSystems interop —
+`ss`, `bode`, poles/zeros.
 
 # Example
 ```julia
 ac_sol = ac!(circuit)
-dss_vout = ac_sol[:vout]     # Node voltage
-dss_iv1 = ac_sol[:I_V1]      # Voltage source current
-# Can use with ControlSystemsBase for bode plots, etc.
+dss_vout = subsystem(ac_sol, :vout)     # node voltage
+dss_iv1  = subsystem(ac_sol, :I_V1)     # voltage-source current
+bode(ss(subsystem(ac_sol, :vout)), ωs)  # via ControlSystemsBase
 ```
 """
-function Base.getindex(ac::ACSol, name::Symbol)
+function subsystem(ac::ACSol, name::Symbol)
     idx = _get_index(ac, name)
     idx == 0 && error("Cannot create subsystem for ground")
 
