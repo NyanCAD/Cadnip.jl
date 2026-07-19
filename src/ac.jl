@@ -13,20 +13,24 @@
 # For MNA: C·dx/dt + G·x = b
 # DSS form: E·dx = A·x + B·u  where E=C, A=-G, B=b_ac
 #
-# Current Limitations:
-# --------------------
-# 1. Hierarchical device observables: Cannot observe internal device variables via
-#    hierarchical path syntax (e.g., `sys.l3.V`). Only top-level node voltages and
-#    branch currents are accessible via symbol names:
+# Observable access:
+# ------------------
+# Any system variable is accessible by name — top-level nodes, branch currents,
+# and hierarchical subcircuit nodes (which flatten into the name table, e.g.
+# `:x1_out`). A `NodeRef` from `scope(...)` also indexes an `ACSol`.
 #      - Node voltages: `ac[:vout]` (over the grid) or `freqresp(ac, :vout, ωs)`
 #      - Branch currents: `ac[:I_V1]` or `freqresp(ac, :I_V1, ωs)`
-#    Device voltages can be computed as node differences:
+#
+# The one thing that is NOT a system variable is a voltage *across* a device
+# wired between two named nodes (an inductor's `V(l3)`); that is a derived
+# quantity, taken as a node difference:
 #      `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`
 #
-# 2. Noise analysis: The `noise!()` function is not implemented. Requires:
+# Not yet implemented — Noise analysis: The `noise!()` function. Requires:
 #    - Per-device noise source modeling (thermal, shot, flicker)
 #    - Noise correlation matrix assembly
 #    - Output noise spectral density computation
+#    See doc/noise_analysis_design.md for the planned port.
 #
 # Bode plots: Use RobustAndOptimalControl to convert DescriptorStateSpace to
 # standard StateSpace: `bode(ss(subsystem(ac, :vout)), ωs)`
@@ -226,8 +230,9 @@ end
 
 Magnitude in dB (`20·log₁₀|H|`) of node/current `name` across `freqs`, which are
 given in **hertz** (as returned by [`acdec`](@ref)), matching SPICE `.ac`
-conventions. This mirrors [`magnitude_db(::ACSolution, ::Symbol)`](@ref) for the
-high-level `ac!` result, so you no longer need to convert to rad/s by hand.
+conventions, so you no longer need to convert to rad/s by hand. See also the
+two-argument [`magnitude_db(::ACSol, ::Symbol)`](@ref) which reads the grid
+stored on `ac`.
 
 ```julia
 ac = ac!(circuit)
@@ -253,8 +258,7 @@ end
     magnitude_db(ac::ACSol, name::Symbol) -> Vector{Float64}
 
 Magnitude in dB of node/current `name` over the frequency grid the analysis was
-built with (`ac!(circuit, freqs)`). Mirrors
-[`magnitude_db(::ACSolution, ::Symbol)`](@ref); errors if `ac` carries no grid.
+built with (`ac!(circuit, freqs)`); errors if `ac` carries no grid.
 """
 function MNA.magnitude_db(ac::ACSol, name::Symbol)
     return 20 .* log10.(abs.(ac[name]))
@@ -319,8 +323,12 @@ end
 
 Name-based access to an AC solution: the complex response at node voltage or
 branch current `name` over the frequency grid the analysis was built with
-(`ac!(circuit, freqs)`). This is the SPICE-native readout and matches
-[`ACSolution`](@ref)'s `sol[:name]`, so the two AC result types index alike.
+(`ac!(circuit, freqs)`). This is the SPICE-native readout and follows the same
+`sol[:name]` convention as the DC and transient solutions, so all three index
+alike.
+
+Hierarchical subcircuit nodes flatten into the name table (`:x1_out`), so they
+resolve here too; a `NodeRef` from `scope(...)` works as the index as well.
 
 For the descriptor-state-space (ControlSystems) object of an output, use
 [`subsystem`](@ref) instead. For evaluation at arbitrary angular frequencies
@@ -341,6 +349,12 @@ function Base.getindex(ac::ACSol, name::Symbol)
     end
     return freqresp(ac, name, 2π .* ac.freqs)
 end
+
+# Hierarchical access: a NodeRef (from `scope`) resolves to its flat name,
+# mirroring the DCSolution / transient-solution NodeRef indexing.
+Base.getindex(ac::ACSol, ref::MNA.NodeRef) = ac[MNA._flat_name(ref)]
+freqresp(ac::ACSol, ref::MNA.NodeRef, ωs::AbstractVector{<:Real}) =
+    freqresp(ac, MNA._flat_name(ref), ωs)
 
 """
     subsystem(ac::ACSol, name::Symbol) -> DescriptorStateSpace

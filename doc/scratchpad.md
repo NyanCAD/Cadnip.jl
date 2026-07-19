@@ -61,9 +61,9 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
 - [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
 - [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
-- [ ] AC UX: unify the two AC result types (`ACSolution` Hz vs `ACSol` rad/s) onto one Hz-first surface that keeps the ControlSystems interop — see `doc/ac_result_unification.md`
-- [x] AC UX: make `sol[:name]` return-type consistent across AC types — both `ACSolution` and `ACSol` now index to a complex response vector; the DSS subsystem moved to `subsystem(ac, :name)`; `ac!(circuit, freqs)` carries a Hz grid and 2-arg `magnitude_db`/`phase_deg`
-- [ ] AC UX: hierarchical device-observable access in AC (`src/ac.jl` LIMITATION 1) — see `doc/ac_result_unification.md`
+- [x] AC UX: unify the two AC result types onto one Hz-first surface that keeps the ControlSystems interop — retired `ACSolution`/`solve_ac`; `ac!`/`ACSol` is the single AC path (DSS-backed `freqresp`/`ss`/`bode` + SPICE-native `sol[:name]`)
+- [x] AC UX: make `sol[:name]` return-type consistent across AC types — `ACSol` now indexes to a complex response vector (matching DC/tran); the DSS subsystem moved to `subsystem(ac, :name)`; `ac!(circuit, freqs)` carries a Hz grid and 2-arg `magnitude_db`/`phase_deg`
+- [x] AC UX: hierarchical device-observable access in AC — subcircuit nodes flatten into the name table so `ac[:x1_out]` resolves, and a `NodeRef` from `scope(...)` indexes an `ACSol` (parity with DC/tran); genuine device-across voltages remain node differences
 - [ ] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost) — design: `doc/noise_analysis_design.md`
 - [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
 - [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)

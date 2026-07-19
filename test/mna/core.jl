@@ -26,7 +26,7 @@ using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using Cadnip.MNA: get_source_value, pwl_at_time
 using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS
 using Cadnip.MNA: assemble!, assemble_G, assemble_C, get_rhs
-using Cadnip.MNA: DCSolution, ACSolution, solve_dc, solve_ac
+using Cadnip.MNA: DCSolution, solve_dc
 using Cadnip.MNA: magnitude_db, phase_deg
 using Cadnip.MNA: make_ode_problem, make_ode_function
 using Cadnip.MNA: make_dae_problem, make_dae_function
@@ -637,75 +637,46 @@ using NyanVerilogAParser
     #==========================================================================#
 
     @testset "AC: RC low-pass filter" begin
-        # R = 1k, C = 1uF
-        # fc = 1/(2*pi*R*C) ≈ 159.15 Hz
-        # At f = fc: |H| = 1/sqrt(2) ≈ 0.707 (-3dB)
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
+        # R = 1k, C = 1uF; fc = 1/(2πRC) ≈ 159.15 Hz; |H(fc)| = 1/√2 (-3 dB)
         R = 1000.0
         C_val = 1e-6
         fc = 1.0 / (2π * R * C_val)
 
-        stamp!(VoltageSource(1.0), ctx, inp, 0)  # 1V AC source
-        stamp!(Resistor(R), ctx, inp, out)
-        stamp!(Capacitor(C_val), ctx, out, 0)
+        circuit = MNACircuit(sp"""
+        * RC low-pass
+        V1 inp 0 AC 1
+        R1 inp out 1k
+        C1 out 0 1u
+        """)
 
-        sys = assemble!(ctx)
-
-        # Test at various frequencies
         freqs = [fc/10, fc, fc*10]
-        ac_sol = solve_ac(sys, freqs)
+        resp = ac!(circuit, freqs)[:out]
 
-        # At low frequency: Vout ≈ Vin
-        Vout_low = abs(ac_sol[:out, 1])
-        @test Vout_low > 0.99
-
-        # At cutoff: |Vout/Vin| ≈ 0.707
-        Vout_fc = abs(ac_sol[:out, 2])
-        @test Vout_fc ≈ 1.0/sqrt(2) atol=0.01
-
-        # At high frequency: Vout << Vin
-        Vout_high = abs(ac_sol[:out, 3])
-        @test Vout_high < 0.15
+        @test abs(resp[1]) > 0.99                  # f << fc: Vout ≈ Vin
+        @test abs(resp[2]) ≈ 1.0/sqrt(2) atol=0.01 # at cutoff: -3 dB
+        @test abs(resp[3]) < 0.15                  # f >> fc: Vout ≪ Vin
     end
 
     @testset "AC: RL high-pass filter" begin
-        # For high-pass: R in series, L to ground
-        # Vout/Vin = jωL / (R + jωL)
-        # R = 1k, L = 1H
-        # fc = R/(2*pi*L) ≈ 159.15 Hz
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
+        # R in series, L to ground → high-pass. Vout/Vin = jωL/(R+jωL).
+        # R = 1k, L = 1H; fc = R/(2πL) ≈ 159.15 Hz
         R = 1000.0
         L_val = 1.0
         fc = R / (2π * L_val)
 
-        stamp!(VoltageSource(1.0), ctx, inp, 0)
-        stamp!(Resistor(R), ctx, inp, out)  # R in series
-        stamp!(Inductor(L_val), ctx, out, 0)  # L to ground
-
-        sys = assemble!(ctx)
+        circuit = MNACircuit(sp"""
+        * RL high-pass
+        V1 inp 0 AC 1
+        R1 inp out 1k
+        L1 out 0 1
+        """)
 
         freqs = [fc/10, fc, fc*10]
-        ac_sol = solve_ac(sys, freqs)
+        resp = ac!(circuit, freqs)[:out]
 
-        # At low frequency: Vout << Vin (inductor is short)
-        Vout_low = abs(ac_sol[:out, 1])
-        @test Vout_low < 0.15
-
-        # At cutoff: |Vout/Vin| ≈ 0.707
-        Vout_fc = abs(ac_sol[:out, 2])
-        @test Vout_fc ≈ 1.0/sqrt(2) atol=0.01
-
-        # At high frequency: Vout ≈ Vin (inductor is open)
-        Vout_high = abs(ac_sol[:out, 3])
-        @test Vout_high > 0.99
+        @test abs(resp[1]) < 0.15                  # f << fc: L shorts → Vout ≪ Vin
+        @test abs(resp[2]) ≈ 1.0/sqrt(2) atol=0.01 # at cutoff: -3 dB
+        @test abs(resp[3]) > 0.99                  # f >> fc: L opens → Vout ≈ Vin
     end
 
     #==========================================================================#
@@ -1200,7 +1171,10 @@ using NyanVerilogAParser
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
-            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            # DC Vcc for the operating point, plus a unit AC magnitude so ac!
+            # has an excitation (AC analysis uses b_ac, not the DC rhs). The
+            # 6-arg (mode-aware) stamp! is the form that registers b_ac.
+            stamp!(VoltageSource(params.Vcc; ac=1.0), ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
@@ -1213,15 +1187,14 @@ using NyanVerilogAParser
         sol = solve_dc(circuit)
         @test sol[:out] ≈ 5.0  # At DC, capacitor is open
 
-        # AC sweep - cutoff fc = 1/(2πRC) ≈ 159Hz for R=1kΩ, C=1μF
-        # At 10Hz (well below cutoff), gain should be ~1
+        # AC sweep - cutoff fc = 1/(2πRC) ≈ 159Hz for R=1kΩ, C=1μF; unit input.
         freqs = [10.0, 100.0, 1000.0]
-        ac_sol = solve_ac(circuit, freqs)
+        ac_sol = ac!(circuit, freqs)
 
         # At 10Hz (f << fc), gain ≈ 1 (within 1%)
-        @test abs(ac_sol[:out][1]) > 0.99 * circuit.params.Vcc
+        @test abs(ac_sol[:out][1]) > 0.99
         # At 1000Hz (f >> fc), gain should be < 0.2 (rolloff)
-        @test abs(ac_sol[:out][3]) < 0.2 * circuit.params.Vcc
+        @test abs(ac_sol[:out][3]) < 0.2
     end
 
     @testset "DC-initialized transient (ODE)" begin
