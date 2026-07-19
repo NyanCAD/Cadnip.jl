@@ -16,10 +16,11 @@ using Random
 
 # real_time is defined in precompile.jl (handles ForwardDiff.Dual for tgrad)
 
-export DCSolution, ACSolution
-export solve_dc, solve_dc!, solve_ac
+export DCSolution
+export solve_dc, solve_dc!
 export make_ode_problem, make_dae_problem  # For static MNAData
-# voltage / current accessors deleted — use sol[:name]. magnitude_db / phase_deg stay for AC.
+# voltage / current accessors deleted — use sol[:name]. magnitude_db / phase_deg
+# are the AC Bode readout; their methods live on ACSol in src/ac.jl.
 export magnitude_db, phase_deg
 
 #==============================================================================#
@@ -239,64 +240,26 @@ end
 # AC Solution
 #==============================================================================#
 
-"""
-    ACSolution
-
-Result of AC small-signal analysis.
-
-# Fields
-- `freqs::Vector{Float64}`: Frequency points (Hz)
-- `x::Vector{Vector{ComplexF64}}`: Solution at each frequency
-- `node_names::Vector{Symbol}`: Node names
-- `current_names::Vector{Symbol}`: Current variable names
-- `n_nodes::Int`: Number of voltage nodes
-"""
-struct ACSolution
-    freqs::Vector{Float64}
-    x::Vector{Vector{ComplexF64}}
-    node_names::Vector{Symbol}
-    current_names::Vector{Symbol}
-    n_nodes::Int
-end
+# AC small-signal analysis lives on the `ACSol` type in `src/ac.jl`, which is
+# DSS-backed (freqresp, ss, bode, poles/zeros) and carries a SPICE-native
+# name-based readout. `magnitude_db` / `phase_deg` are that readout's Bode
+# helpers; the generics are declared here (so MNA owns and exports them) and
+# their methods are attached to `ACSol` in `src/ac.jl`.
 
 """
-    sol[name::Symbol]
+    magnitude_db(ac, name[, freqs]) -> Vector{Float64}
 
-Name-based access to an AC solution — returns the complex trajectory across
-all frequencies. `sol[name, freq_idx]` returns the complex value at one frequency.
+Magnitude in dB (`20·log₁₀|H|`) of node/current `name`. See the `ACSol`
+methods in `src/ac.jl`.
 """
-function Base.getindex(sol::ACSolution, name::Symbol)
-    (name === :gnd || name === Symbol("0")) && return zeros(ComplexF64, length(sol.freqs))
-    idx = findfirst(==(name), sol.node_names)
-    idx === nothing && error("Unknown node: $name")
-    return [x[idx] for x in sol.x]
-end
-
-function Base.getindex(sol::ACSolution, name::Symbol, freq_idx::Int)
-    (name === :gnd || name === Symbol("0")) && return 0.0 + 0.0im
-    idx = findfirst(==(name), sol.node_names)
-    idx === nothing && error("Unknown node: $name")
-    return sol.x[freq_idx][idx]
-end
+function magnitude_db end
 
 """
-    magnitude_db(sol::ACSolution, name::Symbol) -> Vector{Float64}
+    phase_deg(ac, name[, freqs]) -> Vector{Float64}
 
-Get the voltage magnitude in dB at a node.
+Phase in degrees of node/current `name`. See the `ACSol` methods in `src/ac.jl`.
 """
-magnitude_db(sol::ACSolution, name::Symbol) = 20 .* log10.(abs.(sol[name]))
-
-"""
-    phase_deg(sol::ACSolution, name::Symbol) -> Vector{Float64}
-
-Get the voltage phase in degrees at a node.
-"""
-phase_deg(sol::ACSolution, name::Symbol) = rad2deg.(angle.(sol[name]))
-
-function Base.show(io::IO, sol::ACSolution)
-    print(io, "ACSolution($(length(sol.freqs)) frequencies, ")
-    print(io, "$(length(sol.node_names)) nodes)")
-end
+function phase_deg end
 
 #==============================================================================#
 # DC Analysis
@@ -915,50 +878,9 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 end
 
 #==============================================================================#
-# AC Analysis
+# AC Analysis: see `ac!` / `ACSol` in src/ac.jl. AC linearizes at the DC
+# operating point and builds a DSS-backed result; there is one AC entry point.
 #==============================================================================#
-
-"""
-    solve_ac(sys::MNAData, freqs::AbstractVector{<:Real}) -> ACSolution
-
-Solve AC small-signal analysis at given frequencies.
-
-For each frequency f, solves: (G + j*2π*f*C) * x = b
-
-This linearizes around the DC operating point, so DC analysis
-should be performed first if the circuit contains nonlinear elements.
-"""
-function solve_ac(sys::MNAData, freqs::AbstractVector{<:Real})
-    n = system_size(sys)
-    nf = length(freqs)
-
-    results = Vector{Vector{ComplexF64}}(undef, nf)
-    b_complex = complex.(sys.b)
-
-    for (i, f) in enumerate(freqs)
-        omega = 2π * f
-        # Form Y = G + jωC
-        Y = sys.G + (im * omega) * sys.C
-        # Solve Y*x = b
-        results[i] = Y \ b_complex
-    end
-
-    return ACSolution(collect(Float64, freqs), results,
-                      sys.node_names, sys.current_names, sys.n_nodes)
-end
-
-"""
-    solve_ac(sys::MNAData; fstart, fstop, points_per_decade) -> ACSolution
-
-Solve AC analysis with logarithmically spaced frequencies.
-"""
-function solve_ac(sys::MNAData; fstart::Real, fstop::Real, points_per_decade::Int=10)
-    # Generate log-spaced frequencies
-    decades = log10(fstop / fstart)
-    n_points = max(2, round(Int, decades * points_per_decade) + 1)
-    freqs = 10 .^ range(log10(fstart), log10(fstop), length=n_points)
-    return solve_ac(sys, freqs)
-end
 
 #==============================================================================#
 # Transient Analysis: ODEProblem Formulation
@@ -1395,8 +1317,8 @@ _flat_name(ref::NodeRef) = isempty(ref.path) ? ref.name :
 
 # Support sol[NodeRef] on DCSolution and any SciML transient solution whose
 # f.sys supports SII. Delegates to the flat name lookup — `sol[:x1_out]`.
+# (The AC `ACSol` NodeRef method lives in src/ac.jl, next to that type.)
 Base.getindex(sol::DCSolution, ref::NodeRef) = sol[_flat_name(ref)]
-Base.getindex(sol::ACSolution, ref::NodeRef) = sol[_flat_name(ref)]
 # Transient solutions come from SciMLBase; add the NodeRef → flat lookup.
 Base.getindex(sol::SciMLBase.AbstractTimeseriesSolution, ref::NodeRef) =
     sol[_flat_name(ref)]
@@ -2188,7 +2110,8 @@ end
 # MNACircuit Analysis Methods
 #==============================================================================#
 
-# Internal solve_dc/solve_ac methods for MNACircuit (called from sweeps.jl)
+# Internal solve_dc method for MNACircuit (called from sweeps.jl). AC analysis
+# goes through `ac!` / `ACSol` (src/ac.jl), which linearizes at this DC point.
 #
 # NOTE: solve_dc(circuit) now uses Newton iteration via solve_dc(builder, params, spec)
 # which handles both linear and nonlinear circuits. For linear circuits, it converges
@@ -2222,16 +2145,6 @@ function solve_dc(circuit::MNACircuit)
     sys_final = assemble!(ctx)
 
     return DCSolution(sys_final, u)
-end
-
-function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
-    # Build with detection, then rebuild with AC spec
-    ctx = build_with_detection(circuit)
-    ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
-    sys = assemble!(ctx)
-    return solve_ac(sys, freqs; kwargs...)
 end
 
 #==============================================================================#

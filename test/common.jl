@@ -10,7 +10,7 @@ using SciMLBase
 using Sundials
 using LinearSolve: KLUFactorization
 
-using Cadnip.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
+using Cadnip.MNA: MNAContext, MNASpec, assemble!, solve_dc
 using Cadnip.MNA: MNACircuit
 using Cadnip.MNA: get_node!, stamp!
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource

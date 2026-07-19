@@ -1,9 +1,9 @@
 # AC result-type unification — design plan
 
-Status: **not started.** This records the design for cleaning up the AC-analysis
-UX gaps discovered while adding the Hz-based `magnitude_db`/`phase_deg` helpers
-(`src/ac.jl`). Small, self-contained follow-ups; the tracking checkboxes live in
-`doc/scratchpad.md`.
+Status: **done.** Sub-tasks 1–4 landed: `ACSol` is the single AC result type,
+its `sol[:name]` is a Hz response vector, the DSS interop moved to
+`subsystem`/`freqresp`, and hierarchical node access works. This records the
+design; the tracking checkboxes live in `doc/scratchpad.md`.
 
 ## The problem: two parallel AC result types
 
@@ -29,39 +29,59 @@ implementations, so the end state is one type, not two.
 
 ## Sub-tasks
 
-### 1. Unify on a single AC result type
+### 1. Unify on a single AC result type — **done**
 
-Leaning toward keeping `ACSol` (DSS-backed, strictly more capable — you can get
-`ss`/`bode`/poles/zeros/`freqresp` out of it) and deriving the SPICE-native
-views from it, then retiring `solve_ac`/`ACSolution`. Concretely:
+Kept `ACSol` (DSS-backed, strictly more capable — `ss`/`bode`/poles/zeros/
+`freqresp`) and derived the SPICE-native views from it, then retired
+`solve_ac`/`ACSolution`. Concretely, as landed:
 
-- Give `ACSol` the SPICE-native surface `ACSolution` has today: an Hz-based
-  `sol[:name]` response trajectory and the `magnitude_db`/`phase_deg` Bode
-  readout (the Hz methods added on top of `freqresp` are the first step).
-- Port `test/mna/core.jl`'s `solve_ac` call sites to the unified type.
-- Delete `ACSolution`, `solve_ac`, and the now-duplicated accessors.
+- `ACSol` carries the SPICE-native surface: an Hz `sol[:name]` response vector
+  (over the grid passed to `ac!(circuit, freqs)`) and the two-argument
+  `magnitude_db`/`phase_deg` Bode readout, all on top of `freqresp`.
+- `test/mna/core.jl`'s `solve_ac` call sites moved to `ac!` (netlist-driven
+  behavioral tests, per CLAUDE.md), and `test/common.jl` dropped the import.
+- Deleted `ACSolution`, all `solve_ac` methods, and the duplicated accessors;
+  `magnitude_db`/`phase_deg` are now bare generics in `solve.jl` whose only
+  methods live on `ACSol`.
 
-### 2. Make `sol[:name]` return-type consistent
+One correctness note surfaced during the port: the old low-level
+`solve_ac(sys, freqs)` excited with the DC rhs `b`, so it treated a plain DC
+source as an AC stimulus. `ac!` uses `b_ac` (explicit `AC` magnitudes) — the
+correct SPICE semantics — so ported tests give their sources an `AC`/`ac=` spec.
 
-`ACSolution[:name]` returns a response vector; `ACSol[:name]` returns a SISO
-subsystem. Same indexing syntax, different return type is a footgun. Pick one
-meaning (a response vector reads as the natural SPICE answer; expose the
-subsystem via an explicit accessor such as `subsystem(ac, :name)` or the
-existing `ac[:name]` kept only if it clearly means "control-systems object").
+### 2. Make `sol[:name]` return-type consistent — **done**
 
-### 3. Hz-first helpers, rad/s only where the contract demands it
+`ACSolution[:name]` returned a response vector; `ACSol[:name]` returned a SISO
+subsystem. Same indexing syntax, different return type was a footgun. Resolved:
 
-Keep `freqresp` in rad/s (it *is* the ControlSystems contract) but route every
+- `ACSol[:name]` now returns a complex **response vector** over the analysis's
+  Hz grid — the natural SPICE answer, matching `ACSolution[:name]`. To carry the
+  grid, `ac!` gained an optional `freqs` argument: `ac!(circuit, acdec(...))`.
+  Without a grid, `ac[:name]` errors and points at `freqresp`.
+- The SISO descriptor subsystem moved to the explicit accessor
+  `subsystem(ac, :name)` (control-systems object → `ss`/`bode`/poles/zeros).
+- `magnitude_db(ac, :name)` / `phase_deg(ac, :name)` two-arg forms read the
+  stored grid; the three-arg Hz forms remain.
+Landed together with sub-task 1: with `ACSolution` retired there is only one
+`[:name]` surface, and it is the response vector.
+
+### 3. Hz-first helpers, rad/s only where the contract demands it — **done**
+
+`freqresp` stays in rad/s (it *is* the ControlSystems contract) while every
 SPICE-facing helper — `magnitude_db`, `phase_deg`, `sol[:name]` trajectory
-access, and a future `.ac` netlist card — through Hz so users never
-hand-convert. Document the one rad/s boundary (`freqresp`) prominently.
+access — routes through Hz so users never hand-convert. The one rad/s boundary
+(`freqresp`) is documented in the README AC section and the `ac.jl` header.
 
-### 4. Hierarchical device-observable access (`src/ac.jl` LIMITATION 1)
+### 4. Hierarchical device-observable access — **done (for what MNA models)**
 
-Only flat top-level node/current names are observable today; device-internal
-variables via a hierarchical path (`sys.l3.V`) are not. Voltages across devices
-wired between top-level nodes can already be had as node differences; the gap is
-genuinely-internal nodes. Scope this against whatever the unified type exposes.
+Subcircuit-internal nodes flatten into the flat name table (`:x1_out`), so they
+are observable by name on an `ACSol` exactly like top-level nodes, and a
+`NodeRef` from `scope(...)` now indexes an `ACSol` too (parity with
+`DCSolution`/transient). The only thing that is *not* a system variable is a
+voltage across a device wired between two named nodes (an inductor's `V(l3)`) —
+that is a derived quantity, taken as a node difference. So there is no remaining
+hierarchical-access gap for anything MNA represents as a state; genuine
+device-internal observables would need the device to expose them as nodes.
 
 ## Notes
 

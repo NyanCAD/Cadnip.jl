@@ -32,11 +32,14 @@ ast = NyanSpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, im
 circuit_code = Cadnip.make_mna_circuit(ast)
 circuit_fn = eval(circuit_code)
 
-# Create MNACircuit with parameters
+# Create MNACircuit with parameters. Passing the Hz grid to ac! makes the
+# SPICE-native name-based readout (ac[:name], 2-arg magnitude_db/phase_deg)
+# resolve over that grid.
 circ = MNACircuit(circuit_fn; res=R4_val)
-ac = ac!(circ)
+freqs_hz = acdec(20, 0.01, 10) # equivalent to spice .ac dec 10 0.01 10
+ac = ac!(circ, freqs_hz)
 
-ωs = 2π .* acdec(20, 0.01, 10) # equivalent to spice .ac dec 10 0.01 10
+ωs = 2π .* freqs_hz
 resp_sim = Cadnip.freqresp(ac, :vout, ωs) # compute frequency response
 
 # analytic
@@ -48,17 +51,30 @@ resp_an = ControlSystemsBase.freqrespv(H, ωs)
 
 @test all(Cadnip.freqresp(ac, :vin, ωs) .≈ 1.0) # check directly-observed source
 
-# Hz-based bode helpers on the high-level ACSol: magnitude_db / phase_deg take
-# frequencies in Hz (SPICE .ac convention), so no manual 2π conversion.
-freqs_hz = acdec(20, 0.01, 10)
+# SPICE-native name-based access: ac[:name] returns the complex response over the
+# stored Hz grid, following the same sol[:name] convention as dc!/tran!.
+@test ac[:vout] ≈ resp_sim
+@test all(ac[:vin] .≈ 1.0)
+
+# Hz-based bode helpers on the high-level ACSol. The 2-arg forms use the stored
+# grid; the 3-arg forms take frequencies in Hz (SPICE .ac convention), so no
+# manual 2π conversion in either case.
+@test Cadnip.magnitude_db(ac, :vout) ≈ 20 .* log10.(abs.(resp_an))
+@test Cadnip.phase_deg(ac, :vout) ≈ rad2deg.(angle.(resp_an))
 @test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_an))
 @test Cadnip.phase_deg(ac, :vout, freqs_hz) ≈ rad2deg.(angle.(resp_an))
 # equivalent to going through freqresp with rad/s by hand
 @test Cadnip.magnitude_db(ac, :vout, freqs_hz) ≈ 20 .* log10.(abs.(resp_sim))
 
-# Convert to ControlSystems state space, compute bode
-# RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion
-mag_sim, phase_sim, w_sim = bode(ss(ac[:vout]), ωs)
+# An ACSol without a frequency grid has no ac[:name] readout — use freqresp.
+ac_nogrid = ac!(circ)
+@test_throws ErrorException ac_nogrid[:vout]
+@test Cadnip.freqresp(ac_nogrid, :vout, ωs) ≈ resp_sim
+
+# The descriptor-state-space subsystem is now an explicit accessor (subsystem),
+# not ac[:name]. Convert to ControlSystems state space and compute bode.
+# RobustAndOptimalControl provides ss(::DescriptorStateSpace) conversion.
+mag_sim, phase_sim, w_sim = bode(ss(subsystem(ac, :vout)), ωs)
 mag_an, phase_an, w_an = bode(H, ωs)
 
 @test mag_sim ≈ mag_an
@@ -132,16 +148,47 @@ spectre_ac_isource_sol = ac!(MNACircuit(spectre_ac_isource_circuit))
 @test all(Cadnip.freqresp(spectre_ac_isource_sol, :vin, [1.0, 10.0]) .≈ 1.0 + 0.0im)
 
 #==============================================================================#
-# Limitations - Functionality Not Yet Implemented in MNA AC
+# Hierarchical / subcircuit node access
 #==============================================================================#
 
-# LIMITATION 1: Hierarchical device observable access
-# ---------------------------------------------------
-# Cannot observe internal device variables via hierarchical path (sys.l3.V).
-# MNA tracks flat node/current names. However, for devices connected between
-# top-level nodes, we CAN compute the voltage as node difference (shown above).
+# Subcircuit-internal nodes flatten into the flat name table (e.g. :x1_out), so
+# they are observable by name on an ACSol just like top-level nodes — and a
+# NodeRef from scope(...) resolves to the same flat name. (A voltage *across* a
+# device between two named nodes is still a node difference, e.g. V_L3 above.)
+let
+    function build_hier(params, spec, t=0.0; x=Float64[], ctx=nothing)
+        ctx === nothing ? (ctx = MNAContext()) : Cadnip.MNA.reset_for_restamping!(ctx)
+        vin    = Cadnip.MNA.get_node!(ctx, :vin)
+        x1_in  = Cadnip.MNA.get_node!(ctx, :x1_in)
+        x1_out = Cadnip.MNA.get_node!(ctx, :x1_out)
+        # 6-arg (mode-aware) stamp! is the one that registers the AC excitation
+        # (b_ac); the 4-arg form is DC-only.
+        Cadnip.MNA.stamp!(VoltageSource(0.0; ac=1.0), ctx, vin, 0, t, spec.mode)
+        Cadnip.MNA.stamp!(Resistor(1e3), ctx, vin, x1_in)
+        Cadnip.MNA.stamp!(Resistor(1e3), ctx, x1_in, x1_out)
+        Cadnip.MNA.stamp!(Capacitor(1e-6), ctx, x1_out, 0)
+        return ctx
+    end
+    hier    = MNACircuit(build_hier)
+    hfreqs  = acdec(10, 1, 1e4)          # 1 Hz … 10 kHz; RC pole ≈ 80 Hz
+    hier_ac = ac!(hier, hfreqs)
 
-# LIMITATION 2: Noise analysis
+    # The (would-be subcircuit-internal) node is observable by its flat name,
+    # and carries the expected unit-input low-pass response (not a trivial zero).
+    resp_flat = hier_ac[:x1_out]
+    @test length(resp_flat) == length(hfreqs)
+    @test abs(resp_flat[1]) > 0.9        # low freq: cap open, x1_out ≈ vin
+    @test abs(resp_flat[end]) < 0.1      # high freq: cap shorts, rolled off
+
+    # A NodeRef from scope(...) indexes the ACSol identically.
+    s = scope(Cadnip.MNA.assemble!(hier))
+    @test s.x1.out isa NodeRef
+    @test hier_ac[s.x1.out] == resp_flat
+    @test Cadnip.freqresp(hier_ac, s.x1.out, 2π .* hfreqs) ==
+          Cadnip.freqresp(hier_ac, :x1_out, 2π .* hfreqs)
+end
+
+# LIMITATION: Noise analysis
 # ----------------------------
 # noise!() is not implemented. Would require:
 # - Thermal noise (4kTR) for resistors
