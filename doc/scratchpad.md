@@ -64,7 +64,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] AC UX: unify the two AC result types onto one Hz-first surface that keeps the ControlSystems interop — retired `ACSolution`/`solve_ac`; `ac!`/`ACSol` is the single AC path (DSS-backed `freqresp`/`ss`/`bode` + SPICE-native `sol[:name]`)
 - [x] AC UX: make `sol[:name]` return-type consistent across AC types — `ACSol` now indexes to a complex response vector (matching DC/tran); the DSS subsystem moved to `subsystem(ac, :name)`; `ac!(circuit, freqs)` carries a Hz grid and 2-arg `magnitude_db`/`phase_deg`
 - [x] AC UX: hierarchical device-observable access in AC — subcircuit nodes flatten into the name table so `ac[:x1_out]` resolves, and a `NodeRef` from `scope(...)` indexes an `ACSol` (parity with DC/tran); genuine device-across voltages remain node differences
-- [ ] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost) — design: `doc/noise_analysis_design.md`
+- [x] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost); resistor Johnson–Nyquist thermal noise (`4kT·G`) is the first registered source, PSD helper covers thermal/shot/white/flicker — design: `doc/noise_analysis_design.md`. Still to wire for N1: builtin diode/BJT/MOSFET shot+flicker and the VA `white_noise`/`flicker_noise` codegen path (needs branch context at the contribution site).
 - [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
 - [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
 - [ ] Noise N3: `noise!()` + `.noise` card — output/total/input-referred, name-based access

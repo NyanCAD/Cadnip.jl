@@ -124,6 +124,74 @@ Base.getindex(::ZeroVector, ::Integer) = 0.0
 
 const ZERO_VECTOR = ZeroVector()
 
+#==============================================================================#
+# Noise-source channel (see doc/noise_analysis_design.md)
+#
+# Noise analysis reuses the AC linearization at the DC operating point. The
+# noise-source channel is the deferred, structure-discovery-time list of
+# small-signal noise current sources that gets built alongside the AC excitation
+# channel on an MNAContext (and is deliberately absent from DirectStampContext,
+# so transient restamping pays nothing for it).
+#==============================================================================#
+
+# Physical constants (CODATA, matching va_env.jl's thermal-voltage definition).
+const K_BOLTZMANN = 1.3806488e-23      # Boltzmann constant [J/K]
+const Q_ELEMENTARY = 1.6021766208e-19  # Elementary charge [C]
+
+"""
+    NoiseKind
+
+Tags the spectral shape of a registered noise source. The per-source
+parameters `a`/`b` on the noise channel are interpreted per kind by
+[`noise_psd`](@ref):
+
+- `THERMAL`: white thermal noise, `S = 4·k·T·a` with `a = G` (conductance).
+- `SHOT`: white shot noise, `S = 2·q·a` with `a = I` (branch current).
+- `WHITE`: Verilog-A `white_noise(a)`, `S = a`.
+- `FLICKER`: Verilog-A `flicker_noise(a, b)`, `S = a / f^b`.
+"""
+@enum NoiseKind THERMAL SHOT WHITE FLICKER
+
+"""
+    NoiseSource
+
+A single registered noise source, as returned by [`noise_sources`](@ref). Holds
+the branch nodes the noise current injects between (`p`, `n`), the spectral
+`kind`, its parameters (`a`, `b`), and the originating device `name`. This is a
+convenience view over the context's parallel COO vectors, not the storage.
+"""
+struct NoiseSource
+    p::MNAIndex
+    n::MNAIndex
+    kind::NoiseKind
+    a::Float64
+    b::Float64
+    name::Symbol
+end
+
+"""
+    noise_psd(src::NoiseSource, temp_c::Real, f::Real) -> Float64
+
+One-sided power spectral density (A²/Hz) of `src` at temperature `temp_c`
+(Celsius) and frequency `f` (Hz). Thermal/shot sources are white; flicker rolls
+off as `1/f^b`.
+"""
+@inline function noise_psd(src::NoiseSource, temp_c::Real, f::Real)
+    if src.kind === THERMAL
+        return 4 * K_BOLTZMANN * (Float64(temp_c) + 273.15) * src.a
+    elseif src.kind === SHOT
+        return 2 * Q_ELEMENTARY * src.a
+    elseif src.kind === WHITE
+        return src.a
+    else # FLICKER
+        return src.a / Float64(f)^src.b
+    end
+end
+
+export NoiseKind, THERMAL, SHOT, WHITE, FLICKER
+export NoiseSource, noise_psd, noise_sources, num_noise_sources
+export stamp_noise!, register_thermal_noise!
+
 """
     MNAContext
 
@@ -204,6 +272,19 @@ mutable struct MNAContext
     b_ac_I::Vector{MNAIndex}
     b_ac_V::Vector{ComplexF64}
 
+    # Noise-source channel - fully deferred (for noise analysis).
+    # COO-style parallel vectors mirroring b_ac_I/b_ac_V: each entry is a
+    # small-signal noise current injected between branch nodes (noise_p, noise_n)
+    # whose one-sided PSD is described by (noise_kind, noise_a, noise_b). Populated
+    # only during MNAContext structure discovery; DirectStampContext has no noise
+    # channel, so the transient hot path never touches it (see doc/noise_analysis_design.md).
+    noise_p::Vector{MNAIndex}
+    noise_n::Vector{MNAIndex}
+    noise_kind::Vector{NoiseKind}
+    noise_a::Vector{Float64}
+    noise_b::Vector{Float64}
+    noise_names::Vector{Symbol}
+
     # Charge state variables (for voltage-dependent capacitors)
     # See doc/voltage_dependent_capacitors.md
     # These are differential variables with dq/dt = I and constraint q = Q(V)
@@ -278,6 +359,12 @@ function MNAContext()
         Float64[],          # b_V (COO format for b vector)
         MNAIndex[],         # b_ac_I (deferred AC stamps)
         ComplexF64[],       # b_ac_V (deferred AC stamps)
+        MNAIndex[],         # noise_p (deferred noise sources)
+        MNAIndex[],         # noise_n
+        NoiseKind[],        # noise_kind
+        Float64[],          # noise_a
+        Float64[],          # noise_b
+        Symbol[],           # noise_names
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -882,6 +969,61 @@ All stamps are deferred and resolved at assembly time via `get_rhs_ac()`.
     return nothing
 end
 
+"""
+    stamp_noise!(ctx::MNAContext, p, n, kind::NoiseKind, a, b, name::Symbol)
+
+Register a noise-current source injected between branch nodes `p` and `n` (as a
+current source: it adds to KCL at `p` and subtracts at `n`, ground entries
+skipped at resolution time). `kind`/`a`/`b` describe the source's PSD; see
+[`NoiseKind`](@ref) and [`noise_psd`](@ref).
+
+This is a structure-discovery-time side effect: it appends to the deferred noise
+channel and does **not** touch G/C/b, so DC/transient numerics are unchanged. On
+[`DirectStampContext`](@ref) it is a no-op, so the transient hot path pays
+nothing.
+"""
+@inline function stamp_noise!(ctx::MNAContext, p, n, kind::NoiseKind, a, b, name::Symbol)
+    # A source with both terminals grounded (or shorted onto one node) injects
+    # nothing observable; skip the degenerate case, matching the other stampers.
+    (iszero(p) && iszero(n)) && return nothing
+    push!(ctx.noise_p, _to_typed(p))
+    push!(ctx.noise_n, _to_typed(n))
+    push!(ctx.noise_kind, kind)
+    push!(ctx.noise_a, Float64(a))
+    push!(ctx.noise_b, Float64(b))
+    push!(ctx.noise_names, name)
+    return nothing
+end
+
+"""
+    register_thermal_noise!(ctx, p, n, G; name)
+
+Register the Johnson–Nyquist thermal noise of a conductance `G` between nodes
+`p` and `n` (PSD `4·k·T·G`, white). No-op on [`DirectStampContext`](@ref).
+"""
+@inline register_thermal_noise!(ctx::MNAContext, p, n, G; name::Symbol=:R) =
+    stamp_noise!(ctx, p, n, THERMAL, G, 0.0, name)
+
+"""
+    num_noise_sources(ctx::MNAContext) -> Int
+
+Number of noise sources registered on the context.
+"""
+@inline num_noise_sources(ctx::MNAContext) = length(ctx.noise_kind)
+
+"""
+    noise_sources(ctx::MNAContext) -> Vector{NoiseSource}
+
+Materialize the deferred noise channel into a vector of [`NoiseSource`](@ref)
+views. Convenience for reporting/tests; the analysis path reads the parallel
+vectors directly.
+"""
+function noise_sources(ctx::MNAContext)
+    [NoiseSource(ctx.noise_p[i], ctx.noise_n[i], ctx.noise_kind[i],
+                 ctx.noise_a[i], ctx.noise_b[i], ctx.noise_names[i])
+     for i in 1:num_noise_sources(ctx)]
+end
+
 #==============================================================================#
 # Conductance Stamping Helpers (2-terminal pattern)
 #==============================================================================#
@@ -1095,6 +1237,14 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.b_ac_I)
     empty!(ctx.b_ac_V)
 
+    # Deferred noise sources (recomputed from scratch every build, like breakpoints)
+    empty!(ctx.noise_p)
+    empty!(ctx.noise_n)
+    empty!(ctx.noise_kind)
+    empty!(ctx.noise_a)
+    empty!(ctx.noise_b)
+    empty!(ctx.noise_names)
+
     # Charge state variables
     empty!(ctx.charge_names)
     ctx.n_charges = 0
@@ -1153,6 +1303,12 @@ function clear!(ctx::MNAContext)
     empty!(ctx.b_V)
     empty!(ctx.b_ac_I)
     empty!(ctx.b_ac_V)
+    empty!(ctx.noise_p)
+    empty!(ctx.noise_n)
+    empty!(ctx.noise_kind)
+    empty!(ctx.noise_a)
+    empty!(ctx.noise_b)
+    empty!(ctx.noise_names)
     empty!(ctx.charge_names)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)

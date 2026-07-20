@@ -65,6 +65,7 @@ elseif RUN_CORE
         @testset "mna/precompile.jl" include("mna/precompile.jl")
         @testset "mna/breakpoints.jl" include("mna/breakpoints.jl")
         @testset "mna/pcnr.jl" include("mna/pcnr.jl")
+        @testset "mna/noise.jl" include("mna/noise.jl")
     end
 
     # VA integration tests (s-dual contribution stamping)
