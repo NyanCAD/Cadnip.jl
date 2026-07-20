@@ -249,7 +249,7 @@ function lex_tilde(l::Lexer)
     elseif accept(l, '&')
         return emit(l, TILDE_AND)
     elseif accept(l, '|')
-        return emit(l, TILD_OR)
+        return emit(l, TILDE_OR)
     end
     return emit(l, TILDE)
 end

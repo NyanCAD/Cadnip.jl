@@ -458,6 +458,93 @@ struct SubcktCall <: AbstractInstanceNode
     nl::EXPR{Notation}
 end
 
+# --- ngspice/Xyce extensions (kept in sync with the NetlistParse.rs parser (NyanCAD/NetlistParse.rs)) ---
+# K coupled inductors: name, inductor references, trailing coupling coefficient.
+struct MutualInductor <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    inductors::EXPRList{HierarchialNode}
+    coupling::EXPR
+    nl::EXPR{Notation}
+end
+
+# J (JFET) / Z (MESFET): name nd ng ns model [area] [OFF] [params].
+struct JFET <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    drain::EXPR{HierarchialNode}
+    gate::EXPR{HierarchialNode}
+    source::EXPR{HierarchialNode}
+    model::EXPR{HierarchialNode}
+    area::Maybe{EXPR}
+    off::Maybe{EXPR{Keyword}}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct Mesfet <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    drain::EXPR{HierarchialNode}
+    gate::EXPR{HierarchialNode}
+    source::EXPR{HierarchialNode}
+    model::EXPR{HierarchialNode}
+    area::Maybe{EXPR}
+    off::Maybe{EXPR{Keyword}}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+# Permissive device (name, trailing nodes/values, params): transmission lines
+# (T/O/U/P/Y all lex to one kind) and XSPICE `A` (irregular syntax).
+struct TransmissionLine <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct XspiceDevice <: AbstractInstanceNode
+    name::EXPR{HierarchialNode}
+    nodes::EXPRList{HierarchialNode}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+# Xyce dot-commands (dispatched on the identifier text): `.step`, `.func`,
+# `.global_param`, `.nodeset`. `cmd` is the command word (a plain identifier).
+struct StepStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    args::EXPRList
+    nl::EXPR{Notation}
+end
+
+struct FuncStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    args::EXPRList
+    nl::EXPR{Notation}
+end
+
+struct GlobalParamStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    params::EXPRList{Parameter}
+    nl::EXPR{Notation}
+end
+
+struct NodeSetEntry <: AbstractASTNode
+    func::EXPR{Identifier}
+    node::EXPR{NodeName}
+    eq::EXPR{Notation}
+    val::EXPR
+end
+
+struct NodeSetStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    cmd::EXPR{Identifier}
+    entries::EXPRList{NodeSetEntry}
+    nl::EXPR{Notation}
+end
+
 
 struct Subckt <: AbstractBlockASTNode
     dot::EXPR{Notation}
