@@ -122,13 +122,23 @@ high-level API.
 
 ## Roadmap
 
-- **N0 — Groundwork: noise-source channel.** Add a deferred noise-source list to
-  `MNAContext` (COO-style, mirroring `b_ac_I`/`b_ac_V`); do *not* add it to
-  `DirectStampContext`. Make the VA `white_noise`/`flicker_noise` builtins (and
-  builtin thermal/shot) ctx-aware — register a source on `MNAContext`, no-op on
-  `DirectStampContext`, always return `0.0` in the value path so DC/transient
-  numerics are byte-identical. Land with a transient allocation/throughput
-  benchmark asserting no regression.
+- **N0 — Groundwork: noise-source channel. _(landed)_** A deferred noise-source
+  channel lives on `MNAContext` as COO-style parallel vectors
+  (`noise_p/noise_n/noise_kind/noise_a/noise_b/noise_names`), mirroring
+  `b_ac_I`/`b_ac_V`, and is absent from `DirectStampContext` — `stamp_noise!` /
+  `register_thermal_noise!` are no-ops there, so transient restamping is
+  untouched. A `NoiseKind` enum (`THERMAL`/`SHOT`/`WHITE`/`FLICKER`) plus a
+  `noise_psd(src, temp_c, f)` helper carry the spectral shapes. The resistor
+  stamp registers Johnson–Nyquist thermal noise (`4kT·G`) as the first real
+  source; the G/C/b value path is byte-identical, so DC/transient numerics are
+  unchanged (`test/mna/noise.jl`).
+
+  Still open within the "make every source ctx-aware" scope, deferred toward N1:
+  builtin diode/BJT/MOSFET shot+flicker noise (need the branch current at the
+  device stamp) and the VA `white_noise`/`flicker_noise` builtins — those fold
+  to a literal `0.0` at codegen today (`vasim.jl`), and registering them needs
+  the LHS branch context at the contribution site rather than at the isolated
+  call expression.
 - **N1 — PSD models at the DC bias.** Evaluate per-source spectral density at the
   operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
   `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes

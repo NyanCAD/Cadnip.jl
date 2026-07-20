@@ -149,6 +149,17 @@ No-op. Breakpoints are collected once during structure discovery on
 register_breakpoints!(::DirectStampContext, ::Any) = nothing
 
 """
+    stamp_noise!(::DirectStampContext, args...)
+    register_thermal_noise!(::DirectStampContext, args...; kwargs...)
+
+No-ops. The noise-source channel lives only on `MNAContext` (structure
+discovery); the zero-allocation restamping path carries no noise machinery, so
+transient restamping is untouched (see doc/noise_analysis_design.md).
+"""
+@inline stamp_noise!(::DirectStampContext, args...) = nothing
+@inline register_thermal_noise!(::DirectStampContext, args...; kwargs...) = nothing
+
+"""
     get_current_idx(ctx::DirectStampContext, name::Symbol) -> CurrentIndex
 
 Get the index of a current variable by name in DirectStampContext (for CCVS/CCCS restamping).

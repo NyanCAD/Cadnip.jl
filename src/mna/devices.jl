@@ -498,6 +498,9 @@ Vn [ -G  +G ]
 function stamp!(R::Resistor, ctx::AnyMNAContext, p::Int, n::Int)
     G = 1.0 / R.r
     stamp_conductance!(ctx, p, n, G)
+    # Johnson–Nyquist thermal noise (4kT·G). Registration is a no-op on the
+    # transient hot-path DirectStampContext, so DC/transient cost is unchanged.
+    register_thermal_noise!(ctx, p, n, G; name=R.name)
     return nothing
 end
 
