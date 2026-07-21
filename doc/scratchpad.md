@@ -66,6 +66,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] AC UX: hierarchical device-observable access in AC — subcircuit nodes flatten into the name table so `ac[:x1_out]` resolves, and a `NodeRef` from `scope(...)` indexes an `ACSol` (parity with DC/tran); genuine device-across voltages remain node differences
 - [x] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost); resistor Johnson–Nyquist thermal noise (`4kT·G`) is the first registered source, PSD helper covers thermal/shot/white/flicker — design: `doc/noise_analysis_design.md`. Still to wire for N1: builtin diode/BJT/MOSFET shot+flicker and the VA `white_noise`/`flicker_noise` codegen path (needs branch context at the contribution site).
 - [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
+  - [x] builtin diode shot noise (`2q·|I|`) registered from the junction bias via `register_shot_noise!`
 - [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
 - [ ] Noise N3: `noise!()` + `.noise` card — output/total/input-referred, name-based access
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
