@@ -6,12 +6,16 @@ how it threads through the current MNA system **without slowing DC/transient**.
 
 ## Status
 
-Not implemented. The scaffolding that exists today:
+Single-operating-point linear noise analysis is implemented (`src/noise.jl`):
+`noise!(circuit, output; freqs)` computes the output-noise PSD and per-source
+contributions over the thermal sources the N0 channel registers. The remaining
+work is lighting up the other sources (device/VA shot & flicker) and the
+input-referred / `.noise`-card surface. The scaffolding this builds on:
 
-- `src/ac.jl` — `noise!()` is scoped in the header comment but unimplemented.
-  The AC path already builds a linearized descriptor state-space system
+- `src/ac.jl` — the AC path builds a linearized descriptor state-space system
   (`E·dx = A·x + B·u, y = C·x`) at the DC operating point, which is exactly the
-  linearization a noise analysis consumes.
+  linearization the noise analysis consumes; `noise!` reuses that
+  rebuild-at-op-point pattern.
 - `src/va_env.jl` / `src/vasim.jl` — the Verilog-A `white_noise` /
   `flicker_noise` builtins are parsed (NyanVerilogAParser keywords) and lowered
   to `0.0` (`vasim.jl:1297`, and named noise branches zeroed at
@@ -143,14 +147,20 @@ high-level API.
   operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
   `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes
   from the DC solution the AC path already computes.
-- **N2 — Transfer functions via the AC system.** Reuse `ac!`'s linearized
-  `(jωC + G)`; per output+frequency, one adjoint solve `(jωC+G)ᵀ x_adj = e_out`
-  gives the transfer from every source at O(1) each (`H_k = x_adjᵀ e_k`),
-  reusing the factorization across sources.
-- **N3 — `noise!()` analysis + output.** Output PSD `Σ_k |H_k(jω)|² S_k(ω)`, band
-  integration for total noise, input-referred via the input transfer function; a
-  `NoiseSol` mirroring `ACSol` plus a `.noise` netlist card and name-based
-  access.
+- **N2 — Transfer functions via the AC system. _(landed)_** Reuse `ac!`'s
+  linearized `(jωC + G)`; per output+frequency, one adjoint solve
+  `(jωC+G)ᵀ x_adj = e_out` gives the transfer from every source at O(1) each
+  (`H_k = x_adj[p_k] − x_adj[n_k]`), reusing the factorization across sources.
+  Implemented in `noise!` (`src/noise.jl`).
+- **N3 — `noise!()` analysis + output. _(landed, partial)_** `noise!(circuit,
+  output; freqs)` returns a `NoiseSol` (mirroring `ACSol`) with the output PSD
+  `S_out(f) = Σ_k |H_k(jω)|² S_k(f)`, per-source contributions
+  (`ns[:onoise]` / `ns[:devname]`), and band-integrated `total_noise` (the RC
+  case integrates to `kT/C`). The analysis is source-agnostic — it consumes
+  whatever sits on the noise channel, so device/VA sources light up here for
+  free once registered. **Still open:** input-referred noise (needs the input
+  source→output transfer) and the `.noise` netlist card driven through the
+  high-level API.
 - **N4 — Tests + validation.** Netlist tests (thermal noise of an RC = `4kT·R`
   shaped by the RC pole; op-amp input-referred noise) cross-checked against
   ngspice `.noise`, driven through the high-level API.

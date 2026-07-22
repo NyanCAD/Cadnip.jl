@@ -65,8 +65,9 @@ The most nebulous and least important at this stage: copying features from other
 - [x] AC UX: make `sol[:name]` return-type consistent across AC types — `ACSol` now indexes to a complex response vector (matching DC/tran); the DSS subsystem moved to `subsystem(ac, :name)`; `ac!(circuit, freqs)` carries a Hz grid and 2-arg `magnitude_db`/`phase_deg`
 - [x] AC UX: hierarchical device-observable access in AC — subcircuit nodes flatten into the name table so `ac[:x1_out]` resolves, and a `NodeRef` from `scope(...)` indexes an `ACSol` (parity with DC/tran); genuine device-across voltages remain node differences
 - [x] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost); resistor Johnson–Nyquist thermal noise (`4kT·G`) is the first registered source, PSD helper covers thermal/shot/white/flicker — design: `doc/noise_analysis_design.md`. Still to wire for N1: builtin diode/BJT/MOSFET shot+flicker and the VA `white_noise`/`flicker_noise` codegen path (needs branch context at the contribution site).
-- [ ] Noise N1: per-source PSD models at the DC bias (thermal/shot/flicker + VA `white_noise`/`flicker_noise`)
-- [ ] Noise N2: noise transfer functions via the AC linearization (adjoint solve per output/frequency)
-- [ ] Noise N3: `noise!()` + `.noise` card — output/total/input-referred, name-based access
+- [x] Noise N2: noise transfer functions via the AC linearization — `noise!(circuit, output; freqs)` adjoint-solves `(jωC+G)ᵀ x_adj = e_out` per frequency, transfer `H_k = x_adj[p_k]-x_adj[n_k]` for every source at O(1) (`src/noise.jl`, `test/noise.jl`)
+- [x] Noise N3 (partial): `noise!()` output PSD `Σ_k |H_k|² S_k`, per-source contributions (`ns[:onoise]`/`ns[:devname]`), band-integrated `total_noise` validated against RC `4kTR`-shaped noise and `kT/C`. Source-agnostic: new sources light up for free once registered
+- [ ] Noise N1: per-source PSD at the DC bias for the *remaining* sources — builtin diode/BJT/MOSFET shot+flicker and VA `white_noise`/`flicker_noise` (thermal already flows through N2/N3)
+- [ ] Noise N3 rest: input-referred noise (input source→output transfer) + `.noise` netlist card through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
