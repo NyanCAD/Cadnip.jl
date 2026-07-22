@@ -1362,6 +1362,11 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         # Companion anchored at the evaluation voltage w — see
         # stamp_limited_companion! for why probe-anchoring is wrong here.
         stamp_limited_companion!(ctx, p, n, w, I0, Gd)
+
+        # Shot noise (2q·|I|) at the junction bias. No-op on the transient
+        # DirectStampContext, and a structure-discovery side effect on
+        # MNAContext, so DC/transient numerics are unchanged.
+        register_shot_noise!(ctx, p, n, I0; name=D.name)
     else
         # Classic companion model, identical to the pre-PCNR diode: raw
         # exponential (no clamp — this is the reference/unaugmented model),
@@ -1381,6 +1386,8 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         # So: -Ieq enters p, +Ieq enters n
         stamp_b!(ctx, p, -Ieq)
         stamp_b!(ctx, n,  Ieq)
+
+        register_shot_noise!(ctx, p, n, I0; name=D.name)
     end
 
     return nothing
@@ -1514,6 +1521,9 @@ function stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int;
     # Stamp companion current
     stamp_b!(ctx, p, -Ieq)
     stamp_b!(ctx, n,  Ieq)
+
+    # Shot noise (2q·|I|) at the junction bias — see the Diode stamp.
+    register_shot_noise!(ctx, p, n, I0; name=D.name)
 
     # === Reactive Part (Junction Capacitance) ===
     Cj0, Vj, m = D.Cj0, D.Vj, D.m

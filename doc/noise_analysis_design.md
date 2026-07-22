@@ -133,12 +133,18 @@ high-level API.
   source; the G/C/b value path is byte-identical, so DC/transient numerics are
   unchanged (`test/mna/noise.jl`).
 
+  The builtin `Diode`/`DiodeWithCap` stamps now register shot noise (`2q·|I|`)
+  via `register_shot_noise!`, reading the junction current `I0` at the operating
+  point the channel is built at (`test/mna/noise.jl`). Same zero-cost contract:
+  no-op on `DirectStampContext`, structure-discovery side effect on `MNAContext`,
+  G/C/b value path byte-identical.
+
   Still open within the "make every source ctx-aware" scope, deferred toward N1:
-  builtin diode/BJT/MOSFET shot+flicker noise (need the branch current at the
-  device stamp) and the VA `white_noise`/`flicker_noise` builtins — those fold
-  to a literal `0.0` at codegen today (`vasim.jl`), and registering them needs
-  the LHS branch context at the contribution site rather than at the isolated
-  call expression.
+  BJT/MOSFET shot+flicker and diode flicker noise (the builtins are level-1
+  `nmos`/`pmos`/VA models rather than a Cadnip stamp with a `KF`/`AF` card), and
+  the VA `white_noise`/`flicker_noise` builtins — those fold to a literal `0.0`
+  at codegen today (`vasim.jl`), and registering them needs the LHS branch
+  context at the contribution site rather than at the isolated call expression.
 - **N1 — PSD models at the DC bias.** Evaluate per-source spectral density at the
   operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
   `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes

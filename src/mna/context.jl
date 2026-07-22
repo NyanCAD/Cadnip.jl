@@ -190,7 +190,7 @@ end
 
 export NoiseKind, THERMAL, SHOT, WHITE, FLICKER
 export NoiseSource, noise_psd, noise_sources, num_noise_sources
-export stamp_noise!, register_thermal_noise!
+export stamp_noise!, register_thermal_noise!, register_shot_noise!
 
 """
     MNAContext
@@ -1003,6 +1003,21 @@ Register the Johnson–Nyquist thermal noise of a conductance `G` between nodes
 """
 @inline register_thermal_noise!(ctx::MNAContext, p, n, G; name::Symbol=:R) =
     stamp_noise!(ctx, p, n, THERMAL, G, 0.0, name)
+
+"""
+    register_shot_noise!(ctx, p, n, I; name)
+
+Register the shot noise of a junction carrying DC current `I` between nodes `p`
+and `n` (PSD `2·q·|I|`, white). The magnitude is used so a reverse-biased branch
+still registers a physically meaningful (small) source. No-op on
+[`DirectStampContext`](@ref).
+
+The current is read at the operating point the noise channel is built at (the AC
+path rebuilds at the DC solution), so registering a shot source is a
+structure-discovery-time side effect that does not perturb the G/C/b value path.
+"""
+@inline register_shot_noise!(ctx::MNAContext, p, n, I; name::Symbol=:D) =
+    stamp_noise!(ctx, p, n, SHOT, abs(I), 0.0, name)
 
 """
     num_noise_sources(ctx::MNAContext) -> Int
