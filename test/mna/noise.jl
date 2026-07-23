@@ -11,9 +11,10 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNAContext, get_node!, stamp!, Resistor, Diode, VoltageSource, resolve_index
+using Cadnip.MNA: MNAContext, get_node!, stamp!, Resistor, Diode, SimpleMOSFET, VoltageSource, resolve_index
 using Cadnip.MNA: reset_for_restamping!, num_noise_sources, noise_sources, noise_psd
 using Cadnip.MNA: stamp_noise!, register_thermal_noise!, register_shot_noise!
+using Cadnip.MNA: register_channel_thermal_noise!
 using Cadnip.MNA: solve_dc, MNASpec
 using Cadnip.MNA: THERMAL, SHOT, WHITE, FLICKER, NoiseSource
 using Cadnip.MNA: NodeIndex, GroundIndex
@@ -79,6 +80,56 @@ using Cadnip.SpectreEnvironment
         src = noise_sources(ctx)[1]
         @test src.a ≈ Is                    # |Is·(exp(-38)-1)| ≈ Is
         @test noise_psd(src, 27.0, 1e3) ≈ 2 * Q_ELEMENTARY * Is
+    end
+
+    @testset "MOSFET channel thermal noise registration in saturation" begin
+        # A MOSFET biased in saturation registers channel thermal noise
+        # 4kT·(2/3)·gm between drain and source, with a = (2/3)·gm evaluated at
+        # the operating-point transconductance. Hand-stamping at a known bias is a
+        # low-level stamping-mechanics test.
+        Vth, K = 0.5, 1e-3
+        Vg, Vd = 1.5, 2.0              # Vgs = 1.5 > Vth, Vds = 2.0 > Vgs - Vth = 1.0
+        gm = K * (Vg - Vth)           # square-law saturation gm = K·(Vgs - Vth)
+
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)        # index 1
+        g = get_node!(ctx, :g)        # index 2
+        stamp!(SimpleMOSFET(Vth=Vth, K=K, lambda=0.0, name=:M1), ctx, d, g, 0; x=[Vd, Vg])
+
+        @test num_noise_sources(ctx) == 1
+        src = noise_sources(ctx)[1]
+        @test src.kind === THERMAL
+        @test src.name === :M1
+        @test src.a ≈ (2/3) * gm      # effective channel noise conductance
+        @test resolve_index(ctx, src.p) == d
+        @test resolve_index(ctx, src.n) == 0
+
+        # PSD = 4·k·T·(2/3)·gm, white
+        T = 27.0
+        expected = 4 * K_BOLTZMANN * (T + 273.15) * (2/3) * gm
+        @test noise_psd(src, T, 1e3) ≈ expected
+        @test noise_psd(src, T, 1e9) ≈ expected   # white: no frequency dependence
+    end
+
+    @testset "MOSFET in cutoff registers no channel noise" begin
+        # Vgs <= Vth: the channel carries no current (gm == 0), so there is no
+        # channel thermal noise to register.
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        g = get_node!(ctx, :g)
+        stamp!(SimpleMOSFET(Vth=0.5, K=1e-3, name=:M1), ctx, d, g, 0; x=[1.0, 0.2])
+        @test num_noise_sources(ctx) == 0
+    end
+
+    @testset "register_channel_thermal_noise! honors gamma" begin
+        # The effective noise conductance scales with the excess-noise factor γ.
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        s = get_node!(ctx, :s)
+        register_channel_thermal_noise!(ctx, d, s, 2e-3; gamma=1.0, name=:Mg)
+        src = noise_sources(ctx)[1]
+        @test src.kind === THERMAL
+        @test src.a ≈ 2e-3            # γ = 1 ⇒ a = gm
     end
 
     @testset "multiple sources accumulate; rebuild does not duplicate" begin

@@ -1639,6 +1639,14 @@ function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
     stamp_b!(ctx, d, -Ieq)
     stamp_b!(ctx, s,  Ieq)
 
+    # Channel thermal noise: 4kT·(2/3)·gm between drain and source, registered at
+    # the operating-point transconductance. Skipped in cutoff (gm == 0), where the
+    # channel carries no current and injects no noise. No-op on DirectStampContext,
+    # so the transient hot path is untouched (see doc/noise_analysis_design.md).
+    if gm > 0
+        register_channel_thermal_noise!(ctx, d, s, gm; name=M.name)
+    end
+
     # === Capacitances ===
     # Simple linear caps (not voltage-dependent for this simple model)
     # Cgs between g and s
