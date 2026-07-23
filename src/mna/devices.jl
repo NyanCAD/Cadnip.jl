@@ -1362,6 +1362,11 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         # Companion anchored at the evaluation voltage w — see
         # stamp_limited_companion! for why probe-anchoring is wrong here.
         stamp_limited_companion!(ctx, p, n, w, I0, Gd)
+
+        # Shot noise (2q·|I|) at the junction bias. No-op on the transient
+        # DirectStampContext, and a structure-discovery side effect on
+        # MNAContext, so DC/transient numerics are unchanged.
+        register_shot_noise!(ctx, p, n, I0; name=D.name)
     else
         # Classic companion model, identical to the pre-PCNR diode: raw
         # exponential (no clamp — this is the reference/unaugmented model),
@@ -1381,6 +1386,8 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         # So: -Ieq enters p, +Ieq enters n
         stamp_b!(ctx, p, -Ieq)
         stamp_b!(ctx, n,  Ieq)
+
+        register_shot_noise!(ctx, p, n, I0; name=D.name)
     end
 
     return nothing
@@ -1515,6 +1522,9 @@ function stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int;
     stamp_b!(ctx, p, -Ieq)
     stamp_b!(ctx, n,  Ieq)
 
+    # Shot noise (2q·|I|) at the junction bias — see the Diode stamp.
+    register_shot_noise!(ctx, p, n, I0; name=D.name)
+
     # === Reactive Part (Junction Capacitance) ===
     Cj0, Vj, m = D.Cj0, D.Vj, D.m
 
@@ -1628,6 +1638,14 @@ function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
     # Companion current
     stamp_b!(ctx, d, -Ieq)
     stamp_b!(ctx, s,  Ieq)
+
+    # Channel thermal noise: 4kT·(2/3)·gm between drain and source, registered at
+    # the operating-point transconductance. Skipped in cutoff (gm == 0), where the
+    # channel carries no current and injects no noise. No-op on DirectStampContext,
+    # so the transient hot path is untouched (see doc/noise_analysis_design.md).
+    if gm > 0
+        register_channel_thermal_noise!(ctx, d, s, gm; name=M.name)
+    end
 
     # === Capacitances ===
     # Simple linear caps (not voltage-dependent for this simple model)

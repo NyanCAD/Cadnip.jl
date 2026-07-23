@@ -137,12 +137,27 @@ high-level API.
   source; the G/C/b value path is byte-identical, so DC/transient numerics are
   unchanged (`test/mna/noise.jl`).
 
+  The builtin `Diode`/`DiodeWithCap` stamps now register shot noise (`2q·|I|`)
+  via `register_shot_noise!`, reading the junction current `I0` at the operating
+  point the channel is built at (`test/mna/noise.jl`). Same zero-cost contract:
+  no-op on `DirectStampContext`, structure-discovery side effect on `MNAContext`,
+  G/C/b value path byte-identical.
+
+  The builtin `SimpleMOSFET` stamp now registers channel thermal noise
+  (`4kT·(2/3)·gm`, drain→source) via `register_channel_thermal_noise!`, reading
+  the operating-point transconductance `gm` the channel is built at and skipping
+  cutoff (`gm == 0`). This reuses the `THERMAL` kind with an *effective* channel
+  noise conductance `γ·gm` (`γ = 2/3` in saturation — the ngspice level-1/2/3
+  `(8/3)·k·T·gm` shape). Same zero-cost contract: no-op on `DirectStampContext`,
+  structure-discovery side effect on `MNAContext`, G/C/b value path byte-identical
+  (`test/mna/noise.jl`).
+
   Still open within the "make every source ctx-aware" scope, deferred toward N1:
-  builtin diode/BJT/MOSFET shot+flicker noise (need the branch current at the
-  device stamp) and the VA `white_noise`/`flicker_noise` builtins — those fold
-  to a literal `0.0` at codegen today (`vasim.jl`), and registering them needs
-  the LHS branch context at the contribution site rather than at the isolated
-  call expression.
+  BJT shot noise, MOSFET/diode flicker noise (the builtins carry no `KF`/`AF`
+  card yet), and the VA `white_noise`/`flicker_noise` builtins — those fold to a
+  literal `0.0` at codegen today (`vasim.jl`), and registering them needs the LHS
+  branch context at the contribution site rather than at the isolated call
+  expression.
 - **N1 — PSD models at the DC bias.** Evaluate per-source spectral density at the
   operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
   `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes
