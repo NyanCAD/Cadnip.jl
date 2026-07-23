@@ -11,3 +11,6 @@ NyanVerilogAParser = "28caa042-5edb-4d1f-abcd-02ce41b2dd3d"
 [sources]
 Cadnip = {path = "../.."}
 NyanVerilogAParser = {path = "../../NyanVerilogAParser.jl"}
+
+[compat]
+ForwardDiff = "1.4.1"
