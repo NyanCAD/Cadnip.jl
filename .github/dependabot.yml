@@ -9,23 +9,3 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "julia"
-    directory: "/NyanLexers.jl"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "julia"
-    directory: "/NyanSpectreNetlistParser.jl"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "julia"
-    directory: "/NyanVerilogAParser.jl"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "julia"
-    directory: "/SpiceArmyKnife.jl"
-    schedule:
-      interval: "weekly"
