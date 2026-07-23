@@ -106,6 +106,7 @@ elseif RUN_CORE
     # AC small-signal analysis
     @testset "AC Analysis" begin
         @testset "ac.jl" include("ac.jl")
+        @testset "noise.jl" include("noise.jl")
     end
 
     # PDK Precompilation tests

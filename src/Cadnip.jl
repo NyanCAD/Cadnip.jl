@@ -97,6 +97,7 @@ include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
 include("ac.jl")
+include("noise.jl")
 include("ModelLoader.jl")
 include("circsummary.jl")
 

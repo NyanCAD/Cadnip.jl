@@ -26,11 +26,10 @@
 # quantity, taken as a node difference:
 #      `freqresp(ac, :n1, ωs) - freqresp(ac, :n2, ωs)`
 #
-# Not yet implemented — Noise analysis: The `noise!()` function. Requires:
-#    - Per-device noise source modeling (thermal, shot, flicker)
-#    - Noise correlation matrix assembly
-#    - Output noise spectral density computation
-#    See doc/noise_analysis_design.md for the planned port.
+# Noise analysis: `noise!()` (see src/noise.jl) reuses this same
+# rebuild-at-DC-operating-point linearization, adjoint-solving `(jωC+G)` per
+# frequency to accumulate the output-noise PSD from the sources on the context's
+# noise channel. See doc/noise_analysis_design.md.
 #
 # Bode plots: Use RobustAndOptimalControl to convert DescriptorStateSpace to
 # standard StateSpace: `bode(ss(subsystem(ac, :vout)), ωs)`
