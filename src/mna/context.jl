@@ -191,6 +191,7 @@ end
 export NoiseKind, THERMAL, SHOT, WHITE, FLICKER
 export NoiseSource, noise_psd, noise_sources, num_noise_sources
 export stamp_noise!, register_thermal_noise!, register_shot_noise!
+export register_channel_thermal_noise!
 
 """
     MNAContext
@@ -1018,6 +1019,20 @@ structure-discovery-time side effect that does not perturb the G/C/b value path.
 """
 @inline register_shot_noise!(ctx::MNAContext, p, n, I; name::Symbol=:D) =
     stamp_noise!(ctx, p, n, SHOT, abs(I), 0.0, name)
+
+"""
+    register_channel_thermal_noise!(ctx, p, n, gm; gamma=2/3, name)
+
+Register the channel thermal noise of a MOSFET between drain (`p`) and source
+(`n`): PSD `4·k·T·γ·gm`, white. This reuses the [`THERMAL`](@ref NoiseKind)
+shape with an *effective* channel conductance `γ·gm` — for the long-channel
+model `γ = 2/3` in saturation (the ngspice level-1/2/3 `(8/3)·k·T·gm` shape).
+The transconductance `gm` is read at the operating point the noise channel is
+built at, so registration does not perturb the G/C/b value path. No-op on
+[`DirectStampContext`](@ref).
+"""
+@inline register_channel_thermal_noise!(ctx::MNAContext, p, n, gm; gamma::Real=2/3, name::Symbol=:M) =
+    stamp_noise!(ctx, p, n, THERMAL, gamma * gm, 0.0, name)
 
 """
     num_noise_sources(ctx::MNAContext) -> Int
