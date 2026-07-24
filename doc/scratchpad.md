@@ -71,6 +71,7 @@ The most nebulous and least important at this stage: copying features from other
   - [x] builtin diode shot noise (`2q·|I|`) registered from the junction bias via `register_shot_noise!`
   - [x] builtin MOSFET channel thermal noise (`4kT·(2/3)·gm`) registered from the bias gm via `register_channel_thermal_noise!`
   - [ ] remaining: BJT shot+flicker, MOSFET flicker, and VA `white_noise`/`flicker_noise`
-- [ ] Noise N3 rest: input-referred noise (input source→output transfer) + `.noise` netlist card through the high-level API
+- [x] Noise N3 rest (input-referral): `noise!(circuit, output; freqs, input=:V1)` refers the output noise back to a voltage-source input via the same adjoint — the unit-voltage transfer `H(jω)=x_adjᵀ b_in` is read for free per frequency, `ns[:inoise] = onoise/|H|²`, `total_noise(ns; referred=:input)`. Validated: divider input-referred `4kT·2000` and RC input-referred flattening to the bare `4kTR` (`src/noise.jl`, `test/noise.jl`)
+- [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
