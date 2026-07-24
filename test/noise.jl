@@ -81,6 +81,46 @@ const _kT = K_BOLTZMANN * (27.0 + 273.15)
         @test vrms2 ≈ _kT / C rtol=2e-2
     end
 
+    @testset "input-referred: resistor divider" begin
+        # Gain from the input source V1 (drives node `in`) to `out` is the
+        # divider ratio R2/(R1+R2) = 0.5, flat in frequency. Input-referring the
+        # white output noise divides by that gain²: S_in = 4kT·(R1‖R2)/0.25.
+        circuit = MNACircuit(sp"""
+        V1 in 0 DC 0
+        R1 in out 1k
+        R2 out 0 1k
+        """i)
+
+        ns = noise!(circuit, :out; freqs=[1.0, 1e3, 1e6], input=:V1)
+
+        @test all(≈(0.5; rtol=1e-6), real.(ns.gain))
+        @test all(≈(0.0; atol=1e-9), imag.(ns.gain))
+
+        Rpar = 500.0
+        expected_in = 4 * _kT * Rpar / 0.25     # = 4kT·2000
+        @test all(≈(expected_in; rtol=1e-6), ns[:inoise])
+        @test ns[:inoise] ≈ ns[:onoise] ./ abs2.(ns.gain)
+    end
+
+    @testset "input-referred: RC low-pass flattens to 4kTR" begin
+        # The input→output gain 1/(1+jωRC) shapes the output noise by exactly the
+        # same pole that shapes the thermal noise, so input-referred noise is the
+        # bare resistor thermal noise 4kTR — flat across the whole band.
+        R = 1e3
+        circuit = MNACircuit(sp"""
+        V1 in 0 DC 0
+        R1 in out 1k
+        C1 out 0 1u
+        """i)
+
+        freqs = acdec(10, 1.0, 1e7)
+        ns = noise!(circuit, :out; freqs=freqs, input=:V1)
+
+        @test all(≈(4 * _kT * R; rtol=1e-6), ns[:inoise])
+        @test total_noise(ns; referred=:input)^2 ≈
+              4 * _kT * R * (freqs[end] - freqs[1]) rtol=1e-6
+    end
+
     @testset "errors and edge cases" begin
         circuit = MNACircuit(sp"""
         V1 in 0 DC 0
@@ -92,5 +132,13 @@ const _kT = K_BOLTZMANN * (27.0 + 273.15)
         ns = noise!(circuit, :out; freqs=[1e3])
         @test_throws ErrorException ns[:nonexistent_source]
         @test onoise(ns) === ns[:onoise]
+
+        # No input requested: input-referred access and integration both error.
+        @test_throws ErrorException ns[:inoise]
+        @test_throws ErrorException total_noise(ns; referred=:input)
+        @test_throws ArgumentError total_noise(ns; referred=:bogus)
+
+        # An input that is not an independent voltage source is rejected.
+        @test_throws ErrorException noise!(circuit, :out; freqs=[1e3], input=:R1)
     end
 end

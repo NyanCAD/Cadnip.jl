@@ -8,9 +8,10 @@ how it threads through the current MNA system **without slowing DC/transient**.
 
 Single-operating-point linear noise analysis is implemented (`src/noise.jl`):
 `noise!(circuit, output; freqs)` computes the output-noise PSD and per-source
-contributions over the thermal sources the N0 channel registers. The remaining
-work is lighting up the other sources (device/VA shot & flicker) and the
-input-referred / `.noise`-card surface. The scaffolding this builds on:
+contributions over the thermal sources the N0 channel registers, and
+`input=:V1` refers the noise back to a voltage-source input. The remaining work
+is lighting up the other sources (device/VA shot & flicker) and the `.noise`
+netlist card surface. The scaffolding this builds on:
 
 - `src/ac.jl` — the AC path builds a linearized descriptor state-space system
   (`E·dx = A·x + B·u, y = C·x`) at the DC operating point, which is exactly the
@@ -173,9 +174,22 @@ high-level API.
   (`ns[:onoise]` / `ns[:devname]`), and band-integrated `total_noise` (the RC
   case integrates to `kT/C`). The analysis is source-agnostic — it consumes
   whatever sits on the noise channel, so device/VA sources light up here for
-  free once registered. **Still open:** input-referred noise (needs the input
-  source→output transfer) and the `.noise` netlist card driven through the
-  high-level API.
+  free once registered.
+
+  **Input-referral _(landed)_.** `noise!(circuit, output; freqs, input=:V1)`
+  refers the noise back to an independent voltage-source input, matching SPICE
+  `.noise v(out) V1`. A voltage source `V1` carries its branch equation in the
+  current-variable row `:I_V1`, so a unit injection there is a 1 V small-signal
+  drive; the input→output gain is the same adjoint dot product used for the
+  noise sources, `H(jω) = x_adjᵀ b_in = x_adj[idx(:I_V1)]`, read for free per
+  frequency (no extra solve). The result then carries `ns.gain` (the complex
+  transfer), `ns[:inoise] = onoise ./ |H|²` (V²/Hz for a voltage input), and
+  `total_noise(ns; referred=:input)`. Validated against a resistor divider
+  (input-referred `4kT·2000`) and an RC low-pass whose input-referred noise
+  flattens to the bare `4kTR` because the gain pole cancels the noise-shaping
+  pole (`test/noise.jl`).
+
+  **Still open:** the `.noise` netlist card driven through the high-level API.
 - **N4 — Tests + validation.** Netlist tests (thermal noise of an RC = `4kT·R`
   shaped by the RC pole; op-amp input-referred noise) cross-checked against
   ngspice `.noise`, driven through the high-level API.
