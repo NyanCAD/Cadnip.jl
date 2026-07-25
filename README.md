@@ -105,6 +105,17 @@ result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 `dc!(cs::CircuitSweep)` returns a `SweepResult` that iterates `(params, sol)`
 pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`.
 
+A DC operating point is also enumerable, so you can introspect or export it
+without knowing the node names up front:
+
+```julia
+sol = dc!(circuit)
+keys(sol)                 # node voltages then branch currents, e.g. [:in, :out, :I_V1]
+Dict(pairs(sol))          # the whole operating point as name => value
+get(sol, :out, NaN)       # non-throwing lookup (sol[:out] throws if absent)
+haskey(sol, :out)         # true
+```
+
 `ac!(circuit, freqs)` returns an `ACSol` — a linearized descriptor state-space
 system about the DC operating point, carrying the Hz frequency grid you asked
 for. Name-based access is the SPICE-native readout (same `sol[:name]` meaning as

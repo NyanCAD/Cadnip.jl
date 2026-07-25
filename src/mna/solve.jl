@@ -183,6 +183,76 @@ function Base.getindex(sol::DCSolution, name::Symbol)
     error("Unknown variable: $name")
 end
 
+# String names delegate to the Symbol lookup, so `sol["out"]` works too.
+Base.getindex(sol::DCSolution, name::AbstractString) = sol[Symbol(name)]
+
+#==============================================================================#
+# Operating-point introspection: keys / values / pairs / haskey / get
+#
+# `sol[:name]` reads one known quantity; these enumerate the whole operating
+# point — the physical observables a user reads out, i.e. node voltages
+# followed by branch currents (exactly what `show(::MIME"text/plain", sol)`
+# prints). Internal charge/limit state variables are deliberately excluded from
+# the enumeration; they remain reachable by name through `sol[:name]`.
+#==============================================================================#
+
+"""
+    keys(sol::DCSolution) -> Vector{Symbol}
+
+Names of the operating-point observables: node voltages followed by branch
+currents (the quantities `show` prints). Internal charge/limit state variables
+are excluded — index those by name with `sol[:name]` if you need them.
+
+```julia
+sol = dc!(circuit)
+keys(sol)              # [:in, :out, :I_V1]
+Dict(pairs(sol))       # whole operating point as a Dict
+```
+"""
+Base.keys(sol::DCSolution) = vcat(sol.node_names, sol.current_names)
+
+"""
+    values(sol::DCSolution) -> Vector{Float64}
+
+Operating-point values aligned with [`keys(sol)`](@ref): the node voltages then
+the branch currents.
+"""
+Base.values(sol::DCSolution) =
+    vcat(Float64[sol.x[i] for i in eachindex(sol.node_names)],
+         Float64[sol.x[sol.n_nodes + j] for j in eachindex(sol.current_names)])
+
+"""
+    pairs(sol::DCSolution)
+
+Iterator of `name => value` pairs over the operating-point observables (node
+voltages then branch currents). `Dict(pairs(sol))` collects the whole operating
+point; `collect(pairs(sol))` gives a `Vector` of `Pair`s.
+"""
+Base.pairs(sol::DCSolution) = (k => v for (k, v) in zip(keys(sol), values(sol)))
+
+"""
+    haskey(sol::DCSolution, name) -> Bool
+
+Whether `name` names a readable quantity: ground (`:gnd` / `Symbol("0")`), a
+node voltage, or a branch current. Companion to [`get`](@ref) — a `true` here
+means `sol[name]` returns a value rather than throwing.
+"""
+Base.haskey(sol::DCSolution, name::Symbol) =
+    name === :gnd || name === Symbol("0") ||
+    name in sol.node_names || name in sol.current_names
+Base.haskey(sol::DCSolution, name::AbstractString) = haskey(sol, Symbol(name))
+
+"""
+    get(sol::DCSolution, name, default)
+
+The value at `name` when [`haskey`](@ref)`(sol, name)`, otherwise `default`.
+The non-throwing counterpart to `sol[name]`.
+"""
+Base.get(sol::DCSolution, name::Symbol, default) =
+    haskey(sol, name) ? sol[name] : default
+Base.get(sol::DCSolution, name::AbstractString, default) =
+    get(sol, Symbol(name), default)
+
 """
     nameat(sol, name::Symbol, t::Real)
 
