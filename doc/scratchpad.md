@@ -51,6 +51,7 @@ The most nebulous and least important at this stage: copying features from other
 
 # Progress
 
+- [x] UX: enumerable DC operating point — `keys`/`values`/`pairs`/`haskey`/`get` on `DCSolution` so an operating point can be iterated, `Dict`-collected, and diffed without knowing node names up front (nodes + branch currents; string names delegate to the symbol lookup)
 - [x] AC source phase (`V1 ... AC mag phase`)
 - [x] Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
 - [x] Cleanup: drop dead backward-compat aliases
