@@ -1112,4 +1112,51 @@ end
     @test isapprox(sol[:out], 1.0; atol=deftol)
 end
 
+@testset "DCSolution operating-point introspection" begin
+    # Resistive divider: out = 6·2k/(1k+2k) = 4 V, in = 6 V.
+    circuit = MNACircuit(sp"""
+    * resistive divider
+    V1 in 0 DC 6
+    R1 in out 1k
+    R2 out 0 2k
+    """i)
+    sol = dc!(circuit)
+
+    cur = only(sol.current_names)        # single V source ⇒ one branch current
+
+    # keys enumerate node voltages then branch currents (what `show` prints);
+    # internal charge/limit state variables are excluded from the enumeration.
+    ks = keys(sol)
+    @test :in in ks && :out in ks
+    @test cur in ks
+    @test length(ks) == length(sol.node_names) + length(sol.current_names)
+
+    # values align positionally with keys
+    vs = values(sol)
+    @test length(vs) == length(ks)
+    kv = Dict(zip(ks, vs))
+    @test kv[:in]  ≈ 6.0
+    @test kv[:out] ≈ 4.0
+    @test kv[cur]  ≈ sol[cur]
+
+    # pairs / Dict round-trip, and every pair agrees with name-based indexing
+    @test Dict(pairs(sol)) == kv
+    for (k, v) in pairs(sol)
+        @test sol[k] == v
+    end
+
+    # haskey / get: safe, non-throwing lookups (ground is readable as 0.0)
+    @test haskey(sol, :out)
+    @test haskey(sol, :gnd)
+    @test !haskey(sol, :does_not_exist)
+    @test get(sol, :out, NaN) ≈ 4.0
+    @test isnan(get(sol, :does_not_exist, NaN))
+    @test_throws Exception sol[:does_not_exist]   # sol[name] still throws
+
+    # string names work across getindex / haskey / get
+    @test sol["out"] ≈ 4.0
+    @test haskey(sol, "out")
+    @test get(sol, "does_not_exist", -1.0) == -1.0
+end
+
 end # basic_tests
