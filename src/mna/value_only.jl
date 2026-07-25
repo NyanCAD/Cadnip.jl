@@ -153,6 +153,8 @@ register_breakpoints!(::DirectStampContext, ::Any) = nothing
     register_thermal_noise!(::DirectStampContext, args...; kwargs...)
     register_shot_noise!(::DirectStampContext, args...; kwargs...)
     register_channel_thermal_noise!(::DirectStampContext, args...; kwargs...)
+    register_white_noise!(::DirectStampContext, args...; kwargs...)
+    register_flicker_noise!(::DirectStampContext, args...; kwargs...)
 
 No-ops. The noise-source channel lives only on `MNAContext` (structure
 discovery); the zero-allocation restamping path carries no noise machinery, so
@@ -162,6 +164,17 @@ transient restamping is untouched (see doc/noise_analysis_design.md).
 @inline register_thermal_noise!(::DirectStampContext, args...; kwargs...) = nothing
 @inline register_shot_noise!(::DirectStampContext, args...; kwargs...) = nothing
 @inline register_channel_thermal_noise!(::DirectStampContext, args...; kwargs...) = nothing
+@inline register_white_noise!(::DirectStampContext, args...; kwargs...) = nothing
+@inline register_flicker_noise!(::DirectStampContext, args...; kwargs...) = nothing
+
+"""
+    noise_enabled(::DirectStampContext) -> false
+
+The restamping hot path carries no noise channel. Constant-folding this to
+`false` lets the Verilog-A noise lowering's whole registration branch — noise
+power expression included — be eliminated during transient restamping.
+"""
+@inline noise_enabled(::DirectStampContext) = false
 
 """
     get_current_idx(ctx::DirectStampContext, name::Symbol) -> CurrentIndex

@@ -12,10 +12,35 @@ using Test
 using Cadnip
 using Cadnip.MNA
 using Cadnip.SpectreEnvironment
-using Cadnip.MNA: K_BOLTZMANN
+using Cadnip.MNA: K_BOLTZMANN, Q_ELEMENTARY
+using VADistillerModels   # sp_diode / sp_bjt, whose Verilog-A carries noise
 
 # Boltzmann·T at the default 27 °C operating temperature.
 const _kT = K_BOLTZMANN * (27.0 + 273.15)
+
+# Netlists carrying `.model` cards have to be built at module top level — the
+# generated builder defines model constants, which a local scope rejects.
+
+# A forward-biased VADistiller diode (sp_diode via the `d` model tier) loaded by
+# a resistor. `rs=0` leaves the junction shot noise as the diode's only live
+# source; `kf=0` (the default) zeroes its flicker term.
+const diode_shot = sp"""
+V1 in 0 DC 5
+R1 in out 10k
+D1 out 0 dmod
+.model dmod d is=1e-14 rs=0
+"""i
+
+# A VADistiller BJT (sp_bjt via the `npn` model tier) in the active region. Its
+# Verilog-A carries the whole SPICE3 noise model: three parasitic-resistance
+# thermal sources, collector and base shot noise, and base flicker noise.
+const bjt_noise = sp"""
+Vcc vcc 0 DC 5
+Vb b 0 DC 0.7
+Rc vcc c 4.7k
+Q1 c b 0 qn
+.model qn npn bf=100 is=1e-15 rb=100 re=1 rc=10 kf=1e-12 af=1
+"""i
 
 @testset "noise! analysis" begin
 
@@ -140,5 +165,54 @@ const _kT = K_BOLTZMANN * (27.0 + 273.15)
 
         # An input that is not an independent voltage source is rejected.
         @test_throws ErrorException noise!(circuit, :out; freqs=[1e3], input=:R1)
+    end
+
+    #==========================================================================#
+    # Verilog-A device noise, through the two-tier model resolution real users
+    # hit: a `.model` card resolves to a VADistiller model whose Verilog-A
+    # carries the full SPICE3 noise model (`white_noise`/`flicker_noise`), and
+    # those sources land on the noise channel `noise!` consumes.
+    #==========================================================================#
+
+    @testset "diode shot noise vs. the resistor's thermal noise" begin
+        # Both sources inject at `out` — V1 is an AC short, so `in` is AC ground
+        # and R1 sits from AC ground to `out`, just like the diode. They
+        # therefore see the same transfer impedance, and the ratio of their
+        # output contributions is exactly the ratio of their PSDs: no transfer
+        # function, no operating-point modelling, just 2q·I_D over 4kT·G.
+        R = 10e3
+        circuit = MNACircuit(diode_shot)
+
+        sol = dc!(circuit)
+        I_D = (sol[:in] - sol[:out]) / R      # KCL: R1's current is the diode's
+        @test I_D > 1e-4                       # forward biased, well above noise floor
+
+        ns = noise!(circuit, :out; freqs=[1e2, 1e4])
+
+        @test haskey(ns.contributions, :d1_id)
+        expected = (2 * Q_ELEMENTARY * I_D) / (4 * _kT / R)
+        @test all(≈(expected; rtol=1e-4), ns[:d1_id] ./ ns[:r1])
+
+        # Nothing is lost: the per-source contributions sum to the total.
+        @test sum(values(ns.contributions)) ≈ ns[:onoise]
+    end
+
+    @testset "BJT: per-mechanism sources, flicker rolling as 1/f" begin
+        ns = noise!(MNACircuit(bjt_noise), :c; freqs=[1e1, 1e2])
+
+        # The SPICE3 BJT noise model: three parasitic-resistance thermal
+        # sources, collector and base shot noise, and base flicker noise. Each
+        # is named by its instance and the label the Verilog-A gave it.
+        for mech in (:q1_rb, :q1_rc, :q1_re, :q1_ic, :q1_ib, :q1_flicker)
+            @test haskey(ns.contributions, mech)
+        end
+
+        # Flicker: one decade of frequency is one decade of PSD (exponent 1).
+        @test ns[:q1_flicker][1] / ns[:q1_flicker][2] ≈ 10 rtol=1e-6
+        # Shot noise is white, so it is flat over the same two points.
+        @test ns[:q1_ic][1] ≈ ns[:q1_ic][2] rtol=1e-6
+
+        @test sum(values(ns.contributions)) ≈ ns[:onoise]
+        @test all(>(0), ns[:onoise])
     end
 end

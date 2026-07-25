@@ -28,7 +28,7 @@ using Base: @inbounds, @inline, @noinline
 using Base.Experimental: @overlay
 export @inbounds, @inline, @overlay, var"$temperature", var"$vt"
 
-export pow, ln, limexp, ddt, absdelay, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
+export pow, ln, limexp, ddt, absdelay, atan2, log, log10, va_or, va_and
 
 @noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
@@ -100,15 +100,6 @@ ddt(x) = x
 # This is a placeholder for codegen that doesn't go through MNA stamping
 absdelay(expr, tdelay) = expr
 absdelay(expr, tdelay, maxdelay) = expr
-
-# Noise stubs - MNA doesn't support noise analysis yet
-# Returns 0 to not affect simulation
-function white_noise(dscope, pwr, name)
-    0.0
-end
-function flicker_noise(dscope, pwr, exp, name)
-    0.0
-end
 
 vaconvert(T::Type{<:Number}, x::Cadnip.Default) = Cadnip.Default(vaconvert(T, x.val))
 vaconvert(T::Type{<:Number}, x::Cadnip.DefaultOr) = Cadnip.DefaultOr(vaconvert(T, x.val), x.is_default)
