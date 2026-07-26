@@ -76,11 +76,10 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Noise N3 rest (input-referral): `noise!(circuit, output; freqs, input=:V1)` refers the output noise back to a voltage-source input via the same adjoint — the unit-voltage transfer `H(jω)=x_adjᵀ b_in` is read for free per frequency, `ns[:inoise] = onoise/|H|²`, `total_noise(ns; referred=:input)`. Validated: divider input-referred `4kT·2000` and RC input-referred flattening to the bare `4kTR` (`src/noise.jl`, `test/noise.jl`)
 - [x] UX/design: netlist `.param` overrides reach the netlist — `MNACircuit(ckt; vbias=1.2)` and `Sweep(vbias=…)` used to resolve to the default at every point, so a swept design read as a flat transfer curve with no error. Restored `canonicalize_params` in `ParamLens` (one rule: a leaf is a parameter, a group is a child), codegen precedence lens > instance line > `.subckt` default, `alter` inserting along the path, and one `alter` instead of two shadowing ones — design: `doc/parameter_overrides.md`
 - [x] UX/design: `test/design_flow.jl` walks a hand-sized NMOS common-source stage op → DC transfer curve → AC → transient → noise against the square-law derivation; the two `test/mna/audio_integration.jl` sweeps now assert the swept value reaches the source (they used to pass as no-ops)
-- [ ] Parameterization, in the order they bite — design: `doc/parameter_overrides.md`
-  - [ ] Uniquify subcircuit builder names, so two netlists in one module can each define a `.subckt divider`
-  - [ ] Validate override names against a table of declared names emitted by codegen
-  - [ ] Override raw device instance parameters (`r1=(r=2e3,)`, `m1=(w=…)`) through the lens
-  - [ ] Diagnose a `.model` card that references a `.param` instead of failing with `UndefVarError` at load
+- [ ] Finish the override design: reach raw device instance parameters (`r1=(r=2e3,)`, `m1=(w=…)`) through the lens. Named parameters land; device instance parameters were meant to be in the same tree (see the commented-out "device == param" test in `test/basic.jl`) and codegen never consults the lens at device sites — design: `doc/parameter_overrides.md`
+- [ ] Diagnose unknown override names. An undeclared name being inert is deliberate, but it is silent; codegen can emit a table of declared names to check against
+- [ ] Codegen: uniquify subcircuit builder names, so two netlists in one module can each define a `.subckt divider`. Unrelated to overrides — found while testing them
+- [ ] Sema/codegen: let a `.model` card read a `.param`. `.model nch nmos vto=vt0` fails at load with `UndefVarError` with no override in play, because model cards are hoisted out of the builder
 - [ ] UX/design follow-ups from the same walkthrough:
   - [ ] Report device terminal currents in the operating point, via an op-info channel on `MNAContext`
   - [ ] Report device small-signal parameters and region (gm, gds, triode/saturation), which needs Verilog-A operating-point variables in the VA front end

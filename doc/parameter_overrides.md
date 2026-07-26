@@ -1,8 +1,9 @@
 # Parameter overrides: the lens, and what is still missing
 
 How a netlist `.param`, a `.subckt` formal parameter, or a builder keyword
-reaches the thing it names — and the four known holes, sized against the code so
-the next session doesn't re-derive them or walk into the traps.
+reaches the thing it names — what the design covers, the one piece of it that is
+unimplemented, and three adjacent defects, sized against the code so the next
+session doesn't re-derive them or walk into the traps.
 
 Context: `src/spectre.jl` (the lens), `src/spc/codegen.jl` (parameter
 resolution), `src/mna/solve.jl` (`alter`), `test/params.jl` (the contracts).
@@ -54,39 +55,28 @@ parameter. Without that, a circuit built `params=(vin=1.0,)` and altered
 `vin=4.0` keeps the old value, and the sweep comes back a flat line with no
 error.
 
-### What responds today
+## Status
 
-`.param` (top level and subcircuit-local), `.subckt` formal parameters including
-ones the instance line sets, Spectre `parameters`, and parameter→parameter
-expression chains (`.param rbot='rtop*3'` follows `rtop`, and is itself
-overridable). The PDK idiom — devices wrapped in a subcircuit whose W/L are
-formal parameters, as in `test/testpdk/testpdk.spice` — sweeps correctly,
-including overriding a value the instance line spells out, two levels down.
+The override path for **named** parameters is complete: `.param` (top level and
+subcircuit-local), `.subckt` formal parameters including ones the instance line
+sets, Spectre `parameters`, and parameter→parameter expression chains
+(`.param rbot='rtop*3'` follows `rtop`, and is itself overridable) — at any
+hierarchy depth, through `MNACircuit`, `alter` and sweeps. The PDK idiom, devices
+wrapped in a subcircuit whose W/L are formal parameters as in
+`test/testpdk/testpdk.spice`, sweeps correctly including overriding a value the
+instance line spells out, two levels down.
 
-## Known holes
+One piece of the design is unimplemented — device instance parameters (§1). The
+three sections after it are adjacent defects, not parts of this design: §2 is a
+missing diagnostic, §3 and §4 are independent bugs that happen to surface
+nearby.
 
-### 1. Subcircuit builder names collide (correctness bug, cheapest fix)
-
-Builders are named after the `.subckt` (`divider` → `divider_mna_builder`), so
-two netlists loaded into the same module that both define `.subckt divider`
-silently overwrite each other — the second wins, and the first netlist's
-instances then call it with the wrong keyword arguments. The name needs the
-netlist's identity in it; the `sp"..."` gensym already has one.
-
-### 2. Override names are not validated
-
-A typo'd knob is inert. Do **not** reach for `ParamObserver`: it needs a full
-builder pass, and `MNACircuit` is a plain struct today (free) that `alter`
-reconstructs *per sweep point*, so validating at construction would rebuild the
-whole circuit on every point. Codegen already knows every declared name
-(`sema.params`, formal params, the subckt semas) — emit a static table beside the
-builder and validate with a set lookup. That also affords a real message: "`x1`
-is an instance, write `x1=(rv=…)`".
-
-### 3. Raw device instance parameters are not overridable
+## 1. Raw device instance parameters are not overridable (unfinished here)
 
 `alter(c; var"r1.r"=2e3)`, `r1=(r=2e3,)` and `var"r1.params.r"` are all silently
-ignored.
+ignored. The namespace rule above already accommodates them — a group under an
+instance name is that instance's scope — but codegen never consults the lens at
+device sites.
 
 Narrower than it looks: the PDK wrapper-subcircuit path above already covers the
 W/L case, so this only bites *raw* device lines in hand-written netlists
@@ -104,11 +94,35 @@ shows device parameters were in the lens tree by design (`i1=(dc=-1,)`,
 `rload=(r=2000.0,)`), and the netlist-*text* `alter(io, ast; r1=(r=4.0,))` still
 honours that spelling.
 
-### 4. `.model` cards cannot reference a `.param`
+## 2. Unknown override names are silent (missing diagnostic, not a design gap)
 
-`.param vt0=0.7` + `.model nch nmos vto=vt0` fails at *load* with
-`UndefVarError: vt0`, because `codegen_toplevel_models!` emits model cards as
-module-level `const`s outside the builder.
+A name no scope declares is inert. That is deliberate — it matches how Spectre
+`alter` behaves — but nothing says so, and a typo therefore looks like a
+parameter that has no effect.
+
+Do **not** reach for `ParamObserver`: it needs a full builder pass, and
+`MNACircuit` is a plain struct today (free) that `alter` reconstructs *per sweep
+point*, so validating at construction would rebuild the whole circuit on every
+point. Codegen already knows every declared name (`sema.params`, formal params,
+the subckt semas) — emit a static table beside the builder and validate with a
+set lookup. That also affords a real message: "`x1` is an instance, write
+`x1=(rv=…)`".
+
+## 3. Subcircuit builder names collide (independent codegen bug)
+
+Nothing to do with overrides — it surfaces through mismatched parameter keywords,
+which is how it was found. Builders are named after the `.subckt` (`divider` →
+`divider_mna_builder`), so two netlists loaded into the same module that both
+define `.subckt divider` silently overwrite each other — the second wins, and the
+first netlist's instances then call it with the wrong keyword arguments. The name
+needs the netlist's identity in it; the `sp"..."` gensym already has one.
+
+## 4. `.model` cards cannot reference a `.param` (independent scoping bug)
+
+Also unrelated to overrides: this fails with no override in play. `.param
+vt0=0.7` + `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`,
+because `codegen_toplevel_models!` emits model cards as module-level `const`s
+outside the builder, where the `.param` local does not exist.
 
 Do **not** "just move them inside the builder". The hoisting is deliberate —
 subcircuit builders and the main function share them — and with `is_large_model`
