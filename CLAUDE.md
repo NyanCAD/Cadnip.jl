@@ -243,17 +243,35 @@ sol(1e-4)          # state at t
 ```
 
 ### ParamLens Pattern
-`ParamLens` navigates hierarchical params and merges overrides at `.params` fields:
-```julia
-# Flat circuit params
-circuit = MNACircuit(my_circuit; params = (R1=100.0, R2=200.0))
-altered = alter(circuit; var"params.R1"=150.0)
 
-# Hierarchical subcircuit params
-circuit = MNACircuit(my_circuit; inner = (params = (R1=100.0,),))
-altered = alter(circuit; var"inner.params.R1"=200.0)
+A scope (the top level, or a subcircuit instance) has *parameters* of its own
+and *children* it instantiates, in two namespaces that can collide. One rule
+tells them apart: **a leaf is a parameter of the scope, a group is a child.**
+
+```julia
+circuit = MNACircuit(my_circuit; R1=100.0, R2=200.0)   # parameters of the top scope
+altered  = alter(circuit; R1=150.0)
+
+circuit = MNACircuit(my_circuit; inner = (R1=100.0,))  # R1 of instance `inner`
+altered  = alter(circuit; var"inner.R1"=200.0)
 ```
-The `lens(; defaults...)` call merges with `lens.nt.params` if present.
+
+When a name is *both* a parameter and an instance (`.param x1` next to `X1`),
+`x1=2.0` sets the parameter and `x1=(rv=…)` addresses the instance; write
+`params=(x1=2.0,)` to name the parameter explicitly (it outranks the flat
+spelling) when you need both at once.
+
+`ParamLens` canonicalizes on construction — `canonicalize_params` maps the
+compact form users write to the `(params=(…), child=(params=(…),))` form the
+lens reads, and `compact_params` maps back (it is what `ParamObserver` reports,
+so an observed tree can be handed straight back as an override). Both are
+`@generated`, so the whole thing folds away at compile time.
+
+An override outranks the netlist: a subcircuit parameter the instance line
+spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
+a sweep axis. Two things are *not* reachable, and are silent when you try:
+device instance parameters (`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist
+with a `.param` instead), and a name no scope declares at all, i.e. a typo.
 
 ### Parameter Sweeps (the sweep API)
 
@@ -270,21 +288,19 @@ for (params, sol) in tran!(cs, (0.0, 5e-3))
 end
 ```
 
-**The gotcha (the "wrap"):** two things must line up or the sweep is a silent
-no-op that returns the default for every point.
-1. **Pass the base value as a `CircuitSweep` kwarg** (`; vac=1e-3, freq=1e3`
-   above) — this seeds the params NamedTuple so the swept name resolves. The
-   canonical working netlist example is `test/mna/audio_integration.jl`
-   (`.param vac` / `.param freq` driving a `SIN` source).
-2. **The builder must actually read `params.<name>` where you want variation.**
-   A hand-coded builder must `merge(defaults, params)` or use `ParamLens`. In a
-   SPICE netlist, a `.param` that feeds a *runtime-evaluated* source (SIN/PULSE
-   amplitude, freq) responds to the sweep; a `.param` baked into a *DC operating
-   value* is folded at codegen time and will not — vary that via a builder that
-   reads the param, not a bare `.param` on a `DC` card.
+The `CircuitSweep` kwargs (`; vac=1e-3, freq=1e3` above) set the *base* value of
+everything the sweep doesn't vary; a swept axis needs no seeding of its own. Any
+netlist `.param` responds: DC source values, device values, and
+runtime-evaluated SIN/PULSE amplitudes alike, at top level or inside a
+subcircuit. A hand-coded builder has to read `params.<name>` itself
+(`merge(defaults, params)` or `ParamLens`), and a swept name no scope declares is
+inert — the sweep runs and every point returns the netlist default. Netlist
+examples: `test/params.jl` (DC values, device values, instance params),
+`test/design_flow.jl` (a bias sweep as a DC transfer curve), and
+`test/mna/audio_integration.jl` (`.param vac` / `.param freq` on a `SIN` source).
 
-For hierarchical/subcircuit params use `var"a.b.c"` selectors with a matching
-wrapped base (`inner=(params=(R1=…),)`), same as `alter` (see ParamLens above).
+For hierarchical/subcircuit params use `var"a.b"` selectors with a matching base
+(`inner=(R1=…,)`), same as `alter` (see ParamLens above).
 
 ### SPICE Name Collisions
 PDK modules use `baremodule` so SPICE names like `inv`, `log`, `exp` don't

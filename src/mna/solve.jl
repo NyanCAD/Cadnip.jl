@@ -1218,8 +1218,6 @@ function make_dae_problem(sys::MNAData, tspan::Tuple{Real,Real};
     )
 end
 
-export alter
-
 #==============================================================================#
 # Out-of-Place Evaluation (GPU-Compatible)
 #==============================================================================#
@@ -1498,36 +1496,68 @@ function MNACircuit(builder::F; spec::S=MNASpec(), kwargs...) where {F,S}
 end
 
 """
+    _set_param_path(params::NamedTuple, parts, value) -> NamedTuple
+
+Set `params.<parts...> = value`, inserting any level the NamedTuple does not
+carry yet. A netlist circuit starts out with no parameters at all — its `.param`
+defaults live in the generated builder — so setting a knob has to be able to
+introduce it, not just overwrite one that is already there.
+
+A knob already carried under the canonical `params` group is updated *there*
+rather than shadowed by a flat sibling: `canonicalize_params` lets an explicit
+`params=` outrank the flat spelling, so writing flat next to an existing
+qualified entry would leave the older value in force — the silent no-op this
+whole path exists to prevent.
+"""
+function _set_param_path(params::NamedTuple, parts, value)
+    head = first(parts)
+    if length(parts) == 1
+        own = get(params, :params, nothing)
+        if head !== :params && isa(own, NamedTuple) && haskey(own, head)
+            return merge(params, (params = _set_leaf(own, head, value),))
+        end
+        return _set_leaf(params, head, value)
+    end
+    sub = get(params, head, (;))
+    isa(sub, NamedTuple) ||
+        throw(ArgumentError("cannot descend into parameter `$head`: it holds a $(typeof(sub)), not a parameter group"))
+    return merge(params, NamedTuple{(head,)}((_set_param_path(sub, parts[2:end], value),)))
+end
+
+function _set_leaf(nt::NamedTuple, name::Symbol, value)
+    # Keep the stored type stable when re-setting an existing Float64 knob.
+    if isa(value, Number) && isa(get(nt, name, nothing), Float64)
+        value = Float64(value)
+    end
+    return merge(nt, NamedTuple{(name,)}((value,)))
+end
+
+"""
     alter(circuit::MNACircuit; kwargs...) -> MNACircuit
 
 Create a new circuit with modified parameters.
 
-Supports nested paths via var-strings: `alter(circuit; var"inner.R1" = 100.0)`
+Supports nested paths via var-strings: `alter(circuit; var"inner.R1" = 100.0)`.
+A parameter the circuit does not carry yet is added, so a netlist `.param` can
+be re-bound without seeding it at construction time.
 
 # Example
 ```julia
 circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
 circuit2 = alter(circuit; R=500.0)  # New circuit with R=500, C unchanged
+
+circuit = MNACircuit(amp)           # netlist with `.param vbias=1.1472`
+biased  = alter(circuit; vbias=1.2) # knob introduced here
 ```
 """
 function alter(circuit::MNACircuit; spec=nothing, kwargs...)
-    # Helper to convert symbol to lens (handles nested paths like "a.b.c")
-    function to_lens(selector::Symbol)
-        parts = Symbol.(split(string(selector), "."))
-        return Accessors.opticcompose(PropertyLens.(parts)...)
-    end
-
     new_params = circuit.params
     for (selector, value) in pairs(kwargs)
         if value === nothing
             continue  # Skip nothing values (sentinel for "use default")
         end
-        lens = to_lens(selector)
-        # Auto-convert numeric types to Float64 if the target is Float64
-        if isa(value, Number) && isa(lens(new_params), Float64)
-            value = Float64(value)
-        end
-        new_params = Accessors.set(new_params, lens, value)
+        parts = Symbol.(split(string(selector), "."))
+        new_params = _set_param_path(new_params, parts, value)
     end
 
     new_spec = spec === nothing ? circuit.spec : spec

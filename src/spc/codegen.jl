@@ -3175,22 +3175,29 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         end
     end
 
-    # Generate parameter resolution code for the body
-    # For each local param: use kwarg if provided, else lens override, else default expression
+    # Generate parameter resolution code for the body.
+    #
+    # Precedence, strongest first:
+    #   1. lens override — `alter(circuit; var"x1.r1val"=...)`, a sweep axis
+    #   2. instance-line value — `X1 a b divider r1val=2k` (passed as a kwarg)
+    #   3. the `.subckt` default
+    #
+    # The lens has to outrank the instance line: overriding a value the netlist
+    # already spells out is the whole point of `alter`/sweeps. Feeding the
+    # netlist value in as the lens *default* gets both — the lens merge returns
+    # the override when there is one, and the netlist value when there isn't.
+    #
+    # Every lens returns the defaults it was called with (merged with whatever
+    # overrides it carries), so the result always has this field — no `hasfield`
+    # guard, which would otherwise be emitted once per subcircuit parameter.
     param_resolution_exprs = Expr[]
     for (name, defs) in sema.params
         if haskey(local_params_with_defaults, name)
             def_expr = local_params_with_defaults[name]
-            # Check kwarg first, then lens, then default
+            netlist_val = gensym(Symbol(name, "_netlist"))
             push!(param_resolution_exprs, quote
-                $name = if !($name === nothing)
-                    $name  # Explicit kwarg override
-                else
-                    # Try lens override, falling back to default expression
-                    lens_params = lens(; $name = $def_expr)
-                    ifelse(hasfield(typeof(lens_params), $(QuoteNode(name))),
-                           getfield(lens_params, $(QuoteNode(name))),
-                           $def_expr)
+                $name = let $netlist_val = $name === nothing ? $def_expr : $name
+                    getfield(lens(; $name = $netlist_val), $(QuoteNode(name)))
                 end
             end)
         end

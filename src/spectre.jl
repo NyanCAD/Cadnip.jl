@@ -45,18 +45,62 @@ function setproperties(obj; kw...)
     setproperties(obj, (;kw...))
 end
 
+#==============================================================================#
+# The two shapes of a parameter tree
+#
+# A scope (the top level, or a subcircuit instance) has *parameters* of its own
+# and *children* it instantiates. Both are named, and the two namespaces can
+# collide (`.param x1=2` next to an `X1` instance), so overrides come in two
+# shapes:
+#
+#   compact    (a, x1 = (b,))                    ← what a user writes
+#   canonical  (params = (a,), x1 = (params = (b,),))  ← what the lens reads
+#
+# The rule, in compact form: **a leaf is a parameter of this scope, a group is a
+# child**. `x1 = (rv = 2k,)` always addresses the instance `X1`; `x1 = 2.0`
+# always addresses the parameter `x1`. When a name is both and you need the
+# parameter while also descending into the child, `params = (x1 = 2.0,)` names
+# it explicitly and outranks the flat spelling.
+#
+# `canonicalize_params` maps compact → canonical and is idempotent, so the lens
+# accepts either. `compact_params` is the inverse, and is what `ParamObserver`
+# reports back, so an observed tree can be handed straight back as an override.
+#==============================================================================#
+
 @generated function canonicalize_params(nt::NamedTuple)
-    par = []
-    ch = []
+    names = Symbol[]              # this scope's parameters, in order of first mention
+    exprs = Any[]
+    explicit = Set{Symbol}()      # ...of which these came from an explicit `params =`
+    ch = []                       # children
+    function setparam!(name, ex, is_explicit)
+        i = findfirst(==(name), names)
+        if i === nothing
+            push!(names, name); push!(exprs, ex)
+        elseif is_explicit || !(name in explicit)
+            # An explicit `params = (...)` outranks the flat spelling of the
+            # same name, whichever order the two were written in.
+            exprs[i] = ex
+        end
+        is_explicit && push!(explicit, name)
+    end
     for p in fieldnames(nt)
-        if p == :params
-            append!(par, [:($pp=nt.params.$pp) for pp in fieldnames(fieldtype(nt, :params))])
-        elseif fieldtype(nt, p) <: Number
-            push!(par, :($p=nt.$p))
+        if p === :params
+            PT = fieldtype(nt, :params)
+            PT <: NamedTuple ||
+                return :(throw(ArgumentError("`params` names this scope's parameters and must be a NamedTuple, got $($PT)")))
+            for pp in fieldnames(PT)
+                setparam!(pp, :(nt.params.$pp), true)
+            end
         elseif fieldtype(nt, p) <: NamedTuple
-            push!(ch, :($p=canonicalize_params(nt.$p)))
+            push!(ch, :($p = canonicalize_params(nt.$p)))
+        else
+            # Leaf: a parameter of this scope. Deliberately not restricted to
+            # `Number` — silently dropping anything else is how overrides used
+            # to go missing without a word.
+            setparam!(p, :(nt.$p), false)
         end
     end
+    par = [:($name = $ex) for (name, ex) in zip(names, exprs)]
     return quote
         (; params=(;$(par...)), $(ch...))
     end
@@ -69,8 +113,8 @@ function canonicalize_params(p::Dict)
             res[k] = canonicalize_params(v)
         elseif v isa NamedTuple
             res[k] = canonicalize_params(Dict(pairs(v)))
-        elseif v isa Number
-            get!(res, :params, Dict{Symbol, Number}())[k] = v
+        else
+            get!(res, :params, Dict{Symbol, Any}())[k] = v
         end
     end
     res
@@ -80,18 +124,20 @@ end
     par = []
     ch = []
     for p in fieldnames(nt)
-        if p == :params
+        if p === :params
             for pp in fieldnames(fieldtype(nt, :params))
                 if pp in fieldnames(nt)
+                    # Name collides with a child: keep it qualified, that is
+                    # the one case the `params` key exists for.
                     push!(par, :($pp=nt.params.$pp))
                 else
                     push!(ch, :($pp=nt.params.$pp))
                 end
             end
-        elseif fieldtype(nt, p) <: Number
-            push!(ch, :($p=nt.$p))
         elseif fieldtype(nt, p) <: NamedTuple
             push!(ch, :($p=compact_params(nt.$p)))
+        else
+            push!(ch, :($p=nt.$p))
         end
     end
     if isempty(par)
@@ -119,32 +165,53 @@ Base.getproperty(lens::ValLens, ::Symbol; type=:unknown) = cedarerror("Reached t
 """
     ParamLens(::NamedTuple)
 
-Takes a nested named tuple to override arguments.
-For example `sweep.foo(bar=1)` by default returns `(bar=1,)`
-unless `ParamLens((foo=(bar=2,),))` is used, in which case it'll return `(bar=2,)`
+Navigates a nested override tuple: calling the lens with a scope's declared
+parameters and their defaults returns those defaults with the overrides merged
+in, and `getproperty` descends into a child instance.
+
+The tuple may be written in either shape (see `canonicalize_params`) — a leaf is
+a parameter of the scope, a group is a child:
+
+```julia
+ParamLens((vin = 2.0, x1 = (rv = 2e3,)))(; vin = 1.0)   # (vin = 2.0,)
+ParamLens((params = (vin = 2.0,),))(; vin = 1.0)        # (vin = 2.0,)
+getproperty(ParamLens((x1 = (rv = 2e3,),)), :x1)(; rv = 1e3)   # (rv = 2000.0,)
+```
+
+The tuple is canonicalized on construction, so everything downstream reads one
+unambiguous shape.
 """
 struct ParamLens{NT<:NamedTuple} <: AbstractParamLens
     nt::NT
     function ParamLens(nt::NT=(;)) where {NT<:NamedTuple}
-        #nnt = canonicalize_params(nt)
-        new{typeof(nt)}(nt)
+        nnt = canonicalize_params(nt)
+        new{typeof(nnt)}(nnt)
     end
 end
 
+# A canonical tuple always carries a `params` field, so "nothing to override
+# here" is an empty tuple or an empty `params` with no children.
+_lens_isempty(nt::NamedTuple) =
+    isempty(nt) || (keys(nt) === (:params,) && isempty(nt.params))
+
 function Base.getproperty(🔍::ParamLens{T}, sym::Symbol; type=:unknown) where T
     nt = getfield(🔍, :nt)
+    # Child lookup only: a scope's own parameters live under `params` after
+    # canonicalization and are never descended into. That is what makes a name
+    # that is both a parameter and an instance work — `x1 = 2.0` sets the
+    # parameter and leaves instance `X1` on its netlist defaults, `x1 = (rv=…)`
+    # does the reverse.
     nnt = get(nt, sym, (;))
-    if !isa(nnt, NamedTuple)
-        return ValLens(nnt)
-    end
-    isempty(nnt) && return IdentityLens()
+    isa(nnt, NamedTuple) || return ValLens(nnt)
+    _lens_isempty(nnt) && return IdentityLens()
     return ParamLens(nnt)
 end
 
 function (🔍::ParamLens)(;kwargs...)
     nt = getfield(🔍, :nt)
-    hasfield(typeof(nt), :params) || return values(kwargs)
-    merge(values(kwargs), nt.params)
+    defaults = values(kwargs)
+    hasfield(typeof(nt), :params) || return defaults
+    merge(defaults, nt.params)
 end
 
 (🔍::ParamLens{typeof((;))})(val) = val
@@ -485,7 +552,7 @@ function modify_spice(io::IO, node::SNode, nt::NamedTuple, startof)
     startof
 end
 
-function alter(io::IO, node::SNode, nt::NamedTuple)
+function MNA.alter(io::IO, node::SNode, nt::NamedTuple)
     startof=node.startof+node.expr.off
     startof = modify_spice(io, node, canonicalize_params(nt), startof)
     endoff = node.startof+node.expr.off+node.expr.width-1
@@ -500,12 +567,12 @@ end
 Print a netlist with the given parameters substituted.
 Parameters in subcircuits can be passed as named tuples.
 """
-alter(node::SNode; kwargs...) = alter(stdout, node, values(kwargs))
-alter(node::SNode, nt::ParamSim) = alter(stdout, node, nt.params)
-alter(node::SNode, nt::ParamLens) = alter(stdout, node, getfield(nt, :nt))
-alter(io::IO, node::SNode; kwargs...) = alter(io, node, values(kwargs))
-alter(io::IO, node::SNode, nt::ParamSim) = alter(io, node, nt.params)
-alter(io::IO, node::SNode, nt::ParamLens) = alter(io, node, getfield(nt, :nt))
+MNA.alter(node::SNode; kwargs...) = MNA.alter(stdout, node, values(kwargs))
+MNA.alter(node::SNode, nt::ParamSim) = MNA.alter(stdout, node, nt.params)
+MNA.alter(node::SNode, nt::ParamLens) = MNA.alter(stdout, node, getfield(nt, :nt))
+MNA.alter(io::IO, node::SNode; kwargs...) = MNA.alter(io, node, values(kwargs))
+MNA.alter(io::IO, node::SNode, nt::ParamSim) = MNA.alter(io, node, nt.params)
+MNA.alter(io::IO, node::SNode, nt::ParamLens) = MNA.alter(io, node, getfield(nt, :nt))
 
 
 struct SpectreParseError

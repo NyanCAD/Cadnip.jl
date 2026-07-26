@@ -93,12 +93,48 @@ end
 The string macros (`sp"..."`, `spc"..."`, `va"..."`) expand at the call site
 and work transparently in both top-level and function-body contexts.
 
+### Parameters and sweeps
+
+A netlist `.param` is the knob a design is parameterized on: bias point, device
+size, source amplitude. Override one by name when the circuit is built, re-bind
+it with `alter`, or make it a sweep axis — the same name in every case:
+
+```julia
+Base.include(@__MODULE__, SpiceFile("amp.sp"))  # .param vbias=1.1472, .param rd=10k
+
+c = MNACircuit(amp; vbias=1.2)                  # override at construction
+c = alter(c; rd=20e3)                           # re-bind (introduces the knob if absent)
+
+for (p, sol) in dc!(CircuitSweep(amp, Sweep(vbias = 1.05:0.05:1.30)))
+    @show p.vbias, sol[:drain]                  # DC transfer curve
+end
+```
+
+Subcircuit parameters are keyed by instance name, and an override outranks the
+value the instance line spells out (`X1 in out divider r1val=2k`):
+
+```julia
+c = MNACircuit(top; x1=(r1val=1e3,))            # or var"x1.r1val" as a sweep axis
+```
+
+Parameters and instances share a namespace, and the shape of the override tells
+them apart: **a leaf is a parameter, a group is an instance**. So with a
+`.param x1` next to an `X1` instance, `x1=2.0` sets the parameter and
+`x1=(r1val=1e3,)` addresses the instance; `params=(x1=2.0,)` names the parameter
+explicitly when you need both at once.
+
+Two limits worth knowing: device instance parameters are not reachable this way
+(`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
+override names are not validated against the netlist, so a typo silently leaves
+the default in place.
+
 ### Analyses
 
 ```julia
 sol = dc!(circuit)                             # DC operating point
 sol = tran!(circuit, (0.0, 1e-3))              # Transient
 ac  = ac!(circuit)                             # AC small-signal (linearized DSS)
+ns  = noise!(circuit, :out; freqs=acdec(10, 1, 1e6))   # Noise
 result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 ```
 

@@ -5,8 +5,14 @@ using Base.Iterators
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
 
+# One `alter` for the whole package: MNA owns the generic (it defines the
+# `MNACircuit` method), everything else — this optics version, the netlist-text
+# version in spectre.jl — adds methods to it. Re-exported above, so
+# `using Cadnip` and `using Cadnip.MNA` name the same function rather than two
+# that shadow each other.
+#
 # This `alter()` is to make it easy to apply directly to a struct or named tuple with the optics.
-function alter(x::T, params) where {T}
+function MNA.alter(x::T, params) where {T}
     lens(selector::Union{PropertyLens,ComposedFunction}) = selector
     lens(selector::Symbol) = Accessors.opticcompose(PropertyLens.(Symbol.(split(string(selector), ".")))...)
 

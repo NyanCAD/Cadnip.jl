@@ -109,6 +109,11 @@ elseif RUN_CORE
         @testset "noise.jl" include("noise.jl")
     end
 
+    # End-to-end design flow: hand derivation → op → DC sweep → AC → tran → noise
+    @testset "Design Flow" begin
+        @testset "design_flow.jl" include("design_flow.jl")
+    end
+
     # PDK Precompilation tests
     @testset "PDK Precompilation" begin
         @testset "testpdk/pdk_test.jl" include("testpdk/pdk_test.jl")

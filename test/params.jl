@@ -8,7 +8,7 @@ using Cadnip.MNA: Resistor, Capacitor, VoltageSource
 
 using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using Cadnip: ParamLens, IdentityLens
-using Cadnip: dc!
+using Cadnip: dc!, CircuitSweep, Sweep
 
 # Loading a Makie backend activates CadnipMakieExt, which defines Cadnip.explore.
 import CairoMakie
@@ -324,6 +324,192 @@ end
 
     # Current should reflect new R: I = -V/R = -5/500 = -0.01
     @test sol2[:I_V] ≈ -0.01
+end
+
+#==============================================================================#
+# Test 8: Netlist `.param` overrides through the high-level API
+#
+# A `.param` is the designer's knob: bias point, device size, source amplitude.
+# Overriding one has to work in the spelling a user reaches for first —
+# `MNACircuit(ckt; vin=4.0)` and `Sweep(vin=...)` — not only in the qualified
+# `params=(vin=4.0,)` form. Getting this wrong is silent: every sweep point
+# returns the netlist default and the sweep looks like a perfectly flat curve.
+#==============================================================================#
+
+# Netlists live at module top level (world age; see CLAUDE.md "File-First Loading").
+const divider_ckt = sp"""
+.param vin=1.0
+.param rtop=1k
+V1 in 0 DC vin
+R1 in out {rtop}
+R2 out 0 1k
+"""i
+
+const hier_ckt = sp"""
+.subckt divider a out b r1val=1k r2val=1k
+R1 a out {r1val}
+R2 out b {r2val}
+.ends
+.param vin=3.0
+V1 in 0 DC vin
+X1 in vout 0 divider r1val=2k r2val=1k
+"""i
+
+# `.param x1` next to an `X1` instance: the one case where a name means two
+# different things in the same scope. (Subcircuit builders are named after the
+# `.subckt`, so this one cannot reuse `divider` above — two netlists in one
+# module would generate the same builder name.)
+const collide_ckt = sp"""
+.subckt pair a out b rv=1k
+R1 a out {rv}
+R2 out b 1k
+.ends
+.param x1=2000
+V1 in 0 DC 4
+Rs in mid {x1}
+X1 mid vout 0 pair rv=1k
+"""i
+
+@testset "netlist .param overrides" begin
+    # Baseline: the netlist's own values.
+    @test dc!(MNACircuit(divider_ckt))[:out] ≈ 0.5
+
+    # Flat spelling — the one the README and CLAUDE.md document.
+    @test dc!(MNACircuit(divider_ckt; vin=4.0))[:out] ≈ 2.0
+    # Qualified spelling — the ParamLens `params=` form.
+    @test dc!(MNACircuit(divider_ckt; params=(vin=4.0,)))[:out] ≈ 2.0
+    # Both at once: the explicit `params=` wins.
+    @test dc!(MNACircuit(divider_ckt; vin=6.0, params=(vin=4.0,)))[:out] ≈ 2.0
+
+    # A `.param` feeding a device value, not a source value.
+    @test dc!(MNACircuit(divider_ckt; rtop=3e3))[:out] ≈ 0.25
+
+    # Overriding both knobs at once.
+    @test dc!(MNACircuit(divider_ckt; vin=4.0, rtop=3e3))[:out] ≈ 1.0
+
+    # alter() re-parameterizes an existing circuit.
+    @test dc!(alter(MNACircuit(divider_ckt; vin=4.0); vin=2.0))[:out] ≈ 1.0
+
+    # A name no scope declares is inert (it is not a parameter of this circuit).
+    @test dc!(MNACircuit(divider_ckt; nosuch=1.0))[:out] ≈ 0.5
+end
+
+@testset "overrides survive mixed spellings" begin
+    # Building with one spelling and re-binding with the other has to land on the
+    # same parameter. `alter` writing flat next to an existing qualified entry
+    # would otherwise be discarded — an explicit `params=` outranks the flat form
+    # — and the sweep would come back a flat line with no error, which is the
+    # exact failure mode this whole path exists to prevent.
+    @test dc!(alter(MNACircuit(divider_ckt; vin=1.0); vin=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; params=(vin=1.0,)); var"params.vin"=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; params=(vin=1.0,)); vin=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; vin=1.0); var"params.vin"=4.0))[:out] ≈ 2.0
+
+    # ...including when a sweep axis is spelled differently from its base value.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [2.0, 4.0]); params=(vin=1.0,))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [1.0, 2.0]
+
+    # The same rule one level down: the knob is updated where it already lives.
+    @test dc!(alter(MNACircuit(hier_ckt; x1=(params=(r1val=2e3,),)); var"x1.r1val"=1e3))[:vout] ≈ 1.5
+end
+
+@testset "netlist .param sweeps" begin
+    # The sweep axis must actually move the operating point — a swept `.param`
+    # that silently resolves to its default gives a flat curve, and every
+    # "gain is constant across the sweep" assertion passes for the wrong reason.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [1.0, 2.0, 4.0]); vin=1.0)
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 1.0, 2.0]
+
+    # The qualified selector addresses the same parameter.
+    cs = CircuitSweep(divider_ckt, Sweep(var"params.vin" = [1.0, 2.0]); params=(vin=1.0,))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 1.0]
+
+    # A swept axis needs no base value of its own — `alter` introduces the knob.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [1.0, 4.0]))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 2.0]
+
+    # Points and solutions stay aligned.
+    cs = CircuitSweep(divider_ckt, Sweep(rtop = [1e3, 3e3]); rtop=1e3)
+    for (p, sol) in dc!(cs)
+        @test sol[:out] ≈ 1.0 * 1e3 / (p.rtop + 1e3)
+    end
+end
+
+@testset "subcircuit instance parameter overrides" begin
+    # X1 spells out r1val=2k: 3V across 2k+1k → 1V at the tap.
+    @test dc!(MNACircuit(hier_ckt))[:vout] ≈ 1.0
+
+    # An override has to outrank the instance line — otherwise a parameter the
+    # netlist happens to set is unreachable from alter() and from sweeps.
+    @test dc!(MNACircuit(hier_ckt; x1=(r1val=1e3,)))[:vout] ≈ 1.5
+    @test dc!(MNACircuit(hier_ckt; x1=(params=(r1val=1e3,),)))[:vout] ≈ 1.5
+
+    # Parent-scope and instance-scope parameters override independently.
+    @test dc!(MNACircuit(hier_ckt; vin=6.0, x1=(r1val=1e3,)))[:vout] ≈ 3.0
+
+    # ... and a subcircuit instance parameter is a usable sweep axis.
+    cs = CircuitSweep(hier_ckt, Sweep(var"x1.r1val" = [1e3, 2e3]); x1=(r1val=1e3,))
+    @test [sol[:vout] for (_, sol) in dc!(cs)] ≈ [1.5, 1.0]
+
+    # A `.subckt` default the instance line does not set stays overridable.
+    @test dc!(MNACircuit(hier_ckt; x1=(r2val=3e3,)))[:vout] ≈ 1.8
+end
+
+@testset "parameter/instance name collision" begin
+    # `.param x1=2000` (the series resistor Rs) and instance `X1` (a 1k/1k
+    # divider) share the name. The *shape* of the override decides which one it
+    # addresses: a leaf is the parameter, a group is the instance.
+    tap(rs, rv) = 4 * 1e3 / (rs + rv + 1e3)
+
+    @test dc!(MNACircuit(collide_ckt))[:vout] ≈ tap(2e3, 1e3)
+
+    # Leaf → the parameter: Rs goes 2k → 6k.
+    param_hit = dc!(MNACircuit(collide_ckt; x1=6000.0))[:vout]
+    @test param_hit ≈ tap(6e3, 1e3)
+
+    # Group → the instance: its rv goes 1k → 3k, Rs stays 2k.
+    @test dc!(MNACircuit(collide_ckt; x1=(rv=3e3,)))[:vout] ≈ tap(2e3, 3e3)
+
+    # `params=` names the parameter explicitly — same as the leaf spelling, and
+    # the form to reach for when both meanings are needed at once.
+    @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,)))[:vout] ≈ param_hit
+    @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,), x1=(rv=3e3,)))[:vout] ≈
+          tap(6e3, 3e3)
+end
+
+@testset "canonical / compact parameter trees" begin
+    canon = Cadnip.canonicalize_params
+    compact = Cadnip.compact_params
+
+    # Compact (what a user writes) → canonical (what the lens reads).
+    @test canon((; params=(;boo=4), foo=2, bar=(; baz=3))) ==
+          (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
+
+    # Canonicalization is idempotent, so the lens accepts either shape.
+    c = canon((; params=(;boo=4), foo=2, bar=(; baz=3)))
+    @test canon(c) == c
+
+    # An explicit `params=` outranks the flat spelling, written either order.
+    @test canon((; vin=1.0, params=(;vin=2.0))).params.vin == 2.0
+    @test canon((; params=(;vin=2.0), vin=1.0)).params.vin == 2.0
+
+    # A leaf that isn't a Number is still a parameter, not something to drop.
+    @test canon((; mode=:fast)).params.mode == :fast
+
+    # `compact_params` is the inverse — this is the shape `ParamObserver`
+    # reports, so an observed tree can be handed straight back as an override.
+    @test compact(canon((; vin=1.0, x1=(rv=2.0,)))) == (vin=1.0, x1=(rv=2.0,))
+    # ...and it keeps the qualified form exactly where it is needed.
+    @test compact(canon((; params=(x1=2.0,), x1=(rv=3.0,)))) ==
+          (params=(x1=2.0,), x1=(rv=3.0,))
+
+    # Lens-level: leaf is a parameter, group is a child, and a leaf is never
+    # descended into.
+    @test ParamLens((vin=2.0,))(; vin=1.0) == (vin=2.0,)
+    @test ParamLens((params=(vin=2.0,),))(; vin=1.0) == (vin=2.0,)
+    @test ParamLens((x1=(rv=2.0,),))(; vin=1.0) == (vin=1.0,)
+    @test getproperty(ParamLens((x1=(rv=2.0,),)), :x1)(; rv=1.0) == (rv=2.0,)
+    @test getproperty(ParamLens((vin=2.0,)), :x1) isa IdentityLens
 end
 
 end # module params_tests
