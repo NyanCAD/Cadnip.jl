@@ -1502,20 +1502,34 @@ Set `params.<parts...> = value`, inserting any level the NamedTuple does not
 carry yet. A netlist circuit starts out with no parameters at all — its `.param`
 defaults live in the generated builder — so setting a knob has to be able to
 introduce it, not just overwrite one that is already there.
+
+A knob already carried under the canonical `params` group is updated *there*
+rather than shadowed by a flat sibling: `canonicalize_params` lets an explicit
+`params=` outrank the flat spelling, so writing flat next to an existing
+qualified entry would leave the older value in force — the silent no-op this
+whole path exists to prevent.
 """
 function _set_param_path(params::NamedTuple, parts, value)
     head = first(parts)
     if length(parts) == 1
-        # Keep the stored type stable when re-setting an existing Float64 knob.
-        if isa(value, Number) && isa(get(params, head, nothing), Float64)
-            value = Float64(value)
+        own = get(params, :params, nothing)
+        if head !== :params && isa(own, NamedTuple) && haskey(own, head)
+            return merge(params, (params = _set_leaf(own, head, value),))
         end
-        return merge(params, NamedTuple{(head,)}((value,)))
+        return _set_leaf(params, head, value)
     end
     sub = get(params, head, (;))
     isa(sub, NamedTuple) ||
         throw(ArgumentError("cannot descend into parameter `$head`: it holds a $(typeof(sub)), not a parameter group"))
     return merge(params, NamedTuple{(head,)}((_set_param_path(sub, parts[2:end], value),)))
+end
+
+function _set_leaf(nt::NamedTuple, name::Symbol, value)
+    # Keep the stored type stable when re-setting an existing Float64 knob.
+    if isa(value, Number) && isa(get(nt, name, nothing), Float64)
+        value = Float64(value)
+    end
+    return merge(nt, NamedTuple{(name,)}((value,)))
 end
 
 """

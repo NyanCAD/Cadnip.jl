@@ -394,6 +394,25 @@ X1 mid vout 0 pair rv=1k
     @test dc!(MNACircuit(divider_ckt; nosuch=1.0))[:out] ≈ 0.5
 end
 
+@testset "overrides survive mixed spellings" begin
+    # Building with one spelling and re-binding with the other has to land on the
+    # same parameter. `alter` writing flat next to an existing qualified entry
+    # would otherwise be discarded — an explicit `params=` outranks the flat form
+    # — and the sweep would come back a flat line with no error, which is the
+    # exact failure mode this whole path exists to prevent.
+    @test dc!(alter(MNACircuit(divider_ckt; vin=1.0); vin=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; params=(vin=1.0,)); var"params.vin"=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; params=(vin=1.0,)); vin=4.0))[:out] ≈ 2.0
+    @test dc!(alter(MNACircuit(divider_ckt; vin=1.0); var"params.vin"=4.0))[:out] ≈ 2.0
+
+    # ...including when a sweep axis is spelled differently from its base value.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [2.0, 4.0]); params=(vin=1.0,))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [1.0, 2.0]
+
+    # The same rule one level down: the knob is updated where it already lives.
+    @test dc!(alter(MNACircuit(hier_ckt; x1=(params=(r1val=2e3,),)); var"x1.r1val"=1e3))[:vout] ≈ 1.5
+end
+
 @testset "netlist .param sweeps" begin
     # The sweep axis must actually move the operating point — a swept `.param`
     # that silently resolves to its default gives a flat curve, and every
