@@ -1261,7 +1261,15 @@ The stamp! method takes `x` parameter for the current operating point.
 - `Is`: Saturation current (default: 1e-14 A)
 - `Vt`: Thermal voltage (default: 0.026 V ≈ kT/q at 300K)
 - `n`: Ideality factor (default: 1.0)
+- `KF`: Flicker (1/f) noise coefficient (default: 0.0 — flicker off)
+- `AF`: Flicker noise current exponent (default: 1.0)
+- `FFE`: Flicker noise frequency exponent (default: 1.0)
 - `name`: Device name
+
+Shot noise (`2q·|I|`) is always registered at the junction bias; flicker noise
+(`KF·|I|^AF / f^FFE`) is registered only when `KF > 0`. Both are structure-
+discovery side effects consumed by [`noise!`](@ref) and cost DC/transient
+nothing (see doc/noise_analysis_design.md).
 
 # Example
 ```julia
@@ -1284,15 +1292,21 @@ struct Diode
     Is::Float64    # Saturation current
     Vt::Float64    # Thermal voltage
     n::Float64     # Ideality factor
+    KF::Float64    # Flicker noise coefficient
+    AF::Float64    # Flicker noise current exponent
+    FFE::Float64   # Flicker noise frequency exponent
     limit::Bool    # PCNR junction limiting (see doc/pcnr_plan.md)
     vcrit::Float64 # pnjlim critical voltage (precomputed; constant per device)
     name::Symbol
 end
 
-function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, limit::Bool=true, name::Symbol=:D)
+function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0,
+               KF::Real=0.0, AF::Real=1.0, FFE::Real=1.0,
+               limit::Bool=true, name::Symbol=:D)
     nVt = Float64(n) * Float64(Vt)
     vcrit = nVt * log(nVt / (sqrt(2.0) * Float64(Is)))
-    Diode(Float64(Is), Float64(Vt), Float64(n), limit, vcrit, name)
+    Diode(Float64(Is), Float64(Vt), Float64(n),
+          Float64(KF), Float64(AF), Float64(FFE), limit, vcrit, name)
 end
 
 export Diode
@@ -1367,6 +1381,7 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         # DirectStampContext, and a structure-discovery side effect on
         # MNAContext, so DC/transient numerics are unchanged.
         register_shot_noise!(ctx, p, n, I0; name=D.name)
+        _register_diode_flicker!(ctx, p, n, D, I0)
     else
         # Classic companion model, identical to the pre-PCNR diode: raw
         # exponential (no clamp — this is the reference/unaugmented model),
@@ -1388,8 +1403,24 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         stamp_b!(ctx, n,  Ieq)
 
         register_shot_noise!(ctx, p, n, I0; name=D.name)
+        _register_diode_flicker!(ctx, p, n, D, I0)
     end
 
+    return nothing
+end
+
+# Flicker (1/f) noise of a junction carrying DC current `I0`: PSD
+# `KF·|I0|^AF / f^FFE`, registered only when the device carries a nonzero
+# flicker coefficient. Shared by the `limit`/no-limit Diode paths and
+# DiodeWithCap; a no-op on DirectStampContext, so the transient path pays
+# nothing (see doc/noise_analysis_design.md).
+@inline function _register_diode_flicker!(ctx::AnyMNAContext, p::Int, n::Int, D, I0)
+    if D.KF > 0
+        # Same registrar the Verilog-A flicker_noise(pwr, exp) lowering uses:
+        # pwr = KF·|I|^AF (the flicker coefficient folded with the bias current),
+        # exp = FFE (the frequency exponent).
+        register_flicker_noise!(ctx, p, n, D.KF * abs(I0)^D.AF, D.FFE; name=D.name)
+    end
     return nothing
 end
 
@@ -1410,6 +1441,9 @@ For forward bias (V > Vj), the capacitance is clamped to avoid singularity.
 - `Cj0`: Zero-bias junction capacitance (default: 1e-12 F)
 - `Vj`: Junction potential (default: 0.7 V)
 - `m`: Grading coefficient (default: 0.5)
+- `KF`: Flicker (1/f) noise coefficient (default: 0.0 — flicker off)
+- `AF`: Flicker noise current exponent (default: 1.0)
+- `FFE`: Flicker noise frequency exponent (default: 1.0)
 - `name`: Device name
 
 # Charge Model
@@ -1425,13 +1459,18 @@ struct DiodeWithCap
     Cj0::Float64   # Zero-bias junction capacitance
     Vj::Float64    # Junction potential
     m::Float64     # Grading coefficient
+    KF::Float64    # Flicker noise coefficient
+    AF::Float64    # Flicker noise current exponent
+    FFE::Float64   # Flicker noise frequency exponent
     name::Symbol
 end
 
 function DiodeWithCap(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0,
-                       Cj0::Real=1e-12, Vj::Real=0.7, m::Real=0.5, name::Symbol=:D)
+                       Cj0::Real=1e-12, Vj::Real=0.7, m::Real=0.5,
+                       KF::Real=0.0, AF::Real=1.0, FFE::Real=1.0, name::Symbol=:D)
     DiodeWithCap(Float64(Is), Float64(Vt), Float64(n),
-                 Float64(Cj0), Float64(Vj), Float64(m), name)
+                 Float64(Cj0), Float64(Vj), Float64(m),
+                 Float64(KF), Float64(AF), Float64(FFE), name)
 end
 
 export DiodeWithCap
@@ -1522,8 +1561,10 @@ function stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int;
     stamp_b!(ctx, p, -Ieq)
     stamp_b!(ctx, n,  Ieq)
 
-    # Shot noise (2q·|I|) at the junction bias — see the Diode stamp.
+    # Shot noise (2q·|I|) and flicker noise (KF·|I|^AF/f^FFE) at the junction
+    # bias — see the Diode stamp.
     register_shot_noise!(ctx, p, n, I0; name=D.name)
+    _register_diode_flicker!(ctx, p, n, D, I0)
 
     # === Reactive Part (Junction Capacitance) ===
     Cj0, Vj, m = D.Cj0, D.Vj, D.m
@@ -1558,10 +1599,17 @@ Linear region:
 - `lambda`: Channel length modulation (default: 0)
 - `Cgd`: Gate-drain capacitance (default: 1e-15 F)
 - `Cgs`: Gate-source capacitance (default: 1e-15 F)
+- `KF`: Flicker (1/f) noise coefficient (default: 0.0 — flicker off)
+- `AF`: Flicker noise drain-current exponent (default: 1.0)
+- `FFE`: Flicker noise frequency exponent (default: 1.0)
 - `name`: Device name
 
 This is NOT a BSIM4-level model. It's a simple model for testing the
-multi-port stamping infrastructure.
+multi-port stamping infrastructure. Channel thermal noise (`4kT·(2/3)·gm`) is
+always registered in conduction; flicker noise (`KF·|Ids|^AF / f^FFE`, drain→
+source) is registered only when `KF > 0`. As with `K` and the capacitances, the
+device carries no geometry, so `KF` absorbs the `Cox·Leff²` denominator of the
+full ngspice level-1 flicker formula.
 """
 struct SimpleMOSFET
     Vth::Float64     # Threshold voltage
@@ -1569,13 +1617,18 @@ struct SimpleMOSFET
     lambda::Float64  # Channel length modulation
     Cgd::Float64     # Gate-drain capacitance
     Cgs::Float64     # Gate-source capacitance
+    KF::Float64      # Flicker noise coefficient
+    AF::Float64      # Flicker noise drain-current exponent
+    FFE::Float64     # Flicker noise frequency exponent
     name::Symbol
 end
 
 function SimpleMOSFET(; Vth::Real=0.5, K::Real=1e-3, lambda::Real=0.0,
-                       Cgd::Real=1e-15, Cgs::Real=1e-15, name::Symbol=:M)
+                       Cgd::Real=1e-15, Cgs::Real=1e-15,
+                       KF::Real=0.0, AF::Real=1.0, FFE::Real=1.0, name::Symbol=:M)
     SimpleMOSFET(Float64(Vth), Float64(K), Float64(lambda),
-                 Float64(Cgd), Float64(Cgs), name)
+                 Float64(Cgd), Float64(Cgs),
+                 Float64(KF), Float64(AF), Float64(FFE), name)
 end
 
 export SimpleMOSFET
@@ -1645,6 +1698,14 @@ function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
     # so the transient hot path is untouched (see doc/noise_analysis_design.md).
     if gm > 0
         register_channel_thermal_noise!(ctx, d, s, gm; name=M.name)
+    end
+    # Flicker (1/f) noise: KF·|Ids|^AF / f^FFE between drain and source, at the
+    # operating-point drain current. Off by default (KF == 0) and inert in cutoff
+    # (Ids == 0). No-op on DirectStampContext.
+    if M.KF > 0 && Ids != 0.0
+        # Shared with the Verilog-A flicker_noise(pwr, exp) path: pwr = KF·|Ids|^AF,
+        # exp = FFE.
+        register_flicker_noise!(ctx, d, s, M.KF * abs(Ids)^M.AF, M.FFE; name=M.name)
     end
 
     # === Capacitances ===

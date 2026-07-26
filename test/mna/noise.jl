@@ -15,7 +15,7 @@ using Cadnip.MNA: MNAContext, get_node!, stamp!, Resistor, Capacitor, Diode, Sim
 using Cadnip.MNA: reset_for_restamping!, num_noise_sources, noise_sources, noise_psd
 using Cadnip.MNA: stamp_noise!, register_thermal_noise!, register_shot_noise!
 using Cadnip.MNA: register_channel_thermal_noise!, register_white_noise!, register_flicker_noise!
-using Cadnip.MNA: noise_enabled, noise_source_name
+using Cadnip.MNA: noise_enabled, noise_source_name, DiodeWithCap
 using Cadnip.MNA: solve_dc, MNASpec, MNACircuit
 using Cadnip.MNA: THERMAL, SHOT, WHITE, FLICKER, NoiseSource
 using Cadnip.MNA: NodeIndex, GroundIndex
@@ -166,6 +166,108 @@ end
         src = noise_sources(ctx)[1]
         @test src.kind === THERMAL
         @test src.a ≈ 2e-3            # γ = 1 ⇒ a = gm
+    end
+
+    @testset "diode flicker noise registration at bias" begin
+        # A junction with KF > 0 registers flicker noise KF·|I|^AF / f^FFE at the
+        # operating-point current, alongside its (always-on) shot source. Hand-
+        # stamping at a known bias is a low-level stamping-mechanics test.
+        Is, Vt = 1e-14, 0.026
+        KF, AF, FFE = 1e-15, 1.0, 1.0
+        Vbias = 0.6
+        I0 = Is * (exp(Vbias / Vt) - 1.0)
+
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        stamp!(Diode(Is=Is, Vt=Vt, KF=KF, AF=AF, FFE=FFE, limit=false, name=:D1),
+               ctx, a, 0; x=[Vbias])
+
+        # Both shot and flicker sources are registered for this device.
+        @test num_noise_sources(ctx) == 2
+        flick = only(filter(s -> s.kind === FLICKER, noise_sources(ctx)))
+        @test flick.name === :D1
+        @test flick.a ≈ KF * abs(I0)^AF     # coefficient = KF·|I|^AF
+        @test flick.b ≈ FFE
+        @test resolve_index(ctx, flick.p) == a
+
+        # PSD = KF·|I|^AF / f^FFE — rolls off as 1/f for FFE = 1.
+        S(f) = KF * abs(I0)^AF / f^FFE
+        @test noise_psd(flick, 27.0, 10.0) ≈ S(10.0)
+        @test noise_psd(flick, 27.0, 1e3) ≈ S(1e3)
+        @test noise_psd(flick, 27.0, 10.0) ≈ 100 * noise_psd(flick, 27.0, 1e3)
+    end
+
+    @testset "diode flicker is off by default (KF = 0)" begin
+        # Without a KF card only shot noise registers — the flicker path is inert,
+        # so the default builtin diode's noise footprint is unchanged.
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        stamp!(Diode(Is=1e-14, Vt=0.026, limit=false, name=:D1), ctx, a, 0; x=[0.6])
+        @test isempty(filter(s -> s.kind === FLICKER, noise_sources(ctx)))
+        @test num_noise_sources(ctx) == 1        # shot only
+    end
+
+    @testset "DiodeWithCap flicker noise registration" begin
+        Is, Vt = 1e-14, 0.026
+        KF, AF = 2e-16, 1.0
+        Vbias = 0.5
+        I0 = Is * (exp(Vbias / Vt) - 1.0)
+
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        stamp!(DiodeWithCap(Is=Is, Vt=Vt, KF=KF, AF=AF, name=:D1), ctx, a, 0; x=[Vbias])
+
+        flick = only(filter(s -> s.kind === FLICKER, noise_sources(ctx)))
+        @test flick.a ≈ KF * abs(I0)^AF
+        @test flick.b ≈ 1.0
+    end
+
+    @testset "MOSFET flicker noise registration in conduction" begin
+        # A conducting MOSFET with KF > 0 registers drain→source flicker noise
+        # KF·|Ids|^AF / f^FFE at the operating-point drain current, alongside its
+        # channel thermal source.
+        Vth, K = 0.5, 1e-3
+        KF, AF, FFE = 1e-24, 2.0, 1.0
+        Vg, Vd = 1.5, 2.0                     # saturation: Vgs=1.0>0, Vds=2.0>Vgs-Vth
+        Ids = K / 2 * (Vg - Vth)^2            # square-law saturation current (lambda=0)
+
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        g = get_node!(ctx, :g)
+        stamp!(SimpleMOSFET(Vth=Vth, K=K, lambda=0.0, KF=KF, AF=AF, FFE=FFE, name=:M1),
+               ctx, d, g, 0; x=[Vd, Vg])
+
+        @test num_noise_sources(ctx) == 2     # channel thermal + flicker
+        flick = only(filter(s -> s.kind === FLICKER, noise_sources(ctx)))
+        @test flick.name === :M1
+        @test flick.a ≈ KF * abs(Ids)^AF
+        @test flick.b ≈ FFE
+        @test resolve_index(ctx, flick.p) == d
+        @test resolve_index(ctx, flick.n) == 0
+    end
+
+    @testset "MOSFET in cutoff registers no flicker noise" begin
+        # Ids == 0 in cutoff ⇒ no flicker source even with KF > 0.
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        g = get_node!(ctx, :g)
+        stamp!(SimpleMOSFET(Vth=0.5, K=1e-3, KF=1e-24, name=:M1), ctx, d, g, 0; x=[1.0, 0.2])
+        @test num_noise_sources(ctx) == 0
+    end
+
+    @testset "builtin flicker uses the shared register_flicker_noise! path" begin
+        # The builtin diode/MOSFET stamps register through the same
+        # `register_flicker_noise!(ctx, p, n, pwr, exp)` entry point the Verilog-A
+        # `flicker_noise(pwr, exp)` lowering uses — no parallel construction.
+        ctx = MNAContext()
+        p = get_node!(ctx, :p)
+        n = get_node!(ctx, :n)
+        register_flicker_noise!(ctx, p, n, 1e-18, 1.2; name=:Nf)
+        src = only(noise_sources(ctx))
+        @test src.kind === FLICKER
+        @test src.a ≈ 1e-18
+        @test src.b ≈ 1.2
+        @test noise_psd(src, 27.0, 100.0) ≈ 1e-18 / 100.0^1.2
     end
 
     @testset "multiple sources accumulate; rebuild does not duplicate" begin
