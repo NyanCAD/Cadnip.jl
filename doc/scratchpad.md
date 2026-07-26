@@ -77,20 +77,56 @@ The most nebulous and least important at this stage: copying features from other
 - [x] UX/design: netlist `.param` overrides actually reach the netlist. Walking a
   hand-designed NMOS common-source stage through the high-level API turned up a
   silent-wrong-answer class of bug: `MNACircuit(ckt; vbias=1.2)` and
-  `Sweep(vbias=…)` resolved to the netlist default for every point (the lens only
-  merged a `params=(…)`-wrapped NamedTuple), a subcircuit parameter the instance
-  line spelled out was unreachable from an override entirely, and `alter` on a
-  circuit built without that knob threw instead of introducing it. A swept design
-  therefore read as a perfectly flat transfer curve — no error anywhere. Fixed at
-  all three levels (`ParamLens` flat merge, codegen precedence
-  lens > instance line > `.subckt` default, `alter` path insertion), and `alter`
-  is now one function instead of two shadowing ones (`using Cadnip` gets the
-  documented `alter(circuit; …)`). `test/design_flow.jl` walks the stage
+  `Sweep(vbias=…)` resolved to the netlist default for every point, a subcircuit
+  parameter the instance line spelled out was unreachable from an override
+  entirely, and `alter` on a circuit built without that knob threw instead of
+  introducing it. A swept design therefore read as a perfectly flat transfer
+  curve — no error anywhere.
+  The root cause was not a missing design but a disabled one: `ParamLens`'s
+  constructor had `#nnt = canonicalize_params(nt)` commented out, so the lens
+  only ever read the canonical `params=(…)` shape while users (and
+  `ParamObserver`, which reports `compact_params`) wrote the compact one. Fixed
+  by restoring canonicalization, which collapses to one rule — **a leaf is a
+  parameter of the scope, a group is a child**, `params=` names a parameter
+  explicitly when a name is both (`.param x1` next to `X1`). Plus codegen
+  precedence lens > instance line > `.subckt` default, and `alter` inserting
+  along the path so a swept axis needs no seeding. `alter` is also one function
+  instead of two shadowing ones (`using Cadnip` gets the documented
+  `alter(circuit; …)`). `test/design_flow.jl` walks the stage
   op → DC transfer curve → AC → transient → noise against the hand derivation, so
   the parameterization contract is pinned by a design rather than by a unit test.
   The two `test/mna/audio_integration.jl` sweeps were green *because* they were
   no-ops; they now assert the swept value reaches the source.
-- [ ] UX/design follow-ups found on that walkthrough, none blocking:
+- [ ] Parameterization follow-ups, in the order they bite:
+  - [ ] **Device instance parameters are not overridable** — `alter(c; var"r1.r"=2e3)`,
+    `r1=(r=2e3,)` and `var"r1.params.r"` are all silently ignored, so W/L can only
+    be swept if the netlist author wrapped the value in a `.param`. The
+    netlist-*text* `alter(io, ast; r1=(r=4.0,))` honours exactly this spelling, and
+    the commented-out CedarSim test at `test/basic.jl` ("device == param") shows
+    device params were part of the lens tree by design (`i1=(dc=-1,)`,
+    `rload=(r=2000.0,)`). Each device's codegen builds its params at a single site
+    (MOSFET/BJT/Diode/OSDI share one `param_kwargs` list; R/C/L one value
+    expression each), so it is ~6 hooks of the form
+    `Base.getproperty(lens, :r1)(; r=1000.0, m=1)` — constant-folded to the
+    literals under an empty lens, but in the restamp hot path, so gate it on the
+    zero-alloc transient tests and the vacask benchmarks.
+  - [ ] **`.model` cards cannot reference a `.param`** — `.param vt0=0.7` +
+    `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`, because
+    model cards are emitted as module-level `const`s outside the builder
+    (`const rmod = (rsh = rval,)`). This blocks PDK corner parameterization
+    (`.model … vto='vto_nom+dvt'`). Model cards need to move inside the builder
+    (or take a lens-resolved closure).
+  - [ ] Override names are not validated: a typo'd knob is inert, and so is a
+    device param (above). `ParamObserver` already walks the full tree, so a check
+    at `MNACircuit` construction could say "`vinn` is not a parameter of this
+    circuit; did you mean `vin`?" or "`x1` is an instance — write `x1=(rv=…)`".
+  - [ ] Subcircuit builders are named after the `.subckt` (`divider` →
+    `divider_mna_builder`), so two netlists loaded into the same module that both
+    define a `.subckt divider` silently overwrite each other's builder — the
+    second definition wins and the first netlist's instances then call it with
+    the wrong keyword arguments. Hit while writing `test/params.jl`. The name
+    needs the netlist's identity in it (the `sp"..."` gensym already has one).
+- [ ] UX/design follow-ups found on the same walkthrough, none blocking:
   - [ ] No device-level operating point. "Is M1 in saturation, what is gm?" can
     only be answered by hand from node voltages — there is no `.op` report and no
     device current (only voltage-source branch currents are state variables). The
@@ -99,8 +135,6 @@ The most nebulous and least important at this stage: copying features from other
   - [ ] No `.dc` sweep analysis. `CircuitSweep` covers it, but each point solves
     from zeros — `dc_solve_with_ctx` has no `u0`, so there is no continuation
     (warm start from the previous point) the way SPICE `.dc` does it.
-  - [ ] Override names are not validated: a typo'd knob is inert. `ParamObserver`
-    already collects the parameter hierarchy, so a check is within reach.
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise

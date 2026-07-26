@@ -243,24 +243,35 @@ sol(1e-4)          # state at t
 ```
 
 ### ParamLens Pattern
-`ParamLens` navigates hierarchical params and merges overrides into the defaults
-a scope declares. An override may be spelled flat (the name as it appears in the
-netlist) or qualified with `params`; both address the same parameter, and the
-qualified form wins if you somehow give both:
-```julia
-# Flat circuit params — both spellings equivalent
-circuit = MNACircuit(my_circuit; R1=100.0, R2=200.0)
-circuit = MNACircuit(my_circuit; params = (R1=100.0, R2=200.0))
-altered  = alter(circuit; R1=150.0)                 # or var"params.R1"=150.0
 
-# Hierarchical subcircuit params, keyed by instance name
-circuit = MNACircuit(my_circuit; inner = (R1=100.0,))
-altered  = alter(circuit; var"inner.R1"=200.0)      # or var"inner.params.R1"
+A scope (the top level, or a subcircuit instance) has *parameters* of its own
+and *children* it instantiates, in two namespaces that can collide. One rule
+tells them apart: **a leaf is a parameter of the scope, a group is a child.**
+
+```julia
+circuit = MNACircuit(my_circuit; R1=100.0, R2=200.0)   # parameters of the top scope
+altered  = alter(circuit; R1=150.0)
+
+circuit = MNACircuit(my_circuit; inner = (R1=100.0,))  # R1 of instance `inner`
+altered  = alter(circuit; var"inner.R1"=200.0)
 ```
+
+When a name is *both* a parameter and an instance (`.param x1` next to `X1`),
+`x1=2.0` sets the parameter and `x1=(rv=…)` addresses the instance; write
+`params=(x1=2.0,)` to name the parameter explicitly (it outranks the flat
+spelling) when you need both at once.
+
+`ParamLens` canonicalizes on construction — `canonicalize_params` maps the
+compact form users write to the `(params=(…), child=(params=(…),))` form the
+lens reads, and `compact_params` maps back (it is what `ParamObserver` reports,
+so an observed tree can be handed straight back as an override). Both are
+`@generated`, so the whole thing folds away at compile time.
+
 An override outranks the netlist: a subcircuit parameter the instance line
 spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
-a sweep axis. A name no scope declares is inert — it is not an error, so watch
-for typos in override names.
+a sweep axis. Two things are *not* reachable, and are silent when you try:
+device instance parameters (`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist
+with a `.param` instead), and a name no scope declares at all, i.e. a typo.
 
 ### Parameter Sweeps (the sweep API)
 

@@ -355,6 +355,21 @@ V1 in 0 DC vin
 X1 in vout 0 divider r1val=2k r2val=1k
 """i
 
+# `.param x1` next to an `X1` instance: the one case where a name means two
+# different things in the same scope. (Subcircuit builders are named after the
+# `.subckt`, so this one cannot reuse `divider` above — two netlists in one
+# module would generate the same builder name.)
+const collide_ckt = sp"""
+.subckt pair a out b rv=1k
+R1 a out {rv}
+R2 out b 1k
+.ends
+.param x1=2000
+V1 in 0 DC 4
+Rs in mid {x1}
+X1 mid vout 0 pair rv=1k
+"""i
+
 @testset "netlist .param overrides" begin
     # Baseline: the netlist's own values.
     @test dc!(MNACircuit(divider_ckt))[:out] ≈ 0.5
@@ -419,6 +434,63 @@ end
 
     # A `.subckt` default the instance line does not set stays overridable.
     @test dc!(MNACircuit(hier_ckt; x1=(r2val=3e3,)))[:vout] ≈ 1.8
+end
+
+@testset "parameter/instance name collision" begin
+    # `.param x1=2000` (the series resistor Rs) and instance `X1` (a 1k/1k
+    # divider) share the name. The *shape* of the override decides which one it
+    # addresses: a leaf is the parameter, a group is the instance.
+    tap(rs, rv) = 4 * 1e3 / (rs + rv + 1e3)
+
+    @test dc!(MNACircuit(collide_ckt))[:vout] ≈ tap(2e3, 1e3)
+
+    # Leaf → the parameter: Rs goes 2k → 6k.
+    param_hit = dc!(MNACircuit(collide_ckt; x1=6000.0))[:vout]
+    @test param_hit ≈ tap(6e3, 1e3)
+
+    # Group → the instance: its rv goes 1k → 3k, Rs stays 2k.
+    @test dc!(MNACircuit(collide_ckt; x1=(rv=3e3,)))[:vout] ≈ tap(2e3, 3e3)
+
+    # `params=` names the parameter explicitly — same as the leaf spelling, and
+    # the form to reach for when both meanings are needed at once.
+    @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,)))[:vout] ≈ param_hit
+    @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,), x1=(rv=3e3,)))[:vout] ≈
+          tap(6e3, 3e3)
+end
+
+@testset "canonical / compact parameter trees" begin
+    canon = Cadnip.canonicalize_params
+    compact = Cadnip.compact_params
+
+    # Compact (what a user writes) → canonical (what the lens reads).
+    @test canon((; params=(;boo=4), foo=2, bar=(; baz=3))) ==
+          (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
+
+    # Canonicalization is idempotent, so the lens accepts either shape.
+    c = canon((; params=(;boo=4), foo=2, bar=(; baz=3)))
+    @test canon(c) == c
+
+    # An explicit `params=` outranks the flat spelling, written either order.
+    @test canon((; vin=1.0, params=(;vin=2.0))).params.vin == 2.0
+    @test canon((; params=(;vin=2.0), vin=1.0)).params.vin == 2.0
+
+    # A leaf that isn't a Number is still a parameter, not something to drop.
+    @test canon((; mode=:fast)).params.mode == :fast
+
+    # `compact_params` is the inverse — this is the shape `ParamObserver`
+    # reports, so an observed tree can be handed straight back as an override.
+    @test compact(canon((; vin=1.0, x1=(rv=2.0,)))) == (vin=1.0, x1=(rv=2.0,))
+    # ...and it keeps the qualified form exactly where it is needed.
+    @test compact(canon((; params=(x1=2.0,), x1=(rv=3.0,)))) ==
+          (params=(x1=2.0,), x1=(rv=3.0,))
+
+    # Lens-level: leaf is a parameter, group is a child, and a leaf is never
+    # descended into.
+    @test ParamLens((vin=2.0,))(; vin=1.0) == (vin=2.0,)
+    @test ParamLens((params=(vin=2.0,),))(; vin=1.0) == (vin=2.0,)
+    @test ParamLens((x1=(rv=2.0,),))(; vin=1.0) == (vin=1.0,)
+    @test getproperty(ParamLens((x1=(rv=2.0,),)), :x1)(; rv=1.0) == (rv=2.0,)
+    @test getproperty(ParamLens((vin=2.0,)), :x1) isa IdentityLens
 end
 
 end # module params_tests

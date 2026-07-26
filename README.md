@@ -117,8 +117,16 @@ value the instance line spells out (`X1 in out divider r1val=2k`):
 c = MNACircuit(top; x1=(r1val=1e3,))            # or var"x1.r1val" as a sweep axis
 ```
 
-Overrides are not validated against the netlist: a name no scope declares is
-inert, so a typo silently leaves the netlist default in place.
+Parameters and instances share a namespace, and the shape of the override tells
+them apart: **a leaf is a parameter, a group is an instance**. So with a
+`.param x1` next to an `X1` instance, `x1=2.0` sets the parameter and
+`x1=(r1val=1e3,)` addresses the instance; `params=(x1=2.0,)` names the parameter
+explicitly when you need both at once.
+
+Two limits worth knowing: device instance parameters are not reachable this way
+(`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
+override names are not validated against the netlist, so a typo silently leaves
+the default in place.
 
 ### Analyses
 
