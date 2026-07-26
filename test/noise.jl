@@ -13,6 +13,8 @@ using Cadnip
 using Cadnip.MNA
 using Cadnip.SpectreEnvironment
 using Cadnip.MNA: K_BOLTZMANN, Q_ELEMENTARY
+using Cadnip.MNA: MNAContext, get_node!, stamp_conductance!, register_flicker_noise!
+using Cadnip.MNA: reset_for_restamping!
 using VADistillerModels   # sp_diode / sp_bjt, whose Verilog-A carries noise
 
 # Boltzmann·T at the default 27 °C operating temperature.
@@ -144,6 +146,37 @@ Q1 c b 0 qn
         @test all(≈(4 * _kT * R; rtol=1e-6), ns[:inoise])
         @test total_noise(ns; referred=:input)^2 ≈
               4 * _kT * R * (freqs[end] - freqs[1]) rtol=1e-6
+    end
+
+    @testset "flicker source: 1/f-shaped output noise" begin
+        # A pure flicker current source a/f^ffe across a noiseless conductance G
+        # produces output voltage noise |1/G|²·a/f^ffe — the FLICKER kind carried
+        # end-to-end through noise!'s adjoint. A noiseless `stamp_conductance!`
+        # load (no Johnson–Nyquist thermal source) isolates the flicker shape.
+        G = 1e-3            # 1 kΩ, noiseless
+        a = 1e-16           # flicker coefficient
+        function flicker_load(params, spec, t=0.0; x=Float64[], ctx=nothing)
+            ctx === nothing ? (ctx = MNAContext()) : reset_for_restamping!(ctx)
+            out = get_node!(ctx, :out)
+            stamp_conductance!(ctx, out, 0, G)
+            register_flicker_noise!(ctx, out, 0, a, 1.0; name=:nf)
+            return ctx
+        end
+
+        circuit = MNACircuit(flicker_load)
+        freqs = [1.0, 10.0, 100.0]
+        ns = noise!(circuit, :out; freqs=freqs)
+
+        Z2 = (1 / G)^2                         # |transfer|² = |1/G|²
+        expected = [Z2 * a / f for f in freqs] # 1/f roll-off
+        @test ns[:onoise] ≈ expected rtol=1e-6
+
+        # Single source ⇒ its contribution is the whole output noise.
+        @test ns[:nf] ≈ ns[:onoise]
+
+        # Decade steps drop the PSD by exactly 10× (the 1/f signature).
+        @test ns[:onoise][1] ≈ 10 * ns[:onoise][2] rtol=1e-6
+        @test ns[:onoise][2] ≈ 10 * ns[:onoise][3] rtol=1e-6
     end
 
     @testset "errors and edge cases" begin

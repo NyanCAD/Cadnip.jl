@@ -9,11 +9,13 @@ how it threads through the current MNA system **without slowing DC/transient**.
 Single-operating-point linear noise analysis is implemented (`src/noise.jl`):
 `noise!(circuit, output; freqs)` computes the output-noise PSD and per-source
 contributions, and `input=:V1` refers the noise back to a voltage-source input.
-Sources register from the builtin stamps (resistor thermal, diode shot, MOSFET
-channel thermal) *and* from Verilog-A `white_noise`/`flicker_noise`, which means
-every VADistiller model's full SPICE3 noise model — resistor, diode, BJT,
-MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — is live. The remaining work is the
-`.noise` netlist card surface and the ngspice cross-validation (N4). The
+Sources register from the builtin stamps (resistor thermal, diode shot+flicker,
+MOSFET channel thermal+flicker) *and* from Verilog-A `white_noise`/`flicker_noise`,
+which means every VADistiller model's full SPICE3 noise model — resistor, diode,
+BJT, MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — is live. The builtin flicker
+sources register through the very same `register_flicker_noise!` entry point the
+VA lowering uses, so there is one noise code path, not two. The remaining work is
+the `.noise` netlist card surface and the ngspice cross-validation (N4). The
 scaffolding this builds on:
 
 - `src/ac.jl` — the AC path builds a linearized descriptor state-space system
@@ -23,6 +25,13 @@ scaffolding this builds on:
 - `src/vasim.jl` — the Verilog-A `white_noise` / `flicker_noise` builtins are
   parsed (NyanVerilogAParser keywords) and lowered by `mna_noise_source`. These
   are the real per-device noise-source hooks.
+
+Builtin device noise (thermal `4kT·g`, shot `2qI`, flicker `KF·|I|^AF/f^FFE`) is
+attached to the MNA device stamps: the resistor registers thermal noise, the
+diode shot+flicker, and the MOSFET channel-thermal+flicker, all at the DC bias
+the noise channel is built at. The flicker registrations call the shared
+`register_flicker_noise!(ctx, p, n, pwr, exp)` — the same one `mna_noise_source`
+emits for VA `flicker_noise` — so builtins and Verilog-A converge on one path.
 
 ## How AC threads through MNA today (the pattern to reuse)
 
@@ -152,9 +161,9 @@ high-level API.
   (`test/mna/noise.jl`).
 
   The Verilog-A `white_noise`/`flicker_noise` builtins now register too (see
-  N1). The builtin `Diode`/`SimpleMOSFET` stamps still carry no `KF`/`AF` card,
-  so their flicker noise has no parameters to read; models that need it come in
-  through Verilog-A, which has the full SPICE3 flicker model.
+  N1), and the builtin `Diode`/`DiodeWithCap`/`SimpleMOSFET` stamps carry
+  `KF`/`AF`/`FFE` cards (off by default) whose flicker noise registers through
+  the same `register_flicker_noise!` entry point as the Verilog-A path.
 - **N1 — PSD models at the DC bias. _(landed)_** Per-source spectral density at
   the operating point: thermal `4kT·g`, shot `2qI`, VA `white_noise(pwr)` →
   `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes from the DC solution
@@ -190,6 +199,15 @@ high-level API.
   shot, flicker), MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — plus any user or PDK
   Verilog-A that writes noise contributions (`test/noise.jl`,
   `test/mna/noise.jl`).
+
+  **The builtin stamps.** The reference `Diode`/`DiodeWithCap`/`SimpleMOSFET`
+  builtins have no Verilog-A behind them, so they register flicker noise
+  (`KF·|I|^AF / f^FFE`, off unless a `KF`/`AF`/`FFE` card is given) directly from
+  their stamps — but through the *same* `register_flicker_noise!(ctx, p, n, pwr,
+  exp)` entry point the VA lowering emits (`pwr = KF·|I|^AF`, `exp = FFE`), not a
+  parallel construction. The diode reads the junction current, the MOSFET the
+  drain current, at the operating point the channel is built at — same zero-cost
+  contract (`test/mna/noise.jl`, `test/noise.jl`).
 - **N2 — Transfer functions via the AC system. _(landed)_** Reuse `ac!`'s
   linearized `(jωC + G)`; per output+frequency, one adjoint solve
   `(jωC+G)ᵀ x_adj = e_out` gives the transfer from every source at O(1) each
