@@ -3175,22 +3175,28 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         end
     end
 
-    # Generate parameter resolution code for the body
-    # For each local param: use kwarg if provided, else lens override, else default expression
+    # Generate parameter resolution code for the body.
+    #
+    # Precedence, strongest first:
+    #   1. lens override — `alter(circuit; var"x1.r1val"=...)`, a sweep axis
+    #   2. instance-line value — `X1 a b divider r1val=2k` (passed as a kwarg)
+    #   3. the `.subckt` default
+    #
+    # The lens has to outrank the instance line: overriding a value the netlist
+    # already spells out is the whole point of `alter`/sweeps. Feeding the
+    # netlist value in as the lens *default* gets both — the lens merge returns
+    # the override when there is one, and the netlist value when there isn't.
     param_resolution_exprs = Expr[]
     for (name, defs) in sema.params
         if haskey(local_params_with_defaults, name)
             def_expr = local_params_with_defaults[name]
-            # Check kwarg first, then lens, then default
+            netlist_val = gensym(Symbol(name, "_netlist"))
             push!(param_resolution_exprs, quote
-                $name = if !($name === nothing)
-                    $name  # Explicit kwarg override
-                else
-                    # Try lens override, falling back to default expression
-                    lens_params = lens(; $name = $def_expr)
+                $name = let $netlist_val = $name === nothing ? $def_expr : $name,
+                            lens_params = lens(; $name = $netlist_val)
                     ifelse(hasfield(typeof(lens_params), $(QuoteNode(name))),
                            getfield(lens_params, $(QuoteNode(name))),
-                           $def_expr)
+                           $netlist_val)
                 end
             end)
         end

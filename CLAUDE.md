@@ -243,17 +243,24 @@ sol(1e-4)          # state at t
 ```
 
 ### ParamLens Pattern
-`ParamLens` navigates hierarchical params and merges overrides at `.params` fields:
+`ParamLens` navigates hierarchical params and merges overrides into the defaults
+a scope declares. An override may be spelled flat (the name as it appears in the
+netlist) or qualified with `params`; both address the same parameter, and the
+qualified form wins if you somehow give both:
 ```julia
-# Flat circuit params
+# Flat circuit params — both spellings equivalent
+circuit = MNACircuit(my_circuit; R1=100.0, R2=200.0)
 circuit = MNACircuit(my_circuit; params = (R1=100.0, R2=200.0))
-altered = alter(circuit; var"params.R1"=150.0)
+altered  = alter(circuit; R1=150.0)                 # or var"params.R1"=150.0
 
-# Hierarchical subcircuit params
-circuit = MNACircuit(my_circuit; inner = (params = (R1=100.0,),))
-altered = alter(circuit; var"inner.params.R1"=200.0)
+# Hierarchical subcircuit params, keyed by instance name
+circuit = MNACircuit(my_circuit; inner = (R1=100.0,))
+altered  = alter(circuit; var"inner.R1"=200.0)      # or var"inner.params.R1"
 ```
-The `lens(; defaults...)` call merges with `lens.nt.params` if present.
+An override outranks the netlist: a subcircuit parameter the instance line
+spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
+a sweep axis. A name no scope declares is inert — it is not an error, so watch
+for typos in override names.
 
 ### Parameter Sweeps (the sweep API)
 
@@ -270,21 +277,19 @@ for (params, sol) in tran!(cs, (0.0, 5e-3))
 end
 ```
 
-**The gotcha (the "wrap"):** two things must line up or the sweep is a silent
-no-op that returns the default for every point.
-1. **Pass the base value as a `CircuitSweep` kwarg** (`; vac=1e-3, freq=1e3`
-   above) — this seeds the params NamedTuple so the swept name resolves. The
-   canonical working netlist example is `test/mna/audio_integration.jl`
-   (`.param vac` / `.param freq` driving a `SIN` source).
-2. **The builder must actually read `params.<name>` where you want variation.**
-   A hand-coded builder must `merge(defaults, params)` or use `ParamLens`. In a
-   SPICE netlist, a `.param` that feeds a *runtime-evaluated* source (SIN/PULSE
-   amplitude, freq) responds to the sweep; a `.param` baked into a *DC operating
-   value* is folded at codegen time and will not — vary that via a builder that
-   reads the param, not a bare `.param` on a `DC` card.
+The `CircuitSweep` kwargs (`; vac=1e-3, freq=1e3` above) set the *base* value of
+everything the sweep doesn't vary; a swept axis needs no seeding of its own. Any
+netlist `.param` responds: DC source values, device values, and
+runtime-evaluated SIN/PULSE amplitudes alike, at top level or inside a
+subcircuit. A hand-coded builder has to read `params.<name>` itself
+(`merge(defaults, params)` or `ParamLens`), and a swept name no scope declares is
+inert — the sweep runs and every point returns the netlist default. Netlist
+examples: `test/params.jl` (DC values, device values, instance params),
+`test/design_flow.jl` (a bias sweep as a DC transfer curve), and
+`test/mna/audio_integration.jl` (`.param vac` / `.param freq` on a `SIN` source).
 
-For hierarchical/subcircuit params use `var"a.b.c"` selectors with a matching
-wrapped base (`inner=(params=(R1=…),)`), same as `alter` (see ParamLens above).
+For hierarchical/subcircuit params use `var"a.b"` selectors with a matching base
+(`inner=(R1=…,)`), same as `alter` (see ParamLens above).
 
 ### SPICE Name Collisions
 PDK modules use `baremodule` so SPICE names like `inv`, `log`, `exp` don't

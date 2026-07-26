@@ -141,10 +141,37 @@ function Base.getproperty(🔍::ParamLens{T}, sym::Symbol; type=:unknown) where 
     return ParamLens(nnt)
 end
 
+"""
+    _flat_overrides(nt, defaults) -> NamedTuple
+
+The subset of `nt` naming a parameter this scope actually declares (i.e. a key of
+`defaults`). Lets an override be written flat — `MNACircuit(ckt; vin=2.0)` — next
+to the hierarchy keys (subcircuit instance names) that share the same NamedTuple,
+which must not leak into the parameter set. A NamedTuple given for a scalar
+parameter is read as hierarchy, not as that parameter's value, so a subcircuit
+instance may share a parameter's name without clobbering it.
+"""
+@generated function _flat_overrides(nt::NamedTuple, defaults::NamedTuple)
+    common = Symbol[]
+    for (name, default_type) in zip(fieldnames(defaults), fieldtypes(defaults))
+        i = findfirst(==(name), fieldnames(nt))
+        i === nothing && continue
+        fieldtypes(nt)[i] <: NamedTuple && !(default_type <: NamedTuple) && continue
+        push!(common, name)
+    end
+    :(NamedTuple{$(Tuple(common))}(nt))
+end
+
 function (🔍::ParamLens)(;kwargs...)
     nt = getfield(🔍, :nt)
-    hasfield(typeof(nt), :params) || return values(kwargs)
-    merge(values(kwargs), nt.params)
+    defaults = values(kwargs)
+    # Two accepted spellings for the same override, flat first so that an
+    # explicit `params=` wins when both name the same parameter:
+    #   flat:      MNACircuit(ckt; vin=2.0)          / Sweep(vin=...)
+    #   qualified: MNACircuit(ckt; params=(vin=2.0,)) / Sweep(var"params.vin"=...)
+    merged = merge(defaults, _flat_overrides(nt, defaults))
+    hasfield(typeof(nt), :params) || return merged
+    merge(merged, nt.params)
 end
 
 (🔍::ParamLens{typeof((;))})(val) = val
@@ -485,7 +512,7 @@ function modify_spice(io::IO, node::SNode, nt::NamedTuple, startof)
     startof
 end
 
-function alter(io::IO, node::SNode, nt::NamedTuple)
+function MNA.alter(io::IO, node::SNode, nt::NamedTuple)
     startof=node.startof+node.expr.off
     startof = modify_spice(io, node, canonicalize_params(nt), startof)
     endoff = node.startof+node.expr.off+node.expr.width-1
@@ -500,12 +527,12 @@ end
 Print a netlist with the given parameters substituted.
 Parameters in subcircuits can be passed as named tuples.
 """
-alter(node::SNode; kwargs...) = alter(stdout, node, values(kwargs))
-alter(node::SNode, nt::ParamSim) = alter(stdout, node, nt.params)
-alter(node::SNode, nt::ParamLens) = alter(stdout, node, getfield(nt, :nt))
-alter(io::IO, node::SNode; kwargs...) = alter(io, node, values(kwargs))
-alter(io::IO, node::SNode, nt::ParamSim) = alter(io, node, nt.params)
-alter(io::IO, node::SNode, nt::ParamLens) = alter(io, node, getfield(nt, :nt))
+MNA.alter(node::SNode; kwargs...) = MNA.alter(stdout, node, values(kwargs))
+MNA.alter(node::SNode, nt::ParamSim) = MNA.alter(stdout, node, nt.params)
+MNA.alter(node::SNode, nt::ParamLens) = MNA.alter(stdout, node, getfield(nt, :nt))
+MNA.alter(io::IO, node::SNode; kwargs...) = MNA.alter(io, node, values(kwargs))
+MNA.alter(io::IO, node::SNode, nt::ParamSim) = MNA.alter(io, node, nt.params)
+MNA.alter(io::IO, node::SNode, nt::ParamLens) = MNA.alter(io, node, getfield(nt, :nt))
 
 
 struct SpectreParseError

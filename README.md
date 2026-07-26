@@ -93,12 +93,40 @@ end
 The string macros (`sp"..."`, `spc"..."`, `va"..."`) expand at the call site
 and work transparently in both top-level and function-body contexts.
 
+### Parameters and sweeps
+
+A netlist `.param` is the knob a design is parameterized on: bias point, device
+size, source amplitude. Override one by name when the circuit is built, re-bind
+it with `alter`, or make it a sweep axis — the same name in every case:
+
+```julia
+Base.include(@__MODULE__, SpiceFile("amp.sp"))  # .param vbias=1.1472, .param rd=10k
+
+c = MNACircuit(amp; vbias=1.2)                  # override at construction
+c = alter(c; rd=20e3)                           # re-bind (introduces the knob if absent)
+
+for (p, sol) in dc!(CircuitSweep(amp, Sweep(vbias = 1.05:0.05:1.30)))
+    @show p.vbias, sol[:drain]                  # DC transfer curve
+end
+```
+
+Subcircuit parameters are keyed by instance name, and an override outranks the
+value the instance line spells out (`X1 in out divider r1val=2k`):
+
+```julia
+c = MNACircuit(top; x1=(r1val=1e3,))            # or var"x1.r1val" as a sweep axis
+```
+
+Overrides are not validated against the netlist: a name no scope declares is
+inert, so a typo silently leaves the netlist default in place.
+
 ### Analyses
 
 ```julia
 sol = dc!(circuit)                             # DC operating point
 sol = tran!(circuit, (0.0, 1e-3))              # Transient
 ac  = ac!(circuit)                             # AC small-signal (linearized DSS)
+ns  = noise!(circuit, :out; freqs=acdec(10, 1, 1e6))   # Noise
 result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 ```
 

@@ -8,7 +8,7 @@ using Cadnip.MNA: Resistor, Capacitor, VoltageSource
 
 using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using Cadnip: ParamLens, IdentityLens
-using Cadnip: dc!
+using Cadnip: dc!, CircuitSweep, Sweep
 
 # Loading a Makie backend activates CadnipMakieExt, which defines Cadnip.explore.
 import CairoMakie
@@ -324,6 +324,101 @@ end
 
     # Current should reflect new R: I = -V/R = -5/500 = -0.01
     @test sol2[:I_V] ≈ -0.01
+end
+
+#==============================================================================#
+# Test 8: Netlist `.param` overrides through the high-level API
+#
+# A `.param` is the designer's knob: bias point, device size, source amplitude.
+# Overriding one has to work in the spelling a user reaches for first —
+# `MNACircuit(ckt; vin=4.0)` and `Sweep(vin=...)` — not only in the qualified
+# `params=(vin=4.0,)` form. Getting this wrong is silent: every sweep point
+# returns the netlist default and the sweep looks like a perfectly flat curve.
+#==============================================================================#
+
+# Netlists live at module top level (world age; see CLAUDE.md "File-First Loading").
+const divider_ckt = sp"""
+.param vin=1.0
+.param rtop=1k
+V1 in 0 DC vin
+R1 in out {rtop}
+R2 out 0 1k
+"""i
+
+const hier_ckt = sp"""
+.subckt divider a out b r1val=1k r2val=1k
+R1 a out {r1val}
+R2 out b {r2val}
+.ends
+.param vin=3.0
+V1 in 0 DC vin
+X1 in vout 0 divider r1val=2k r2val=1k
+"""i
+
+@testset "netlist .param overrides" begin
+    # Baseline: the netlist's own values.
+    @test dc!(MNACircuit(divider_ckt))[:out] ≈ 0.5
+
+    # Flat spelling — the one the README and CLAUDE.md document.
+    @test dc!(MNACircuit(divider_ckt; vin=4.0))[:out] ≈ 2.0
+    # Qualified spelling — the ParamLens `params=` form.
+    @test dc!(MNACircuit(divider_ckt; params=(vin=4.0,)))[:out] ≈ 2.0
+    # Both at once: the explicit `params=` wins.
+    @test dc!(MNACircuit(divider_ckt; vin=6.0, params=(vin=4.0,)))[:out] ≈ 2.0
+
+    # A `.param` feeding a device value, not a source value.
+    @test dc!(MNACircuit(divider_ckt; rtop=3e3))[:out] ≈ 0.25
+
+    # Overriding both knobs at once.
+    @test dc!(MNACircuit(divider_ckt; vin=4.0, rtop=3e3))[:out] ≈ 1.0
+
+    # alter() re-parameterizes an existing circuit.
+    @test dc!(alter(MNACircuit(divider_ckt; vin=4.0); vin=2.0))[:out] ≈ 1.0
+
+    # A name no scope declares is inert (it is not a parameter of this circuit).
+    @test dc!(MNACircuit(divider_ckt; nosuch=1.0))[:out] ≈ 0.5
+end
+
+@testset "netlist .param sweeps" begin
+    # The sweep axis must actually move the operating point — a swept `.param`
+    # that silently resolves to its default gives a flat curve, and every
+    # "gain is constant across the sweep" assertion passes for the wrong reason.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [1.0, 2.0, 4.0]); vin=1.0)
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 1.0, 2.0]
+
+    # The qualified selector addresses the same parameter.
+    cs = CircuitSweep(divider_ckt, Sweep(var"params.vin" = [1.0, 2.0]); params=(vin=1.0,))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 1.0]
+
+    # A swept axis needs no base value of its own — `alter` introduces the knob.
+    cs = CircuitSweep(divider_ckt, Sweep(vin = [1.0, 4.0]))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [0.5, 2.0]
+
+    # Points and solutions stay aligned.
+    cs = CircuitSweep(divider_ckt, Sweep(rtop = [1e3, 3e3]); rtop=1e3)
+    for (p, sol) in dc!(cs)
+        @test sol[:out] ≈ 1.0 * 1e3 / (p.rtop + 1e3)
+    end
+end
+
+@testset "subcircuit instance parameter overrides" begin
+    # X1 spells out r1val=2k: 3V across 2k+1k → 1V at the tap.
+    @test dc!(MNACircuit(hier_ckt))[:vout] ≈ 1.0
+
+    # An override has to outrank the instance line — otherwise a parameter the
+    # netlist happens to set is unreachable from alter() and from sweeps.
+    @test dc!(MNACircuit(hier_ckt; x1=(r1val=1e3,)))[:vout] ≈ 1.5
+    @test dc!(MNACircuit(hier_ckt; x1=(params=(r1val=1e3,),)))[:vout] ≈ 1.5
+
+    # Parent-scope and instance-scope parameters override independently.
+    @test dc!(MNACircuit(hier_ckt; vin=6.0, x1=(r1val=1e3,)))[:vout] ≈ 3.0
+
+    # ... and a subcircuit instance parameter is a usable sweep axis.
+    cs = CircuitSweep(hier_ckt, Sweep(var"x1.r1val" = [1e3, 2e3]); x1=(r1val=1e3,))
+    @test [sol[:vout] for (_, sol) in dc!(cs)] ≈ [1.5, 1.0]
+
+    # A `.subckt` default the instance line does not set stays overridable.
+    @test dc!(MNACircuit(hier_ckt; x1=(r2val=3e3,)))[:vout] ≈ 1.8
 end
 
 end # module params_tests

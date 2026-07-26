@@ -74,6 +74,33 @@ The most nebulous and least important at this stage: copying features from other
   - [x] VA `white_noise`/`flicker_noise` register on the noise channel — the contribution codegen binds the LHS branch into `_mna_noise_p_`/`_mna_noise_n_`, the call still evaluates to `0.0`, and an `if noise_enabled(ctx)` gate (constant-false on `DirectStampContext`) folds the whole registration — power expression included — out of the transient hot path. Sources are named `<instance>_<label>` (`:q1_rb`, `:q1_flicker`) and scale with `$mfactor`. This lights up **every** VADistiller model's SPICE3 noise model at once (resistor, diode, BJT, MOS1/2/3/6/9, JFET, MESFET, BSIM3/4) plus any PDK/user Verilog-A, so BJT shot+flicker and MOSFET flicker come in through the models rather than as builtin-stamp special cases
   - [x] builtin `Diode`/`DiodeWithCap`/`SimpleMOSFET` flicker (1/f) noise (`KF·|I|^AF / f^FFE`) — `KF`/`AF`/`FFE` cards (off by default) register through the **same** `register_flicker_noise!(ctx, p, n, pwr, exp)` entry point the VA `flicker_noise(pwr, exp)` lowering uses (no parallel construction), reading the flicker coefficient from the DC bias current; exercises the `FLICKER` kind end-to-end through `noise!` for the reference builtins (`test/mna/noise.jl`, `test/noise.jl`)
 - [x] Noise N3 rest (input-referral): `noise!(circuit, output; freqs, input=:V1)` refers the output noise back to a voltage-source input via the same adjoint — the unit-voltage transfer `H(jω)=x_adjᵀ b_in` is read for free per frequency, `ns[:inoise] = onoise/|H|²`, `total_noise(ns; referred=:input)`. Validated: divider input-referred `4kT·2000` and RC input-referred flattening to the bare `4kTR` (`src/noise.jl`, `test/noise.jl`)
+- [x] UX/design: netlist `.param` overrides actually reach the netlist. Walking a
+  hand-designed NMOS common-source stage through the high-level API turned up a
+  silent-wrong-answer class of bug: `MNACircuit(ckt; vbias=1.2)` and
+  `Sweep(vbias=…)` resolved to the netlist default for every point (the lens only
+  merged a `params=(…)`-wrapped NamedTuple), a subcircuit parameter the instance
+  line spelled out was unreachable from an override entirely, and `alter` on a
+  circuit built without that knob threw instead of introducing it. A swept design
+  therefore read as a perfectly flat transfer curve — no error anywhere. Fixed at
+  all three levels (`ParamLens` flat merge, codegen precedence
+  lens > instance line > `.subckt` default, `alter` path insertion), and `alter`
+  is now one function instead of two shadowing ones (`using Cadnip` gets the
+  documented `alter(circuit; …)`). `test/design_flow.jl` walks the stage
+  op → DC transfer curve → AC → transient → noise against the hand derivation, so
+  the parameterization contract is pinned by a design rather than by a unit test.
+  The two `test/mna/audio_integration.jl` sweeps were green *because* they were
+  no-ops; they now assert the swept value reaches the source.
+- [ ] UX/design follow-ups found on that walkthrough, none blocking:
+  - [ ] No device-level operating point. "Is M1 in saturation, what is gm?" can
+    only be answered by hand from node voltages — there is no `.op` report and no
+    device current (only voltage-source branch currents are state variables). The
+    noise channel is the proven pattern for this: a deferred op-info channel on
+    `MNAContext`, no-op on `DirectStampContext`.
+  - [ ] No `.dc` sweep analysis. `CircuitSweep` covers it, but each point solves
+    from zeros — `dc_solve_with_ctx` has no `u0`, so there is no continuation
+    (warm start from the previous point) the way SPICE `.dc` does it.
+  - [ ] Override names are not validated: a typo'd knob is inert. `ParamObserver`
+    already collects the parameter hierarchy, so a check is within reach.
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise

@@ -237,6 +237,7 @@ eval(ce_amplifier_code)
         result = tran!(cs, tspan; solver=Rodas5P(linsolve=KLUFactorization()), abstol=1e-9, reltol=1e-7)
 
         gains = Float64[]
+        drives = Float64[]
         for (params, sol) in result
             if sol.retcode == ReturnCode.Success
                 t_start = 3 * period
@@ -249,13 +250,20 @@ eval(ce_amplifier_code)
                 Vin_pp = maximum(V_base) - minimum(V_base)
 
                 push!(gains, Vout_pp / Vin_pp)
+                push!(drives, Vin_pp)
             else
                 push!(gains, NaN)
+                push!(drives, NaN)
             end
         end
 
         # All simulations should succeed
         @test all(!isnan, gains)
+
+        # The swept `.param vac` must reach the SIN amplitude: without that the
+        # three runs are the same simulation and "gain is constant" below holds
+        # trivially. Base swing is 2*vac (peak-to-peak of the sine).
+        @test drives ≈ 2 .* sweep.values rtol=0.05
 
         # For small signals, gain should be relatively constant (within 30%)
         if all(!isnan, gains) && length(gains) >= 2
@@ -279,6 +287,7 @@ eval(ce_amplifier_code)
         cs = CircuitSweep(ce_amplifier, sweep; vac=vac, freq=1000.0)
 
         gains = Float64[]
+        cycles = Float64[]
         # Iterate over sweep - each frequency needs different tspan
         for circuit in cs
             freq = circuit.params.freq
@@ -303,10 +312,22 @@ eval(ce_amplifier_code)
                 Vin_pp = maximum(V_base) - minimum(V_base)
 
                 push!(gains, Vout_pp / Vin_pp)
+                # Upward zero crossings of the base swing over a 3-period window:
+                # ~3 if the swept `.param freq` really set the SIN frequency, and
+                # wildly off (30 at 100 Hz, 0 at 10 kHz) if the source stayed at
+                # the base 1 kHz while only the measurement window scaled.
+                dev = V_base .- 0.65
+                push!(cycles, count(i -> dev[i] <= 0 < dev[i+1], 1:length(dev)-1))
             else
                 push!(gains, NaN)
+                push!(cycles, NaN)
             end
         end
+
+        # The window is three periods of the *swept* frequency wide. Allow ±1:
+        # the window edges land on a crossing, so it counts 2 or 3 depending on
+        # where the samples fall.
+        @test all(c -> isnan(c) || 2 <= c <= 4, cycles)
 
         # At least one should succeed
         @test any(!isnan, gains)
