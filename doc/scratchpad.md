@@ -97,44 +97,74 @@ The most nebulous and least important at this stage: copying features from other
   the parameterization contract is pinned by a design rather than by a unit test.
   The two `test/mna/audio_integration.jl` sweeps were green *because* they were
   no-ops; they now assert the swept value reaches the source.
-- [ ] Parameterization follow-ups, in the order they bite:
-  - [ ] **Device instance parameters are not overridable** — `alter(c; var"r1.r"=2e3)`,
-    `r1=(r=2e3,)` and `var"r1.params.r"` are all silently ignored, so W/L can only
-    be swept if the netlist author wrapped the value in a `.param`. The
-    netlist-*text* `alter(io, ast; r1=(r=4.0,))` honours exactly this spelling, and
-    the commented-out CedarSim test at `test/basic.jl` ("device == param") shows
-    device params were part of the lens tree by design (`i1=(dc=-1,)`,
-    `rload=(r=2000.0,)`). Each device's codegen builds its params at a single site
-    (MOSFET/BJT/Diode/OSDI share one `param_kwargs` list; R/C/L one value
-    expression each), so it is ~6 hooks of the form
-    `Base.getproperty(lens, :r1)(; r=1000.0, m=1)` — constant-folded to the
-    literals under an empty lens, but in the restamp hot path, so gate it on the
-    zero-alloc transient tests and the vacask benchmarks.
-  - [ ] **`.model` cards cannot reference a `.param`** — `.param vt0=0.7` +
-    `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`, because
-    model cards are emitted as module-level `const`s outside the builder
-    (`const rmod = (rsh = rval,)`). This blocks PDK corner parameterization
-    (`.model … vto='vto_nom+dvt'`). Model cards need to move inside the builder
-    (or take a lens-resolved closure).
-  - [ ] Override names are not validated: a typo'd knob is inert, and so is a
-    device param (above). `ParamObserver` already walks the full tree, so a check
-    at `MNACircuit` construction could say "`vinn` is not a parameter of this
-    circuit; did you mean `vin`?" or "`x1` is an instance — write `x1=(rv=…)`".
+- [ ] Parameterization follow-ups. Sized against the code, not guessed — the
+  first two are smaller in reach and larger in cost than they look:
   - [ ] Subcircuit builders are named after the `.subckt` (`divider` →
     `divider_mna_builder`), so two netlists loaded into the same module that both
     define a `.subckt divider` silently overwrite each other's builder — the
     second definition wins and the first netlist's instances then call it with
     the wrong keyword arguments. Hit while writing `test/params.jl`. The name
     needs the netlist's identity in it (the `sp"..."` gensym already has one).
+    **Cheapest of these and a genuine correctness bug; do it first.**
+  - [ ] Override names are not validated: a typo'd knob is inert. Do **not**
+    reach for `ParamObserver` here — it needs a full builder pass, and
+    `MNACircuit` is a plain struct today (free) that `alter` reconstructs *per
+    sweep point*, so validating at construction would rebuild the whole circuit
+    on every point. Codegen already knows every declared name (`sema.params`,
+    formal params, the subckt semas), so emit a static table beside the builder
+    and validate with a set lookup — no build, and it can then also say "`x1` is
+    an instance, write `x1=(rv=…)`".
+  - [ ] **Raw device instance parameters are not overridable** —
+    `alter(c; var"r1.r"=2e3)`, `r1=(r=2e3,)` and `var"r1.params.r"` are all
+    silently ignored. Narrower than it first appears: the PDK idiom wraps devices
+    in a subcircuit whose W/L are formal parameters (see `test/testpdk/testpdk.spice`,
+    `Xn out in vss vss nmos_1v8 W={WN} L={L}`), and that path sweeps correctly —
+    including overriding, two levels down, a value the instance line spells out.
+    So this only bites *raw* device lines in hand-written netlists
+    (`M1 d g 0 0 nch w=20u l=1u`). Cost is also higher than a first look suggests:
+    there are 17 `cg_mna_instance!` methods and ~57 sites where a value or
+    parameter expression is built, so it wants a shared helper rather than a
+    hook per site, and a per-device lens lookup inflates the generated code for
+    every device in the circuit — on c6288 (212k devices) compile time is already
+    a known problem. Gate on the zero-alloc transient tests *and* on c6288 build
+    time, not just the vacask benchmarks. The commented-out CedarSim test at
+    `test/basic.jl` ("device == param") shows device params were in the lens tree
+    by design (`i1=(dc=-1,)`, `rload=(r=2000.0,)`), and the netlist-*text*
+    `alter(io, ast; r1=(r=4.0,))` still honours that spelling.
+  - [ ] **`.model` cards cannot reference a `.param`** — `.param vt0=0.7` +
+    `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`, because
+    `codegen_toplevel_models!` emits model cards as module-level `const`s outside
+    the builder. Do **not** "just move them inside the builder": the hoisting is
+    deliberate (subcircuit builders and the main function share them), and with
+    `is_large_model` (200+ fields, `invoke` to stop LLVM SROA blow-up) that would
+    mean constructing a PSP-sized struct on every restamp — the exact cost
+    `doc/psp103_noinline_investigation.md` and `doc/sroa_exploration_results.md`
+    exist to avoid. Demand is also smaller than it looks: corners are normally
+    `.LIB` sections with their own model cards, which already work
+    (`test/testpdk/testpdk.spice`). Worth doing first: turn the `UndefVarError`
+    into a diagnostic that names the parameter and points at `.lib` sections. If
+    parameterized model cards are ever genuinely needed, build *only* the cards
+    that reference a parameter, once per parameter set — never per restamp.
 - [ ] UX/design follow-ups found on the same walkthrough, none blocking:
   - [ ] No device-level operating point. "Is M1 in saturation, what is gm?" can
-    only be answered by hand from node voltages — there is no `.op` report and no
-    device current (only voltage-source branch currents are state variables). The
-    noise channel is the proven pattern for this: a deferred op-info channel on
-    `MNAContext`, no-op on `DirectStampContext`.
+    only be answered by hand from node voltages. Two separable pieces:
+    - *Device terminal currents* are tractable — every stamp already computes its
+      own contribution, and `dc!` rebuilds once at the solved point for names, so
+      a deferred op-info channel on `MNAContext` (no-op on `DirectStampContext`,
+      exactly like the noise channel) costs nothing in the transient path.
+    - *Small-signal parameters and region* (gm, gds, saturated/triode) are the
+      harder half and the noise-channel analogy does not carry: the VADistiller
+      models don't compute them, and Verilog-A operating-point variables
+      (`(* desc=… *)` attributes on module reals) aren't parsed today, so this
+      needs OP-variable support in the VA front end or per-device AD of the
+      stamp. Don't scope these two as one task.
   - [ ] No `.dc` sweep analysis. `CircuitSweep` covers it, but each point solves
     from zeros — `dc_solve_with_ctx` has no `u0`, so there is no continuation
-    (warm start from the previous point) the way SPICE `.dc` does it.
+    (warm start from the previous point) the way SPICE `.dc` does it. Adding the
+    `u0` kwarg is a few lines; the judgement call is whether to warm-start by
+    default, since on a hysteretic circuit continuation can walk onto a different
+    solution branch than a cold solve, and the existing gmin/source-stepping
+    fallbacks — not the initial guess — are what carry convergence today.
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
