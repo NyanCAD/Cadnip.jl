@@ -11,15 +11,51 @@
 using Test
 using Cadnip
 using Cadnip.MNA
-using Cadnip.MNA: MNAContext, get_node!, stamp!, Resistor, Diode, SimpleMOSFET, VoltageSource, resolve_index
+using Cadnip.MNA: MNAContext, get_node!, stamp!, Resistor, Capacitor, Diode, SimpleMOSFET, VoltageSource, resolve_index
 using Cadnip.MNA: reset_for_restamping!, num_noise_sources, noise_sources, noise_psd
 using Cadnip.MNA: stamp_noise!, register_thermal_noise!, register_shot_noise!
-using Cadnip.MNA: register_channel_thermal_noise!
-using Cadnip.MNA: solve_dc, MNASpec
+using Cadnip.MNA: register_channel_thermal_noise!, register_white_noise!, register_flicker_noise!
+using Cadnip.MNA: noise_enabled, noise_source_name
+using Cadnip.MNA: solve_dc, MNASpec, MNACircuit
 using Cadnip.MNA: THERMAL, SHOT, WHITE, FLICKER, NoiseSource
 using Cadnip.MNA: NodeIndex, GroundIndex
 using Cadnip.MNA: K_BOLTZMANN, Q_ELEMENTARY
 using Cadnip.SpectreEnvironment
+
+# A Verilog-A device carrying both noise kinds, one of them behind a runtime
+# conditional. The two contribution-codegen paths a `white_noise` /
+# `flicker_noise` call can sit on (unconditional branch stamping and inline
+# stamping inside an `if`) are exercised by the same module.
+va"""
+module VANoisyRes(p, n);
+    parameter real r = 1000.0;
+    parameter real pwr = 4.0e-21;
+    parameter real kfl = 1.0e-20;
+    parameter integer noisy = 1;
+    inout p, n;
+    electrical p, n;
+    analog begin
+        I(p,n) <+ V(p,n)/r;
+        I(p,n) <+ white_noise(pwr, "thermal");
+        if (noisy > 0) begin
+            I(p,n) <+ flicker_noise(kfl, 1.0, "flicker");
+        end
+    end
+endmodule
+"""
+
+# Divider of two VA noisy resistors — used to check that the noise sources are
+# invisible to the DC/transient value path.
+function va_noisy_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+    ctx === nothing ? (ctx = MNAContext()) : reset_for_restamping!(ctx)
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+    stamp!(VANoisyRes(), ctx, vcc, out; _mna_instance_=:x1, _mna_x_=x)
+    stamp!(VANoisyRes(), ctx, out, 0; _mna_instance_=:x2, _mna_x_=x)
+    stamp!(Capacitor(1e-9; name=:C1), ctx, out, 0)
+    return ctx
+end
 
 @testset "noise-source channel (N0)" begin
 
@@ -223,5 +259,69 @@ using Cadnip.SpectreEnvironment
         """i)
         sol = tran!(circuit, (0.0, 20e-3))
         @test sol[:out][end] ≈ 1.0 atol=1e-2
+    end
+
+    #==========================================================================#
+    # Verilog-A noise sources (N1)
+    #
+    # `white_noise`/`flicker_noise` lower to a value of 0.0 (unchanged
+    # DC/transient numerics) plus a registration on the context's noise channel,
+    # injected between the enclosing contribution's branch nodes.
+    #==========================================================================#
+
+    @testset "noise_source_name composes instance and model label" begin
+        @test noise_source_name(:q1, :rb) === :q1_rb
+        @test noise_source_name(:q1, Symbol("")) === :q1
+        @test noise_source_name(Symbol(""), :rb) === :rb
+        @test noise_source_name(Symbol(""), Symbol("")) === :va
+    end
+
+    @testset "VA white_noise/flicker_noise registration" begin
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        b = get_node!(ctx, :b)
+        stamp!(VANoisyRes(), ctx, a, b; _mna_instance_=:x1)
+
+        srcs = noise_sources(ctx)
+        @test length(srcs) == 2
+
+        w = only(filter(s -> s.kind === WHITE, srcs))
+        @test w.name === :x1_thermal        # instance + the model's label string
+        @test w.a ≈ 4.0e-21                 # white_noise(pwr) ⇒ S = pwr
+        @test resolve_index(ctx, w.p) == a  # injected on the contribution's branch
+        @test resolve_index(ctx, w.n) == b
+
+        f = only(filter(s -> s.kind === FLICKER, srcs))
+        @test f.name === :x1_flicker
+        @test f.a ≈ 1.0e-20                 # flicker_noise(pwr, exp) ⇒ S = pwr/f^exp
+        @test f.b ≈ 1.0
+        @test noise_psd(f, 27.0, 100.0) ≈ 1.0e-22
+    end
+
+    @testset "VA noise follows conditionals and scales with \$mfactor" begin
+        ctx = MNAContext()
+        a = get_node!(ctx, :a)
+        # noisy=0 switches off the flicker contribution, so only the
+        # unconditional white source registers; m=4 parallel devices carry four
+        # times the (independent, hence additive) noise power.
+        stamp!(VANoisyRes(noisy=0), ctx, a, 0; _mna_instance_=:x1, _mna_mfactor_=4.0)
+
+        srcs = noise_sources(ctx)
+        @test length(srcs) == 1
+        @test srcs[1].kind === WHITE
+        @test srcs[1].a ≈ 4 * 4.0e-21
+    end
+
+    @testset "VA noise is invisible to the value path" begin
+        # The device solves as a plain 1 kΩ resistor — the noise contributions
+        # evaluate to 0 A exactly as they did before the noise channel existed.
+        # The transient additionally drives DirectStampContext restamping, where
+        # `noise_enabled` is false and the whole registration branch (the noise
+        # power expressions included) folds away.
+        @test noise_enabled(MNAContext())
+        circuit = MNACircuit(va_noisy_divider)
+        @test dc!(circuit)[:out] ≈ 2.5 rtol=1e-6
+        sol = tran!(circuit, (0.0, 1e-5))
+        @test sol[:out][end] ≈ 2.5 rtol=1e-3
     end
 end

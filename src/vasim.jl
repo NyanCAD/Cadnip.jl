@@ -201,7 +201,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         Dict{Symbol, Symbol}(:V => :potential, :I => :flow),
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
         Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
-        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[])
+        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[], Symbol[])
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
@@ -321,7 +321,7 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
         array_nodes, access_map,
         Expr[], Any[], Symbol[], Set{Pair{Symbol,Symbol}}(),
         Expr[], Dict{Tuple{String,Int,Tuple{Vararg{Char}},Char}, Symbol}(), Dict{String, Any}(),
-        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[])
+        Tuple{Symbol,Symbol}[], Ref(0), Tuple{Symbol,Symbol}[], Symbol[])
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -585,6 +585,11 @@ struct MNAScope
     # site gets an extra JacobianTag dual slot (n_all_nodes+j) so its ∂I/∂w can
     # be isolated for the OSDI `lim_rhs` companion anchoring (Option 2).
     limit_sites::Vector{Tuple{Symbol,Symbol}}
+    # One entry per `white_noise`/`flicker_noise` call site (its label). Only
+    # used as a "does this module have noise sources?" flag at assembly time,
+    # to decide whether to emit the `_mna_noise_p_`/`_mna_noise_n_` branch
+    # locals the noise lowering reads. Shared by reference across scope copies.
+    noise_sites::Vector{Symbol}
 end
 
 """Create a copy of the scope with delay_expr set for absdelay rewriting."""
@@ -594,7 +599,7 @@ with_delay(s::MNAScope, delay_jl) = MNAScope(
     s.ddx_order, s.named_branches, delay_jl,
     s.array_nodes, s.access_map, s.extra_stamps, s.extra_stamps_b, s.extra_internal_nodes, s.current_probes,
     s.extra_module_stmts, s.table_itp_consts, s.table_files,
-    s.limit_branches, s.cond_depth, s.limit_sites)
+    s.limit_branches, s.cond_depth, s.limit_sites, s.noise_sites)
 
 """
     resolve_array_ref(scope, node_expr) -> Symbol
@@ -1293,9 +1298,21 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         end
     end
 
-    # Noise functions - return 0 in MNA (noise not simulated in DC/transient)
+    # Verilog-A noise sources. These contribute exactly 0 A to the DC/transient
+    # value path (the expression below evaluates to 0.0), but on an MNAContext
+    # they register a small-signal noise source on the deferred noise channel for
+    # `noise!` to consume (doc/noise_analysis_design.md).
+    #
+    # The branch the source injects into is the LHS of the enclosing contribution
+    # (`I(b_int, e_int) <+ white_noise(...)`), which is not visible here — the
+    # contribution codegen binds it into `_mna_noise_p_`/`_mna_noise_n_` just
+    # before evaluating the RHS, and this lowering reads those locals.
+    #
+    # `noise_enabled(ctx)` is a constant on a concrete context type, so on
+    # DirectStampContext the whole branch — the power expression included — is
+    # eliminated, keeping transient restamping byte-identical to before.
     if fname in (:white_noise, :flicker_noise)
-        return 0.0
+        return mna_noise_source(to_julia, stmt, fname)
     end
 
     # Check for VA-defined function
@@ -2263,7 +2280,14 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         # The Jacobian ∂expr/∂V_k is extracted and stamped into the voltage
         # constraint row (G[I, k]) — same Newton linearization as the
         # unconditional path in generate_mna_stamp_method_nterm.
+        n_noise_before = length(to_julia.noise_sites)
         expr = to_julia(cs.assign_expr)
+        # The noise channel models *current* sources, so a noise term inside a
+        # potential contribution has nowhere to go: bind it to ground, which
+        # makes the registration a no-op rather than letting it land on whatever
+        # branch happened to be bound last.
+        noise_binding = length(to_julia.noise_sites) > n_noise_before ?
+            mna_noise_branch_binding(0, 0) : nothing
         I_alloc_base_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
 
         # All non-ground nodes for Jacobian extraction
@@ -2301,6 +2325,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
 
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
+            $noise_binding
             if $p_node != $n_node
                 let I_var = Cadnip.MNA.alloc_current!(ctx, $I_alloc_base_name, _mna_instance_)
                     V_contrib = $expr
@@ -2335,7 +2360,12 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
 
     # Current contribution: generate inline contribution stamping with full Jacobian
     # This is used when contributions are inside conditionals
+    n_noise_before = length(to_julia.noise_sites)
     expr = to_julia(cs.assign_expr)
+    # Bind the branch for any `white_noise`/`flicker_noise` this RHS lowered
+    # (see mna_noise_source); modules without noise emit nothing.
+    noise_binding = length(to_julia.noise_sites) > n_noise_before ?
+        mna_noise_branch_binding(p_node, n_node) : nothing
     # node_order is [ports; internal_nodes; ground] - exclude ground from Jacobian
     # Duals are only created for non-ground nodes (ports + internal)
     all_node_syms = to_julia.node_order
@@ -2378,6 +2408,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     # Handle nested Duals: ContributionTag wraps JacobianTag when ddt() is used
     return quote
         # Contribution I($p_sym, $n_sym) <+ ...
+        $noise_binding
         let I_branch = $expr
             # Extract value and the resistive Dual (for Jacobian extraction)
             # ContributionTag wraps the JacobianTag Dual - we need to unwrap it
@@ -2491,7 +2522,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
         to_julia.array_nodes, to_julia.access_map,
         to_julia.extra_stamps, to_julia.extra_stamps_b, to_julia.extra_internal_nodes, to_julia.current_probes,
         to_julia.extra_module_stmts, to_julia.table_itp_consts, to_julia.table_files,
-        to_julia.limit_branches, to_julia.cond_depth, to_julia.limit_sites)
+        to_julia.limit_branches, to_julia.cond_depth, to_julia.limit_sites,
+        to_julia.noise_sites)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -2750,6 +2782,77 @@ function detect_short_circuits(analog_block, to_julia::MNAScope, internal_nodes:
     return short_circuits
 end
 
+# Branch-node locals the noise lowering reads. The contribution codegen binds
+# these right before evaluating a contribution's RHS, so a `white_noise` /
+# `flicker_noise` call nested anywhere in that RHS knows which branch it belongs
+# to (see mna_noise_source).
+const MNA_NOISE_P = Symbol("_mna_noise_p_")
+const MNA_NOISE_N = Symbol("_mna_noise_n_")
+
+"""
+    mna_noise_branch_binding(p_node, n_node) -> Expr
+
+Bind the branch a contribution's noise sources inject into. `p_node`/`n_node`
+are the codegen-time node index expressions (a `_node_*` symbol, or literal `0`
+for ground) of the contribution's LHS branch.
+"""
+mna_noise_branch_binding(p_node, n_node) = quote
+    $MNA_NOISE_P = $p_node
+    $MNA_NOISE_N = $n_node
+end
+
+"""
+    mna_noise_source(to_julia, stmt, fname) -> Expr
+
+Lower a Verilog-A `white_noise(pwr[, name])` / `flicker_noise(pwr, exp[, name])`
+call site.
+
+The call **evaluates to `0.0`**, exactly as before noise analysis existed, so the
+DC/transient value path is untouched. Its only effect is to register a
+small-signal noise source on the context's deferred noise channel, injected
+between the enclosing contribution's branch nodes (`_mna_noise_p_` /
+`_mna_noise_n_`, bound by the contribution codegen).
+
+Registration is gated on `noise_enabled(ctx)`, which is a compile-time constant
+per context type: `false` on `DirectStampContext`, so the transient hot path
+eliminates the branch — noise-power expression and all — and pays nothing.
+"""
+function mna_noise_source(to_julia::MNAScope, stmt, fname::Symbol)
+    nargs = length(stmt.args)
+    # white_noise(pwr[, name]); flicker_noise(pwr, exp[, name]).
+    label_pos = fname === :white_noise ? 2 : 3
+    pwr = nargs >= 1 ? to_julia(stmt.args[1].item) : 0.0
+    expo = fname === :flicker_noise && nargs >= 2 ? to_julia(stmt.args[2].item) : 1.0
+
+    # The trailing name argument is a string literal in every model we've seen;
+    # anything else (an expression) just goes unnamed and folds into the
+    # instance-level contribution.
+    label = Symbol("")
+    if nargs >= label_pos
+        lbl = to_julia(stmt.args[label_pos].item)
+        lbl isa AbstractString && (label = Symbol(lbl))
+    end
+    push!(to_julia.noise_sites, label)
+
+    register = fname === :white_noise ?
+        :(Cadnip.MNA.register_white_noise!(ctx, $MNA_NOISE_P, $MNA_NOISE_N,
+              _mna_mfactor_ * Cadnip.MNA.extract_value($pwr);
+              name=Cadnip.MNA.noise_source_name(_mna_instance_, $(QuoteNode(label))))) :
+        :(Cadnip.MNA.register_flicker_noise!(ctx, $MNA_NOISE_P, $MNA_NOISE_N,
+              _mna_mfactor_ * Cadnip.MNA.extract_value($pwr),
+              Cadnip.MNA.extract_value($expo);
+              name=Cadnip.MNA.noise_source_name(_mna_instance_, $(QuoteNode(label)))))
+
+    return quote
+        # `$mfactor` multiplies the number of parallel devices, and independent
+        # sources add in power, so the PSD scales linearly with it.
+        if Cadnip.MNA.noise_enabled(ctx)
+            $register
+        end
+        0.0
+    end
+end
+
 """
 Translate a contribution statement for MNA.
 """
@@ -2873,6 +2976,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # the module has no `$limit` sites, so non-limited codegen is unchanged.
     n_limit_sites = length(to_julia.limit_sites)
     dual_width = n_all_nodes + n_limit_sites
+
+    # Does this module contribute Verilog-A noise sources? If so, the branch
+    # locals the noise lowering reads get bound per contribution (and seeded to
+    # ground here, so a noise call outside any contribution can't reach an
+    # undefined local). Modules without noise emit none of this.
+    has_noise = !isempty(to_julia.noise_sites)
+    noise_preamble = has_noise ? mna_noise_branch_binding(0, 0) : nothing
 
     # PCNR `$limit` preamble. One limiting variable per unique probe branch
     # collected during lowering (to_julia.limit_branches). For each branch we
@@ -3094,6 +3204,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # points. See detect_or_cached! in contrib.jl.
 
         branch_stamp = quote
+            # Tell any `white_noise`/`flicker_noise` call nested in this branch's
+            # contributions which branch it injects into (see mna_noise_source).
+            $(has_noise ? mna_noise_branch_binding(p_node, n_node) : nothing)
+
             # Evaluate the branch current. Per the Verilog-A LRM, $mfactor scales
             # *all* of a module's contributions (I()<+ and Q()<+ alike); models
             # only reference $mfactor explicitly for terms that must NOT scale
@@ -3435,6 +3549,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     # Generate voltage contribution stamping for named branches
     voltage_stamp_code = Expr(:block)
+    # Potential contributions carry no current-noise branch (see the conditional
+    # path in the ContributionStatement handler): re-seed to ground so a noise
+    # call in one can't land on the last current branch that was bound.
+    has_noise && push!(voltage_stamp_code.args, mna_noise_branch_binding(0, 0))
     for (branch_name, vc) in voltage_branch_contribs
         I_var = branch_current_vars[branch_name]
         p_sym, n_sym = vc.p, vc.n
@@ -3507,6 +3625,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Generate stamping code for two-node voltage contributions V(p,n) <+ expr
     # These require branch current variables to carry DC current (especially for short circuits)
     twonode_voltage_stamp_code = Expr(:block)
+    has_noise && push!(twonode_voltage_stamp_code.args, mna_noise_branch_binding(0, 0))
     for ((p_sym, n_sym), exprs) in twonode_voltage_contribs
         I_var = twonode_voltage_vars[(p_sym, n_sym)]
 
@@ -3672,6 +3791,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Stamp idt/laplace b values with Jacobian extraction (post-dual)
         $extra_b_stamp_code
+
+        # Ground-seed the Verilog-A noise branch locals (see mna_noise_source);
+        # per-contribution bindings overwrite them as the branches are evaluated.
+        $noise_preamble
 
         # Evaluate contribution expressions with duals
         $contrib_eval

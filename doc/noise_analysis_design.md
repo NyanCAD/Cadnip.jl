@@ -8,23 +8,21 @@ how it threads through the current MNA system **without slowing DC/transient**.
 
 Single-operating-point linear noise analysis is implemented (`src/noise.jl`):
 `noise!(circuit, output; freqs)` computes the output-noise PSD and per-source
-contributions over the thermal sources the N0 channel registers, and
-`input=:V1` refers the noise back to a voltage-source input. The remaining work
-is lighting up the other sources (device/VA shot & flicker) and the `.noise`
-netlist card surface. The scaffolding this builds on:
+contributions, and `input=:V1` refers the noise back to a voltage-source input.
+Sources register from the builtin stamps (resistor thermal, diode shot, MOSFET
+channel thermal) *and* from Verilog-A `white_noise`/`flicker_noise`, which means
+every VADistiller model's full SPICE3 noise model — resistor, diode, BJT,
+MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — is live. The remaining work is the
+`.noise` netlist card surface and the ngspice cross-validation (N4). The
+scaffolding this builds on:
 
 - `src/ac.jl` — the AC path builds a linearized descriptor state-space system
   (`E·dx = A·x + B·u, y = C·x`) at the DC operating point, which is exactly the
   linearization the noise analysis consumes; `noise!` reuses that
   rebuild-at-op-point pattern.
-- `src/va_env.jl` / `src/vasim.jl` — the Verilog-A `white_noise` /
-  `flicker_noise` builtins are parsed (NyanVerilogAParser keywords) and lowered
-  to `0.0` (`vasim.jl:1297`, and named noise branches zeroed at
-  `vasim.jl:3413`). These are the real per-device noise-source hooks; a noise
-  analysis lights them up instead of zeroing them.
-
-Builtin device noise (thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`) has no
-home yet and would attach to the MNA device stamps.
+- `src/vasim.jl` — the Verilog-A `white_noise` / `flicker_noise` builtins are
+  parsed (NyanVerilogAParser keywords) and lowered by `mna_noise_source`. These
+  are the real per-device noise-source hooks.
 
 ## How AC threads through MNA today (the pattern to reuse)
 
@@ -153,16 +151,45 @@ high-level API.
   structure-discovery side effect on `MNAContext`, G/C/b value path byte-identical
   (`test/mna/noise.jl`).
 
-  Still open within the "make every source ctx-aware" scope, deferred toward N1:
-  BJT shot noise, MOSFET/diode flicker noise (the builtins carry no `KF`/`AF`
-  card yet), and the VA `white_noise`/`flicker_noise` builtins — those fold to a
-  literal `0.0` at codegen today (`vasim.jl`), and registering them needs the LHS
-  branch context at the contribution site rather than at the isolated call
-  expression.
-- **N1 — PSD models at the DC bias.** Evaluate per-source spectral density at the
-  operating point: thermal `4kT·g`, shot `2qI`, flicker `KF·I^AF/f`, VA
-  `white_noise(pwr)` → `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes
-  from the DC solution the AC path already computes.
+  The Verilog-A `white_noise`/`flicker_noise` builtins now register too (see
+  N1). The builtin `Diode`/`SimpleMOSFET` stamps still carry no `KF`/`AF` card,
+  so their flicker noise has no parameters to read; models that need it come in
+  through Verilog-A, which has the full SPICE3 flicker model.
+- **N1 — PSD models at the DC bias. _(landed)_** Per-source spectral density at
+  the operating point: thermal `4kT·g`, shot `2qI`, VA `white_noise(pwr)` →
+  `pwr`, `flicker_noise(pwr,exp)` → `pwr/f^exp`. Bias comes from the DC solution
+  the AC path already computes.
+
+  **The Verilog-A path.** `white_noise`/`flicker_noise` used to fold to a
+  literal `0.0` at codegen. They still *evaluate* to `0.0` — the DC/transient
+  value path is byte-identical — but now carry a registration side effect. The
+  branch a source injects into is the LHS of the enclosing contribution
+  (`I(b_int, e_int) <+ white_noise(2*q*Ib, "ib")`), which the isolated call
+  expression cannot see, so the contribution codegen binds it into two locals
+  (`_mna_noise_p_` / `_mna_noise_n_`) immediately before evaluating the RHS and
+  the lowering reads them. Both contribution paths bind: unconditional branch
+  stamping in `generate_mna_stamp_method_nterm`, and the inline stamping the
+  `ContributionStatement` handler emits for contributions inside an `if` (which
+  is where e.g. the VADistiller resistor's `if (noisy)` noise block lives).
+  Potential contributions re-seed the binding to ground — the channel models
+  current sources, so a noise term there has nowhere to land.
+
+  The registration is wrapped in `if noise_enabled(ctx)`, a predicate that is
+  `true` on `MNAContext` and `false` on `DirectStampContext`. Because it is a
+  constant on a concrete context type, the *entire* branch — the noise-power
+  expression included — is eliminated during transient restamping, so lighting
+  up VA noise costs the hot path nothing (previously the power expressions were
+  never emitted at all, so this preserves the status quo rather than trading it
+  away). Sources are named `<instance>_<label>` from the model's own label
+  string (`:q1_rb`, `:q1_flicker`), so a `NoiseSol` decomposes a device's noise
+  per physical mechanism. `$mfactor` scales the PSD linearly: `m` parallel
+  devices are `m` independent sources, and independent sources add in power.
+
+  This lights up every VADistiller model's noise at once — resistor (thermal +
+  flicker), diode (rs thermal, shot, flicker), BJT (rb/rc/re thermal, ic/ib
+  shot, flicker), MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — plus any user or PDK
+  Verilog-A that writes noise contributions (`test/noise.jl`,
+  `test/mna/noise.jl`).
 - **N2 — Transfer functions via the AC system. _(landed)_** Reuse `ac!`'s
   linearized `(jωC + G)`; per output+frequency, one adjoint solve
   `(jωC+G)ᵀ x_adj = e_out` gives the transfer from every source at O(1) each

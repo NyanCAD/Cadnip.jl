@@ -192,6 +192,7 @@ export NoiseKind, THERMAL, SHOT, WHITE, FLICKER
 export NoiseSource, noise_psd, noise_sources, num_noise_sources
 export stamp_noise!, register_thermal_noise!, register_shot_noise!
 export register_channel_thermal_noise!
+export noise_enabled, register_white_noise!, register_flicker_noise!, noise_source_name
 
 """
     MNAContext
@@ -1033,6 +1034,55 @@ built at, so registration does not perturb the G/C/b value path. No-op on
 """
 @inline register_channel_thermal_noise!(ctx::MNAContext, p, n, gm; gamma::Real=2/3, name::Symbol=:M) =
     stamp_noise!(ctx, p, n, THERMAL, gamma * gm, 0.0, name)
+
+"""
+    noise_enabled(ctx) -> Bool
+
+Whether `ctx` carries a noise-source channel: `true` for [`MNAContext`](@ref)
+(structure discovery), `false` for [`DirectStampContext`](@ref).
+
+This is the compile-time gate the Verilog-A `white_noise`/`flicker_noise`
+lowering wraps its registration in. Because the predicate is a constant on a
+concrete context type, the whole registration branch — *including evaluation of
+the noise-power expression* — folds away in the transient hot path, so lighting
+up VA noise costs restamping nothing.
+"""
+@inline noise_enabled(::MNAContext) = true
+
+"""
+    register_white_noise!(ctx, p, n, pwr; name)
+
+Register a Verilog-A `white_noise(pwr)` source between nodes `p` and `n`: a
+white current source with PSD `S = pwr` (A²/Hz). No-op on
+[`DirectStampContext`](@ref).
+"""
+@inline register_white_noise!(ctx::MNAContext, p, n, pwr; name::Symbol=:va) =
+    stamp_noise!(ctx, p, n, WHITE, pwr, 0.0, name)
+
+"""
+    register_flicker_noise!(ctx, p, n, pwr, expo; name)
+
+Register a Verilog-A `flicker_noise(pwr, exp)` source between nodes `p` and `n`:
+a current source with PSD `S(f) = pwr / f^exp` (A²/Hz). No-op on
+[`DirectStampContext`](@ref).
+"""
+@inline register_flicker_noise!(ctx::MNAContext, p, n, pwr, expo; name::Symbol=:va) =
+    stamp_noise!(ctx, p, n, FLICKER, pwr, expo, name)
+
+"""
+    noise_source_name(instance::Symbol, label::Symbol) -> Symbol
+
+Name a Verilog-A noise source from the device instance it belongs to and the
+label the model gave it (the trailing string argument of `white_noise` /
+`flicker_noise`, e.g. `"rb"`, `"flicker"`). Yields `:q1_rb`-style names so a
+[`NoiseSol`](@ref) decomposes a device's noise per physical mechanism, and falls
+back to whichever half is present.
+"""
+@inline function noise_source_name(instance::Symbol, label::Symbol)
+    instance === Symbol("") && return label === Symbol("") ? :va : label
+    label === Symbol("") && return instance
+    return Symbol(instance, :_, label)
+end
 
 """
     num_noise_sources(ctx::MNAContext) -> Int
