@@ -269,9 +269,12 @@ so an observed tree can be handed straight back as an override). Both are
 
 An override outranks the netlist: a subcircuit parameter the instance line
 spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
-a sweep axis. Two things are *not* reachable, and are silent when you try:
-device instance parameters (`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist
-with a `.param` instead), and a name no scope declares at all, i.e. a typo.
+a sweep axis. Two things are *not* reachable — device instance parameters
+(`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist with a `.param` instead),
+and a name no scope declares at all, i.e. a typo — and both now throw at
+construction instead of running as a no-op. Codegen emits the declared names of
+each scope beside the builder (`src/mna/param_scope.jl`); a hand-written builder
+emits none, so its `params` are never checked.
 
 ### Parameter Sweeps (the sweep API)
 
@@ -293,8 +296,9 @@ everything the sweep doesn't vary; a swept axis needs no seeding of its own. Any
 netlist `.param` responds: DC source values, device values, and
 runtime-evaluated SIN/PULSE amplitudes alike, at top level or inside a
 subcircuit. A hand-coded builder has to read `params.<name>` itself
-(`merge(defaults, params)` or `ParamLens`), and a swept name no scope declares is
-inert — the sweep runs and every point returns the netlist default. Netlist
+(`merge(defaults, params)` or `ParamLens`); a swept name a *netlist* scope does
+not declare throws when the sweep is built, rather than quietly giving every
+point the default. Netlist
 examples: `test/params.jl` (DC values, device values, instance params),
 `test/design_flow.jl` (a bias sweep as a DC transfer curve), and
 `test/mna/audio_integration.jl` (`.param vac` / `.param freq` on a `SIN` source).

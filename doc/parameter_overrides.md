@@ -66,10 +66,10 @@ wrapped in a subcircuit whose W/L are formal parameters as in
 `test/testpdk/testpdk.spice`, sweeps correctly including overriding a value the
 instance line spells out, two levels down.
 
-One piece of the design is unimplemented — device instance parameters (§1). The
-three sections after it are adjacent defects, not parts of this design: §2 is a
-missing diagnostic, §3 and §4 are independent bugs that happen to surface
-nearby.
+An override that names nothing no longer passes silently (§2). One piece of the
+design is still unimplemented — device instance parameters (§1). The two
+sections after those are adjacent defects, not parts of this design: §3 and §4
+are independent bugs that happen to surface nearby.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -94,19 +94,42 @@ shows device parameters were in the lens tree by design (`i1=(dc=-1,)`,
 `rload=(r=2000.0,)`), and the netlist-*text* `alter(io, ast; r1=(r=4.0,))` still
 honours that spelling.
 
-## 2. Unknown override names are silent (missing diagnostic, not a design gap)
+## 2. Unknown override names are diagnosed (done)
 
-A name no scope declares is inert. That is deliberate — it matches how Spectre
-`alter` behaves — but nothing says so, and a typo therefore looks like a
-parameter that has no effect.
+A name no scope declares used to be inert, which made a typo look like a
+parameter with no effect. It now throws at construction.
 
-Do **not** reach for `ParamObserver`: it needs a full builder pass, and
-`MNACircuit` is a plain struct today (free) that `alter` reconstructs *per sweep
-point*, so validating at construction would rebuild the whole circuit on every
-point. Codegen already knows every declared name (`sema.params`, formal params,
-the subckt semas) — emit a static table beside the builder and validate with a
-set lookup. That also affords a real message: "`x1` is an instance, write
-`x1=(rv=…)`".
+`ParamObserver` was the wrong tool for this: it needs a full builder pass, and
+`MNACircuit` is a plain struct (free) that `alter` reconstructs *per sweep
+point*, so validating through it would rebuild the whole circuit at every point.
+Codegen already knows every declared name, so it emits a `ParamScope` — declared
+parameters, child instances, device instances — and the override tuple is
+checked against it with set lookups (`src/mna/param_scope.jl`,
+`cg_param_scope` in `src/spc/codegen.jl`).
+
+One table per *scope* (the top level and each `.subckt`), not per instance, so
+the tables are sized by the netlist text rather than by the flattened design —
+c6288 is 2.5k lines of netlist and 212k devices.
+
+The table rides on the builder as an extra method of the builder itself,
+`builder(::DeclaredParams)`, rather than as a method of `MNA.declared_params`.
+Generated code routinely lands in a local scope — `@testset begin circuit =
+sp"..." end` — where adding a method to a function defined elsewhere is a
+*syntax* error, while adding another method to the function being defined right
+there is not. A builder with no such method (any hand-written one) reports
+`nothing` and is not checked, since only it knows what its `params` mean.
+
+Knowing the three kinds of name affords a real message rather than just
+"unknown": `x1 = 2.0` where `X1` is an instance says to write `x1 = (rv = …,)`,
+`r1 = (r = 2e3,)` says device instance parameters are the §1 gap and to
+parameterize the netlist with a `.param`, and an outright typo lists what the
+scope does declare.
+
+Two knock-on fixes, both cases of an override that reached nothing: the
+`MNACircuit` keyword constructor now folds dotted selectors (`var"x1.r1val"=2e3`)
+into the tree the way `alter` always has, and `CircuitSweep` seeds its base
+circuit through `alter` instead of splicing the first sweep point in as flat
+keywords.
 
 ## 3. Subcircuit builder names collide (independent codegen bug)
 

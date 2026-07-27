@@ -390,8 +390,67 @@ X1 mid vout 0 pair rv=1k
     # alter() re-parameterizes an existing circuit.
     @test dc!(alter(MNACircuit(divider_ckt; vin=4.0); vin=2.0))[:out] ≈ 1.0
 
-    # A name no scope declares is inert (it is not a parameter of this circuit).
-    @test dc!(MNACircuit(divider_ckt; nosuch=1.0))[:out] ≈ 0.5
+    # A name no scope declares is rejected — see the diagnostics testset below.
+    @test_throws ArgumentError MNACircuit(divider_ckt; nosuch=1.0)
+end
+
+#==============================================================================#
+# Test 8b: overrides that name nothing are diagnosed
+#
+# An undeclared name used to be inert: the circuit built, every sweep point
+# returned the netlist default, and a typo read as "this parameter has no
+# effect". Codegen emits the names each scope declares beside the builder, so
+# the override tuple is checked against the netlist before anything is built.
+#==============================================================================#
+
+errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
+
+@testset "unknown overrides are diagnosed" begin
+    # A typo at the top level names the scope and lists what it does declare.
+    msg = errmsg(() -> MNACircuit(divider_ckt; vbias=1.0))
+    @test occursin("vbias", msg)
+    @test occursin("the top level", msg)
+    @test occursin("vin", msg) && occursin("rtop", msg)
+
+    # ...through every entry point, not just the constructor.
+    @test_throws ArgumentError alter(MNACircuit(divider_ckt), vbias=1.0)
+    @test_throws ArgumentError alter(MNACircuit(divider_ckt); var"params.vbias"=1.0)
+    @test_throws ArgumentError dc!(CircuitSweep(divider_ckt, Sweep(vbias=[1.0, 2.0])))
+
+    # One level down, the message says *which* scope is missing the name.
+    msg = errmsg(() -> MNACircuit(hier_ckt; x1=(r3val=1.0,)))
+    @test occursin("x1.r3val", msg)
+    @test occursin("r1val", msg) && occursin("r2val", msg)
+    @test_throws ArgumentError alter(MNACircuit(hier_ckt); var"x1.r3val"=1.0)
+
+    # A real subcircuit parameter one level down still lands.
+    @test dc!(MNACircuit(hier_ckt; x1=(r1val=1e3,)))[:vout] ≈ 1.5
+
+    # Naming an instance where a parameter belongs (and the reverse) is its own
+    # mistake, with its own fix in the message.
+    msg = errmsg(() -> MNACircuit(hier_ckt; x1=2.0))
+    @test occursin("subcircuit instance", msg) && occursin("x1 = (inner_param = value,)", msg)
+    msg = errmsg(() -> MNACircuit(divider_ckt; vin=(x=1.0,)))
+    @test occursin("is a parameter of this scope", msg) && occursin("vin = value", msg)
+
+    # Device instance parameters are the one documented gap
+    # (doc/parameter_overrides.md §1) — say so rather than ignore it.
+    for bad in (() -> MNACircuit(divider_ckt; r1=(r=2e3,)),
+                () -> MNACircuit(divider_ckt; r1=2e3))
+        msg = errmsg(bad)
+        @test occursin("device instance", msg)
+        @test occursin(".param", msg)
+    end
+
+    # A name that is both a `.param` and an instance stays legal in both
+    # spellings — the collision rule is what decides, not the checker.
+    @test dc!(MNACircuit(collide_ckt; x1=6000.0))[:vout] > 0
+    @test dc!(MNACircuit(collide_ckt; x1=(rv=3e3,)))[:vout] > 0
+    @test_throws ArgumentError MNACircuit(collide_ckt; x1=(nosuch=1.0,))
+
+    # A hand-written builder declares nothing, so nothing is checked: it reads
+    # `params` itself and only it knows which names mean something.
+    @test dc!(MNACircuit(build_par_cir; R=1000.0, V=5.0, whatever=1.0))[:vcc] ≈ 5.0
 end
 
 @testset "overrides survive mixed spellings" begin

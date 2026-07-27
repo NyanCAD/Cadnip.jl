@@ -3096,6 +3096,100 @@ function codegen_mna(scope::SemaResult)
     codegen_mna!(CodegenState(scope))
 end
 
+#==============================================================================#
+# Declared parameter names
+#
+# Every generated builder carries a `ParamScope` listing the names its scope
+# declares, so an override tuple can be checked against the netlist without
+# building the circuit (see `mna/param_scope.jl`). The table is handed back by
+# an extra *method of the builder itself*, `builder(::DeclaredParams)`, rather
+# than by a method of `MNA.declared_params`: generated code routinely lands in
+# a local scope (`@testset begin circuit = sp"..." end`), where adding a method
+# to a function defined elsewhere is a syntax error, but adding another method
+# to the builder being defined right here is not.
+#==============================================================================#
+
+# What one instance line means for the override tree:
+#   nothing  → a device instance; its parameters are not overridable
+#   Symbol   → the subcircuit it instantiates (builder `<master>_mna_builder`)
+#   missing  → a master this table cannot resolve; accept its subtree unchecked
+function cg_scope_master(sema::SemaResult, subckt_semas::Dict{Symbol,SemaResult}, inst)
+    if isa(inst, SNode{SP.SubcktCall})
+        master_node = inst.model
+    elseif isa(inst, SNode{SC.Instance})
+        master_node = inst.master
+    else
+        return nothing  # R/C/L/V/I/M/Q/D/... device lines
+    end
+    # A VA module instantiated with `X…` / instance syntax is a device, not a
+    # subcircuit — same lookup, same order, as `cg_mna_instance!`.
+    cg_hdl_defines(sema, master_node) && return nothing
+    master = Symbol(lowercase(String(master_node)))
+    (haskey(sema.subckts, master) || haskey(subckt_semas, master)) && return master
+    haskey(sema.models, master) && return nothing  # `.model`-carded device
+    if master in sema.exposed_subckts
+        # Imported from a precompiled PDK module — usable only if that module
+        # really exports the builder, which is what binds the name here.
+        bn = Symbol(master, "_mna_builder")
+        any(m -> isdefined(m, bn), sema.imported_hdl_modules) && return master
+    end
+    # A Spectre instance line whose master is no subcircuit names a builtin
+    # primitive (`resistor`, `vsource`, ...) — a device. An unresolvable SPICE
+    # `X…` master is a netlist codegen skips, so leave its subtree unchecked.
+    return isa(inst, SNode{SC.Instance}) ? nothing : missing
+end
+
+# Does any `.hdl`-imported module define this name (either case)? Mirrors the
+# lookup `cg_mna_instance!` does when deciding VA module vs. subcircuit.
+function cg_hdl_defines(sema::SemaResult, name_node)
+    isempty(sema.imported_hdl_modules) && return false
+    oname = Symbol(String(name_node))
+    lname = Symbol(lowercase(String(name_node)))
+    for m in sema.imported_hdl_modules
+        (isdefined(m, lname) || isdefined(m, oname)) && return true
+    end
+    return false
+end
+
+"""
+    cg_param_scope(sema, subckt_semas) -> Expr
+
+Build the `ParamScope` expression for one scope: the parameter names it
+declares, the instances that are child scopes, and the device instances that
+are not.
+"""
+function cg_param_scope(sema::SemaResult, subckt_semas::Dict{Symbol,SemaResult})
+    params = Symbol[name for (name, defs) in sema.params if !isempty(defs)]
+    children = Any[]
+    devices = Symbol[]
+    for (iname, insts) in sema.instances
+        isempty(insts) && continue
+        inst = last(insts)[2].val
+        master = cg_scope_master(sema, subckt_semas, inst)
+        if master === nothing
+            push!(devices, iname)
+        else
+            builder = master === missing ? nothing : Symbol(master, "_mna_builder")
+            push!(children, Expr(:call, GlobalRef(Base, :(=>)), QuoteNode(iname), builder))
+        end
+    end
+    return :($(MNA.ParamScope)($(Expr(:vect, QuoteNode.(params)...)),
+                               $(Expr(:vect, children...)),
+                               $(Expr(:vect, QuoteNode.(devices)...))))
+end
+
+"""
+    cg_declared_params_method(builder_name, sema, subckt_semas) -> Expr
+
+The `builder(::DeclaredParams) -> ParamScope` method that reports a builder's
+declared names.
+"""
+cg_declared_params_method(builder_name::Symbol, sema::SemaResult,
+                          subckt_semas::Dict{Symbol,SemaResult}) =
+    :(function $(builder_name)(::$(MNA.DeclaredParams))
+          return $(cg_param_scope(sema, subckt_semas))
+      end)
+
 """
     extract_subcircuit_ports(sema::SemaResult) -> Vector{Symbol}
 
@@ -3218,6 +3312,9 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
             $body
             return nothing
         end
+
+        # The names this subcircuit declares, for override checking
+        $(cg_declared_params_method(builder_name, sema, subckt_semas))
     end
 end
 
@@ -3361,6 +3458,9 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
             $body
             return ctx
         end
+
+        # The names the top-level scope declares, for override checking
+        $(cg_declared_params_method(circuit_name, sema_result, subckt_semas))
     end
 end
 

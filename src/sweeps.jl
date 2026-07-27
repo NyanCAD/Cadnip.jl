@@ -399,9 +399,11 @@ end
 
 # Convenience constructor: create an MNACircuit from a builder function with default params
 function CircuitSweep(builder::Function, iterator::SweepLike; spec=MNA.MNASpec(), default_params...)
-    first_params = sweep_example(iterator)
-    merged_params = merge(NamedTuple(default_params), NamedTuple(first_params))
-    circuit = MNA.MNACircuit(builder; spec=spec, merged_params...)
+    # Seed the base circuit with the first sweep point through `alter`, the same
+    # path iteration takes: an axis named by a dotted path (`var"x1.r1val"`) has
+    # to land on that path, not on a top-level parameter of that literal name.
+    circuit = MNA.alter(MNA.MNACircuit(builder; spec=spec, default_params...);
+                        sweep_example(iterator)...)
     return CircuitSweep(builder, circuit, iterator)
 end
 
