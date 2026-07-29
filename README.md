@@ -2,19 +2,24 @@
 
 **C**ircuit **A**nalysis & **D**ifferentiable **N**umerical **I**ntegration **P**rogram
 
-Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of CedarSim that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
+Cadnip is an analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. 
 
 ## Features
 
-- Import of multi-dialect SPICE/Spectre netlists
-- Import of Verilog-A models
+- Import of circuits in the form of netlists written in multiple dialects of Spice or Spectre
+- Definition of new devices using Verilog-A models
 - DC and transient analyses
-- Full differentiability via ForwardDiff (for sensitivities, optimization, ML, etc.)
+- Full differentiability with respect to parameter values via ForwardDiff (for sensitivities, optimization, ML, etc.)
 - Parameter sweeps with `CircuitSweep`
 - Works with standard Julia releases (1.11+)
 
+Cadnip is a fork of now inactive CedarSim that replaces the DAECompiler backend with a Modified Nodal Analysis (MNA) implementation. Internally, Cadnip represents ciruits using Julia function. The result is high performance simulation that interacts well with Julia's optimization and execution capabilities.
+
 ## Installation
 
+```
+Is this complex installation necessary? If so, why? If not necessary for normal use, can we provide both kinds of install with a justification?
+```
 Install from GitHub by first adding the subpackages, then the main package:
 
 ```julia
@@ -35,14 +40,11 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 ## Quick Start
 
+A simple voltage divider is the circuit-level "hello world!" equivalent. Here's how you can analyze that circuit with using the `sp` string macro to inline a Spice netlist
+
 ```julia
 using Cadnip
 using Cadnip.MNA: MNACircuit
-
-# --- File-first (production): load a netlist from disk ---
-circuit = MNACircuit("amp.sp")                 # extension → .scs Spectre, else SPICE
-sol = dc!(circuit)
-println("Output voltage: ", sol[:out])
 
 # --- Inline (tests, small samples): string macros ---
 circuit = MNACircuit(sp"""
@@ -53,16 +55,71 @@ R2 out 0 1k
 """)
 sol = dc!(circuit)
 println("Vout = ", sol[:out], " V")            # 2.5
+```
+Note that `sp"..."` treats the first line as comment. If we don't have that `* Voltage divider` line, we get a confusing result:
+```julia
+julia> circuit = MNACircuit(sp"""
+       V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+       """)
+MNACircuit{var"###circuit#257", @NamedTuple{}, Cadnip.MNA.MNASpec{Float64}}(var"##circuit#257", NamedTuple(), Cadnip.MNA.MNASpec{Float64}(27.0, :tran, 0.0, 1.0e-12, 0.0, 1.0, 27.0, 1.0e-12, 0.001, 1.0e-6, 1.0e-12))
 
-# --- Spectre syntax via spc"..." ---
+julia> sol = dc!(circuit)
+DC Solution:
+  Node Voltages:
+    V(out) = 0 V
+    V(vcc) = 0 V
+```
+
+You can use the inline form `sp"..."i` (note the `i` at the end) to avoid that:
+```julia
+julia> circuit = MNACircuit(sp"""
+       V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+       """i)
+MNACircuit{var"###circuit#258", @NamedTuple{}, Cadnip.MNA.MNASpec{Float64}}(var"##circuit#258", NamedTuple(), Cadnip.MNA.MNASpec{Float64}(27.0, :tran, 0.0, 1.0e-12, 0.0, 1.0, 27.0, 1.0e-12, 0.001, 1.0e-6, 1.0e-12))
+
+julia> sol = dc!(circuit)
+DC Solution:
+  Node Voltages:
+    V(out) = 2.5 V
+    V(vcc) = 5 V
+  Branch Currents:
+    I_v1 = -0.0025 A
+```
+
+You can also use Spectre syntax instead with the `spc` string macro:
+
+```julia
 circuit = MNACircuit(spc"""
 v1 (vcc 0) vsource type=dc dc=5
 r1 (vcc out) resistor r=1k
 r2 (out 0) resistor r=1k
 """)
+sol = dc!(circuit)
+println("Vout = ", sol[:out], " V")            # 2.5
+```
+
+For larger netlists, loading from a file is easier. In Cadnip, the `.scs` extension on a file name indicates that the file contains a Spectre-formatted netlist while anything else indicates Spice syntax.
+
+```julia
+# --- File-first (production): load a netlist from disk ---
+circuit = MNACircuit("amp.sp")                 # extension → .scs Spectre, else SPICE
+sol = dc!(circuit)
+println("Output voltage: ", sol[:out])
+```
+
+```
+Quick question: would it useful to provide a convenience overload of dc! and trans!
+so that the call to MNACircuit isn't necessary? Or is the world age thing the problem
+that causes this to be necessary?
 ```
 
 ### Loading options
+
+Circuits can be loaded in a number of ways
 
 | Input                        | Loader                                            |
 | ---------------------------- | ------------------------------------------------- |
@@ -75,23 +132,68 @@ r2 (out 0) resistor r=1k
 | Already-compiled builder     | `MNACircuit(my_builder_fn; R=1e3)`                |
 | PDK package                  | `.lib "jlpkg://MyPDK/..." typical` in the netlist |
 
-**Top-level only for runtime parsing.** `MNACircuit("path")` and
-`MNACircuit(code; lang=...)` call `Base.eval` internally and must be used at
-the REPL or module top level. Inside a function body, Julia freezes the
-caller's world age at entry and the freshly-defined builder can't be
-dispatched. For that case, bring the circuit into scope at top level first:
+**Warning: limitation on runtime parsing**
 
+Note that `MNACircuit("path")` calls `Base.eval` internally. That means that if you
+write code that tries to analyze a circuit that you load from a file, you can get
+a surprising error message as shown here:
 ```julia
-Base.include(@__MODULE__, SpiceFile("amp.sp"))   # top level: defines `amp`
+julia> function foo()
+          dc!(MNACircuit("divider.sp"))
+       end
+foo (generic function with 1 method)
 
-function run_sim()
-    c = MNACircuit(amp; R1=1e3)                  # no eval, no world-age tax
-    dc!(c)
-end
+julia> foo()
+ERROR: MethodError: no method matching divider(::@NamedTuple{}, ::Cadnip.MNA.MNASpec{Float64}, ::Float64; x::Cadnip.MNA.ZeroVector)
+The applicable method may be too new: running in world age 27017, while current world is 27025.
+...
+```
+This happens because `eval` is called with the age of the world frozen at the time of the call to `foo`.
+But `eval` advances the state of the world so when other methods get added, those methods are too recent
+to call in the context of the original world because code compiled in two different ages may have conflicting
+assumptions baked in.
+
+A similarly surprising result can be had if you are parsing an inline Spice netlist:
+```julia
+julia> function foo()
+              dc!(MNACircuit(sp"""
+              V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+       """))
+       end
+ERROR: syntax: "using" expression not at top level
+Stacktrace:
+ [1] top-level scope
+   @ REPL[33]:1
 ```
 
-The string macros (`sp"..."`, `spc"..."`, `va"..."`) expand at the call site
-and work transparently in both top-level and function-body contexts.
+The solution in both cases is the same. Define the circuit at the REPL
+or in the `Base` and pass it in.
+
+```
+julia> foo(MNACircuit("divider.sp"))
+DC Solution:
+  Node Voltages:
+    V(out) = 2.5 V
+    V(vcc) = 5 V
+  Branch Currents:
+    I_v1 = -0.0025 A
+
+
+julia> foo(MNACircuit(sp"""
+       * divider
+       V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+              """))
+DC Solution:
+  Node Voltages:
+    V(out) = 2.5 V
+    V(vcc) = 5 V
+  Branch Currents:
+    I_v1 = -0.0025 A
+```
 
 ### Parameters and sweeps
 
