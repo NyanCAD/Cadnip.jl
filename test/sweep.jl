@@ -9,6 +9,7 @@ using Cadnip.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restampin
 using Cadnip.MNA: Resistor, VoltageSource
 using Cadnip.MNA: DCSolution
 using Cadnip: ParamLens
+using VADistillerModels   # .model dmod d → sp_diode, for the continuation sweep
 
 # Simple two-resistor circuit (MNA builder function):
 #
@@ -307,7 +308,61 @@ end
         # Current through voltage source is negative (sources current)
         # I = V / (R1 + R2) = 1 / (R1 + R2)
         @test isapprox(sol[:I_V], -1/(params.R1 + params.R2); atol=deftol)
+        @test sol.converged
     end
+end
+
+#==============================================================================#
+# Sweep continuation: each point warm-starts Newton from the previous one, the
+# way a SPICE `.dc` sweep does. Three series junctions behind a source resistor
+# — the operating point moves smoothly with the supply, so every point is a
+# small perturbation of the last.
+#==============================================================================#
+
+const diode_chain = sp"""
+.param vsrc=1.0
+v1 in 0 DC vsrc
+r1 in n1 1k
+d1 n1 n2 dmod
+d2 n2 n3 dmod
+d3 n3 0 dmod
+.model dmod d is=1e-14 n=1.0
+"""i
+
+@testset "dc! sweep continuation" begin
+    sweep = Sweep(vsrc = 0.5:0.5:20.0)
+    warm = Cadnip.dc!(CircuitSweep(diode_chain, sweep))
+    cold = Cadnip.dc!(CircuitSweep(diode_chain, sweep); continuation=false)
+
+    @test length(warm) == length(cold) == 40
+    @test all(sol.converged for (_, sol) in warm)
+
+    # Continuation changes the path Newton takes, not where it lands.
+    for ((p_warm, s_warm), (p_cold, s_cold)) in zip(warm, cold)
+        @test p_warm == p_cold
+        @test isapprox(s_warm[:n1], s_cold[:n1]; atol=deftol)
+        @test isapprox(s_warm[:I_v1], s_cold[:I_v1]; rtol=1e-6)
+    end
+
+    # Physical sanity, so the agreement above can't be two identical wrong
+    # answers: three junctions in series clamp n1 near 3·0.7 V, and the drop
+    # only grows logarithmically as the supply drives more current.
+    v_n1 = [sol[:n1] for (_, sol) in warm]
+    @test issorted(v_n1)
+    @test 1.5 < v_n1[end] < 2.5
+end
+
+@testset "dc! warm start" begin
+    base = MNACircuit(diode_chain; vsrc=10.0)
+    cold = Cadnip.dc!(base)
+    @test cold.converged
+
+    # Starting from a solution reaches that same solution...
+    @test isapprox(Cadnip.dc!(base; u0=cold.x)[:n1], cold[:n1]; atol=deftol)
+    # ...and a guess whose length doesn't match the system (a sweep point that
+    # changed the structure) is dropped rather than resized, so the solve runs
+    # cold instead of erroring.
+    @test isapprox(Cadnip.dc!(base; u0=[1.0, 2.0])[:n1], cold[:n1]; atol=deftol)
 end
 
 # Phase 4: MNA-based SPICE codegen tests

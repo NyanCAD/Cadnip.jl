@@ -138,6 +138,10 @@ Result of DC operating point analysis.
 - `charge_names::Vector{Symbol}`: Charge state variable names
 - `limit_names::Vector{Symbol}`: Newton limiting variable names
 - `n_nodes::Int`: Number of voltage nodes
+- `converged::Bool`: Whether the Newton solve reached the requested tolerance.
+  A non-converged solve still returns its last iterate (and warns), so this is
+  the flag to check before trusting the values — it is also what makes a sweep
+  refuse to warm-start the next point from a failed one.
 """
 struct DCSolution
     x::Vector{Float64}
@@ -146,16 +150,17 @@ struct DCSolution
     charge_names::Vector{Symbol}
     limit_names::Vector{Symbol}
     n_nodes::Int
+    converged::Bool
 end
 
 """
-    DCSolution(sys::MNAData, x::Vector{Float64})
+    DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true)
 
 Create a DC solution from a system and solution vector.
 """
-DCSolution(sys::MNAData, x::Vector{Float64}) =
+DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true) =
     DCSolution(copy(x), sys.node_names, sys.current_names,
-               sys.charge_names, sys.limit_names, sys.n_nodes)
+               sys.charge_names, sys.limit_names, sys.n_nodes, converged)
 
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
@@ -293,7 +298,7 @@ function Base.show(io::IO, sol::DCSolution)
 end
 
 function Base.show(io::IO, ::MIME"text/plain", sol::DCSolution)
-    println(io, "DC Solution:")
+    println(io, sol.converged ? "DC Solution:" : "DC Solution (did not converge):")
     println(io, "  Node Voltages:")
     for (i, name) in enumerate(sol.node_names)
         @printf(io, "    V(%s) = %.6g V\n", name, sol.x[i])
@@ -839,8 +844,30 @@ function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::
     return u, false
 end
 
+# Initial guess for a DC solve, `nothing` meaning a cold start.
+#
+# Cold start is zeros: more robust for highly nonlinear circuits (diodes,
+# MOSFETs) than the linear solve G\b, which can give wildly wrong values when
+# the circuit is linearized at x=0 (e.g., a diode looks like an open circuit at
+# V=0). The Newton solver handles the nonlinearity more carefully from zeros —
+# and PCNR keys its junction seeding (`initjct`) off `iszero(u0)`, so a cold
+# start is exactly the state that gets seeded.
+#
+# A warm start whose length doesn't match the system is dropped rather than
+# resized: a sweep point that changes the circuit *structure* (not just values)
+# has nothing meaningful to continue from, and starting cold is always valid.
+function _dc_initial_guess(u0, n::Int)
+    u0 === nothing && return zeros(n)
+    if length(u0) != n
+        @debug "DC warm start ignored: guess has length $(length(u0)), system size is $n"
+        return zeros(n)
+    end
+    return collect(Float64, u0)
+end
+
 """
-    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=CedarRobustNLSolve())
+    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100,
+                      nlsolve=CedarRobustNLSolve(), u0=nothing)
 
 DC solve using a pre-built detection context.
 
@@ -851,10 +878,17 @@ The context is used to determine the system structure, then compiled for Newton 
 
 Uses `CedarRobustNLSolve()` by default which combines RobustMultiNewton algorithms
 with LevenbergMarquardt (GMIN-like regularization) and PseudoTransient for difficult circuits.
+
+`u0` is the Newton starting point; `nothing` (the default) starts cold from
+zeros. Pass a previous solution vector to *continue* from a nearby operating
+point — what a `.dc` sweep does from point to point. Only the direct Newton
+tiers use it; the GMIN/source-stepping fallbacks always restart from zeros, so a
+warm start that turns out to be a bad guess costs an iteration count, never a
+solution.
 """
 function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
                             abstol::Real=1e-10, maxiters::Int=100,
-                            nlsolve=CedarRobustNLSolve())
+                            nlsolve=CedarRobustNLSolve(), u0=nothing)
     n = system_size(ctx)
 
     if n == 0
@@ -865,14 +899,8 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     cs = compile_structure(builder, params, spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Initial guess: zeros
-    # Using zeros is more robust for highly nonlinear circuits (diodes, MOSFETs)
-    # than the linear solve G\b, which can give wildly wrong values when the
-    # circuit is linearized at x=0 (e.g., diode looks like open circuit at V=0).
-    # The Newton solver handles the nonlinearity more carefully from zeros.
-    u0 = zeros(n)
-
-    return _dc_solve_with_fallbacks(cs, ws, u0; abstol, maxiters, nlsolve)
+    return _dc_solve_with_fallbacks(cs, ws, _dc_initial_guess(u0, n);
+                                    abstol, maxiters, nlsolve)
 end
 
 # Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
@@ -904,7 +932,7 @@ end
 
 """
     solve_dc(builder, params, spec::MNASpec;
-             abstol=1e-10, maxiters=100) -> DCSolution
+             abstol=1e-10, maxiters=100, u0=nothing) -> DCSolution
 
 Solve DC operating point using a circuit builder function.
 
@@ -917,23 +945,24 @@ Supports both linear and nonlinear devices.
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
 - `maxiters`: Maximum Newton iterations (default: 100)
+- `u0`: Newton starting point, `nothing` (default) for a cold start from zeros
 
 # See Also
 - `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
-                  abstol::Real=1e-10, maxiters::Int=100) where {F,P}
+                  abstol::Real=1e-10, maxiters::Int=100, u0=nothing) where {F,P}
     # Run detection passes to discover all states
     ctx = _detect_structure(builder, params, spec)
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
     u, converged = dc_solve_with_ctx(builder, params, spec, ctx;
-                                      abstol=abstol, maxiters=maxiters)
+                                      abstol=abstol, maxiters=maxiters, u0=u0)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
@@ -944,7 +973,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     builder(params, spec, 0.0; x=u, ctx=ctx)
     sys_final = assemble!(ctx)
 
-    return DCSolution(sys_final, u)
+    return DCSolution(sys_final, u, converged)
 end
 
 #==============================================================================#
@@ -2220,7 +2249,7 @@ end
 #
 # Uses the unified DC solve path: build_with_detection() + dc_solve_with_ctx()
 # This ensures consistent state detection between DC and transient analysis.
-function solve_dc(circuit::MNACircuit)
+function solve_dc(circuit::MNACircuit; u0=nothing)
     # Use the circuit's spec directly - time-dependent sources handle mode internally
     # If caller wants DC operating point behavior, they should set mode to :dcop
 
@@ -2229,11 +2258,12 @@ function solve_dc(circuit::MNACircuit)
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true)
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
-    u, converged = dc_solve_with_ctx(circuit.builder, circuit.params, circuit.spec, ctx)
+    u, converged = dc_solve_with_ctx(circuit.builder, circuit.params, circuit.spec, ctx;
+                                     u0=u0)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
@@ -2244,7 +2274,7 @@ function solve_dc(circuit::MNACircuit)
     circuit.builder(circuit.params, circuit.spec, 0.0; x=u, ctx=ctx)
     sys_final = assemble!(ctx)
 
-    return DCSolution(sys_final, u)
+    return DCSolution(sys_final, u, converged)
 end
 
 #==============================================================================#

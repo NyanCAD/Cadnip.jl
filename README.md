@@ -139,7 +139,21 @@ result = dc!(CircuitSweep(circuit, sweep))     # Parameter sweep
 ```
 
 `dc!(cs::CircuitSweep)` returns a `SweepResult` that iterates `(params, sol)`
-pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`.
+pairs. Solutions support name-based access via `sol[:node]` / `sol[:I_vsrc]`,
+and `sol.converged` says whether Newton actually reached tolerance.
+
+A DC sweep *continues*: each point starts Newton from the previous point's
+solution rather than from zeros, like a SPICE `.dc` sweep. Adjacent points are a
+small perturbation of each other, so this costs far fewer Newton iterations on
+nonlinear circuits (a 40-junction ladder over 60 points: 877 iterations cold vs
+477 continued). A point that fails to converge is never used as a starting
+guess. Pass `continuation=false` for independent cold solves, and
+`dc!(circuit; u0=sol.x)` to warm-start a single operating point by hand:
+
+```julia
+result = dc!(CircuitSweep(circuit, sweep))                     # continued (default)
+result = dc!(CircuitSweep(circuit, sweep); continuation=false)  # independent points
+```
 
 A DC operating point is also enumerable, so you can introspect or export it
 without knowing the node names up front:

@@ -83,7 +83,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] UX/design follow-ups from the same walkthrough:
   - [ ] Report device terminal currents in the operating point, via an op-info channel on `MNAContext`
   - [ ] Report device small-signal parameters and region (gm, gds, triode/saturation), which needs Verilog-A operating-point variables in the VA front end
-  - [ ] `.dc` sweep with continuation: take a `u0` in `dc_solve_with_ctx` and warm-start each point from the last
+  - [x] `.dc` sweep with continuation: `dc_solve_with_ctx`/`solve_dc`/`dc!` take a `u0`, and `dc!(::CircuitSweep)` warm-starts each point from the previous *converged* one (`continuation=true` by default, as SPICE `.dc` does). `DCSolution` carries `converged`, which is what gates the hand-off; a guess of the wrong length (a point that changed the system size) is dropped, and the GMIN/source-stepping fallbacks still restart from zeros, so a bad guess costs iterations and never a solution. Transient sweeps still DC-init cold per point — `tran!(::CircuitSweep)` inits through `CedarDCOp`, which has no `u0` seam yet
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
