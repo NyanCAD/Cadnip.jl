@@ -357,6 +357,34 @@ end
     end
 
     #==========================================================================#
+    # Continuation: a warm start is what a `.dc` sweep hands the next point
+    #==========================================================================#
+
+    @testset "PCNR warm start" begin
+        spec = MNASpec(mode=:dcop)
+
+        ctx = MNA._detect_structure(chain_lim, (;), spec)
+        cs = MNA.compile_structure(chain_lim, (;), spec; ctx=ctx)
+        ws = MNA.create_workspace(cs; ctx=ctx)
+        n = system_size(ctx)
+
+        u_cold, ok_cold, iters_cold = MNA._dc_pcnr_newton(cs, ws, zeros(n);
+                                                          abstol=1e-10, maxiters=100)
+        @test ok_cold
+
+        # A neighbouring operating point, i.e. what the previous point of a
+        # sweep leaves behind. `iszero(u0)` is false here, so PCNR skips its
+        # cold-start junction seeding and starts from the guess as given.
+        u_warm, ok_warm, iters_warm = MNA._dc_pcnr_newton(cs, ws, u_cold .* 0.99;
+                                                          abstol=1e-10, maxiters=100)
+        @test ok_warm
+        # Same operating point, reached in fewer iterations — the whole point
+        # of continuation.
+        @test u_warm ≈ u_cold atol=1e-6
+        @test iters_warm < iters_cold
+    end
+
+    #==========================================================================#
     # Transient smoke test: augmented system must not break IDA
     #==========================================================================#
 
