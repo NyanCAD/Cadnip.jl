@@ -315,6 +315,37 @@ function cg_expr_with_parent_params!(state::CodegenState, node, exposed_params::
     end
 end
 
+"""
+    model_param_deps(state, model_ast) -> Vector{Symbol}
+
+The `.param` names a `.model` card's parameter expressions read, in first-seen
+order.
+
+A model card with no such dependency is a constant and gets hoisted to module
+scope as a `const` (see `codegen_toplevel_models!`), where it is shared by the
+top-level builder and every subcircuit builder and infers concretely. A card
+that reads a `.param` cannot live there — the parameter is a local of the
+builder function, so the hoisted `const` would fail to resolve it at load time.
+Those cards become module-level factory functions of exactly these names
+instead, called once per builder pass.
+
+Only names some scope actually declares count. An identifier that is *not* a
+declared parameter (a bare `type=n` value, a function name) is left alone, so
+this never turns a card that would have hoisted fine into a factory.
+"""
+function model_param_deps(state::CodegenState, model_ast)
+    deps = Symbol[]
+    for p in model_ast.parameters
+        LSymbol(p.name) in (:level, :version) && continue
+        sema_visit_ids!(p.val) do id
+            if haskey(state.sema.params, id) && !(id in deps)
+                push!(deps, id)
+            end
+        end
+    end
+    return deps
+end
+
 function cg_params!(state::CodegenState, params)
     ret = Expr[]
     for param in params
@@ -2669,111 +2700,158 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 end
 
 """
-    codegen_toplevel_models!(state::CodegenState)
+    cg_model_value!(state, model_ast, model_ref; cg_val=…) -> Union{Expr, Nothing}
 
-Generate model definitions for the top level of the circuit.
-Returns an array of Expr that should be placed at module scope (before subcircuit builders).
+Build the right-hand side a `.model` card lowers to: a NamedTuple for an `r`
+card, a `spicecall(ParsedModel, …)` for a VA/registry model. Returns `nothing`
+for a card that needs no binding of its own (a legacy `SpectreEnvironment`
+device, which the instance site constructs directly).
 
-This extracts model factory definitions (like psp103n, psp103p) so they can be
-accessed by both subcircuit builders and the main circuit function.
+`cg_val` lowers a parameter's value expression. It is a hook because the same
+card is lowered into different scopes: at module level and in a top-level
+builder its identifiers are plain locals, while inside a subcircuit builder a
+name the subcircuit doesn't declare is the parent's and has to be read from
+`parent_params`.
 """
-function codegen_toplevel_models!(state::CodegenState)
-    model_defs = Expr[]
-
-    for (model_name, defs) in state.sema.models
-        if !isempty(defs)
-            (_, def) = last(defs)  # Use most recent definition
-            model_ast = def.val[1]  # The model SNode
-            model_ref = def.val[2]  # The GlobalRef
-
-            # Check if this is a resistor model
-            typ = LSymbol(model_ast.typ)
-            if typ == :r
-                # Extract model parameters into a NamedTuple
-                model_params = Expr[]
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    # Skip meta-parameters
-                    if pname in (:level, :version, :type)
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    # Use uppercase for R parameter (SPICE convention)
-                    if pname == :r
-                        push!(model_params, Expr(:(=), :R, pval))
-                    elseif pname == :rsh
-                        push!(model_params, Expr(:(=), :rsh, pval))
-                    else
-                        push!(model_params, Expr(:(=), pname, pval))
-                    end
-                end
-                model_var = cg_model_name!(state, model_name)
-                push!(model_defs, :(const $model_var = ($(model_params...),)))
-            elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
-                # VA model from imported HDL module or external package
-                # Get the model type to build case-insensitive parameter lookup
-                T = getglobal(model_ref.mod, model_ref.name)
-                case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
-
-                model_params = Expr[]
-                level = nothing
-                version = nothing
-                mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
-                type_val = nothing
-                for p in model_ast.parameters
-                    pname = LSymbol(p.name)
-                    if pname == :level
-                        level = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :version
-                        version = parse(Float64, String(p.val))
-                        continue
-                    elseif pname == :type
-                        type_val = cg_expr!(state, p.val)
-                        continue
-                    end
-                    pval = cg_expr!(state, p.val)
-                    # Use case-insensitive lookup to find correct parameter name
-                    lname = Symbol(lowercase(String(pname)))
-                    rname = get(case_insensitive, lname, pname)
-                    # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
-                    push!(model_params, Expr(:(=), rname, pval))
-                end
-                device_type = mosfet_type !== nothing ? mosfet_type : typ
-                level_int = level === nothing ? nothing : Int(level)
-                version_str = version === nothing ? nothing : string(Int(version))
-                type_params = Cadnip.getparams(device_type, level_int, version_str)
-                has_type_from_registry = false
-                for (param_name, param_val) in pairs(type_params)
-                    push!(model_params, Expr(:(=), param_name, param_val))
-                    if param_name == :TYPE
-                        has_type_from_registry = true
-                    end
-                end
-                if !has_type_from_registry && type_val !== nothing
-                    push!(model_params, Expr(:(=), :TYPE, type_val))
-                end
-                model_var = cg_model_name!(state, model_name)
-                # Use Cadnip pattern: pass params as NamedTuple to spicecall
-                # This avoids embedding 200 kwargs in the generated code
-                #
-                # const is essential here, not cosmetic: these bindings are
-                # captured by the circuit builder function as module globals
-                # (not locals/arguments), and a plain `=` global is always
-                # ::Any at use sites regardless of what's assigned to it. That
-                # made every `spicecall(model_var; ...)` call in the builder
-                # infer to Any, forcing the device struct to be heap-boxed on
-                # every stamp!() call (every Newton iteration).
-                push!(model_defs, :(const $model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
-            end
+function cg_model_value!(state::CodegenState, model_ast, model_ref;
+                         cg_val = node -> cg_expr!(state, node))
+    typ = LSymbol(model_ast.typ)
+    if typ == :r
+        # Resistor model: a plain NamedTuple of the card's parameters.
+        model_params = Expr[]
+        for p in model_ast.parameters
+            pname = LSymbol(p.name)
+            # Skip meta-parameters
+            pname in (:level, :version, :type) && continue
+            pval = cg_val(p.val)
+            # Use uppercase for R parameter (SPICE convention).
+            # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
+            push!(model_params, Expr(:(=), pname == :r ? :R : pname, pval))
         end
-    end
+        return :(($(model_params...),))
+    elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
+        # VA model from imported HDL module or external package
+        # Get the model type to build case-insensitive parameter lookup
+        T = getglobal(model_ref.mod, model_ref.name)
+        case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
 
-    return model_defs
+        model_params = Expr[]
+        # Extract level, version for getparams lookup
+        level = nothing
+        version = nothing
+        mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
+        type_val = nothing  # Track type parameter value for later
+        for p in model_ast.parameters
+            pname = LSymbol(p.name)
+            # Track meta-parameters for registry lookup
+            if pname == :level
+                level = parse(Float64, String(p.val))
+                continue
+            elseif pname == :version
+                version = parse(Float64, String(p.val))
+                continue
+            elseif pname == :type
+                # Store type value - may need to add if getparams doesn't provide it
+                type_val = cg_val(p.val)
+                continue
+            end
+            pval = cg_val(p.val)
+            # Use case-insensitive lookup to find correct parameter name
+            lname = Symbol(lowercase(String(pname)))
+            rname = get(case_insensitive, lname, pname)
+            # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
+            push!(model_params, Expr(:(=), rname, pval))
+        end
+        # Query model registry for type parameters (polarity for MOSFET/BJT)
+        device_type = mosfet_type !== nothing ? mosfet_type : typ
+        level_int = level === nothing ? nothing : Int(level)
+        version_str = version === nothing ? nothing : string(Int(version))
+        type_params = Cadnip.getparams(device_type, level_int, version_str)
+        has_type_from_registry = false
+        for (param_name, param_val) in pairs(type_params)
+            push!(model_params, Expr(:(=), param_name, param_val))
+            param_name == :TYPE && (has_type_from_registry = true)
+        end
+        # If getparams didn't provide TYPE but model card had type=N, add it.
+        # VA models typically expect TYPE (uppercase) for device polarity.
+        if !has_type_from_registry && type_val !== nothing
+            push!(model_params, Expr(:(=), :TYPE, type_val))
+        end
+        # Pass params as a NamedTuple to spicecall rather than embedding 200
+        # kwargs in the generated code.
+        return :($(spicecall)($(ParsedModel), $model_ref, ($(model_params...),)))
+    end
+    return nothing
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), skip_models=false)
+    model_factory_name(model_name) -> Symbol
+
+Name of the module-level function that builds a parameterized `.model` card.
+Distinct from `cg_model_name!`, which names the *value* the builder binds — and
+deliberately not derived from it, because the ambiguity check behind that name
+is per-scope while this one has to agree across every scope that calls it. The
+`*modelfn#` prefix is an invalid identifier in both SPICE and Julia, so it
+cannot collide with a spliced name.
+"""
+model_factory_name(model_name::Symbol) = Symbol("*modelfn#", model_name)
+
+"""
+    codegen_toplevel_models!(state::CodegenState) -> (model_defs, factories)
+
+Generate model definitions for the top level of the circuit.
+Returns the Exprs that should be placed at module scope (before subcircuit
+builders), plus a `model name => parameter names` map for the cards that read a
+`.param` and so became factory functions rather than constants.
+
+This extracts model factory definitions (like psp103n, psp103p) so they can be
+accessed by both subcircuit builders and the main circuit function.
+
+A card that reads a `.param` cannot be a `const` — the parameter is a local of
+the builder — but it must not move *into* the builder either: a PSP-sized
+struct literal there is exactly the LLVM SROA blow-up `is_large_model` and
+`doc/psp103_noinline_investigation.md` exist to avoid. So it is hoisted as a
+`@noinline` function of the parameters it reads, and the builder binds one call
+to it. The struct is still built out of line, once per builder pass, and the
+builder's own IR grows by a call.
+"""
+function codegen_toplevel_models!(state::CodegenState)
+    model_defs = Expr[]
+    factories = Dict{Symbol, Vector{Symbol}}()
+
+    for (model_name, defs) in state.sema.models
+        isempty(defs) && continue
+        (_, def) = last(defs)  # Use most recent definition
+        model_ast = def.val[1]  # The model SNode
+        model_ref = def.val[2]  # The GlobalRef
+
+        value = cg_model_value!(state, model_ast, model_ref)
+        value === nothing && continue
+
+        # `deps` appear in `value` as bare symbols, which is exactly what the
+        # factory's formal arguments bind.
+        deps = model_param_deps(state, model_ast)
+        if !isempty(deps)
+            factories[model_name] = deps
+            push!(model_defs, :(@noinline $(model_factory_name(model_name))($(deps...)) = $value))
+            continue
+        end
+
+        model_var = cg_model_name!(state, model_name)
+        # const is essential here, not cosmetic: these bindings are captured by
+        # the circuit builder function as module globals (not locals/arguments),
+        # and a plain `=` global is always ::Any at use sites regardless of what
+        # is assigned to it. That made every `spicecall(model_var; ...)` call in
+        # the builder infer to Any, forcing the device struct to be heap-boxed
+        # on every stamp!() call (every Newton iteration).
+        push!(model_defs, :(const $model_var = $value))
+    end
+
+    return model_defs, factories
+end
+
+"""
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, model_factories=Dict{Symbol,Vector{Symbol}}())
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2787,11 +2865,18 @@ When `is_subcircuit=false` (top-level), params come from the `params` argument.
 `subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
 to look up exposed_parameters when generating subcircuit instance calls.
 
-`skip_models=true` skips model codegen (used when models are defined at top level).
+`models_at_toplevel=true` means the constant model cards are already module-level
+`const`s (`codegen_toplevel_models!`), so nothing needs binding for them here.
+
+`model_factories` maps a model name to the `.param`s its card reads. Those cards
+are module-level functions rather than constants, so this scope binds one call
+to the factory — and does so whether or not the constant cards were hoisted,
+since a value that depends on a parameter is per-scope by construction.
 """
 function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
                       subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
-                      skip_models::Bool=false)
+                      models_at_toplevel::Bool=false,
+                      model_factories::Dict{Symbol,Vector{Symbol}}=Dict{Symbol,Vector{Symbol}}())
     block = Expr(:block)
     ret = block
 
@@ -2916,97 +3001,31 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Codegen model definitions for MNA (unless skip_models=true, meaning models are at top level)
-    # For each model, extract parameters and create a NamedTuple or VA model wrapper
-    if !skip_models
-        for (model_name, defs) in state.sema.models
-            if !isempty(defs)
-                (_, def) = last(defs)  # Use most recent definition
-                model_ast = def.val[1]  # The model SNode
-                model_ref = def.val[2]  # The GlobalRef
-
-                # Check if this is a resistor model
-                typ = LSymbol(model_ast.typ)
-                if typ == :r
-                    # Extract model parameters into a NamedTuple
-                    model_params = Expr[]
-                    for p in model_ast.parameters
-                        pname = LSymbol(p.name)
-                        # Skip meta-parameters
-                        if pname in (:level, :version, :type)
-                            continue
-                        end
-                        pval = cg_expr!(state, p.val)
-                        # Use uppercase for R parameter (SPICE convention)
-                        # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
-                        if pname == :r
-                            push!(model_params, Expr(:(=), :R, pval))
-                        elseif pname == :rsh
-                            push!(model_params, Expr(:(=), :rsh, pval))
-                        else
-                            push!(model_params, Expr(:(=), pname, pval))
-                        end
-                    end
-                    model_var = cg_model_name!(state, model_name)
-                    push!(block.args, :($model_var = ($(model_params...),)))
-                elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
-                    # VA model from imported HDL module or external package
-                    # Get the model type to build case-insensitive parameter lookup
-                    T = getglobal(model_ref.mod, model_ref.name)
-                    case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
-
-                    # Create a model wrapper that combines model params with instance params
-                    model_params = Expr[]
-                    # Extract level, version for getparams lookup
-                    level = nothing
-                    version = nothing
-                    mosfet_type = typ in (:nmos, :pmos) ? typ : nothing
-                    type_val = nothing  # Track type parameter value for later
-                    for p in model_ast.parameters
-                        pname = LSymbol(p.name)
-                        # Track meta-parameters for registry lookup
-                        if pname == :level
-                            level = parse(Float64, String(p.val))
-                            continue
-                        elseif pname == :version
-                            version = parse(Float64, String(p.val))
-                            continue
-                        elseif pname == :type
-                            # Store type value - may need to add if getparams doesn't provide it
-                            type_val = cg_expr!(state, p.val)
-                            continue
-                        end
-                        pval = cg_expr!(state, p.val)
-                        # Use case-insensitive lookup to find correct parameter name
-                        lname = Symbol(lowercase(String(pname)))
-                        rname = get(case_insensitive, lname, pname)
-                        # Use :(=) for NamedTuple field syntax, not :kw (kwargs)
-                        push!(model_params, Expr(:(=), rname, pval))
-                    end
-                    # Query model registry for type parameters (polarity for MOSFET/BJT)
-                    device_type = mosfet_type !== nothing ? mosfet_type : typ
-                    level_int = level === nothing ? nothing : Int(level)
-                    version_str = version === nothing ? nothing : string(Int(version))
-                    type_params = Cadnip.getparams(device_type, level_int, version_str)
-                    has_type_from_registry = false
-                    for (param_name, param_val) in pairs(type_params)
-                        push!(model_params, Expr(:(=), param_name, param_val))
-                        if param_name == :TYPE
-                            has_type_from_registry = true
-                        end
-                    end
-                    # If getparams didn't provide TYPE but model card had type=N, add it
-                    if !has_type_from_registry && type_val !== nothing
-                        # VA models typically expect TYPE (uppercase) for device polarity
-                        push!(model_params, Expr(:(=), :TYPE, type_val))
-                    end
-                    model_var = cg_model_name!(state, model_name)
-                    # Use Cadnip pattern: pass params as NamedTuple to spicecall
-                    # This avoids embedding 200 kwargs in the generated code
-                    push!(block.args, :($model_var = $(spicecall)($(ParsedModel), $model_ref, ($(model_params...),))))
-                end
-            end
+    # Codegen model definitions for MNA. A parameterized card is one call to its
+    # module-level factory; the rest are either module-level consts already
+    # (`models_at_toplevel`) or built inline here.
+    #
+    # A parameter a card reads may be one this scope does not declare - the
+    # parent's, whether the card itself was written at the top level or inside
+    # this subcircuit. Those names are exposed parameters, reached through
+    # `parent_params`, exactly like a `.subckt` default expression that reads
+    # the parent scope.
+    cg_scoped(node) = is_subcircuit ?
+        cg_expr_with_parent_params!(state, node, state.sema.exposed_parameters) :
+        cg_expr!(state, node)
+    for (model_name, defs) in state.sema.models
+        isempty(defs) && continue
+        if haskey(model_factories, model_name)
+            args = [cg_scoped(dep) for dep in model_factories[model_name]]
+            push!(block.args, :($(cg_model_name!(state, model_name)) =
+                $(model_factory_name(model_name))($(args...))))
+            continue
         end
+        models_at_toplevel && continue
+        (_, def) = last(defs)  # Use most recent definition
+        value = cg_model_value!(state, def.val[1], def.val[2]; cg_val=cg_scoped)
+        value === nothing && continue
+        push!(block.args, :($(cg_model_name!(state, model_name)) = $value))
     end
 
     # Codegen device instances using MNA stamps
@@ -3144,7 +3163,8 @@ calls `lens(; param1=param1, ...)` to merge with any sweep overrides.
 to look up exposed_parameters when this subcircuit calls other subcircuits.
 """
 function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
-                                 subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
+                                 subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}();
+                                 model_factories::Dict{Symbol,Vector{Symbol}}=Dict{Symbol,Vector{Symbol}}())
     state = CodegenState(sema)
 
     # Extract ports from AST
@@ -3205,7 +3225,8 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
 
     # Generate body, skipping get_node! for ports (they're passed as args)
     # is_subcircuit=true means params are function kwargs and lens is named `lens`
-    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas)
+    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas,
+                        model_factories=model_factories)
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
@@ -3263,16 +3284,26 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     end
 
     # Generate top-level model definitions FIRST
-    # These need to be accessible by subcircuit builders and the main circuit
-    model_defs = codegen_toplevel_models!(state)
+    # These need to be accessible by subcircuit builders and the main circuit.
+    # `model_factories` are the cards that read a `.param`: hoisted as functions
+    # of those parameters rather than as constants, and called per scope.
+    model_defs, model_factories = codegen_toplevel_models!(state)
 
     # Propagate parent-level model definitions to subcircuit semas (same as make_mna_pdk_module).
     for (_, subckt_list) in sema_result.subckts
         for (_, subckt_entry) in subckt_list
             ss = subckt_entry.val
-            for (model_name, model_defs) in sema_result.models
+            for (model_name, defs) in sema_result.models
                 if model_name in ss.exposed_models && !haskey(ss.models, model_name)
-                    ss.models[model_name] = model_defs
+                    ss.models[model_name] = defs
+                    # The subcircuit calls the factory itself, and the parent's
+                    # `.param`s are not locals there. Expose them so they arrive
+                    # as `parent_params` - unless the subcircuit happens to
+                    # declare a parameter of its own by that name, which then
+                    # takes precedence exactly as a local does anywhere else.
+                    for dep in get(model_factories, model_name, Symbol[])
+                        haskey(ss.params, dep) || push!(ss.exposed_parameters, dep)
+                    end
                 end
             end
         end
@@ -3299,13 +3330,16 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
         if !isempty(subckt_list)
             # Take the first (non-conditional) subcircuit definition
             _, subckt_sema = first(subckt_list)
-            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name, subckt_semas)
+            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name, subckt_semas;
+                                                model_factories=model_factories)
             push!(subckt_defs, subckt_def)
         end
     end
 
-    # Generate the body - skip_models=true since models are at top level
-    body = codegen_mna!(state; subckt_semas=subckt_semas, skip_models=true)
+    # Generate the body - only the deferred models are emitted here, the rest
+    # are the module-level consts above.
+    body = codegen_mna!(state; subckt_semas=subckt_semas, models_at_toplevel=true,
+                        model_factories=model_factories)
 
     # Wrap in function definition with necessary imports
     # These imports are needed when the generated code is eval'd directly in Main

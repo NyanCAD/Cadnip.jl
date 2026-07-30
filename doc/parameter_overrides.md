@@ -68,8 +68,8 @@ instance line spells out, two levels down.
 
 One piece of the design is unimplemented — device instance parameters (§1). The
 three sections after it are adjacent defects, not parts of this design: §2 is a
-missing diagnostic, §3 and §4 are independent bugs that happen to surface
-nearby.
+missing diagnostic, §3 an independent bug that happens to surface nearby, and §4
+an independent bug that has since been fixed, kept here for the reasoning.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -117,23 +117,43 @@ define `.subckt divider` silently overwrite each other — the second wins, and 
 first netlist's instances then call it with the wrong keyword arguments. The name
 needs the netlist's identity in it; the `sp"..."` gensym already has one.
 
-## 4. `.model` cards cannot reference a `.param` (independent scoping bug)
+## 4. `.model` cards reading a `.param` (fixed — independent scoping bug)
 
-Also unrelated to overrides: this fails with no override in play. `.param
-vt0=0.7` + `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`,
+Unrelated to overrides: it used to fail with no override in play. `.param
+vt0=0.7` + `.model nch nmos vto=vt0` failed at *load* with `UndefVarError: vt0`,
 because `codegen_toplevel_models!` emits model cards as module-level `const`s
 outside the builder, where the `.param` local does not exist.
 
-Do **not** "just move them inside the builder". The hoisting is deliberate —
-subcircuit builders and the main function share them — and with `is_large_model`
-(200+ fields, `invoke` to stop LLVM SROA blow-up) it would mean constructing a
-PSP-sized struct on every restamp, the exact cost
+Moving *all* the cards inside the builder was never the answer: the hoisting is
+deliberate (subcircuit builders and the main function share them), and with
+`is_large_model` (200+ fields, `invoke` to stop LLVM SROA blow-up) it would mean
+a PSP-sized struct literal in the builder body, the exact cost
 `doc/psp103_noinline_investigation.md` and `doc/sroa_exploration_results.md`
 exist to avoid.
 
-Demand is smaller than it looks: corners are normally `.LIB` sections with their
-own model cards, which already work (`test/testpdk/testpdk.spice`). First move is
-to turn the `UndefVarError` into a diagnostic naming the parameter and pointing
-at `.lib` sections. If parameterized model cards are ever genuinely needed, build
-*only* the cards that reference a parameter, once per parameter set — never per
-restamp.
+What is there instead: `model_param_deps` asks which declared `.param`s a card
+actually reads. A card that reads none is still a `const`, unchanged. A card
+that reads some is hoisted as a `@noinline` *function* of exactly those
+parameters, and each scope that uses the model binds one call to it — the top
+level with its locals, a subcircuit through `parent_params` (the parameters are
+added to the subcircuit's `exposed_parameters` when the card is propagated into
+it, so they arrive the same way a `.subckt` default's parent references do). The
+struct is still built out of line and the builder's IR grows by a call, so the
+large-model hazard does not come back; a parameterized card does cost one call
+per builder pass, which a constant card does not.
+
+The two copies of the card-lowering logic — `codegen_toplevel_models!` and the
+`codegen_mna!` body, previously verbatim duplicates — are now one
+`cg_model_value!`, parameterized by how a value expression is lowered. That hook
+is what lets a subcircuit-local card read the parent's `.param` too.
+
+Contracts in `test/params.jl` (`".model cards read .param"`): the card reads the
+netlist values, `MNACircuit(…; vt0=…)` / `alter` / a sweep axis all reach it, two
+model parameters move independently, and the card resolves in all four
+arrangements of card and parameter across the hierarchy (both at the top level,
+both inside the subcircuit, and either one on its own).
+
+Not covered: a `.model` inside a `.lib` section reading a `.param` from the
+enclosing file, and the `make_mna_pdk_module` path, which parses model card
+values as literals (`tryparse`) and skips anything it cannot, rather than going
+through `cg_expr!` at all.
