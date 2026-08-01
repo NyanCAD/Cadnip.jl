@@ -155,12 +155,26 @@ result = dc!(CircuitSweep(circuit, sweep))                     # continued (defa
 result = dc!(CircuitSweep(circuit, sweep); continuation=false)  # independent points
 ```
 
-A DC operating point is also enumerable, so you can introspect or export it
-without knowing the node names up front:
+A DC operating point also reports **device terminal currents** — the drain
+current of a MOSFET, the current through a resistor — which the solution vector
+itself cannot give you, because KCL has already summed every device that meets
+at a node. Devices report them as they stamp the converged point, so builtin
+devices and every Verilog-A model (VADistiller, PDK, your own) are covered
+alike. Positive is *into* the device:
+
+```julia
+op = dc!(circuit)
+op[:i_m1_d]               # drain current of M1 — not inferred from a supply branch
+op[:i_r1_p]               # current into R1's first terminal
+terminal_currents(op)     # every device terminal, as name => current
+```
+
+And it is enumerable, so you can introspect or export the whole thing without
+knowing the names up front:
 
 ```julia
 sol = dc!(circuit)
-keys(sol)                 # node voltages then branch currents, e.g. [:in, :out, :I_V1]
+keys(sol)                 # nodes, branch currents, terminal currents: [:in, :out, :I_V1, :i_r1_p, …]
 Dict(pairs(sol))          # the whole operating point as name => value
 get(sol, :out, NaN)       # non-throwing lookup (sol[:out] throws if absent)
 haskey(sol, :out)         # true

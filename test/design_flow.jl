@@ -81,9 +81,17 @@ CL drain 0 1p
         @test op[:gate] ≈ VBIAS
         @test op[:vdd] ≈ 5.0
 
-        # Drain current, read off the supply branch (Rd carries all of it).
-        id = -op[:I_vdd]
+        # Drain current, reported by the device itself — no inferring it from a
+        # branch that happens to carry it (doc/operating_point_info.md).
+        id = op[:i_m1_d]
         @test isapprox(id, ID; rtol=0.05)
+        # It is the supply current here, because Rd carries all of it; that
+        # identity is a check on the report, not the way to obtain it.
+        @test isapprox(id, -op[:I_vdd]; rtol=1e-6)
+        @test isapprox(id, op[:i_rd_p]; rtol=1e-6)
+        # A DC gate draws nothing, and the four terminals conserve charge.
+        @test op[:i_m1_g] ≈ 0.0 atol=1e-9
+        @test op[:i_m1_d] + op[:i_m1_g] + op[:i_m1_s] + op[:i_m1_b] ≈ 0.0 atol=1e-9
         @test isapprox(op[:drain], 5.0 - id * RD; rtol=1e-6)   # KVL on the load
         @test isapprox(op[:drain], 3.0; rtol=0.05)
 

@@ -194,6 +194,9 @@ export stamp_noise!, register_thermal_noise!, register_shot_noise!
 export register_channel_thermal_noise!
 export noise_enabled, register_white_noise!, register_flicker_noise!, noise_source_name
 
+export op_enabled, register_terminal_current!, register_ohmic_terminal_current!
+export terminal_current_name, terminal_currents, num_terminal_currents
+
 """
     MNAContext
 
@@ -287,6 +290,24 @@ mutable struct MNAContext
     noise_b::Vector{Float64}
     noise_names::Vector{Symbol}
 
+    # Operating-point info channel - fully deferred (device terminal currents).
+    # Parallel vectors mirroring the noise channel: each entry is the current
+    # flowing *into* terminal `opi_terminals[i]` of instance `opi_devices[i]`,
+    # either as a value taken straight from the stamp (`opi_ohmic[i] == false`,
+    # current = `opi_a[i]`) or as a conductance to be read against the solution
+    # (`opi_ohmic[i] == true`, current = `opi_a[i] · (V[opi_p[i]] − V[opi_n[i]])`),
+    # which is how linear devices that never see `x` report. Instance and
+    # terminal are kept apart so registration is a pure push — the `i_m1_d` name
+    # is composed once, at readout. Populated only during MNAContext stamping;
+    # DirectStampContext has no op channel, so the transient hot path never
+    # touches it (see doc/operating_point_info.md).
+    opi_devices::Vector{Symbol}
+    opi_terminals::Vector{Symbol}
+    opi_p::Vector{MNAIndex}
+    opi_n::Vector{MNAIndex}
+    opi_a::Vector{Float64}
+    opi_ohmic::Vector{Bool}
+
     # Charge state variables (for voltage-dependent capacitors)
     # See doc/voltage_dependent_capacitors.md
     # These are differential variables with dq/dt = I and constraint q = Q(V)
@@ -367,6 +388,12 @@ function MNAContext()
         Float64[],          # noise_a
         Float64[],          # noise_b
         Symbol[],           # noise_names
+        Symbol[],           # opi_devices (deferred terminal currents)
+        Symbol[],           # opi_terminals
+        MNAIndex[],         # opi_p
+        MNAIndex[],         # opi_n
+        Float64[],          # opi_a
+        Bool[],             # opi_ohmic
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -1105,6 +1132,131 @@ function noise_sources(ctx::MNAContext)
 end
 
 #==============================================================================#
+# Operating-point info channel: device terminal currents
+#
+# A device's terminal currents are known where it is stamped — the diode's I0,
+# the MOSFET's Ids, every Verilog-A `I(p,n) <+ …` branch — but they are not
+# recoverable from the assembled system afterwards, because KCL has already
+# summed every device at the node. So devices hand them to the context as they
+# stamp, on a deferred channel that only `MNAContext` carries; the DC solve
+# reads it off the rebuild it already does at the converged point, and the
+# transient hot path (DirectStampContext) has no channel at all.
+# See doc/operating_point_info.md.
+#==============================================================================#
+
+"""
+    op_enabled(ctx) -> Bool
+
+Whether `ctx` carries the operating-point info channel: `true` for
+[`MNAContext`](@ref), `false` for [`DirectStampContext`](@ref).
+
+This is the compile-time gate the Verilog-A terminal-current accumulation wraps
+itself in. The predicate is a constant on a concrete context type, so the whole
+accumulation — the per-terminal sums included — folds out of the transient hot
+path.
+"""
+@inline op_enabled(::MNAContext) = true
+
+"""
+    terminal_current_name(device::Symbol, terminal::Symbol) -> Symbol
+
+Name the operating-point entry for the current into `terminal` of instance
+`device`: `:i_m1_d` for the drain of `m1`, `:i_r1_p` for the `p` end of `r1`.
+Falls back to whichever half is present, mirroring
+[`noise_source_name`](@ref).
+"""
+@inline function terminal_current_name(device::Symbol, terminal::Symbol)
+    device === Symbol("") && return Symbol(:i_, terminal)
+    terminal === Symbol("") && return Symbol(:i_, device)
+    return Symbol(:i_, device, :_, terminal)
+end
+
+"""
+    register_terminal_current!(ctx, device::Symbol, terminal::Symbol, I)
+
+Record the current `I` flowing **into** `terminal` of instance `device` at the
+point the device is being stamped at. No-op on [`DirectStampContext`](@ref).
+
+Devices that evaluate their own current (diode, MOSFET, every Verilog-A branch)
+report it this way; linear devices that never see the solution vector use
+[`register_ohmic_terminal_current!`](@ref) instead. Entries that repeat a name
+sum, so a terminal fed by several branches reports their total.
+"""
+@inline function register_terminal_current!(ctx::MNAContext, device::Symbol,
+                                            terminal::Symbol, I)
+    push!(ctx.opi_devices, device)
+    push!(ctx.opi_terminals, terminal)
+    push!(ctx.opi_p, GROUND)
+    push!(ctx.opi_n, GROUND)
+    push!(ctx.opi_a, Float64(extract_value(I)))
+    push!(ctx.opi_ohmic, false)
+    return nothing
+end
+
+"""
+    register_ohmic_terminal_current!(ctx, device, terminal, p, n, G)
+
+Record that the current into `terminal` of `device` is `G·(V_p − V_n)`, to be
+evaluated against the solution when the operating point is read out. This is the
+entry point for linear devices whose stamp never sees `x` (the resistor is the
+one builtin that does): a resistor registers `(:p, p, n, G)` and `(:n, n, p, G)`
+— the same call with the branch reversed. No-op on
+[`DirectStampContext`](@ref).
+"""
+@inline function register_ohmic_terminal_current!(ctx::MNAContext, device::Symbol,
+                                                  terminal::Symbol, p, n, G)
+    push!(ctx.opi_devices, device)
+    push!(ctx.opi_terminals, terminal)
+    push!(ctx.opi_p, p isa MNAIndex ? p : (p == 0 ? GROUND : NodeIndex(p)))
+    push!(ctx.opi_n, n isa MNAIndex ? n : (n == 0 ? GROUND : NodeIndex(n)))
+    push!(ctx.opi_a, Float64(extract_value(G)))
+    push!(ctx.opi_ohmic, true)
+    return nothing
+end
+
+"""
+    num_terminal_currents(ctx::MNAContext) -> Int
+
+Number of terminal-current entries registered on the context (before duplicate
+names are summed).
+"""
+@inline num_terminal_currents(ctx::MNAContext) = length(ctx.opi_devices)
+
+"""
+    terminal_currents(ctx::MNAContext, x::AbstractVector) -> Vector{Pair{Symbol,Float64}}
+
+Materialize the deferred operating-point channel against the solution vector
+`x`: device terminal currents in registration order, with repeated names summed
+into their first appearance. Ohmic entries are evaluated as `G·(V_p − V_n)`
+here, which is why the solution has to be handed in.
+
+Only meaningful when `ctx` was last stamped *at* `x` — the DC solve does exactly
+that rebuild before it reads this off (see `solve_dc`).
+"""
+function terminal_currents(ctx::MNAContext, x::AbstractVector)
+    out = Pair{Symbol,Float64}[]
+    pos = Dict{Symbol,Int}()
+    volt(idx) = begin
+        i = resolve_index(ctx, idx)
+        (i == 0 || i > length(x)) ? 0.0 : Float64(x[i])
+    end
+    for k in 1:num_terminal_currents(ctx)
+        I = ctx.opi_ohmic[k] ?
+            ctx.opi_a[k] * (volt(ctx.opi_p[k]) - volt(ctx.opi_n[k])) :
+            ctx.opi_a[k]
+        name = terminal_current_name(ctx.opi_devices[k], ctx.opi_terminals[k])
+        j = get(pos, name, 0)
+        if j == 0
+            push!(out, name => I)
+            pos[name] = length(out)
+        else
+            out[j] = name => (out[j].second + I)
+        end
+    end
+    return out
+end
+
+#==============================================================================#
 # Conductance Stamping Helpers (2-terminal pattern)
 #==============================================================================#
 
@@ -1324,6 +1476,14 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.noise_a)
     empty!(ctx.noise_b)
     empty!(ctx.noise_names)
+
+    # Deferred operating-point terminal currents (recomputed every build)
+    empty!(ctx.opi_devices)
+    empty!(ctx.opi_terminals)
+    empty!(ctx.opi_p)
+    empty!(ctx.opi_n)
+    empty!(ctx.opi_a)
+    empty!(ctx.opi_ohmic)
 
     # Charge state variables
     empty!(ctx.charge_names)
