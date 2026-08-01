@@ -135,6 +135,16 @@ throws on the observer and is left alone — which is right, since only it knows
 what its parameters mean. Generated builders are observable because they accept
 whatever lens they are handed (`params isa AbstractParamLens ? params : …`).
 
+The one case where observation succeeds but *lies* is a hand-written builder
+that takes its lens as a parameter (`p = params.lens(; R=…)`, as in
+`test/mna/core.jl`): reading `params.lens` off the observer mints a phantom
+child scope called `lens`, and the matching `MNACircuit(b; lens=IdentityLens())`
+would then be rejected as naming an instance. An override whose *value* is an
+`AbstractParamLens` is therefore skipped — a lens addresses whatever the builder
+does with it, which is not a name that could be validated in the first place.
+This is the failure mode to keep in mind if the checker ever gains reach:
+observing a builder that was not written to be observed can invent structure.
+
 Two knock-on fixes, both cases of an override that reached nothing: the
 `MNACircuit` keyword constructor now folds dotted selectors (`var"x1.r1val"=2e3`)
 into the tree the way `alter` always has, and `CircuitSweep` seeds its base

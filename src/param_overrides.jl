@@ -73,7 +73,14 @@ function _check_scope(obs::Dict, nt::NamedTuple, path::Vector{Symbol})
     own = get(obs, :params, nothing)
     for name in keys(nt)
         v = getfield(nt, name)
-        if name === :params && isa(v, NamedTuple)
+        if isa(v, AbstractParamLens)
+            # A lens passed as a value is a hand-written builder injecting its
+            # own lens (`params.lens(; R=…)`). Observing such a builder mints a
+            # phantom child scope for that name, so there is nothing to check
+            # it against — and a lens addresses whatever the builder does with
+            # it, not a name we could validate anyway.
+            continue
+        elseif name === :params && isa(v, NamedTuple)
             for pname in keys(v)
                 _check_param(obs, own, pname, path)
             end

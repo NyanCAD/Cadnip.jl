@@ -405,6 +405,18 @@ end
 
 errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
 
+# A hand-written builder whose *lens* is a parameter, as in test/mna/core.jl.
+function build_lens_arg_cir(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+    ctx === nothing ? (ctx = MNAContext()) : reset_for_restamping!(ctx)
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+    p = params.lens(; Vcc=5.0, R1=1000.0, R2=1000.0)
+    stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+    stamp!(Resistor(p.R1), ctx, vcc, out)
+    stamp!(Resistor(p.R2), ctx, out, 0)
+    return ctx
+end
+
 @testset "unknown overrides are diagnosed" begin
     # A typo at the top level names the scope and lists what it does declare.
     msg = errmsg(() -> MNACircuit(divider_ckt; vbias=1.0))
@@ -453,6 +465,14 @@ errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
     # does not — and only it knows what its parameters mean anyway.
     @test dc!(MNACircuit(build_par_cir; R=1000.0, V=5.0, whatever=1.0))[:vcc] ≈ 5.0
     @test dc!(MNACircuit(build_nested_par_cir; nosuch=1.0, child=(params=(R=1.0,),)))[:I_V] == -5.0
+
+    # A builder that takes its *lens* as a parameter (`params.lens(; R=…)`,
+    # test/mna/core.jl) makes the observer mint a phantom child scope for that
+    # name. A lens passed as a value addresses whatever the builder does with
+    # it, so it is skipped rather than read as an instance.
+    @test dc!(MNACircuit(build_lens_arg_cir; lens=IdentityLens()))[:out] ≈ 2.5
+    @test dc!(MNACircuit(build_lens_arg_cir;
+                         lens=ParamLens((params=(R1=3000.0,),))))[:out] ≈ 1.25 rtol=1e-6
 end
 
 @testset "overrides survive mixed spellings" begin
