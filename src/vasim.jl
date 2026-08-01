@@ -3075,7 +3075,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # shifting limit indices past that x. vold only affects the limited
             # evaluation value, never the (branch-free) stamp structure, so 0.0
             # is correct whenever x can't supply it.
-            $vold_sym = $li_sym <= length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
+            # `Base.length`, not `length`: a model parameter named `length`
+            # (photonic waveguides have one) shadows the Base function in the
+            # generated code, and Float64 is not callable.
+            $vold_sym = $li_sym <= Base.length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $lidx_sym, 1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $p_param, -1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $n_param, 1.0)
@@ -3766,7 +3769,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 _mna_ivb_idx_ = Cadnip.MNA.resolve_index(ctx, $I_var)
                 # Tolerant read: `x` is ZERO_VECTOR during structure discovery
                 # and can be sized to a previous system during detection.
-                _mna_ivb_ = _mna_ivb_idx_ <= length(_mna_x_) ?
+                # `Base.length` because a model parameter can shadow `length`.
+                _mna_ivb_ = _mna_ivb_idx_ <= Base.length(_mna_x_) ?
                     Cadnip.MNA.extract_value(_mna_x_[_mna_ivb_idx_]) : 0.0
             end)
             # An aliased short circuit stamps nothing and leaves the current
