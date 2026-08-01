@@ -66,6 +66,7 @@ elseif RUN_CORE
         @testset "mna/breakpoints.jl" include("mna/breakpoints.jl")
         @testset "mna/pcnr.jl" include("mna/pcnr.jl")
         @testset "mna/noise.jl" include("mna/noise.jl")
+        @testset "mna/opinfo.jl" include("mna/opinfo.jl")
     end
 
     # VA integration tests (s-dual contribution stamping)
@@ -107,6 +108,11 @@ elseif RUN_CORE
     @testset "AC Analysis" begin
         @testset "ac.jl" include("ac.jl")
         @testset "noise.jl" include("noise.jl")
+    end
+
+    # Operating-point readout: device terminal currents
+    @testset "Operating Point Info" begin
+        @testset "opinfo.jl" include("opinfo.jl")
     end
 
     # End-to-end design flow: hand derivation → op → DC sweep → AC → tran → noise
