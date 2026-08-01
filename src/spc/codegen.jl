@@ -2808,12 +2808,16 @@ This extracts model factory definitions (like psp103n, psp103p) so they can be
 accessed by both subcircuit builders and the main circuit function.
 
 A card that reads a `.param` cannot be a `const` — the parameter is a local of
-the builder — but it must not move *into* the builder either: a PSP-sized
-struct literal there is exactly the LLVM SROA blow-up `is_large_model` and
-`doc/psp103_noinline_investigation.md` exist to avoid. So it is hoisted as a
-`@noinline` function of the parameters it reads, and the builder binds one call
-to it. The struct is still built out of line, once per builder pass, and the
-builder's own IR grows by a call.
+the builder. It is hoisted as a plain function of the parameters it reads, and
+each scope binds one call to it, so the card is written once no matter how many
+subcircuits use the model.
+
+Deliberately *not* `@noinline`, and deliberately not an inline expansion in the
+builder either. Both were tried and measured on PSP103VA (782 fields): runtime,
+allocations, and native code size are identical either way, cold compile time is
+identical, and the compiler emits the same code even with the card used from
+five scopes. Nothing here needs steering — see `doc/parameter_overrides.md` §4
+for the numbers before adding an annotation back.
 """
 function codegen_toplevel_models!(state::CodegenState)
     model_defs = Expr[]
@@ -2833,7 +2837,7 @@ function codegen_toplevel_models!(state::CodegenState)
         deps = model_param_deps(state, model_ast)
         if !isempty(deps)
             factories[model_name] = deps
-            push!(model_defs, :(@noinline $(model_factory_name(model_name))($(deps...)) = $value))
+            push!(model_defs, :($(model_factory_name(model_name))($(deps...)) = $value))
             continue
         end
 

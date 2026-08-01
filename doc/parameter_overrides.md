@@ -124,29 +124,25 @@ vt0=0.7` + `.model nch nmos vto=vt0` failed at *load* with `UndefVarError: vt0`,
 because `codegen_toplevel_models!` emits model cards as module-level `const`s
 outside the builder, where the `.param` local does not exist.
 
-Moving *all* the cards inside the builder was never the answer: the hoisting is
-deliberate (subcircuit builders and the main function share them), and with
-`is_large_model` (200+ fields, `invoke` to stop LLVM SROA blow-up) it would mean
-a PSP-sized struct literal in the builder body, the exact cost
-`doc/psp103_noinline_investigation.md` and `doc/sroa_exploration_results.md`
-exist to avoid.
+What is there: `model_param_deps` asks which declared `.param`s a card actually
+reads. A card that reads none is still a `const`, unchanged. A card that reads
+some is hoisted as a plain *function* of exactly those parameters, and each
+scope that uses the model binds one call to it — the top level with its locals,
+a subcircuit through `parent_params` (the parameters are added to the
+subcircuit's `exposed_parameters` when the card is propagated into it, so they
+arrive the same way a `.subckt` default's parent references do). The card is
+written once no matter how many subcircuits use the model.
 
-What is there instead: `model_param_deps` asks which declared `.param`s a card
-actually reads. A card that reads none is still a `const`, unchanged. A card
-that reads some is hoisted as a `@noinline` *function* of exactly those
-parameters, and each scope that uses the model binds one call to it — the top
-level with its locals, a subcircuit through `parent_params` (the parameters are
-added to the subcircuit's `exposed_parameters` when the card is propagated into
-it, so they arrive the same way a `.subckt` default's parent references do). The
-struct is built out of line and the builder's IR grows by one call, so the
-large-model hazard does not come back.
+### Three performance arguments that did not survive measurement
 
-### What the earlier "never per restamp" note got wrong
-
-This section used to end by asking for parameterized cards to be built *"once
-per parameter set — never per restamp"*, and the first write-up of the fix
-above repeated it as a residual cost. Both were wrong, in two ways worth
-recording so the next session doesn't re-derive them.
+This section used to warn that a parameterized card must not be built in the
+builder ("a PSP-sized struct literal there is the LLVM SROA blow-up
+`doc/psp103_noinline_investigation.md` exists to avoid") and asked for cards to
+be built *"once per parameter set — never per restamp"*. The first write-up of
+the fix repeated both and added a third: that `@noinline` on the factory was
+cheap insurance. All three were wrong. Recorded here so the next session doesn't
+re-derive them — and because two of the three were inherited from this document
+rather than measured, which is exactly how they survived.
 
 **A `const` card never bought "once per parameter set" in the first place.** Any
 device line carrying instance parameters lowers to a `setproperties` in the
@@ -174,10 +170,26 @@ card vs a card reading one `.param`:
 | PSP103VA, DC, parameterized | 928.9 µs | 344.98 KiB | 7600 |
 
 Identical allocation counts at both sizes — the structs are immutable and never
-reach the heap — and the timing difference is noise. So `@noinline` costs
-nothing here and stays: it is cheap insurance for the compile-time hazard above,
-and the inlining it forgoes would only const-fold in the no-override case, which
-measures the same either way.
+reach the heap — and the timing difference is noise.
+
+**And `@noinline` on the factory bought nothing, so it is not there.** It was
+added defensively from the SROA warning above, never measured. Measured on
+PSP103VA (782 fields), `@noinline` vs. letting the compiler decide:
+
+| | cold compile | steady-state | allocs | native code |
+|---|---|---|---|---|
+| `@noinline` | ~462 s | 1.004 ms | 7600 | 87 lines |
+| inlinable | 461.9 s | 952.7 µs | 7600 | 87 lines |
+
+Identical on every axis, *including* with the card used from five scopes (four
+subcircuits + top level), which was the one case the single-scope runs could not
+see and the last argument for keeping it — the "one copy instead of k+1" story
+is not real; the compiler emits the same code either way.
+
+⚠️ **Measure cold-compile numbers in separate processes.** Timing both variants
+in one process makes the second inherit the first's compiled PSP103 `stamp!`
+path and reads as a 33× improvement for whichever ran second. That artifact is
+convincing enough to build a mechanism around; it is not real.
 
 The live question this leaves is *instance*-level construction per restamp, which
 predates this change and is a much larger topic than model cards.
