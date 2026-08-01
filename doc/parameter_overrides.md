@@ -125,24 +125,28 @@ because `codegen_toplevel_models!` emits model cards as module-level `const`s
 outside the builder, where the `.param` local does not exist.
 
 What is there: `model_param_deps` asks which declared `.param`s a card actually
-reads. A card that reads none is still a `const`, unchanged. A card that reads
-some is hoisted as a plain *function* of exactly those parameters, and each
-scope that uses the model binds one call to it — the top level with its locals,
-a subcircuit through `parent_params` (the parameters are added to the
-subcircuit's `exposed_parameters` when the card is propagated into it, so they
-arrive the same way a `.subckt` default's parent references do). The card is
-written once no matter how many subcircuits use the model.
+reads. A card that reads none is still a module-level `const`, unchanged. A card
+that reads some is emitted **inline in every builder that binds it**, after the
+parameter assignments — the top level from its locals, a subcircuit through
+`parent_params` (the parameters are added to the subcircuit's
+`exposed_parameters` when the card is propagated into it, so they arrive the same
+way a `.subckt` default's parent references do).
 
-### Three performance arguments that did not survive measurement
+That is the whole mechanism. It is also the *third* design this took, and the
+two it replaced were both defences against costs that turned out not to exist.
+
+### Four performance arguments that did not survive measurement
 
 This section used to warn that a parameterized card must not be built in the
 builder ("a PSP-sized struct literal there is the LLVM SROA blow-up
 `doc/psp103_noinline_investigation.md` exists to avoid") and asked for cards to
-be built *"once per parameter set — never per restamp"*. The first write-up of
-the fix repeated both and added a third: that `@noinline` on the factory was
-cheap insurance. All three were wrong. Recorded here so the next session doesn't
-re-derive them — and because two of the three were inherited from this document
-rather than measured, which is exactly how they survived.
+be built *"once per parameter set — never per restamp"*. Successive write-ups of
+the fix added two more: `@noinline` on a module-level factory as cheap
+insurance, and the factory itself as avoiding k+1 copies of the card. All four
+were wrong, and the whole edifice reduced to "just emit it inline". Recorded so
+the next session doesn't rebuild it — and because three of the four were
+inherited from this document rather than measured, which is exactly how they
+survived.
 
 **A `const` card never bought "once per parameter set" in the first place.** Any
 device line carrying instance parameters lowers to a `setproperties` in the
@@ -183,8 +187,30 @@ PSP103VA (782 fields), `@noinline` vs. letting the compiler decide:
 
 Identical on every axis, *including* with the card used from five scopes (four
 subcircuits + top level), which was the one case the single-scope runs could not
-see and the last argument for keeping it — the "one copy instead of k+1" story
-is not real; the compiler emits the same code either way.
+see.
+
+**And the factory itself bought nothing, so it is gone too.** Its last claim was
+that inline emission would put k+1 copies of the card in the module. Measured,
+PSP103VA card bound from the top level plus k subcircuits, factory vs inline:
+
+| | expr nodes | source chars |
+|---|---|---|
+| k=1 | 1061 → 1074 | 12341 → 12679 |
+| k=4 | 2198 → 2241 | 25838 → 26746 |
+
+Inline costs ~13 expr nodes per scope — 2% at k=4 — and eval time is
+indistinguishable (0.017 s vs 0.014 s; 0.030 s vs 0.031 s). The premise was
+simply false: a card lowers to only the parameters it *spells out*, never the
+model's field count, so the "782-field literal" being duplicated does not exist.
+
+```julia
+spicecall(ParsedModel, PSP103VA, (VFB = vfbn, TYPE = 1))   # 2 params, not 782
+```
+
+Generated-expression size therefore scales with **card size**, not model size.
+The one case where the factory could still pay is a card spelling out ~200
+parameters across many scopes — and those arrive through `make_mna_pdk_module`,
+which does not use this path at all.
 
 ⚠️ **Measure cold-compile numbers in separate processes.** Timing both variants
 in one process makes the second inherit the first's compiled PSP103 `stamp!`

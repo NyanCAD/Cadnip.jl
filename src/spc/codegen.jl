@@ -2785,43 +2785,33 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref;
 end
 
 """
-    model_factory_name(model_name) -> Symbol
-
-Name of the module-level function that builds a parameterized `.model` card.
-Distinct from `cg_model_name!`, which names the *value* the builder binds — and
-deliberately not derived from it, because the ambiguity check behind that name
-is per-scope while this one has to agree across every scope that calls it. The
-`*modelfn#` prefix is an invalid identifier in both SPICE and Julia, so it
-cannot collide with a spliced name.
-"""
-model_factory_name(model_name::Symbol) = Symbol("*modelfn#", model_name)
-
-"""
-    codegen_toplevel_models!(state::CodegenState) -> (model_defs, factories)
+    codegen_toplevel_models!(state::CodegenState) -> (model_defs, deferred)
 
 Generate model definitions for the top level of the circuit.
 Returns the Exprs that should be placed at module scope (before subcircuit
-builders), plus a `model name => parameter names` map for the cards that read a
-`.param` and so became factory functions rather than constants.
+builders), plus the names of the cards that were *not* hoisted because they read
+a `.param` — every scope that binds those emits the card itself.
 
 This extracts model factory definitions (like psp103n, psp103p) so they can be
 accessed by both subcircuit builders and the main circuit function.
 
-A card that reads a `.param` cannot be a `const` — the parameter is a local of
-the builder. It is hoisted as a plain function of the parameters it reads, and
-each scope binds one call to it, so the card is written once no matter how many
-subcircuits use the model.
+A card that reads a `.param` cannot be a `const`: the parameter is a local of
+the builder. It is emitted in the builder body instead, after the parameter
+assignments that give it its values.
 
-Deliberately *not* `@noinline`, and deliberately not an inline expansion in the
-builder either. Both were tried and measured on PSP103VA (782 fields): runtime,
-allocations, and native code size are identical either way, cold compile time is
-identical, and the compiler emits the same code even with the card used from
-five scopes. Nothing here needs steering — see `doc/parameter_overrides.md` §4
-for the numbers before adding an annotation back.
+Nothing more elaborate is warranted, though this went the long way round. A
+`@noinline` module-level factory of the parameters, so the card would be written
+once rather than once per scope, was tried and measured on PSP103VA (782
+fields): runtime, allocations, cold compile time and native code size were
+identical, and the generated expression was 2% *larger* than emitting inline.
+The premise was wrong — a card lowers to only the parameters it spells out
+(`(VFB = vfbn, TYPE = 1)`), never the model's field count — so there was no
+duplication to avoid. See `doc/parameter_overrides.md` §4 before reaching for it
+again.
 """
 function codegen_toplevel_models!(state::CodegenState)
     model_defs = Expr[]
-    factories = Dict{Symbol, Vector{Symbol}}()
+    deferred = Set{Symbol}()
 
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
@@ -2829,17 +2819,15 @@ function codegen_toplevel_models!(state::CodegenState)
         model_ast = def.val[1]  # The model SNode
         model_ref = def.val[2]  # The GlobalRef
 
-        value = cg_model_value!(state, model_ast, model_ref)
-        value === nothing && continue
-
-        # `deps` appear in `value` as bare symbols, which is exactly what the
-        # factory's formal arguments bind.
-        deps = model_param_deps(state, model_ast)
-        if !isempty(deps)
-            factories[model_name] = deps
-            push!(model_defs, :($(model_factory_name(model_name))($(deps...)) = $value))
+        # A card that reads a `.param` can't be a module-level const - the
+        # parameter is a local of the builder. Emit it in the body instead.
+        if !isempty(model_param_deps(state, model_ast))
+            push!(deferred, model_name)
             continue
         end
+
+        value = cg_model_value!(state, model_ast, model_ref)
+        value === nothing && continue
 
         model_var = cg_model_name!(state, model_name)
         # const is essential here, not cosmetic: these bindings are captured by
@@ -2851,11 +2839,11 @@ function codegen_toplevel_models!(state::CodegenState)
         push!(model_defs, :(const $model_var = $value))
     end
 
-    return model_defs, factories
+    return model_defs, deferred
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, model_factories=Dict{Symbol,Vector{Symbol}}())
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, deferred_models=Set{Symbol}())
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2871,16 +2859,15 @@ to look up exposed_parameters when generating subcircuit instance calls.
 
 `models_at_toplevel=true` means the constant model cards are already module-level
 `const`s (`codegen_toplevel_models!`), so nothing needs binding for them here.
-
-`model_factories` maps a model name to the `.param`s its card reads. Those cards
-are module-level functions rather than constants, so this scope binds one call
-to the factory — and does so whether or not the constant cards were hoisted,
-since a value that depends on a parameter is per-scope by construction.
+`deferred_models` names the ones that could *not* be hoisted, because their cards
+read a `.param`; those are emitted here regardless, a value that depends on a
+parameter being per-scope by construction. A subcircuit passes neither and emits
+every card it can see.
 """
 function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
                       subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
                       models_at_toplevel::Bool=false,
-                      model_factories::Dict{Symbol,Vector{Symbol}}=Dict{Symbol,Vector{Symbol}}())
+                      deferred_models::Set{Symbol}=Set{Symbol}())
     block = Expr(:block)
     ret = block
 
@@ -3005,9 +2992,9 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Codegen model definitions for MNA. A parameterized card is one call to its
-    # module-level factory; the rest are either module-level consts already
-    # (`models_at_toplevel`) or built inline here.
+    # Codegen model definitions for MNA. A card already hoisted to a module-level
+    # const needs no binding here; everything else this scope can see is built
+    # inline, after the parameter assignments above.
     #
     # A parameter a card reads may be one this scope does not declare - the
     # parent's, whether the card itself was written at the top level or inside
@@ -3019,13 +3006,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         cg_expr!(state, node)
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
-        if haskey(model_factories, model_name)
-            args = [cg_scoped(dep) for dep in model_factories[model_name]]
-            push!(block.args, :($(cg_model_name!(state, model_name)) =
-                $(model_factory_name(model_name))($(args...))))
-            continue
-        end
-        models_at_toplevel && continue
+        models_at_toplevel && !(model_name in deferred_models) && continue
         (_, def) = last(defs)  # Use most recent definition
         value = cg_model_value!(state, def.val[1], def.val[2]; cg_val=cg_scoped)
         value === nothing && continue
@@ -3167,8 +3148,7 @@ calls `lens(; param1=param1, ...)` to merge with any sweep overrides.
 to look up exposed_parameters when this subcircuit calls other subcircuits.
 """
 function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
-                                 subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}();
-                                 model_factories::Dict{Symbol,Vector{Symbol}}=Dict{Symbol,Vector{Symbol}}())
+                                 subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
     state = CodegenState(sema)
 
     # Extract ports from AST
@@ -3229,8 +3209,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
 
     # Generate body, skipping get_node! for ports (they're passed as args)
     # is_subcircuit=true means params are function kwargs and lens is named `lens`
-    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas,
-                        model_factories=model_factories)
+    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas)
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
@@ -3289,9 +3268,9 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
 
     # Generate top-level model definitions FIRST
     # These need to be accessible by subcircuit builders and the main circuit.
-    # `model_factories` are the cards that read a `.param`: hoisted as functions
-    # of those parameters rather than as constants, and called per scope.
-    model_defs, model_factories = codegen_toplevel_models!(state)
+    # `deferred_models` are the cards that read a `.param` and so could not be
+    # constants; every scope that binds one emits it in its own body.
+    model_defs, deferred_models = codegen_toplevel_models!(state)
 
     # Propagate parent-level model definitions to subcircuit semas (same as make_mna_pdk_module).
     for (_, subckt_list) in sema_result.subckts
@@ -3300,12 +3279,13 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
             for (model_name, defs) in sema_result.models
                 if model_name in ss.exposed_models && !haskey(ss.models, model_name)
                     ss.models[model_name] = defs
-                    # The subcircuit calls the factory itself, and the parent's
+                    # The subcircuit emits the card itself, and the parent's
                     # `.param`s are not locals there. Expose them so they arrive
                     # as `parent_params` - unless the subcircuit happens to
                     # declare a parameter of its own by that name, which then
                     # takes precedence exactly as a local does anywhere else.
-                    for dep in get(model_factories, model_name, Symbol[])
+                    # (A constant card reads none, so this is a no-op for it.)
+                    for dep in model_param_deps(state, last(defs)[2].val[1])
                         haskey(ss.params, dep) || push!(ss.exposed_parameters, dep)
                     end
                 end
@@ -3334,8 +3314,7 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
         if !isempty(subckt_list)
             # Take the first (non-conditional) subcircuit definition
             _, subckt_sema = first(subckt_list)
-            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name, subckt_semas;
-                                                model_factories=model_factories)
+            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name, subckt_semas)
             push!(subckt_defs, subckt_def)
         end
     end
@@ -3343,7 +3322,7 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     # Generate the body - only the deferred models are emitted here, the rest
     # are the module-level consts above.
     body = codegen_mna!(state; subckt_semas=subckt_semas, models_at_toplevel=true,
-                        model_factories=model_factories)
+                        deferred_models=deferred_models)
 
     # Wrap in function definition with necessary imports
     # These imports are needed when the generated code is eval'd directly in Main
