@@ -1124,12 +1124,15 @@ end
 
     cur = only(sol.current_names)        # single V source ⇒ one branch current
 
-    # keys enumerate node voltages then branch currents (what `show` prints);
-    # internal charge/limit state variables are excluded from the enumeration.
+    # keys enumerate node voltages, branch currents, then device terminal
+    # currents (what `show` prints); internal charge/limit state variables are
+    # excluded from the enumeration.
     ks = keys(sol)
     @test :in in ks && :out in ks
     @test cur in ks
-    @test length(ks) == length(sol.node_names) + length(sol.current_names)
+    @test :i_r1_p in ks                  # device terminal currents (see test/opinfo.jl)
+    @test length(ks) == length(sol.node_names) + length(sol.current_names) +
+                        length(sol.terminal_currents)
 
     # values align positionally with keys
     vs = values(sol)

@@ -2984,6 +2984,64 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     has_noise = !isempty(to_julia.noise_sites)
     noise_preamble = has_noise ? mna_noise_branch_binding(0, 0) : nothing
 
+    # Operating-point terminal currents (doc/operating_point_info.md). One
+    # accumulator per port, summed over every branch that lands on it — a
+    # terminal's current is the sum of its branches, which is what makes this
+    # work for models with internal nodes (the drain current arrives through
+    # I(d,di), not through I(d,s)). The accumulators are handed to the context
+    # once, at the end of the stamp.
+    #
+    # Every touch of them is gated on `op_enabled(ctx)`, a compile-time constant
+    # per context type, so on DirectStampContext the sums and the registration
+    # are eliminated and transient restamping is unchanged.
+    opi_accum = [Symbol("_mna_iterm_", k) for k in 1:n_ports]
+    opi_init = Expr(:block, [:($s = 0.0) for s in opi_accum]...)
+    opi_register = quote
+        if Cadnip.MNA.op_enabled(ctx)
+            $([:(Cadnip.MNA.register_terminal_current!(ctx, _mna_instance_,
+                    $(QuoteNode(port_args[k])), $(opi_accum[k]))) for k in 1:n_ports]...)
+        end
+    end
+    # Which port accumulator does a branch-node symbol feed, and under what
+    # runtime guard? A port feeds its own, unconditionally. An internal node
+    # that *collapses* onto a port (`V(d_int, d) <+ 0` — what a model does when
+    # rd = 0) feeds that port's, because the collapse makes them the same node:
+    # the drain current then arrives on branches written against `d_int`, and
+    # attributing them to `d` is the whole point. The collapse is a runtime
+    # decision (it depends on the parameters), and it shows up as the two node
+    # indices being equal after allocation, which is exactly the guard.
+    # Anything else — ground, a genuinely internal node — stays inside the
+    # device.
+    function opi_target(sym)
+        idx = findfirst(==(sym), port_args)
+        idx === nothing || return (idx, nothing)
+        sc = get(short_circuits, sym, nothing)
+        sc === nothing && return nothing
+        ext_idx = findfirst(==(sc.external), port_args)
+        int_idx = findfirst(==(sym), all_node_syms)
+        (ext_idx === nothing || int_idx === nothing) && return nothing
+        return (ext_idx, :($(all_node_params[int_idx]) == $(node_params[ext_idx])))
+    end
+    # Accumulate a branch current (flowing p → n) into the ports it touches.
+    function opi_accumulate(p_sym, n_sym, I_expr; prelude=nothing)
+        terms = Any[]
+        for (sym, add) in ((p_sym, true), (n_sym, false))
+            tgt = opi_target(sym)
+            tgt === nothing && continue
+            k, guard = tgt
+            acc = add ? :($(opi_accum[k]) += Cadnip.MNA.extract_value($I_expr)) :
+                        :($(opi_accum[k]) -= Cadnip.MNA.extract_value($I_expr))
+            push!(terms, guard === nothing ? acc : :(if $guard; $acc; end))
+        end
+        isempty(terms) && return nothing
+        return quote
+            if Cadnip.MNA.op_enabled(ctx)
+                $prelude
+                $(terms...)
+            end
+        end
+    end
+
     # PCNR `$limit` preamble. One limiting variable per unique probe branch
     # collected during lowering (to_julia.limit_branches). For each branch we
     # allocate the variable (hoisted + unconditional so DirectStampContext's
@@ -3017,7 +3075,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # shifting limit indices past that x. vold only affects the limited
             # evaluation value, never the (branch-free) stamp structure, so 0.0
             # is correct whenever x can't supply it.
-            $vold_sym = $li_sym <= length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
+            # `Base.length`, not `length`: a model parameter named `length`
+            # (photonic waveguides have one) shadows the Base function in the
+            # generated code, and Float64 is not callable.
+            $vold_sym = $li_sym <= Base.length(_mna_x_) ? Cadnip.MNA.extract_value(_mna_x_[$li_sym]) : 0.0
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $lidx_sym, 1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $p_param, -1.0)
             Cadnip.MNA.stamp_G!(ctx, $lidx_sym, $n_param, 1.0)
@@ -3256,6 +3317,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 has_reactive = false
             end
         end
+
+        # Operating point: this branch's DC current lands on the terminals it
+        # spans (the reactive part carries none). Folded out on
+        # DirectStampContext — see opi_accumulate.
+        push!(branch_stamp.args, opi_accumulate(p_sym, n_sym, :I_val))
 
         # Stamp resistive Jacobians into G matrix
         # MNA sign convention: I(p,n) flows from p to n
@@ -3620,6 +3686,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
 
         push!(voltage_stamp_code.args, v_stamp)
+        # Operating point: a potential contribution carries its current in an
+        # MNA unknown, so the terminal current is read off the solution rather
+        # than computed here (`_I_branch_<name>`, extracted above).
+        push!(voltage_stamp_code.args,
+              opi_accumulate(p_sym, n_sym, Symbol("_I_branch_", branch_name)))
     end
 
     # Generate stamping code for two-node voltage contributions V(p,n) <+ expr
@@ -3689,6 +3760,24 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
 
         push!(twonode_voltage_stamp_code.args, v_stamp)
+        # Operating point: like a named potential branch, the current lives in
+        # an MNA unknown — read it off the solution. A short circuit
+        # (`V(d,di) <+ 0`) is exactly this case, and it is how a terminal
+        # current reaches the outside world in models with zero series
+        # resistance, so skipping it would silently zero the terminal.
+        let acc = opi_accumulate(p_sym, n_sym, :_mna_ivb_; prelude=quote
+                _mna_ivb_idx_ = Cadnip.MNA.resolve_index(ctx, $I_var)
+                # Tolerant read: `x` is ZERO_VECTOR during structure discovery
+                # and can be sized to a previous system during detection.
+                # `Base.length` because a model parameter can shadow `length`.
+                _mna_ivb_ = _mna_ivb_idx_ <= Base.length(_mna_x_) ?
+                    Cadnip.MNA.extract_value(_mna_x_[_mna_ivb_idx_]) : 0.0
+            end)
+            # An aliased short circuit stamps nothing and leaves the current
+            # variable unused, so it reports nothing either.
+            acc === nothing || push!(twonode_voltage_stamp_code.args,
+                                     :(if $p_node != $n_node; $acc; end))
+        end
     end
 
     # Generate post-dual b-stamp code for idt/laplace state equations
@@ -3799,6 +3888,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Evaluate contribution expressions with duals
         $contrib_eval
 
+        # Zero the operating-point terminal-current accumulators the branch
+        # stamps below add into (see opi_register).
+        $opi_init
+
         # Stamp current contributions
         $stamp_code
 
@@ -3807,6 +3900,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Stamp two-node voltage contributions (e.g., V(a,b) <+ 0 for short circuit)
         $twonode_voltage_stamp_code
+
+        # Hand this instance's terminal currents to the operating-point channel.
+        $opi_register
 
         return nothing
     end

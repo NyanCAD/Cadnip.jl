@@ -501,6 +501,11 @@ function stamp!(R::Resistor, ctx::AnyMNAContext, p::Int, n::Int)
     # Johnson–Nyquist thermal noise (4kT·G). Registration is a no-op on the
     # transient hot-path DirectStampContext, so DC/transient cost is unchanged.
     register_thermal_noise!(ctx, p, n, G; name=R.name)
+    # Operating-point terminal currents. The resistor never sees the solution
+    # vector, so it reports its conductance and the branch it spans; the readout
+    # evaluates G·(V_p − V_n) against the converged point.
+    register_ohmic_terminal_current!(ctx, R.name, :p, p, n, G)
+    register_ohmic_terminal_current!(ctx, R.name, :n, n, p, G)
     return nothing
 end
 
@@ -696,6 +701,10 @@ function stamp!(I::CurrentSource, ctx::AnyMNAContext, p::Int, n::Int)
     # KCL at n: current I leaves (subtract from RHS)
     stamp_b!(ctx, p,  I.dc)
     stamp_b!(ctx, n, -I.dc)
+    # Operating point: sign convention is current *into* the device, and this
+    # source drives current into node p (out of the device there).
+    register_terminal_current!(ctx, I.name, :p, -I.dc)
+    register_terminal_current!(ctx, I.name, :n,  I.dc)
     return nothing
 end
 
@@ -719,6 +728,10 @@ For DC/AC analysis, uses the DC value.
         stamp_b_ac!(ctx, p,  I.ac)
         stamp_b_ac!(ctx, n, -I.ac)
     end
+
+    # Operating point: current into the device, i.e. minus what it drives into p.
+    register_terminal_current!(ctx, I.name, :p, -i)
+    register_terminal_current!(ctx, I.name, :n,  i)
 
     return nothing
 end
@@ -1406,6 +1419,11 @@ function stamp!(D::Diode, ctx::AnyMNAContext, p::Int, n::Int;
         _register_diode_flicker!(ctx, p, n, D, I0)
     end
 
+    # Operating point: the junction current, positive into the anode. Both
+    # branches above bind `I0`; a no-op on DirectStampContext.
+    register_terminal_current!(ctx, D.name, :p,  I0)
+    register_terminal_current!(ctx, D.name, :n, -I0)
+
     return nothing
 end
 
@@ -1566,6 +1584,11 @@ function stamp!(D::DiodeWithCap, ctx::AnyMNAContext, p::Int, n::Int;
     register_shot_noise!(ctx, p, n, I0; name=D.name)
     _register_diode_flicker!(ctx, p, n, D, I0)
 
+    # Operating point: the junction current, positive into the anode. The
+    # depletion charge below carries no DC current.
+    register_terminal_current!(ctx, D.name, :p,  I0)
+    register_terminal_current!(ctx, D.name, :n, -I0)
+
     # === Reactive Part (Junction Capacitance) ===
     Cj0, Vj, m = D.Cj0, D.Vj, D.m
 
@@ -1708,6 +1731,13 @@ function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int;
         register_flicker_noise!(ctx, d, s, M.KF * abs(Ids)^M.AF, M.FFE; name=M.name)
     end
 
+    # Operating point: the channel current, into the drain and out of the
+    # source. The gate is capacitive only, so it carries no DC current — it is
+    # still reported, because a designer reads the terminal list, not the model.
+    register_terminal_current!(ctx, M.name, :d,  Ids)
+    register_terminal_current!(ctx, M.name, :g,  0.0)
+    register_terminal_current!(ctx, M.name, :s, -Ids)
+
     # === Capacitances ===
     # Simple linear caps (not voltage-dependent for this simple model)
     # Cgs between g and s
@@ -1724,5 +1754,8 @@ function stamp!(M::SimpleMOSFET, ctx::AnyMNAContext, d::Int, g::Int, s::Int, b::
     # For the simple model, body is not connected (ignore body effect)
     # Just call 3-terminal version
     stamp!(M, ctx, d, g, s; x=x)
+    # The body carries no current in this model, but it is a terminal of the
+    # instance, so the operating point reports it.
+    register_terminal_current!(ctx, M.name, :b, 0.0)
     return nothing
 end

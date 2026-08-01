@@ -66,10 +66,11 @@ wrapped in a subcircuit whose W/L are formal parameters as in
 `test/testpdk/testpdk.spice`, sweeps correctly including overriding a value the
 instance line spells out, two levels down.
 
-One piece of the design is unimplemented — device instance parameters (§1). The
-three sections after it are adjacent defects, not parts of this design: §2 is a
-missing diagnostic, §3 an independent bug that happens to surface nearby, and §4
-an independent bug that has since been fixed, kept here for the reasoning.
+An override that names nothing no longer passes silently (§2). One piece of the
+design is still unimplemented — device instance parameters (§1). The two
+sections after those are adjacent defects, not parts of this design: §3 is an
+independent bug that happens to surface nearby, and §4 an independent bug that
+has since been fixed, kept here for the reasoning.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -94,19 +95,62 @@ shows device parameters were in the lens tree by design (`i1=(dc=-1,)`,
 `rload=(r=2000.0,)`), and the netlist-*text* `alter(io, ast; r1=(r=4.0,))` still
 honours that spelling.
 
-## 2. Unknown override names are silent (missing diagnostic, not a design gap)
+## 2. Unknown override names are diagnosed (done)
 
-A name no scope declares is inert. That is deliberate — it matches how Spectre
-`alter` behaves — but nothing says so, and a typo therefore looks like a
-parameter that has no effect.
+A name no scope declares used to be inert, which made a typo look like a
+parameter with no effect. It now throws at construction.
 
-Do **not** reach for `ParamObserver`: it needs a full builder pass, and
-`MNACircuit` is a plain struct today (free) that `alter` reconstructs *per sweep
-point*, so validating at construction would rebuild the whole circuit on every
-point. Codegen already knows every declared name (`sema.params`, formal params,
-the subckt semas) — emit a static table beside the builder and validate with a
-set lookup. That also affords a real message: "`x1` is an instance, write
-`x1=(rv=…)`".
+The names are already discoverable, and it is the two-lens design that makes
+them so. `ParamObserver` is an `AbstractParamLens` that *records* where
+`ParamLens` overrides; building once with one in place of the other yields the
+whole tree — this scope's parameters under `:params`, each instantiated
+subcircuit under its instance name, recursively, with the effective defaults
+attached. `src/param_overrides.jl` diffs the override tuple against that tree.
+
+Dispatch is what keeps this off the hot path. The builder calls the lens
+generically, so observation costs the transient path nothing: it still gets the
+`@generated` `ParamLens`, which folds away. There was no need to emit a static
+table from codegen, and no need to thread anything through the lens.
+
+The one real cost is the builder pass, and it is paid once per builder: the
+observation is memoized on the builder object, so `alter` — which reconstructs
+an `MNACircuit` at every sweep point — hits the cache. It only fires at all when
+`params` is non-empty, so a circuit driven with no overrides (the c6288
+benchmark) pays nothing.
+
+Knowing a name's *kind* affords a real message rather than just "unknown":
+`x1 = 2.0` where `X1` is an instance says to write `x1 = (rv = …,)`, `vin =
+(…,)` where `vin` is a parameter says the reverse, and an outright typo lists
+what the scope does declare.
+
+Two things follow from observing rather than tabulating. Device instances never
+consult the lens, so they are absent from the tree and read as unknown names —
+rejected, but without naming §1 as the reason. And a scope reached only through
+a `.if` that the overrides themselves would select is not observed, so such a
+name reports as unknown; that is the same blind spot `alter` has always had, and
+it fails safe.
+
+A builder that cannot be observed is not checked. A hand-written builder that
+reads `params` as a NamedTuple, or wraps it in `ParamLens` unconditionally,
+throws on the observer and is left alone — which is right, since only it knows
+what its parameters mean. Generated builders are observable because they accept
+whatever lens they are handed (`params isa AbstractParamLens ? params : …`).
+
+The one case where observation succeeds but *lies* is a hand-written builder
+that takes its lens as a parameter (`p = params.lens(; R=…)`, as in
+`test/mna/core.jl`): reading `params.lens` off the observer mints a phantom
+child scope called `lens`, and the matching `MNACircuit(b; lens=IdentityLens())`
+would then be rejected as naming an instance. An override whose *value* is an
+`AbstractParamLens` is therefore skipped — a lens addresses whatever the builder
+does with it, which is not a name that could be validated in the first place.
+This is the failure mode to keep in mind if the checker ever gains reach:
+observing a builder that was not written to be observed can invent structure.
+
+Two knock-on fixes, both cases of an override that reached nothing: the
+`MNACircuit` keyword constructor now folds dotted selectors (`var"x1.r1val"=2e3`)
+into the tree the way `alter` always has, and `CircuitSweep` seeds its base
+circuit through `alter` instead of splicing the first sweep point in as flat
+keywords.
 
 ## 3. Subcircuit builder names collide (independent codegen bug)
 

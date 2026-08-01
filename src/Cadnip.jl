@@ -63,6 +63,8 @@ ParamSim(circuit, mode, spec, params) = ParamSim{typeof(circuit), typeof(mode), 
 
 include("spectre_env.jl")
 include("spectre.jl")
+# Override checking — needs ParamObserver from spectre.jl
+include("param_overrides.jl")
 
 #==============================================================================#
 # Model Registry: Base Device Registrations

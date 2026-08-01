@@ -142,6 +142,12 @@ Result of DC operating point analysis.
   A non-converged solve still returns its last iterate (and warns), so this is
   the flag to check before trusting the values — it is also what makes a sweep
   refuse to warm-start the next point from a failed one.
+- `terminal_currents::Vector{Pair{Symbol,Float64}}`: device terminal currents
+  reported by the devices as they stamped the converged point (`:i_m1_d` is the
+  current into `m1`'s drain), positive *into* the device. Empty when nothing
+  registered. These are not part of the solution vector — KCL has already summed
+  the devices at each node, so they cannot be recovered from `x` afterwards; see
+  doc/operating_point_info.md.
 """
 struct DCSolution
     x::Vector{Float64}
@@ -151,16 +157,37 @@ struct DCSolution
     limit_names::Vector{Symbol}
     n_nodes::Int
     converged::Bool
+    terminal_currents::Vector{Pair{Symbol,Float64}}
 end
 
 """
-    DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true)
+    DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true; terminal_currents)
 
-Create a DC solution from a system and solution vector.
+Create a DC solution from a system and solution vector. `terminal_currents` come
+off the context the system was assembled from — see
+[`terminal_currents`](@ref)`(ctx, x)`.
 """
-DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true) =
+DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true;
+           terminal_currents::Vector{Pair{Symbol,Float64}}=Pair{Symbol,Float64}[]) =
     DCSolution(copy(x), sys.node_names, sys.current_names,
-               sys.charge_names, sys.limit_names, sys.n_nodes, converged)
+               sys.charge_names, sys.limit_names, sys.n_nodes, converged,
+               terminal_currents)
+
+"""
+    terminal_currents(sol::DCSolution) -> Vector{Pair{Symbol,Float64}}
+
+Device terminal currents at the operating point, as `name => current` pairs in
+the order the devices stamped them. Positive is *into* the device, so a
+resistor's two ends are equal and opposite and a MOSFET's drain and source
+currents sum to zero through the channel.
+
+```julia
+op = dc!(circuit)
+op[:i_m1_d]                    # drain current of M1
+Dict(terminal_currents(op))    # every device terminal at once
+```
+"""
+terminal_currents(sol::DCSolution) = sol.terminal_currents
 
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
@@ -170,7 +197,8 @@ Base.length(sol::DCSolution) = length(sol.x)
     sol[name::Symbol]
 
 Name-based solution access. `sol[:vout]` returns the voltage at node `vout`;
-if no such node exists, falls back to searching current variables. Mirrors the
+if no such node exists, falls back to searching current variables, then the
+device terminal currents (`sol[:i_m1_d]`). Mirrors the
 SymbolicIndexingInterface conventions so that `sol[:x]` works uniformly across
 DC and transient solutions.
 """
@@ -185,6 +213,8 @@ function Base.getindex(sol::DCSolution, name::Symbol)
     idx = findfirst(==(name), sol.limit_names)
     idx === nothing || return sol.x[sol.n_nodes + length(sol.current_names) +
                                     length(sol.charge_names) + idx]
+    idx = findfirst(p -> p.first === name, sol.terminal_currents)
+    idx === nothing || return sol.terminal_currents[idx].second
     error("Unknown variable: $name")
 end
 
@@ -195,43 +225,49 @@ Base.getindex(sol::DCSolution, name::AbstractString) = sol[Symbol(name)]
 # Operating-point introspection: keys / values / pairs / haskey / get
 #
 # `sol[:name]` reads one known quantity; these enumerate the whole operating
-# point — the physical observables a user reads out, i.e. node voltages
-# followed by branch currents (exactly what `show(::MIME"text/plain", sol)`
-# prints). Internal charge/limit state variables are deliberately excluded from
-# the enumeration; they remain reachable by name through `sol[:name]`.
+# point — the physical observables a user reads out, i.e. node voltages, branch
+# currents, and device terminal currents (exactly what
+# `show(::MIME"text/plain", sol)` prints). Internal charge/limit state variables
+# are deliberately excluded from the enumeration; they remain reachable by name
+# through `sol[:name]`.
 #==============================================================================#
 
 """
     keys(sol::DCSolution) -> Vector{Symbol}
 
-Names of the operating-point observables: node voltages followed by branch
-currents (the quantities `show` prints). Internal charge/limit state variables
-are excluded — index those by name with `sol[:name]` if you need them.
+Names of the operating-point observables: node voltages, branch currents, then
+device terminal currents (the quantities `show` prints). Internal charge/limit
+state variables are excluded — index those by name with `sol[:name]` if you need
+them.
 
 ```julia
 sol = dc!(circuit)
-keys(sol)              # [:in, :out, :I_V1]
+keys(sol)              # [:in, :out, :I_V1, :i_r1_p, :i_r1_n, ...]
 Dict(pairs(sol))       # whole operating point as a Dict
 ```
 """
-Base.keys(sol::DCSolution) = vcat(sol.node_names, sol.current_names)
+Base.keys(sol::DCSolution) =
+    vcat(sol.node_names, sol.current_names,
+         Symbol[p.first for p in sol.terminal_currents])
 
 """
     values(sol::DCSolution) -> Vector{Float64}
 
-Operating-point values aligned with [`keys(sol)`](@ref): the node voltages then
-the branch currents.
+Operating-point values aligned with [`keys(sol)`](@ref): the node voltages, the
+branch currents, then the device terminal currents.
 """
 Base.values(sol::DCSolution) =
     vcat(Float64[sol.x[i] for i in eachindex(sol.node_names)],
-         Float64[sol.x[sol.n_nodes + j] for j in eachindex(sol.current_names)])
+         Float64[sol.x[sol.n_nodes + j] for j in eachindex(sol.current_names)],
+         Float64[p.second for p in sol.terminal_currents])
 
 """
     pairs(sol::DCSolution)
 
 Iterator of `name => value` pairs over the operating-point observables (node
-voltages then branch currents). `Dict(pairs(sol))` collects the whole operating
-point; `collect(pairs(sol))` gives a `Vector` of `Pair`s.
+voltages, branch currents, device terminal currents). `Dict(pairs(sol))`
+collects the whole operating point; `collect(pairs(sol))` gives a `Vector` of
+`Pair`s.
 """
 Base.pairs(sol::DCSolution) = (k => v for (k, v) in zip(keys(sol), values(sol)))
 
@@ -239,12 +275,14 @@ Base.pairs(sol::DCSolution) = (k => v for (k, v) in zip(keys(sol), values(sol)))
     haskey(sol::DCSolution, name) -> Bool
 
 Whether `name` names a readable quantity: ground (`:gnd` / `Symbol("0")`), a
-node voltage, or a branch current. Companion to [`get`](@ref) — a `true` here
-means `sol[name]` returns a value rather than throwing.
+node voltage, a branch current, or a device terminal current. Companion to
+[`get`](@ref) — a `true` here means `sol[name]` returns a value rather than
+throwing.
 """
 Base.haskey(sol::DCSolution, name::Symbol) =
     name === :gnd || name === Symbol("0") ||
-    name in sol.node_names || name in sol.current_names
+    name in sol.node_names || name in sol.current_names ||
+    any(p -> p.first === name, sol.terminal_currents)
 Base.haskey(sol::DCSolution, name::AbstractString) = haskey(sol, Symbol(name))
 
 """
@@ -307,6 +345,12 @@ function Base.show(io::IO, ::MIME"text/plain", sol::DCSolution)
         println(io, "  Branch Currents:")
         for (i, name) in enumerate(sol.current_names)
             @printf(io, "    %s = %.6g A\n", name, sol.x[sol.n_nodes + i])
+        end
+    end
+    if !isempty(sol.terminal_currents)
+        println(io, "  Device Terminal Currents:")
+        for (name, val) in sol.terminal_currents
+            @printf(io, "    %s = %.6g A\n", name, val)
         end
     end
 end
@@ -957,7 +1001,8 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true,
+                          Pair{Symbol,Float64}[])
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -973,7 +1018,10 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     builder(params, spec, 0.0; x=u, ctx=ctx)
     sys_final = assemble!(ctx)
 
-    return DCSolution(sys_final, u, converged)
+    # That rebuild happened *at* the converged point, so the op channel it
+    # populated is the operating point's device terminal currents.
+    return DCSolution(sys_final, u, converged;
+                      terminal_currents=terminal_currents(ctx, u))
 end
 
 #==============================================================================#
@@ -1437,6 +1485,16 @@ export scope
 #==============================================================================#
 
 """
+    check_override_names(builder, params)
+
+Throw if `params` names a parameter or an instance that `builder` does not
+declare. The real check needs `ParamObserver`, which lives a layer up in
+Cadnip; this no-op is the default MNA carries, and `src/param_overrides.jl`
+adds the `::NamedTuple` method once the observer exists.
+"""
+check_override_names(@nospecialize(builder), @nospecialize(params)) = nothing
+
+"""
     MNACircuit{F,P,S}
 
 Circuit definition for SciML DAE integration, following the System → Problem → Solution pattern.
@@ -1487,12 +1545,20 @@ struct MNACircuit{F,P,S}
     builder::F
     params::P
     spec::S
+
+    # Every way of getting an MNACircuit funnels through here — the keyword
+    # constructor, `alter`, the netlist entry points — so this is where an
+    # override that names nothing is caught.
+    function MNACircuit{F,P,S}(builder, params, spec) where {F,P,S}
+        check_override_names(builder, params)
+        new{F,P,S}(builder, params, spec)
+    end
 end
 
-export MNACircuit
+MNACircuit(builder::F, params::P, spec::S) where {F,P,S} =
+    MNACircuit{F,P,S}(builder, params, spec)
 
-# The default 3-arg constructor is auto-generated by Julia for the struct.
-# No need to define it explicitly.
+export MNACircuit
 
 """
     MNACircuit(builder; spec=MNASpec(), kwargs...)
@@ -1505,7 +1571,11 @@ Parameters are stored as a NamedTuple and can be modified with `alter()`.
 # Arguments
 - `builder`: Circuit builder function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
 - `spec`: Simulation specification (default: MNASpec())
-- `kwargs...`: Circuit parameters (stored as NamedTuple)
+- `kwargs...`: Circuit parameters, in any spelling `alter` accepts — flat
+  (`vin=4.0`), nested (`x1=(r1val=2e3,)`) or a dotted path (`var"x1.r1val"=2e3`)
+
+A name the builder's netlist does not declare throws: an override that reaches
+nothing is otherwise silent, and reads as a parameter that has no effect.
 
 # Example
 ```julia
@@ -1520,8 +1590,33 @@ circuit2 = alter(circuit; R=500.0)
 ```
 """
 function MNACircuit(builder::F; spec::S=MNASpec(), kwargs...) where {F,S}
-    params = NamedTuple(kwargs)
-    MNACircuit{F,typeof(params),S}(builder, params, spec)
+    MNACircuit(builder, override_tree(kwargs), spec)
+end
+
+"""
+    override_tree(kwargs) -> NamedTuple
+
+Fold override keywords into the nested tree the lens reads. A dotted selector
+(`var"x1.r1val"=2e3`) is a path, exactly as in `alter` — spelled flat it would
+be a top-level parameter of that literal name, which no scope declares.
+
+An explicit `params=` is folded in last so it keeps outranking the flat
+spelling of the same name whichever order the two were written in (see
+`canonicalize_params`).
+"""
+function override_tree(kwargs)
+    tree = (;)
+    explicit = nothing
+    for (selector, value) in pairs(kwargs)
+        if selector === :params
+            explicit = value
+            continue
+        end
+        tree = _set_param_path(tree, Symbol.(split(string(selector), ".")), value)
+    end
+    explicit === nothing && return tree
+    isa(explicit, NamedTuple) || return merge(tree, (params = explicit,))
+    return merge(tree, (params = merge(get(tree, :params, (;)), explicit),))
 end
 
 """
@@ -1568,7 +1663,8 @@ Create a new circuit with modified parameters.
 
 Supports nested paths via var-strings: `alter(circuit; var"inner.R1" = 100.0)`.
 A parameter the circuit does not carry yet is added, so a netlist `.param` can
-be re-bound without seeding it at construction time.
+be re-bound without seeding it at construction time. A name the builder's
+netlist does not declare throws, rather than re-binding nothing.
 
 # Example
 ```julia
@@ -2258,7 +2354,8 @@ function solve_dc(circuit::MNACircuit; u0=nothing)
 
     n = system_size(ctx)
     if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true)
+        return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true,
+                          Pair{Symbol,Float64}[])
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -2274,7 +2371,10 @@ function solve_dc(circuit::MNACircuit; u0=nothing)
     circuit.builder(circuit.params, circuit.spec, 0.0; x=u, ctx=ctx)
     sys_final = assemble!(ctx)
 
-    return DCSolution(sys_final, u, converged)
+    # The rebuild above ran at the converged point, so the op channel it filled
+    # holds this operating point's device terminal currents.
+    return DCSolution(sys_final, u, converged;
+                      terminal_currents=terminal_currents(ctx, u))
 end
 
 #==============================================================================#

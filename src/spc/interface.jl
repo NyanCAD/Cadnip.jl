@@ -352,6 +352,5 @@ function MNA.MNACircuit(path_or_code::AbstractString;
     # the call to `Base.eval` has advanced the world so a following top-level
     # `dc!(circuit)` sees the fresh methods. Inside a function body it errors,
     # which is a clear signal to move the load to top level.
-    params = NamedTuple(kwargs)
-    return MNA.MNACircuit(builder, params, spec)
+    return MNA.MNACircuit(builder, MNA.override_tree(kwargs), spec)
 end
