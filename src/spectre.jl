@@ -156,12 +156,6 @@ Base.getproperty(lens::IdentityLens, ::Symbol; type=:unknown) = lens
 (::IdentityLens)(;kwargs...) = values(kwargs)
 (::IdentityLens)(val) = val
 
-struct ValLens{T} <: AbstractParamLens
-    val::T
-end
-Base.getproperty(lens::ValLens, ::Symbol; type=:unknown) = cedarerror("Reached terminal lens")
-(lens::ValLens)(val) = getfield(lens, :val)
-
 """
     ParamLens(::NamedTuple)
 
@@ -201,8 +195,10 @@ function Base.getproperty(🔍::ParamLens{T}, sym::Symbol; type=:unknown) where 
     # that is both a parameter and an instance work — `x1 = 2.0` sets the
     # parameter and leaves instance `X1` on its netlist defaults, `x1 = (rv=…)`
     # does the reverse.
+    # Canonical form makes every top-level value a NamedTuple — `params` and one
+    # per child — so a leaf can never turn up here; that is exactly what stops a
+    # scope's own parameters being descended into.
     nnt = get(nt, sym, (;))
-    isa(nnt, NamedTuple) || return ValLens(nnt)
     _lens_isempty(nnt) && return IdentityLens()
     return ParamLens(nnt)
 end
