@@ -138,9 +138,49 @@ parameters, and each scope that uses the model binds one call to it — the top
 level with its locals, a subcircuit through `parent_params` (the parameters are
 added to the subcircuit's `exposed_parameters` when the card is propagated into
 it, so they arrive the same way a `.subckt` default's parent references do). The
-struct is still built out of line and the builder's IR grows by a call, so the
-large-model hazard does not come back; a parameterized card does cost one call
-per builder pass, which a constant card does not.
+struct is built out of line and the builder's IR grows by one call, so the
+large-model hazard does not come back.
+
+### What the earlier "never per restamp" note got wrong
+
+This section used to end by asking for parameterized cards to be built *"once
+per parameter set — never per restamp"*, and the first write-up of the fix
+above repeated it as a residual cost. Both were wrong, in two ways worth
+recording so the next session doesn't re-derive them.
+
+**A `const` card never bought "once per parameter set" in the first place.** Any
+device line carrying instance parameters lowers to a `setproperties` in the
+builder body:
+
+```julia
+# M1 d g 0 0 nch W=10u L=1u  →  every builder pass:
+let dev = spicecall(nch; W = 1.0e-5, L = 1.0e-6)     # fresh full-size struct
+```
+
+so the full-size struct is already reconstructed on every pass whether `nch` is
+a module-level `const` or a factory call. The `const` only ever saved the
+*card-level* construction, never the instance-level one. Hoisting the card
+further — caching it per parameter set behind a builder-ABI change — would
+therefore have solved half a problem and left the larger half untouched.
+
+**And the card-level cost is not measurable anyway.** Same circuit, constant
+card vs a card reading one `.param`:
+
+| | time | memory | allocs |
+|---|---|---|---|
+| MOS1 (~30 fields), transient, const | 3.006 ms | 647.49 KiB | 15735 |
+| MOS1, transient, parameterized | 2.999 ms | 647.49 KiB | 15735 |
+| PSP103VA (782 fields), DC, const | 986.4 µs | 345.22 KiB | 7600 |
+| PSP103VA, DC, parameterized | 928.9 µs | 344.98 KiB | 7600 |
+
+Identical allocation counts at both sizes — the structs are immutable and never
+reach the heap — and the timing difference is noise. So `@noinline` costs
+nothing here and stays: it is cheap insurance for the compile-time hazard above,
+and the inlining it forgoes would only const-fold in the no-override case, which
+measures the same either way.
+
+The live question this leaves is *instance*-level construction per restamp, which
+predates this change and is a much larger topic than model cards.
 
 The two copies of the card-lowering logic — `codegen_toplevel_models!` and the
 `codegen_mna!` body, previously verbatim duplicates — are now one
