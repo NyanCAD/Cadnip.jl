@@ -99,31 +99,41 @@ honours that spelling.
 A name no scope declares used to be inert, which made a typo look like a
 parameter with no effect. It now throws at construction.
 
-`ParamObserver` was the wrong tool for this: it needs a full builder pass, and
-`MNACircuit` is a plain struct (free) that `alter` reconstructs *per sweep
-point*, so validating through it would rebuild the whole circuit at every point.
-Codegen already knows every declared name, so it emits a `ParamScope` — declared
-parameters, child instances, device instances — and the override tuple is
-checked against it with set lookups (`src/mna/param_scope.jl`,
-`cg_param_scope` in `src/spc/codegen.jl`).
+The names are already discoverable, and it is the two-lens design that makes
+them so. `ParamObserver` is an `AbstractParamLens` that *records* where
+`ParamLens` overrides; building once with one in place of the other yields the
+whole tree — this scope's parameters under `:params`, each instantiated
+subcircuit under its instance name, recursively, with the effective defaults
+attached. `src/param_overrides.jl` diffs the override tuple against that tree.
 
-One table per *scope* (the top level and each `.subckt`), not per instance, so
-the tables are sized by the netlist text rather than by the flattened design —
-c6288 is 2.5k lines of netlist and 212k devices.
+Dispatch is what keeps this off the hot path. The builder calls the lens
+generically, so observation costs the transient path nothing: it still gets the
+`@generated` `ParamLens`, which folds away. There was no need to emit a static
+table from codegen, and no need to thread anything through the lens.
 
-The table rides on the builder as an extra method of the builder itself,
-`builder(::DeclaredParams)`, rather than as a method of `MNA.declared_params`.
-Generated code routinely lands in a local scope — `@testset begin circuit =
-sp"..." end` — where adding a method to a function defined elsewhere is a
-*syntax* error, while adding another method to the function being defined right
-there is not. A builder with no such method (any hand-written one) reports
-`nothing` and is not checked, since only it knows what its `params` mean.
+The one real cost is the builder pass, and it is paid once per builder: the
+observation is memoized on the builder object, so `alter` — which reconstructs
+an `MNACircuit` at every sweep point — hits the cache. It only fires at all when
+`params` is non-empty, so a circuit driven with no overrides (the c6288
+benchmark) pays nothing.
 
-Knowing the three kinds of name affords a real message rather than just
-"unknown": `x1 = 2.0` where `X1` is an instance says to write `x1 = (rv = …,)`,
-`r1 = (r = 2e3,)` says device instance parameters are the §1 gap and to
-parameterize the netlist with a `.param`, and an outright typo lists what the
-scope does declare.
+Knowing a name's *kind* affords a real message rather than just "unknown":
+`x1 = 2.0` where `X1` is an instance says to write `x1 = (rv = …,)`, `vin =
+(…,)` where `vin` is a parameter says the reverse, and an outright typo lists
+what the scope does declare.
+
+Two things follow from observing rather than tabulating. Device instances never
+consult the lens, so they are absent from the tree and read as unknown names —
+rejected, but without naming §1 as the reason. And a scope reached only through
+a `.if` that the overrides themselves would select is not observed, so such a
+name reports as unknown; that is the same blind spot `alter` has always had, and
+it fails safe.
+
+A builder that cannot be observed is not checked. A hand-written builder that
+reads `params` as a NamedTuple, or wraps it in `ParamLens` unconditionally,
+throws on the observer and is left alone — which is right, since only it knows
+what its parameters mean. Generated builders are observable because they accept
+whatever lens they are handed (`params isa AbstractParamLens ? params : …`).
 
 Two knock-on fixes, both cases of an override that reached nothing: the
 `MNACircuit` keyword constructor now folds dotted selectors (`var"x1.r1val"=2e3`)

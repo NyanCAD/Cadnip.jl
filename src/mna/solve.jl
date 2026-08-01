@@ -1408,6 +1408,16 @@ export scope
 #==============================================================================#
 
 """
+    check_override_names(builder, params)
+
+Throw if `params` names a parameter or an instance that `builder` does not
+declare. The real check needs `ParamObserver`, which lives a layer up in
+Cadnip; this no-op is the default MNA carries, and `src/param_overrides.jl`
+adds the `::NamedTuple` method once the observer exists.
+"""
+check_override_names(@nospecialize(builder), @nospecialize(params)) = nothing
+
+"""
     MNACircuit{F,P,S}
 
 Circuit definition for SciML DAE integration, following the System → Problem → Solution pattern.
@@ -1461,9 +1471,7 @@ struct MNACircuit{F,P,S}
 
     # Every way of getting an MNACircuit funnels through here — the keyword
     # constructor, `alter`, the netlist entry points — so this is where an
-    # override that names nothing the netlist declares is caught. Generated
-    # builders carry a table of their declared names; hand-written ones don't,
-    # and are left alone (see mna/param_scope.jl).
+    # override that names nothing is caught.
     function MNACircuit{F,P,S}(builder, params, spec) where {F,P,S}
         check_override_names(builder, params)
         new{F,P,S}(builder, params, spec)

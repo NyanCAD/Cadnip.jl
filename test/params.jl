@@ -399,8 +399,8 @@ end
 #
 # An undeclared name used to be inert: the circuit built, every sweep point
 # returned the netlist default, and a typo read as "this parameter has no
-# effect". Codegen emits the names each scope declares beside the builder, so
-# the override tuple is checked against the netlist before anything is built.
+# effect". `ParamObserver` — the recording `AbstractParamLens` — reports every
+# name a circuit declares, so the override tuple is checked against that tree.
 #==============================================================================#
 
 errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
@@ -434,13 +434,11 @@ errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
     @test occursin("is a parameter of this scope", msg) && occursin("vin = value", msg)
 
     # Device instance parameters are the one documented gap
-    # (doc/parameter_overrides.md §1) — say so rather than ignore it.
-    for bad in (() -> MNACircuit(divider_ckt; r1=(r=2e3,)),
-                () -> MNACircuit(divider_ckt; r1=2e3))
-        msg = errmsg(bad)
-        @test occursin("device instance", msg)
-        @test occursin(".param", msg)
-    end
+    # (doc/parameter_overrides.md §1). Devices never consult the lens, so they
+    # are simply absent from the observed tree and read as unknown names — the
+    # override is still rejected rather than quietly ignored.
+    @test_throws ArgumentError MNACircuit(divider_ckt; r1=(r=2e3,))
+    @test_throws ArgumentError MNACircuit(divider_ckt; r1=2e3)
 
     # A name that is both a `.param` and an instance stays legal in both
     # spellings — the collision rule is what decides, not the checker.
@@ -448,9 +446,13 @@ errmsg(f) = try; f(); ""; catch e; sprint(showerror, e); end
     @test dc!(MNACircuit(collide_ckt; x1=(rv=3e3,)))[:vout] > 0
     @test_throws ArgumentError MNACircuit(collide_ckt; x1=(nosuch=1.0,))
 
-    # A hand-written builder declares nothing, so nothing is checked: it reads
-    # `params` itself and only it knows which names mean something.
+    # Hand-written builders are not checked. Generated ones accept whatever
+    # lens they are handed (`params isa AbstractParamLens ? params : ...`),
+    # which is what makes them observable; a hand-written builder that reads
+    # `params` as a NamedTuple, or wraps it in `ParamLens` unconditionally,
+    # does not — and only it knows what its parameters mean anyway.
     @test dc!(MNACircuit(build_par_cir; R=1000.0, V=5.0, whatever=1.0))[:vcc] ≈ 5.0
+    @test dc!(MNACircuit(build_nested_par_cir; nosuch=1.0, child=(params=(R=1.0,),)))[:I_V] == -5.0
 end
 
 @testset "overrides survive mixed spellings" begin

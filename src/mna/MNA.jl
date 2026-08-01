@@ -72,10 +72,6 @@ include("contrib.jl")
 # Must be before solve.jl since solve.jl uses PrecompiledCircuit
 include("precompile.jl")
 
-# Declared parameter names, emitted by codegen beside each generated builder
-# (used by the MNACircuit constructor to reject overrides that name nothing)
-include("param_scope.jl")
-
 # Analysis solvers (uses precompile.jl types)
 include("solve.jl")
 
