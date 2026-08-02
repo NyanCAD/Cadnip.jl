@@ -190,6 +190,12 @@ Use `MNACircuit(path)` or `Base.include(@__MODULE__, SpiceFile(path))` for
 production code. The latter defines a builder function at top level and avoids
 all world-age and invokelatest overhead.
 
+A file is a *deck*, and a deck is a namespace: its generated code lands in a
+module of its own and only the builder is bound in yours, so two netlists that
+each define `.subckt divider` do not overwrite each other. (Two `sp"..."` decks
+in the same *local* scope still do — a module cannot be defined in expression
+position, and that case is an ordinary Julia redefinition.)
+
 ```julia
 # File path — language inferred from extension (.scs → Spectre, else SPICE)
 circuit = MNACircuit("amp.sp")

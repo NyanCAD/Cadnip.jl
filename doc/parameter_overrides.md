@@ -68,9 +68,9 @@ instance line spells out, two levels down.
 
 An override that names nothing no longer passes silently (§2). One piece of the
 design is still unimplemented — device instance parameters (§1). The two
-sections after those are adjacent defects, not parts of this design: §3 is an
-independent bug that happens to surface nearby, and §4 an independent bug that
-has since been fixed, kept here for the reasoning.
+sections after those are adjacent defects, not parts of this design: §3 and §4
+are independent bugs that happened to surface nearby, both since fixed and kept
+here for the reasoning.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -152,14 +152,58 @@ into the tree the way `alter` always has, and `CircuitSweep` seeds its base
 circuit through `alter` instead of splicing the first sweep point in as flat
 keywords.
 
-## 3. Subcircuit builder names collide (independent codegen bug)
+## 3. Subcircuit builder names collide (fixed)
 
-Nothing to do with overrides — it surfaces through mismatched parameter keywords,
+Nothing to do with overrides — it surfaced through mismatched parameter keywords,
 which is how it was found. Builders are named after the `.subckt` (`divider` →
-`divider_mna_builder`), so two netlists loaded into the same module that both
-define `.subckt divider` silently overwrite each other — the second wins, and the
-first netlist's instances then call it with the wrong keyword arguments. The name
-needs the netlist's identity in it; the `sp"..."` gensym already has one.
+`divider_mna_builder`), and netlist codegen used to be eval'd straight into the
+caller's module, so two decks that each define `.subckt divider` overwrote each
+other. The positional signatures match, so nothing errors: whichever deck was
+loaded second answers for both, and the first returns the second's answer.
+
+Whether that bites is a question of evaluation order, since this is ordinary
+Julia redefinition — load A, use A, load B, use B is fine; load A, load B, use A
+is not. The second ordering is the one the docs recommend (load at module top
+level, use inside functions later, to stay clear of world age), which is what
+made this worth fixing rather than documenting.
+
+### A deck is a namespace
+
+The fix is not to decorate the generated names but to stop leaking them.
+`SpiceFile`/`SpectreFile` load a *complete* deck — they parse with
+`implicit_title=true`, so the first line is a title — and a `.subckt` name is
+local to its deck in SPICE. So each deck now gets a module of its own
+(`_eval_deck_into_module` in `src/spc/interface.jl`), and only the circuit
+builder is bound in the caller's module. A collision *there* is a visible
+redefinition of a name the caller chose, not of one codegen invented.
+
+This is the isolation the rest of the pipeline already had — a Verilog-A file
+gets a baremodule, a PDK gets a baremodule, and `MNACircuit(path)` already
+eval'd into a fresh module. `Base.include(mod, SpiceFile(...))` was the one
+loading path that did not, which is exactly where the bug was.
+
+Two details worth keeping:
+
+- The module and the alias are evaluated as one `Expr(:toplevel, ...)`, not a
+  block. Reading the builder back out with `getfield` immediately after
+  `Base.eval` trips Julia 1.12's "access to binding in a world prior to its
+  definition world".
+- The parse cache stays on the *caller's* module, so `.hdl` Verilog-A modules
+  are still shared across decks loaded into it. Per-deck caches would mean
+  recompiling a PSP/BSIM model once per netlist.
+
+What this deliberately does not cover: two `sp"..."` decks in the *same local
+scope* (one function body, one `@testset`) still collide, because a module
+cannot be defined in expression position. That case is a redefinition inside a
+scope the author wrote, where Julia's last-wins is the expected answer — and it
+is loud whenever the two subcircuits take different parameters.
+
+SPICE's own `.include`, which *does* splice a snippet into the surrounding deck,
+is a netlist directive handled in sema and is unaffected: within one deck, a
+duplicate `.subckt` is a redefinition and last-wins is correct.
+
+Regression test: `test/mna/subckt_scoping.jl`, "each deck keeps its own
+subcircuits", with fixtures in `test/mna/fixtures/subckt_collision/`.
 
 ## 4. `.model` cards reading a `.param` (fixed — independent scoping bug)
 
