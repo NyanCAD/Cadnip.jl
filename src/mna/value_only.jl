@@ -179,20 +179,23 @@ power expression included — be eliminated during transient restamping.
 """
     register_terminal_current!(::DirectStampContext, args...)
     register_ohmic_terminal_current!(::DirectStampContext, args...)
+    register_op_var!(::DirectStampContext, args...)
 
-No-ops. Device terminal currents are an operating-point readout collected on
-`MNAContext`; the zero-allocation restamping path carries no op channel (see
-doc/operating_point_info.md).
+No-ops. Device terminal currents and operating-point variables are an
+operating-point readout collected on `MNAContext`; the zero-allocation
+restamping path carries no op channel (see doc/operating_point_info.md).
 """
 @inline register_terminal_current!(::DirectStampContext, args...) = nothing
 @inline register_ohmic_terminal_current!(::DirectStampContext, args...) = nothing
+@inline register_op_var!(::DirectStampContext, args...) = nothing
 
 """
     op_enabled(::DirectStampContext) -> false
 
 The restamping hot path carries no operating-point channel. Constant-folding
-this to `false` lets the Verilog-A terminal-current accumulation — per-terminal
-sums and all — be eliminated during transient restamping.
+this to `false` lets the Verilog-A terminal-current accumulation and
+operating-point variable registration — per-terminal sums and all — be
+eliminated during transient restamping.
 """
 @inline op_enabled(::DirectStampContext) = false
 

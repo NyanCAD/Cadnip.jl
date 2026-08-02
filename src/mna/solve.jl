@@ -148,6 +148,10 @@ Result of DC operating point analysis.
   registered. These are not part of the solution vector — KCL has already summed
   the devices at each node, so they cannot be recovered from `x` afterwards; see
   doc/operating_point_info.md.
+- `op_vars::Vector{Pair{Symbol,Float64}}`: device operating-point variables, the
+  small-signal quantities the models themselves report (`:m1_gm`, `:m1_gds`,
+  `:m1_vdsat`). Same channel, same rebuild; a Verilog-A model contributes every
+  variable it declares with a `desc`/`units` attribute.
 """
 struct DCSolution
     x::Vector{Float64}
@@ -158,20 +162,23 @@ struct DCSolution
     n_nodes::Int
     converged::Bool
     terminal_currents::Vector{Pair{Symbol,Float64}}
+    op_vars::Vector{Pair{Symbol,Float64}}
 end
 
 """
-    DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true; terminal_currents)
+    DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true;
+               terminal_currents, op_vars)
 
-Create a DC solution from a system and solution vector. `terminal_currents` come
-off the context the system was assembled from — see
-[`terminal_currents`](@ref)`(ctx, x)`.
+Create a DC solution from a system and solution vector. `terminal_currents` and
+`op_vars` come off the context the system was assembled from — see
+[`terminal_currents`](@ref)`(ctx, x)` and [`op_vars`](@ref)`(ctx)`.
 """
 DCSolution(sys::MNAData, x::Vector{Float64}, converged::Bool=true;
-           terminal_currents::Vector{Pair{Symbol,Float64}}=Pair{Symbol,Float64}[]) =
+           terminal_currents::Vector{Pair{Symbol,Float64}}=Pair{Symbol,Float64}[],
+           op_vars::Vector{Pair{Symbol,Float64}}=Pair{Symbol,Float64}[]) =
     DCSolution(copy(x), sys.node_names, sys.current_names,
                sys.charge_names, sys.limit_names, sys.n_nodes, converged,
-               terminal_currents)
+               terminal_currents, op_vars)
 
 """
     terminal_currents(sol::DCSolution) -> Vector{Pair{Symbol,Float64}}
@@ -189,6 +196,27 @@ Dict(terminal_currents(op))    # every device terminal at once
 """
 terminal_currents(sol::DCSolution) = sol.terminal_currents
 
+"""
+    op_vars(sol::DCSolution) -> Vector{Pair{Symbol,Float64}}
+
+Device operating-point variables at the operating point, as `name => value`
+pairs: the small-signal parameters and internal voltages the *models* compute on
+their way to the stamp, which the solution vector cannot contain.
+
+A Verilog-A model reports every module-level variable it declares with a
+`desc`/`units` attribute — the convention the VADistiller models (MOS1/2/3/6/9,
+BSIM3/4, BJT, JFET, diode, resistor) already follow — so this lights up for a
+PDK model with nothing to configure.
+
+```julia
+op = dc!(circuit)
+op[:m1_gm]                  # transconductance of M1
+op[:m1_vdsat] < op[:m1_vds] # saturation, from the model's own numbers
+Dict(op_vars(op))           # every device variable at once
+```
+"""
+op_vars(sol::DCSolution) = sol.op_vars
+
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]
 Base.length(sol::DCSolution) = length(sol.x)
@@ -198,7 +226,8 @@ Base.length(sol::DCSolution) = length(sol.x)
 
 Name-based solution access. `sol[:vout]` returns the voltage at node `vout`;
 if no such node exists, falls back to searching current variables, then the
-device terminal currents (`sol[:i_m1_d]`). Mirrors the
+device terminal currents (`sol[:i_m1_d]`), then the device operating-point
+variables (`sol[:m1_gm]`). Mirrors the
 SymbolicIndexingInterface conventions so that `sol[:x]` works uniformly across
 DC and transient solutions.
 """
@@ -215,6 +244,8 @@ function Base.getindex(sol::DCSolution, name::Symbol)
                                     length(sol.charge_names) + idx]
     idx = findfirst(p -> p.first === name, sol.terminal_currents)
     idx === nothing || return sol.terminal_currents[idx].second
+    idx = findfirst(p -> p.first === name, sol.op_vars)
+    idx === nothing || return sol.op_vars[idx].second
     error("Unknown variable: $name")
 end
 
@@ -235,39 +266,42 @@ Base.getindex(sol::DCSolution, name::AbstractString) = sol[Symbol(name)]
 """
     keys(sol::DCSolution) -> Vector{Symbol}
 
-Names of the operating-point observables: node voltages, branch currents, then
-device terminal currents (the quantities `show` prints). Internal charge/limit
-state variables are excluded — index those by name with `sol[:name]` if you need
-them.
+Names of the operating-point observables: node voltages, branch currents, device
+terminal currents, then device operating-point variables (the quantities `show`
+prints). Internal charge/limit state variables are excluded — index those by
+name with `sol[:name]` if you need them.
 
 ```julia
 sol = dc!(circuit)
-keys(sol)              # [:in, :out, :I_V1, :i_r1_p, :i_r1_n, ...]
+keys(sol)              # [:in, :out, :I_V1, :i_r1_p, :i_r1_n, ..., :m1_gm, ...]
 Dict(pairs(sol))       # whole operating point as a Dict
 ```
 """
 Base.keys(sol::DCSolution) =
     vcat(sol.node_names, sol.current_names,
-         Symbol[p.first for p in sol.terminal_currents])
+         Symbol[p.first for p in sol.terminal_currents],
+         Symbol[p.first for p in sol.op_vars])
 
 """
     values(sol::DCSolution) -> Vector{Float64}
 
 Operating-point values aligned with [`keys(sol)`](@ref): the node voltages, the
-branch currents, then the device terminal currents.
+branch currents, the device terminal currents, then the device operating-point
+variables.
 """
 Base.values(sol::DCSolution) =
     vcat(Float64[sol.x[i] for i in eachindex(sol.node_names)],
          Float64[sol.x[sol.n_nodes + j] for j in eachindex(sol.current_names)],
-         Float64[p.second for p in sol.terminal_currents])
+         Float64[p.second for p in sol.terminal_currents],
+         Float64[p.second for p in sol.op_vars])
 
 """
     pairs(sol::DCSolution)
 
 Iterator of `name => value` pairs over the operating-point observables (node
-voltages, branch currents, device terminal currents). `Dict(pairs(sol))`
-collects the whole operating point; `collect(pairs(sol))` gives a `Vector` of
-`Pair`s.
+voltages, branch currents, device terminal currents, device operating-point
+variables). `Dict(pairs(sol))` collects the whole operating point;
+`collect(pairs(sol))` gives a `Vector` of `Pair`s.
 """
 Base.pairs(sol::DCSolution) = (k => v for (k, v) in zip(keys(sol), values(sol)))
 
@@ -275,14 +309,15 @@ Base.pairs(sol::DCSolution) = (k => v for (k, v) in zip(keys(sol), values(sol)))
     haskey(sol::DCSolution, name) -> Bool
 
 Whether `name` names a readable quantity: ground (`:gnd` / `Symbol("0")`), a
-node voltage, a branch current, or a device terminal current. Companion to
-[`get`](@ref) — a `true` here means `sol[name]` returns a value rather than
-throwing.
+node voltage, a branch current, a device terminal current, or a device
+operating-point variable. Companion to [`get`](@ref) — a `true` here means
+`sol[name]` returns a value rather than throwing.
 """
 Base.haskey(sol::DCSolution, name::Symbol) =
     name === :gnd || name === Symbol("0") ||
     name in sol.node_names || name in sol.current_names ||
-    any(p -> p.first === name, sol.terminal_currents)
+    any(p -> p.first === name, sol.terminal_currents) ||
+    any(p -> p.first === name, sol.op_vars)
 Base.haskey(sol::DCSolution, name::AbstractString) = haskey(sol, Symbol(name))
 
 """
@@ -351,6 +386,12 @@ function Base.show(io::IO, ::MIME"text/plain", sol::DCSolution)
         println(io, "  Device Terminal Currents:")
         for (name, val) in sol.terminal_currents
             @printf(io, "    %s = %.6g A\n", name, val)
+        end
+    end
+    if !isempty(sol.op_vars)
+        println(io, "  Device Operating-Point Variables:")
+        for (name, val) in sol.op_vars
+            @printf(io, "    %s = %.6g\n", name, val)
         end
     end
 end
@@ -1002,7 +1043,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     n = system_size(ctx)
     if n == 0
         return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true,
-                          Pair{Symbol,Float64}[])
+                          Pair{Symbol,Float64}[], Pair{Symbol,Float64}[])
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -1021,7 +1062,8 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     # That rebuild happened *at* the converged point, so the op channel it
     # populated is the operating point's device terminal currents.
     return DCSolution(sys_final, u, converged;
-                      terminal_currents=terminal_currents(ctx, u))
+                      terminal_currents=terminal_currents(ctx, u),
+                      op_vars=op_vars(ctx))
 end
 
 #==============================================================================#
@@ -2355,7 +2397,7 @@ function solve_dc(circuit::MNACircuit; u0=nothing)
     n = system_size(ctx)
     if n == 0
         return DCSolution(Float64[], Symbol[], Symbol[], Symbol[], Symbol[], 0, true,
-                          Pair{Symbol,Float64}[])
+                          Pair{Symbol,Float64}[], Pair{Symbol,Float64}[])
     end
 
     # Use unified dc_solve_with_ctx for Newton iteration
@@ -2374,7 +2416,8 @@ function solve_dc(circuit::MNACircuit; u0=nothing)
     # The rebuild above ran at the converged point, so the op channel it filled
     # holds this operating point's device terminal currents.
     return DCSolution(sys_final, u, converged;
-                      terminal_currents=terminal_currents(ctx, u))
+                      terminal_currents=terminal_currents(ctx, u),
+                      op_vars=op_vars(ctx))
 end
 
 #==============================================================================#

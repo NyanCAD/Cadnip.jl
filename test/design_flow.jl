@@ -95,8 +95,15 @@ CL drain 0 1p
         @test isapprox(op[:drain], 5.0 - id * RD; rtol=1e-6)   # KVL on the load
         @test isapprox(op[:drain], 3.0; rtol=0.05)
 
-        # Saturation headroom: VDS > VOV, with room for the output swing.
+        # Saturation headroom, in the model's own numbers rather than the hand
+        # derivation's: the device reports the saturation voltage it used.
+        @test op[:m1_vds] > op[:m1_vdsat]
+        @test isapprox(op[:m1_vdsat], VOV; rtol=0.05)
         @test op[:drain] > VOV
+
+        # And the transconductance — the number every step below is really
+        # about — without differencing it out of a sweep or an AC gain.
+        @test isapprox(op[:m1_gm], GM; rtol=0.05)
 
         # The bias is a parameter, so re-biasing is a re-parameterization.
         hotter = dc!(alter(circuit; vbias=VBIAS + 0.05))
