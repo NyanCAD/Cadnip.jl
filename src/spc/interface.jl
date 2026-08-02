@@ -99,6 +99,48 @@ function _eval_builder_into_module(mod::Module, code::Expr, circuit_name::Symbol
     return getfield(mod, circuit_name)
 end
 
+#==============================================================================#
+# A deck is a namespace
+#
+# `SpiceFile`/`SpectreFile` load a *complete* netlist — they parse with
+# `implicit_title=true`, so the first line is a deck title. A SPICE `.include`,
+# which does splice a snippet into the surrounding deck, is a netlist directive
+# handled in sema and has nothing to do with this.
+#
+# One deck therefore gets one module. A deck's `.subckt` names are local to it in
+# SPICE, but codegen turns them into Julia function names (`divider` →
+# `divider_mna_builder`); eval'd straight into the caller's module, two decks
+# that each define `.subckt divider` overwrite each other. Since the positional
+# signature matches, nothing errors — whichever deck was loaded second answers
+# for both. Giving each deck its own module is the same isolation VA files, PDKs,
+# and `MNACircuit(path)` already have, and it restores SPICE's own scoping.
+#
+# Only the circuit builder is bound in the caller's module: that is what
+# `Base.include(mod, SpiceFile(...))` promises, and a collision *there* is a
+# visible redefinition of a name the caller chose, not of a name codegen made up.
+#
+# The parse cache stays on the caller's module, so `.hdl` Verilog-A modules are
+# still shared across decks loaded into it — one compile of a PSP/BSIM model, not
+# one per netlist.
+#==============================================================================#
+function _eval_deck_into_module(mod::Module, sa, circuit_name::Symbol)
+    parse_cache = ensure_cache!(mod)
+    code = make_mna_circuit(sa; circuit_name, parse_cache)
+    deck_name = _deck_module_name(circuit_name)
+    # `:toplevel`, not a block: the module has to be fully defined — and the
+    # world updated — before the alias that reads a binding out of it runs.
+    # Reading it with `getfield` right after `Base.eval` instead trips Julia
+    # 1.12's "access to binding in a world prior to its definition world".
+    Base.eval(mod, Expr(:toplevel,
+        Expr(:module, true, deck_name, code),
+        :(const $circuit_name = $deck_name.$circuit_name)))
+    return nothing
+end
+
+# Derived from the circuit name, so two decks colliding here collide on the
+# builder name too — a redefinition the caller can see and name.
+_deck_module_name(circuit_name::Symbol) = Symbol("#", circuit_name, "#deck")
+
 """
     sp"..."
 
@@ -251,19 +293,11 @@ function _parse_netlist_string(code::AbstractString, lang::Symbol; source_dir=no
 end
 
 function Base.include(mod::Module, f::SpiceFile)
-    sa = _parse_netlist_file(f.path, :spice)
-    parse_cache = ensure_cache!(mod)
-    code = make_mna_circuit(sa; circuit_name=f.name, parse_cache)
-    Base.eval(mod, code)
-    return nothing
+    return _eval_deck_into_module(mod, _parse_netlist_file(f.path, :spice), f.name)
 end
 
 function Base.include(mod::Module, f::SpectreFile)
-    sa = _parse_netlist_file(f.path, :spectre)
-    parse_cache = ensure_cache!(mod)
-    code = make_mna_circuit(sa; circuit_name=f.name, parse_cache)
-    Base.eval(mod, code)
-    return nothing
+    return _eval_deck_into_module(mod, _parse_netlist_file(f.path, :spectre), f.name)
 end
 
 """

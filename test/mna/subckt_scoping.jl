@@ -4,7 +4,17 @@ include(joinpath(@__DIR__, "..", "common.jl"))
 
 using Test
 using Cadnip
-using Cadnip.MNA: MNACircuit
+using Cadnip.MNA: MNACircuit, alter
+using Cadnip: SpiceFile
+
+# Two files defining the same `.subckt divider` with different internals, loaded
+# into this module by the canonical file-first API. Both builders are module
+# globals, so before builder names were scoped to their netlist the second
+# definition replaced the first — same positional signature, so no error: `tap_a`
+# simply answered with `tap_b`'s divider. Loaded at top level (world age).
+const _COLLISION_DIR = joinpath(@__DIR__, "fixtures", "subckt_collision")
+Base.include(@__MODULE__, SpiceFile(joinpath(_COLLISION_DIR, "tap_a.sp"); name=:tap_a))
+Base.include(@__MODULE__, SpiceFile(joinpath(_COLLISION_DIR, "tap_b.sp"); name=:tap_b))
 
 # Regression test for subckt internal-node namespacing.
 # Before the fix, two instances of the same subckt shared internal nodes in the
@@ -81,6 +91,20 @@ end
     @test isapprox(sol[:xo2_mid],      4.0; atol=1e-8)
     @test isapprox(sol[:xo2_xi1_mid],  6.0; atol=1e-8)
     @test isapprox(sol[:xo2_xi2_mid],  2.0; atol=1e-8)
+end
+
+@testset "each deck keeps its own subcircuits" begin
+    # Two decks, each with its own `.subckt divider` — identical positional
+    # signatures, so before decks got a module of their own the second builder
+    # replaced the first and `tap_a` answered 3.0: no error, no warning.
+    @test isapprox(dc!(MNACircuit(tap_a))[:vout], 2.0; atol=1e-8)   # 1k/1k
+    @test isapprox(dc!(MNACircuit(tap_b))[:vout], 3.0; atol=1e-8)   # 1k/3k
+
+    # The deck module is an implementation detail; only the builder is bound here.
+    @test isdefined(@__MODULE__, :tap_a) && isdefined(@__MODULE__, :tap_b)
+
+    # Overrides still reach into the right deck's subcircuit.
+    @test isapprox(dc!(alter(MNACircuit(tap_b); var"x1.rbot"=1e3))[:vout], 2.0; atol=1e-8)
 end
 
 @testset "subckt scoping: device name= scoped too" begin

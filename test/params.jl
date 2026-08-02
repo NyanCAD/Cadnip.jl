@@ -356,9 +356,7 @@ X1 in vout 0 divider r1val=2k r2val=1k
 """i
 
 # `.param x1` next to an `X1` instance: the one case where a name means two
-# different things in the same scope. (Subcircuit builders are named after the
-# `.subckt`, so this one cannot reuse `divider` above — two netlists in one
-# module would generate the same builder name.)
+# different things in the same scope.
 const collide_ckt = sp"""
 .subckt pair a out b rv=1k
 R1 a out {rv}
