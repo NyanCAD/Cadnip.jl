@@ -2,6 +2,8 @@ module params_tests
 
 include("common.jl")
 
+using VADistillerModels   # .model nch nmos level=1 → MOS1, for the corner cards
+
 # MNA imports for parameter tests
 using Cadnip.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, Capacitor, VoltageSource
@@ -370,6 +372,61 @@ Rs in mid {x1}
 X1 mid vout 0 pair rv=1k
 """i
 
+# A `.model` card whose values come from `.param`s. This is how a designer
+# writes a process corner: one knob per model parameter, swept together. The
+# four netlists below put the card and the parameter in each arrangement across
+# the hierarchy, because each resolves the name by a different route.
+const corner_ckt = sp"""
+.param vt0=0.7
+.param kpn=100u
+.model nch nmos level=1 vto=vt0 kp=kpn
+Vdd vdd 0 DC 5
+Vg  g   0 DC 1.2
+M1 drain g 0 0 nch w=20u l=1u
+Rd vdd drain 10k
+"""i
+
+const corner_hier_ckt = sp"""
+.param vt0=0.7
+.model nch nmos level=1 vto=vt0 kp=100u
+.subckt stage d g
+M1 d g 0 0 nch w=20u l=1u
+.ends
+Vdd vdd 0 DC 5
+Vg  g   0 DC 1.2
+X1 drain g stage
+Rd vdd drain 10k
+"""i
+
+# The same thing with the card and the `.param` both local to the subcircuit.
+# (Distinct `.subckt` name: builders are named after the `.subckt`, so reusing
+# `stage` here would redefine the one above — same reason `collide_ckt` cannot
+# reuse `divider`.)
+const corner_local_ckt = sp"""
+.subckt localstage d g
+.param vt0=0.7
+.model nch nmos level=1 vto=vt0 kp=100u
+M1 d g 0 0 nch w=20u l=1u
+.ends
+Vdd vdd 0 DC 5
+Vg  g   0 DC 1.2
+X1 drain g localstage
+Rd vdd drain 10k
+"""i
+
+# ...and the card inside the subcircuit reading the *parent's* `.param`.
+const corner_mixed_ckt = sp"""
+.param vt0=0.7
+.subckt mixedstage d g
+.model nch nmos level=1 vto=vt0 kp=100u
+M1 d g 0 0 nch w=20u l=1u
+.ends
+Vdd vdd 0 DC 5
+Vg  g   0 DC 1.2
+X1 drain g mixedstage
+Rd vdd drain 10k
+"""i
+
 @testset "netlist .param overrides" begin
     # Baseline: the netlist's own values.
     @test dc!(MNACircuit(divider_ckt))[:out] ≈ 0.5
@@ -556,6 +613,48 @@ end
     @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,)))[:vout] ≈ param_hit
     @test dc!(MNACircuit(collide_ckt; params=(x1=6000.0,), x1=(rv=3e3,)))[:vout] ≈
           tap(6e3, 3e3)
+end
+
+@testset ".model cards read .param" begin
+    # Model cards are hoisted out of the builder to module scope, where a
+    # `.param` — a local of the builder function — does not exist. A card that
+    # read one therefore failed at *load* with an UndefVarError, with no
+    # override in play: writing `vto=vt0` next to `.param vt0=0.7` simply did
+    # not work, so the one knob a corner sweep needs was the one out of reach.
+
+    # Square-law MOS1 in saturation, W/L = 20, RD = 10k, VGS = 1.2:
+    #   ID = ½·kp·(W/L)·(VGS−VTO)²,  VD = 5 − RD·ID
+    vd(vto, kp=100e-6) = 5 - 10e3 * 0.5 * kp * 20 * (1.2 - vto)^2
+
+    # The card reads the netlist's own values.
+    @test dc!(MNACircuit(corner_ckt))[:drain] ≈ vd(0.7) atol=1e-6
+
+    # ...and an override reaches it, which is the whole point.
+    @test dc!(MNACircuit(corner_ckt; vt0=0.9))[:drain] ≈ vd(0.9) atol=1e-6
+    @test dc!(alter(MNACircuit(corner_ckt); vt0=0.6))[:drain] ≈ vd(0.6) atol=1e-6
+
+    # Two model parameters at once — a corner is never one number.
+    @test dc!(MNACircuit(corner_ckt; vt0=0.9, kpn=50e-6))[:drain] ≈ vd(0.9, 50e-6) atol=1e-6
+
+    # A model parameter is a usable sweep axis.
+    cs = CircuitSweep(corner_ckt, Sweep(vt0 = [0.6, 0.7, 0.9]))
+    @test [sol[:drain] for (_, sol) in dc!(cs)] ≈ vd.([0.6, 0.7, 0.9]) atol=1e-6
+
+    # The card and the `.param` both inside the subcircuit: the parameter is
+    # already a local there, so the card just reads it.
+    @test dc!(MNACircuit(corner_local_ckt))[:drain] ≈ vd(0.7) atol=1e-6
+    @test dc!(MNACircuit(corner_local_ckt; x1=(vt0=0.9,)))[:drain] ≈ vd(0.9) atol=1e-6
+
+    # The card at the top level, the device inside a subcircuit: the subcircuit
+    # binds the card too, so the parent's `.param` has to arrive with it.
+    @test dc!(MNACircuit(corner_hier_ckt))[:drain] ≈ vd(0.7) atol=1e-6
+    @test dc!(MNACircuit(corner_hier_ckt; vt0=0.9))[:drain] ≈ vd(0.9) atol=1e-6
+
+    # ...and the mirror image: the card inside the subcircuit, the `.param` at
+    # the top level. Same route — the name is not a local of the subcircuit, so
+    # it is read from the parent.
+    @test dc!(MNACircuit(corner_mixed_ckt))[:drain] ≈ vd(0.7) atol=1e-6
+    @test dc!(MNACircuit(corner_mixed_ckt; vt0=0.9))[:drain] ≈ vd(0.9) atol=1e-6
 end
 
 @testset "canonical / compact parameter trees" begin
