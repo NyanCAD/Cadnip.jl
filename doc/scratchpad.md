@@ -6,6 +6,10 @@ Spread your effort across different pillars.
 
 # Things to work on
 
+## Documentation
+
+A lot of the readme, design docs, and user docs are stale. Update them to reflect what's actually in the code, remove anything completely superseded, or add new undocumented functionality.
+
 ## Cleanup
 
 There is both old CedarSim code and lingering duplication and warts.
