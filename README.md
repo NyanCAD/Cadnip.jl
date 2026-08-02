@@ -123,6 +123,18 @@ them apart: **a leaf is a parameter, a group is an instance**. So with a
 `x1=(r1val=1e3,)` addresses the instance; `params=(x1=2.0,)` names the parameter
 explicitly when you need both at once.
 
+A `.model` card reads `.param`s too, so a process corner is an ordinary sweep
+axis rather than a second netlist:
+
+```spice
+.param vt0=0.7
+.model nch nmos level=1 vto=vt0 kp=100u
+```
+
+```julia
+dc!(CircuitSweep(amp, Sweep(vt0 = [0.6, 0.7, 0.8])))
+```
+
 Two limits worth knowing: device instance parameters are not reachable this way
 (`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
 override names are not validated against the netlist, so a typo silently leaves
@@ -169,12 +181,25 @@ op[:i_r1_p]               # current into R1's first terminal
 terminal_currents(op)     # every device terminal, as name => current
 ```
 
+Alongside them it reports **device operating-point variables** — the
+small-signal numbers the *models* compute (`gm`, `gds`, `vth`, `vdsat`), which
+no amount of reading the solution vector can recover. A Verilog-A model
+contributes every variable it declares with a `desc`/`units` attribute, which
+is how the VADistiller and PDK models already spell their `.op` output, so this
+needs nothing configured per model:
+
+```julia
+op[:m1_gm]                     # transconductance of M1, from the model itself
+op[:m1_vds] > op[:m1_vdsat]    # in saturation, in the model's own numbers
+op_vars(op)                    # every device variable, as name => value
+```
+
 And it is enumerable, so you can introspect or export the whole thing without
 knowing the names up front:
 
 ```julia
 sol = dc!(circuit)
-keys(sol)                 # nodes, branch currents, terminal currents: [:in, :out, :I_V1, :i_r1_p, …]
+keys(sol)                 # nodes, branch currents, terminal currents, device variables: [:in, :out, :I_V1, :i_r1_p, …]
 Dict(pairs(sol))          # the whole operating point as name => value
 get(sol, :out, NaN)       # non-throwing lookup (sol[:out] throws if absent)
 haskey(sol, :out)         # true

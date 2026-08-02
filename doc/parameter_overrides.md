@@ -69,7 +69,8 @@ instance line spells out, two levels down.
 An override that names nothing no longer passes silently (§2). One piece of the
 design is still unimplemented — device instance parameters (§1). The two
 sections after those are adjacent defects, not parts of this design: §3 and §4
-are independent bugs that happen to surface nearby.
+are independent bugs that happened to surface nearby, both since fixed and kept
+here for the reasoning.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -204,23 +205,121 @@ duplicate `.subckt` is a redefinition and last-wins is correct.
 Regression test: `test/mna/subckt_scoping.jl`, "each deck keeps its own
 subcircuits", with fixtures in `test/mna/fixtures/subckt_collision/`.
 
-## 4. `.model` cards cannot reference a `.param` (independent scoping bug)
+## 4. `.model` cards reading a `.param` (fixed — independent scoping bug)
 
-Also unrelated to overrides: this fails with no override in play. `.param
-vt0=0.7` + `.model nch nmos vto=vt0` fails at *load* with `UndefVarError: vt0`,
+Unrelated to overrides: it used to fail with no override in play. `.param
+vt0=0.7` + `.model nch nmos vto=vt0` failed at *load* with `UndefVarError: vt0`,
 because `codegen_toplevel_models!` emits model cards as module-level `const`s
 outside the builder, where the `.param` local does not exist.
 
-Do **not** "just move them inside the builder". The hoisting is deliberate —
-subcircuit builders and the main function share them — and with `is_large_model`
-(200+ fields, `invoke` to stop LLVM SROA blow-up) it would mean constructing a
-PSP-sized struct on every restamp, the exact cost
-`doc/psp103_noinline_investigation.md` and `doc/sroa_exploration_results.md`
-exist to avoid.
+What is there: `model_param_deps` asks which declared `.param`s a card actually
+reads. A card that reads none is still a module-level `const`, unchanged. A card
+that reads some is emitted **inline in every builder that binds it**, after the
+parameter assignments — the top level from its locals, a subcircuit through
+`parent_params` (the parameters are added to the subcircuit's
+`exposed_parameters` when the card is propagated into it, so they arrive the same
+way a `.subckt` default's parent references do).
 
-Demand is smaller than it looks: corners are normally `.LIB` sections with their
-own model cards, which already work (`test/testpdk/testpdk.spice`). First move is
-to turn the `UndefVarError` into a diagnostic naming the parameter and pointing
-at `.lib` sections. If parameterized model cards are ever genuinely needed, build
-*only* the cards that reference a parameter, once per parameter set — never per
-restamp.
+That is the whole mechanism. It is also the *third* design this took, and the
+two it replaced were both defences against costs that turned out not to exist.
+
+### Four performance arguments that did not survive measurement
+
+This section used to warn that a parameterized card must not be built in the
+builder ("a PSP-sized struct literal there is the LLVM SROA blow-up
+`doc/psp103_noinline_investigation.md` exists to avoid") and asked for cards to
+be built *"once per parameter set — never per restamp"*. Successive write-ups of
+the fix added two more: `@noinline` on a module-level factory as cheap
+insurance, and the factory itself as avoiding k+1 copies of the card. All four
+were wrong, and the whole edifice reduced to "just emit it inline". Recorded so
+the next session doesn't rebuild it — and because three of the four were
+inherited from this document rather than measured, which is exactly how they
+survived.
+
+**A `const` card never bought "once per parameter set" in the first place.** Any
+device line carrying instance parameters lowers to a `setproperties` in the
+builder body:
+
+```julia
+# M1 d g 0 0 nch W=10u L=1u  →  every builder pass:
+let dev = spicecall(nch; W = 1.0e-5, L = 1.0e-6)     # fresh full-size struct
+```
+
+so the full-size struct is already reconstructed on every pass whether `nch` is
+a module-level `const` or a factory call. The `const` only ever saved the
+*card-level* construction, never the instance-level one. Hoisting the card
+further — caching it per parameter set behind a builder-ABI change — would
+therefore have solved half a problem and left the larger half untouched.
+
+**And the card-level cost is not measurable anyway.** Same circuit, constant
+card vs a card reading one `.param`:
+
+| | time | memory | allocs |
+|---|---|---|---|
+| MOS1 (~30 fields), transient, const | 3.006 ms | 647.49 KiB | 15735 |
+| MOS1, transient, parameterized | 2.999 ms | 647.49 KiB | 15735 |
+| PSP103VA (782 fields), DC, const | 986.4 µs | 345.22 KiB | 7600 |
+| PSP103VA, DC, parameterized | 928.9 µs | 344.98 KiB | 7600 |
+
+Identical allocation counts at both sizes — the structs are immutable and never
+reach the heap — and the timing difference is noise.
+
+**And `@noinline` on the factory bought nothing, so it is not there.** It was
+added defensively from the SROA warning above, never measured. Measured on
+PSP103VA (782 fields), `@noinline` vs. letting the compiler decide:
+
+| | cold compile | steady-state | allocs | native code |
+|---|---|---|---|---|
+| `@noinline` | ~462 s | 1.004 ms | 7600 | 87 lines |
+| inlinable | 461.9 s | 952.7 µs | 7600 | 87 lines |
+
+Identical on every axis, *including* with the card used from five scopes (four
+subcircuits + top level), which was the one case the single-scope runs could not
+see.
+
+**And the factory itself bought nothing, so it is gone too.** Its last claim was
+that inline emission would put k+1 copies of the card in the module. Measured,
+PSP103VA card bound from the top level plus k subcircuits, factory vs inline:
+
+| | expr nodes | source chars |
+|---|---|---|
+| k=1 | 1061 → 1074 | 12341 → 12679 |
+| k=4 | 2198 → 2241 | 25838 → 26746 |
+
+Inline costs ~13 expr nodes per scope — 2% at k=4 — and eval time is
+indistinguishable (0.017 s vs 0.014 s; 0.030 s vs 0.031 s). The premise was
+simply false: a card lowers to only the parameters it *spells out*, never the
+model's field count, so the "782-field literal" being duplicated does not exist.
+
+```julia
+spicecall(ParsedModel, PSP103VA, (VFB = vfbn, TYPE = 1))   # 2 params, not 782
+```
+
+Generated-expression size therefore scales with **card size**, not model size.
+The one case where the factory could still pay is a card spelling out ~200
+parameters across many scopes — and those arrive through `make_mna_pdk_module`,
+which does not use this path at all.
+
+⚠️ **Measure cold-compile numbers in separate processes.** Timing both variants
+in one process makes the second inherit the first's compiled PSP103 `stamp!`
+path and reads as a 33× improvement for whichever ran second. That artifact is
+convincing enough to build a mechanism around; it is not real.
+
+The live question this leaves is *instance*-level construction per restamp, which
+predates this change and is a much larger topic than model cards.
+
+The two copies of the card-lowering logic — `codegen_toplevel_models!` and the
+`codegen_mna!` body, previously verbatim duplicates — are now one
+`cg_model_value!`, parameterized by how a value expression is lowered. That hook
+is what lets a subcircuit-local card read the parent's `.param` too.
+
+Contracts in `test/params.jl` (`".model cards read .param"`): the card reads the
+netlist values, `MNACircuit(…; vt0=…)` / `alter` / a sweep axis all reach it, two
+model parameters move independently, and the card resolves in all four
+arrangements of card and parameter across the hierarchy (both at the top level,
+both inside the subcircuit, and either one on its own).
+
+Not covered: a `.model` inside a `.lib` section reading a `.param` from the
+enclosing file, and the `make_mna_pdk_module` path, which parses model card
+values as literals (`tryparse`) and skips anything it cannot, rather than going
+through `cg_expr!` at all.

@@ -142,6 +142,28 @@ end
 #==============================================================================#
 
 """
+    is_op_var_attributed(child::VANode{ModuleItem}) -> Bool
+
+Whether a module item carries the attribute that marks a Verilog-A
+*operating-point variable*: `(* desc = "Transconductance" *) real gm;`. A `desc`
+or `units` attribute is the convention every VADistiller model, and the SPICE
+models they were distilled from, use to say "report this at the operating
+point"; a bare `real gm;` is an internal scratch variable and stays internal.
+
+Attributes are attached to the module item, not to the declaration inside it, so
+this is asked of the item rather than of the `IntRealDeclaration`.
+"""
+function is_op_var_attributed(child)
+    attrs = child.attrs
+    attrs === nothing && return false
+    for spec in attrs.specs
+        name = strip(String(spec.item.name))
+        (name == "desc" || name == "units") && return true
+    end
+    return false
+end
+
+"""
     make_mna_device(vm::VANode{VerilogModule}; noinline=nothing)
 
 Generate MNA-compatible Julia code for a Verilog-A module.
@@ -207,10 +229,16 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
     var_inits = Dict{Symbol, Any}()  # Store variable initialization expressions
     aliases = Dict{Symbol, Symbol}()
+    # Operating-point variables: module-level `real`/`integer` declarations
+    # carrying a `desc`/`units` attribute, which is how Verilog-A marks the
+    # quantities a simulator reports at the operating point (gm, gds, vdsat,
+    # ...). See doc/operating_point_info.md.
+    op_var_names = Vector{Symbol}()
 
     # Pre-pass: collect parameters and nodes
     for child in vm.items
         item = child.item
+        is_op_var_decl = is_op_var_attributed(child)
         @case formof(item) begin
             InOutDeclaration => nothing
             NetDeclaration => begin
@@ -273,6 +301,9 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
                     # Capture initialization expression if present
                     if vardecl.init !== nothing
                         var_inits[name] = to_julia_defaults(vardecl.init)
+                    end
+                    if is_op_var_decl && T !== String
+                        push!(op_var_names, name)
                     end
                 end
             end
@@ -436,10 +467,15 @@ function make_mna_device(vm::VANode{VerilogModule}; noinline::Union{Bool,Nothing
     # Generate stamp method using unified n-terminal approach
     # (works for any number of terminals, including 2)
     port_args = ps
+    # A variable whose name is also a node's is shadowed by the node symbol in
+    # the stamp body — reading it at the end would report a voltage under the
+    # variable's name, which is worse than not reporting it.
+    filter!(v -> !(v in ps) && !(v in internal_nodes), op_var_names)
+
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
         function_defs, contributions, to_julia_mna, short_circuits;
-        noinline, instance_stamp_calls)
+        noinline, instance_stamp_calls, op_var_names)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -2951,12 +2987,15 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `to_julia`: MNAScope for code translation
 - `short_circuits`: Dict mapping internal_node => (external, condition) for node aliasing
 - `noinline`: Set to `true` for very large models to prevent LLVM SROA blow-up (default: inlineable)
+- `op_var_names`: module-level variables the model marks as operating-point
+  output (`(* desc = "..." *) real gm;`), reported through the op channel
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia, short_circuits=Dict{Symbol, NamedTuple}();
                                           noinline::Union{Bool,Nothing}=nothing,
-                                          instance_stamp_calls::Expr=Expr(:block))
+                                          instance_stamp_calls::Expr=Expr(:block),
+                                          op_var_names::Vector{Symbol}=Symbol[])
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
     n_all_nodes = n_ports + n_internal
@@ -2996,6 +3035,19 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # are eliminated and transient restamping is unchanged.
     opi_accum = [Symbol("_mna_iterm_", k) for k in 1:n_ports]
     opi_init = Expr(:block, [:($s = 0.0) for s in opi_accum]...)
+    # Operating-point *variables* ride the same channel and the same gate. These
+    # are the model's own small-signal quantities — `gm`, `gds`, `vdsat`, `vth`
+    # — which it has already computed by the time the stamp is done, so there is
+    # nothing to accumulate: read the local and hand it over. They are the
+    # module-level variables the model marked with a `desc`/`units` attribute,
+    # which is how every VADistiller model (and the SPICE models behind them)
+    # already spells its operating-point output.
+    opv_register = isempty(op_var_names) ? nothing : quote
+        if Cadnip.MNA.op_enabled(ctx)
+            $([:(Cadnip.MNA.register_op_var!(ctx, _mna_instance_,
+                    $(QuoteNode(v)), $v)) for v in op_var_names]...)
+        end
+    end
     opi_register = quote
         if Cadnip.MNA.op_enabled(ctx)
             $([:(Cadnip.MNA.register_terminal_current!(ctx, _mna_instance_,
@@ -3903,6 +3955,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Hand this instance's terminal currents to the operating-point channel.
         $opi_register
+
+        # ... and the operating-point variables the model declared.
+        $opv_register
 
         return nothing
     end

@@ -1,13 +1,14 @@
 #==============================================================================#
-# Operating-point info channel — device terminal currents
+# Operating-point info channel — device terminal currents and variables
 # (doc/operating_point_info.md)
 #
 # These are low-level stamping-mechanics tests: that devices register the
-# current into each of their terminals on the deferred MNAContext channel as
-# they stamp, that the readout evaluates and folds those entries against a
-# solution vector, and — crucially — that none of it is visible to the DC or
-# transient value path (the hot-path DirectStampContext carries no op channel at
-# all). Circuit-behavior assertions live in `test/opinfo.jl`, on netlists.
+# current into each of their terminals — and the operating-point variables a
+# Verilog-A model marks with a `desc`/`units` attribute — on the deferred
+# MNAContext channel as they stamp, that the readout evaluates and folds those
+# entries, and — crucially — that none of it is visible to the DC or transient
+# value path (the hot-path DirectStampContext carries no op channel at all).
+# Circuit-behavior assertions live in `test/opinfo.jl`, on netlists.
 #==============================================================================#
 
 using Test
@@ -18,6 +19,7 @@ using Cadnip.MNA: SimpleMOSFET, VoltageSource, CurrentSource, resolve_index
 using Cadnip.MNA: reset_for_restamping!, op_enabled, terminal_current_name
 using Cadnip.MNA: register_terminal_current!, register_ohmic_terminal_current!
 using Cadnip.MNA: num_terminal_currents, terminal_currents
+using Cadnip.MNA: register_op_var!, num_op_vars, op_vars, op_var_name
 using Cadnip.MNA: solve_dc, MNASpec, MNACircuit
 using Cadnip.SpectreEnvironment
 
@@ -33,6 +35,26 @@ module VASeriesRes(p, n);
     analog begin
         I(p,mid) <+ V(p,mid)/rc;
         I(mid,n) <+ V(mid,n)/r;
+    end
+endmodule
+"""
+
+# A Verilog-A device that declares operating-point variables the way the
+# VADistiller models do: a `desc`/`units` attribute marks a module-level
+# variable as reportable, a bare declaration keeps it internal.
+va"""
+module VAOpRes(p, n);
+    parameter real r = 1000.0;
+    inout p, n;
+    electrical p, n;
+    (* desc = "Conductance", units = "S" *) real g;
+    (* desc = "Branch voltage" *) real vbr;
+    real scratch;
+    analog begin
+        g = 1.0/r;
+        vbr = V(p,n);
+        scratch = 42.0;
+        I(p,n) <+ g*vbr;
     end
 endmodule
 """
@@ -150,6 +172,45 @@ endmodule
         @test all(!occursin("mid", String(nm)) for nm in names)   # internal node stays inside
     end
 
+    @testset "op_var_name composes instance and variable" begin
+        @test op_var_name(:m1, :gm) === :m1_gm
+        @test op_var_name(:m1, Symbol("")) === :m1
+        @test op_var_name(Symbol(""), :gm) === :gm
+    end
+
+    @testset "attributed Verilog-A variables register, bare ones do not" begin
+        ctx = MNAContext()
+        p = get_node!(ctx, :p)
+        n = get_node!(ctx, :n)
+        stamp!(VAOpRes(), ctx, p, n; _mna_instance_=:x1, _mna_x_=[2.0, 0.0])
+
+        ov = Dict(op_vars(ctx))
+        @test ov[:x1_g] ≈ 1e-3            # (* desc *) — reported
+        @test ov[:x1_vbr] ≈ 2.0             # and evaluated at the stamped point
+        @test !haskey(ov, :x1_scratch)    # bare `real` — stays internal
+        @test num_op_vars(ctx) == 2
+
+        # Restamping starts the channel over rather than appending to it.
+        reset_for_restamping!(ctx)
+        @test num_op_vars(ctx) == 0
+        get_node!(ctx, :p); get_node!(ctx, :n)
+        stamp!(VAOpRes(), ctx, 1, 2; _mna_instance_=:x1, _mna_x_=[1.0, 0.0])
+        @test num_op_vars(ctx) == 2
+        @test Dict(op_vars(ctx))[:x1_vbr] ≈ 1.0
+    end
+
+    @testset "a repeated variable keeps its last value" begin
+        # Unlike the terminal currents, which sum: a variable is the device's
+        # own scalar, not a quantity arriving over several branches.
+        ctx = MNAContext()
+        register_op_var!(ctx, :m1, :gm, 1e-3)
+        register_op_var!(ctx, :m1, :gm, 2e-3)
+        @test num_op_vars(ctx) == 2
+        ov = op_vars(ctx)
+        @test length(ov) == 1
+        @test ov[1] == (:m1_gm => 2e-3)
+    end
+
     @testset "hot path carries no op channel" begin
         # `op_enabled` is the compile-time gate the Verilog-A accumulation sits
         # behind; on the restamping context it is a constant false, which is what
@@ -158,7 +219,8 @@ endmodule
 
         # An RC low-pass through the high-level API drives DirectStampContext
         # restamping, where the resistor stamp calls register_ohmic_terminal_current!
-        # — a no-op there. If the no-op were missing this would error.
+        # and the Verilog-A stamps call register_op_var! — no-ops there. If a
+        # no-op were missing this would error.
         circuit = MNACircuit(sp"""
         V1 in 0 DC 1
         R1 in out 1k
