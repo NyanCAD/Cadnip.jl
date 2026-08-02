@@ -123,6 +123,18 @@ them apart: **a leaf is a parameter, a group is an instance**. So with a
 `x1=(r1val=1e3,)` addresses the instance; `params=(x1=2.0,)` names the parameter
 explicitly when you need both at once.
 
+A `.model` card reads `.param`s too, so a process corner is an ordinary sweep
+axis rather than a second netlist:
+
+```spice
+.param vt0=0.7
+.model nch nmos level=1 vto=vt0 kp=100u
+```
+
+```julia
+dc!(CircuitSweep(amp, Sweep(vt0 = [0.6, 0.7, 0.8])))
+```
+
 Two limits worth knowing: device instance parameters are not reachable this way
 (`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
 override names are not validated against the netlist, so a typo silently leaves
