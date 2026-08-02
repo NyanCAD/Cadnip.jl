@@ -1,4 +1,4 @@
-# Operating-point info: device terminal currents
+# Operating-point info: device terminal currents and variables
 
 A designer reading an operating point wants the device's numbers, not the
 system's: *what is M1's drain current, is it in saturation, where is the bias
@@ -129,13 +129,76 @@ The leverage is the same as the noise work's: this lights up *every* VADistiller
 model at once (resistor, diode, BJT, MOS1/2/3/6/9, JFET, MESFET, BSIM3/4), plus
 any PDK or user Verilog-A, without a per-model line of code.
 
+## Operating-point variables: `gm`, `gds`, `vdsat`
+
+A terminal current says how the device is loaded; it does not say how the device
+*behaves* there. The numbers a designer reaches for next — the transconductance,
+the output conductance, the saturation voltage, the threshold the model actually
+used — are not currents at all, and unlike currents they are not even
+in-principle recoverable from the stamp: `gm` is a partial derivative the model
+took internally and then folded into the Jacobian along with everything else.
+
+They are, however, already *named* in the model. Verilog-A marks the variables a
+simulator should report at the operating point with a descriptive attribute:
+
+```verilog
+(* desc = "Transconductance" *)      real gm;
+(* desc = "Drain-Source conductance" *) real gds;
+(* desc = "Saturation drain voltage" *) real vdsat;
+```
+
+Every VADistiller model carries these already — they are how the SPICE models
+they were distilled from expose their `.op` output — and so do PDK and CMC
+models. So the front end does not need a per-model list, an annotation pass, or
+a naming convention of its own: **a module-level `real`/`integer` declaration
+with a `desc` or `units` attribute is an operating-point variable, and a bare
+one is an internal scratch variable.** That is the whole rule.
+
+The channel is the terminal-current channel with the branch machinery removed,
+because there is nothing to accumulate — the model has computed the value by the
+time the stamp is done:
+
+```julia
+opv_devices::Vector{Symbol}   # instance
+opv_names::Vector{Symbol}     # variable
+opv_values::Vector{Float64}
+```
+
+`register_op_var!(ctx, device, var, value)` is a pure push; `op_vars(ctx)`
+composes `m1_gm` at readout and needs no solution vector. A repeated name keeps
+its **last** value rather than summing — a variable is the device's own scalar,
+not a quantity split across branches, which is the one place the two channels
+differ.
+
+Codegen mirrors the terminal-current registration exactly: one
+`register_op_var!` per declared variable at the end of the stamp, the whole
+block inside `if op_enabled(ctx)`, so `DirectStampContext` folds it away and
+transient restamping is untouched. Modules that declare no such variable emit no
+block at all. String-typed variables are skipped — the channel is `Float64`.
+
+This lights up MOS1/2/3/6/9 (`gm`, `gds`, `gmb`, `vdsat`, `von`, `vgs`, `vds`,
+the junction capacitances), BSIM3/BSIM4 (`gm`, `gds`, `gmbs`, `vth`, `vdsat`),
+the BJT (`gm`, `gpi`, `gmu`, `go`, `cpi`, `cmu`), the JFETs, MESFET, diode
+(`gd`, `cd`) and resistor (`i`, `p`) at once, plus any PDK or user Verilog-A —
+the same no-per-model-code leverage as the noise channel.
+
+Region — "is M1 in saturation?" — falls out of the variables rather than being
+its own report: `op[:m1_vds] > op[:m1_vdsat]` is the saturation test, in the
+model's own numbers rather than in a hand-derived overdrive.
+
+```julia
+op = dc!(circuit)
+op[:m1_gm]                     # transconductance, from the model
+op[:m1_vds] > op[:m1_vdsat]    # saturation
+op_vars(op)                    # every device variable, in stamp order
+```
+
 ## What is not covered yet
 
-- **Small-signal parameters and region** (`gm`, `gds`, saturation/triode). These
-  are the other half of the scratchpad item and need Verilog-A operating-point
-  variables (`(* desc=… *)` `real` outputs) in the VA front end — a separate
-  piece of work, with a wider channel (`Float64` observables keyed by name)
-  that this one's shape generalizes to.
+- **Builtin device stamps register no operating-point variables.** The builtins
+  (`SimpleMOSFET`, `Diode`) are reference stamps; the netlist path resolves
+  `level=1` to VADistiller MOS1, which reports. If a builtin ever needs to, it
+  calls the same `register_op_var!`.
 - **Controlled sources** (VCCS/CCCS/VCVS/CCVS) do not register. The
   voltage-output ones already expose their branch current as an MNA unknown
   (`I_e1`); the current-output ones would need a third entry kind (a

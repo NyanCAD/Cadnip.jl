@@ -196,6 +196,7 @@ export noise_enabled, register_white_noise!, register_flicker_noise!, noise_sour
 
 export op_enabled, register_terminal_current!, register_ohmic_terminal_current!
 export terminal_current_name, terminal_currents, num_terminal_currents
+export register_op_var!, op_var_name, op_vars, num_op_vars
 
 """
     MNAContext
@@ -308,6 +309,17 @@ mutable struct MNAContext
     opi_a::Vector{Float64}
     opi_ohmic::Vector{Bool}
 
+    # Operating-point variables — the same channel, for the small-signal
+    # quantities a device computes on its way to the stamp (gm, gds, vdsat,
+    # vth, ...). A Verilog-A model declares them as attributed module-level
+    # variables (`(* desc = "Transconductance" *) real gm;`), which is how every
+    # VADistiller/PDK model already spells them. Device and variable are kept
+    # apart for the same reason as above: the `m1_gm` name is composed at
+    # readout, not on every push.
+    opv_devices::Vector{Symbol}
+    opv_names::Vector{Symbol}
+    opv_values::Vector{Float64}
+
     # Charge state variables (for voltage-dependent capacitors)
     # See doc/voltage_dependent_capacitors.md
     # These are differential variables with dq/dt = I and constraint q = Q(V)
@@ -394,6 +406,9 @@ function MNAContext()
         MNAIndex[],         # opi_n
         Float64[],          # opi_a
         Bool[],             # opi_ohmic
+        Symbol[],           # opv_devices (deferred operating-point variables)
+        Symbol[],           # opv_names
+        Float64[],          # opv_values
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
@@ -1256,6 +1271,76 @@ function terminal_currents(ctx::MNAContext, x::AbstractVector)
     return out
 end
 
+"""
+    op_var_name(device::Symbol, var::Symbol) -> Symbol
+
+Name the operating-point entry for variable `var` of instance `device`:
+`:m1_gm`, `:m1_vdsat`, `:q1_gpi`. Falls back to whichever half is present,
+mirroring [`terminal_current_name`](@ref).
+"""
+@inline function op_var_name(device::Symbol, var::Symbol)
+    device === Symbol("") && return var
+    var === Symbol("") && return device
+    return Symbol(device, :_, var)
+end
+
+"""
+    register_op_var!(ctx, device::Symbol, var::Symbol, value)
+
+Record the operating-point variable `var` of instance `device` at the point the
+device is being stamped at — a small-signal parameter (`gm`, `gds`, `gmb`), a
+terminal voltage the model computed (`vgs`, `vds`), a region marker (`vdsat`,
+`von`), whatever the model chose to expose. No-op on
+[`DirectStampContext`](@ref).
+
+Verilog-A models declare these as attributed module-level variables
+(`(* desc = "Transconductance" *) real gm;`) and the stamp codegen registers
+every one of them; see doc/operating_point_info.md. A name registered twice
+keeps the **last** value, unlike the terminal currents, which sum: a variable is
+the device's own scalar, not a quantity split across branches.
+"""
+@inline function register_op_var!(ctx::MNAContext, device::Symbol, var::Symbol, value)
+    push!(ctx.opv_devices, device)
+    push!(ctx.opv_names, var)
+    push!(ctx.opv_values, Float64(extract_value(value)))
+    return nothing
+end
+
+"""
+    num_op_vars(ctx::MNAContext) -> Int
+
+Number of operating-point variable entries registered on the context (before
+duplicate names are folded).
+"""
+@inline num_op_vars(ctx::MNAContext) = length(ctx.opv_devices)
+
+"""
+    op_vars(ctx::MNAContext) -> Vector{Pair{Symbol,Float64}}
+
+Materialize the deferred operating-point variable channel: `name => value` pairs
+in registration order, a repeated name keeping its last value. Unlike
+[`terminal_currents`](@ref) this needs no solution vector — the values were
+evaluated by the device itself.
+
+Only meaningful when `ctx` was last stamped at the converged point, which is the
+rebuild `solve_dc` already does.
+"""
+function op_vars(ctx::MNAContext)
+    out = Pair{Symbol,Float64}[]
+    pos = Dict{Symbol,Int}()
+    for k in 1:num_op_vars(ctx)
+        name = op_var_name(ctx.opv_devices[k], ctx.opv_names[k])
+        j = get(pos, name, 0)
+        if j == 0
+            push!(out, name => ctx.opv_values[k])
+            pos[name] = length(out)
+        else
+            out[j] = name => ctx.opv_values[k]
+        end
+    end
+    return out
+end
+
 #==============================================================================#
 # Conductance Stamping Helpers (2-terminal pattern)
 #==============================================================================#
@@ -1484,6 +1569,9 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.opi_n)
     empty!(ctx.opi_a)
     empty!(ctx.opi_ohmic)
+    empty!(ctx.opv_devices)
+    empty!(ctx.opv_names)
+    empty!(ctx.opv_values)
 
     # Charge state variables
     empty!(ctx.charge_names)
@@ -1549,6 +1637,15 @@ function clear!(ctx::MNAContext)
     empty!(ctx.noise_a)
     empty!(ctx.noise_b)
     empty!(ctx.noise_names)
+    empty!(ctx.opi_devices)
+    empty!(ctx.opi_terminals)
+    empty!(ctx.opi_p)
+    empty!(ctx.opi_n)
+    empty!(ctx.opi_a)
+    empty!(ctx.opi_ohmic)
+    empty!(ctx.opv_devices)
+    empty!(ctx.opv_names)
+    empty!(ctx.opv_values)
     empty!(ctx.charge_names)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
