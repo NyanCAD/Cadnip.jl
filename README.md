@@ -2,27 +2,32 @@
 
 **C**ircuit **A**nalysis & **D**ifferentiable **N**umerical **I**ntegration **P**rogram
 
-Cadnip is an MNA-based analog circuit simulator written in Julia, focused on simplicity, maintainability, and robustness. It is a fork of CedarSim that replaces the DAECompiler backend with a straightforward Modified Nodal Analysis (MNA) implementation.
+Cadnip is an analog circuit simulator written in Julia, focused on simplicity,
+maintainability, and robustness.
 
 ## Features
 
-- Import of multi-dialect SPICE/Spectre netlists
-- Import of Verilog-A models
-- DC and transient analyses
-- Full differentiability via ForwardDiff (for sensitivities, optimization, ML, etc.)
+- Import of circuits as netlists, in several dialects of SPICE and Spectre
+- Definition of new devices in Verilog-A
+- DC, transient, AC small-signal, and noise analyses
+- Full differentiability with respect to parameter values via ForwardDiff (for
+  sensitivities, optimization, ML, etc.)
 - Parameter sweeps with `CircuitSweep`
 - Works with standard Julia releases (1.11+)
 
+Cadnip is a fork of the now-inactive CedarSim that replaces the DAECompiler
+backend with a straightforward Modified Nodal Analysis (MNA) implementation.
+Internally a circuit is compiled to an ordinary Julia function that stamps the
+MNA matrices, which is what makes it both fast and differentiable by the rest of
+the Julia ecosystem.
+
 ## Installation
 
-Install from GitHub by first adding the subpackages, then the main package:
+Cadnip is in the General registry:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanLexers.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanSpectreNetlistParser.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanVerilogAParser.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl")
+Pkg.add("Cadnip")
 ```
 
 Or clone and develop locally:
@@ -35,16 +40,13 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 ## Quick Start
 
+A resistive voltage divider is the circuit-level "hello world". The `sp"..."`
+string macro inlines a SPICE netlist:
+
 ```julia
 using Cadnip
 using Cadnip.MNA: MNACircuit
 
-# --- File-first (production): load a netlist from disk ---
-circuit = MNACircuit("amp.sp")                 # extension → .scs Spectre, else SPICE
-sol = dc!(circuit)
-println("Output voltage: ", sol[:out])
-
-# --- Inline (tests, small samples): string macros ---
 circuit = MNACircuit(sp"""
 * Voltage divider
 V1 vcc 0 DC 5
@@ -53,13 +55,69 @@ R2 out 0 1k
 """)
 sol = dc!(circuit)
 println("Vout = ", sol[:out], " V")            # 2.5
+```
 
-# --- Spectre syntax via spc"..." ---
+**Mind the title line.** A SPICE deck's first line is its title, so `sp"..."`
+treats it as a comment — that is what the `* Voltage divider` line is for. Drop
+it and the `V1` card is swallowed as the title, which costs you the source
+without any error:
+
+```julia
+julia> sol = dc!(MNACircuit(sp"""
+       V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+       """))            # no title line: V1 is eaten
+DC Solution:
+  Node Voltages:
+    V(out) = 0 V
+    V(vcc) = 0 V
+  Device Terminal Currents:
+    i_r1_p = 0 A
+    ...
+```
+
+There is no source left in the circuit, so everything sits at zero — note that
+the `Branch Currents` section is missing entirely, because `V1` never made it in.
+
+Add the `i` (inline) flag when a snippet has no title line of its own:
+
+```julia
+julia> sol = dc!(MNACircuit(sp"""
+       V1 vcc 0 DC 5
+       R1 vcc out 1k
+       R2 out 0 1k
+       """i))           # `i` = no title expected
+DC Solution:
+  Node Voltages:
+    V(out) = 2.5 V
+    V(vcc) = 5 V
+  Branch Currents:
+    I_v1 = -0.0025 A
+  Device Terminal Currents:
+    i_r1_p = 0.0025 A
+    ...
+```
+
+Spectre syntax works the same way, via `spc"..."` (which has no title line, so
+no flag):
+
+```julia
 circuit = MNACircuit(spc"""
 v1 (vcc 0) vsource type=dc dc=5
 r1 (vcc out) resistor r=1k
 r2 (out 0) resistor r=1k
 """)
+println("Vout = ", dc!(circuit)[:out], " V")   # 2.5
+```
+
+For anything larger than a snippet, keep the netlist in a file. The extension
+picks the language: `.scs` is Spectre, anything else is SPICE.
+
+```julia
+circuit = MNACircuit("amp.sp")                 # extension → .scs Spectre, else SPICE
+sol = dc!(circuit)
+println("Output voltage: ", sol[:out])
 ```
 
 ### Loading options
@@ -75,11 +133,21 @@ r2 (out 0) resistor r=1k
 | Already-compiled builder     | `MNACircuit(my_builder_fn; R=1e3)`                |
 | PDK package                  | `.lib "jlpkg://MyPDK/..." typical` in the netlist |
 
-**Top-level only for runtime parsing.** `MNACircuit("path")` and
-`MNACircuit(code; lang=...)` call `Base.eval` internally and must be used at
-the REPL or module top level. Inside a function body, Julia freezes the
-caller's world age at entry and the freshly-defined builder can't be
-dispatched. For that case, bring the circuit into scope at top level first:
+**Runtime parsing defines a builder, so mind the world age.** `MNACircuit("path")`
+and `MNACircuit(code; lang=...)` parse the netlist and `Base.eval` a builder
+function for it. Julia freezes the world age of a top-level statement while it
+runs, so the fresh builder can only be *called* from a **later** statement:
+
+```julia
+circuit = MNACircuit("amp.sp")   # statement 1: defines the builder
+sol = dc!(circuit)               # statement 2: calls it — fine
+
+dc!(MNACircuit("amp.sp"))        # ✗ same statement: MethodError, "method too new"
+```
+
+A function body freezes its world age at entry the same way, so building *and*
+solving inside one call fails for the same reason. Bring the circuit into scope
+at top level first and the function is free to build and solve as it likes:
 
 ```julia
 Base.include(@__MODULE__, SpiceFile("amp.sp"))   # top level: defines `amp`
@@ -90,8 +158,25 @@ function run_sim()
 end
 ```
 
-The string macros (`sp"..."`, `spc"..."`, `va"..."`) expand at the call site
-and work transparently in both top-level and function-body contexts.
+The string macros expand at the call site rather than eval'ing, so they have no
+world-age tax. But a netlist macro (`sp"..."`, `spc"..."`) expands to a block
+carrying `using` statements, which Julia only allows at top level, so those two
+cannot go inside a function body either:
+
+```julia
+function bad()
+    dc!(MNACircuit(sp"""
+    * divider
+    V1 vcc 0 DC 5
+    R1 vcc out 1k
+    R2 out 0 1k
+    """))
+end
+# ERROR: syntax: "using" expression not at top level
+```
+
+So a netlist — inline or from a file — is loaded at top level, and functions
+take it from there.
 
 ### Parameters and sweeps
 
@@ -135,10 +220,21 @@ axis rather than a second netlist:
 dc!(CircuitSweep(amp, Sweep(vt0 = [0.6, 0.7, 0.8])))
 ```
 
-Two limits worth knowing: device instance parameters are not reachable this way
-(`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
-override names are not validated against the netlist, so a typo silently leaves
-the default in place.
+Override names are checked against what the netlist actually declares, so a typo
+is an error at construction rather than a sweep that quietly returns the default
+at every point:
+
+```julia
+julia> MNACircuit(amp; vbais=1.2)
+ERROR: ArgumentError: unknown parameter override `vbais` — the top level
+declares no parameter `vbais`. It declares: rd, vbias.
+```
+
+The same check runs for `alter` and for sweep axes. Two limits worth knowing:
+device instance parameters are not reachable this way (`r1=(r=2e3,)` throws —
+give the netlist a `.param` and use that instead), and a builder that declares
+nothing at all — a hand-written builder, or a netlist with no `.param` and no
+subcircuit instance — has no knob to typo, so nothing is checked for it.
 
 ### Analyses
 
@@ -264,7 +360,7 @@ julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
 
 ## License
 
-This package is available under the MIT license (see LICENSE.MIT). You may also use it under CERN-OHL-S v2 if that better suits your project.
+This package is available under the MIT license (see [LICENSE](LICENSE)). You may also use it under CERN-OHL-S v2 if that better suits your project.
 
 Contributions are welcome! Please open an issue or pull request on GitHub.
 
