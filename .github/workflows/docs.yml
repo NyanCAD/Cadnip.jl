@@ -1,0 +1,52 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: Build docs
+    runs-on: ubuntu-latest
+
+    # `deploydocs` pushes the built site to gh-pages on a push to main. Without
+    # a DOCUMENTER_KEY secret it authenticates with GITHUB_TOKEN over HTTPS,
+    # which needs write access to the repository contents. Pull requests only
+    # build — Documenter does not deploy for them.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+
+      - uses: julia-actions/cache@v3
+
+      - name: Disable heavy precompile workloads
+        run: |
+          cat > docs/LocalPreferences.toml << 'EOF'
+          [VADistillerModels]
+          precompile_workload = false
+          EOF
+
+      - name: Install docs dependencies
+        run: julia --project=docs -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      # The pages are written as executable `@example` blocks, so this both
+      # renders the site and runs every example in it — a documented API that
+      # stops working fails here.
+      - name: Build docs
+        run: julia --project=docs docs/make.jl
+        env:
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
