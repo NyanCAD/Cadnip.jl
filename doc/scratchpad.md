@@ -89,14 +89,72 @@ The most nebulous and least important at this stage: copying features from other
   - [x] Report device small-signal parameters and region (gm, gds, triode/saturation) via Verilog-A operating-point variables — a module-level `real`/`integer` declaration carrying a `desc`/`units` attribute *is* an operating-point variable (`(* desc = "Transconductance" *) real gm;`), which is exactly how every VADistiller/PDK/CMC model already spells its `.op` output, so no per-model list is needed. They ride the terminal-current channel with the branch machinery removed (nothing to accumulate — the model computed the value), behind the same constant-false `op_enabled(ctx)` gate, so `DirectStampContext` restamping is untouched. `op[:m1_gm]`, `op[:m1_gds]`, `op_vars(op)`, and they join `keys`/`values`/`pairs`/`haskey`/`show`; region is `op[:m1_vds] > op[:m1_vdsat]`, the model's numbers rather than a hand-derived overdrive. Lights up MOS1/2/3/6/9, BSIM3/4, BJT, JFET/MESFET, diode and resistor at once — design: `doc/operating_point_info.md`
   - [x] `.dc` sweep with continuation: `dc_solve_with_ctx`/`solve_dc`/`dc!` take a `u0`, and `dc!(::CircuitSweep)` warm-starts each point from the previous *converged* one (`continuation=true` by default, as SPICE `.dc` does). `DCSolution` carries `converged`, which is what gates the hand-off; a guess of the wrong length (a point that changed the system size) is dropped, and the GMIN/source-stepping fallbacks still restart from zeros, so a bad guess costs iterations and never a solution. Transient sweeps still DC-init cold per point — `tran!(::CircuitSweep)` inits through `CedarDCOp`, which has no `u0` seam yet
 - [x] Documentation: README reviewed against a running Cadnip, building on #256 (@tdunning). Kept that PR's structure — simple case before complications — and rebased it onto current main, which it predates (taking it wholesale would have reverted the `.model`-reads-`.param`, terminal-current and op-var sections). Four claims did not survive measurement: the install dance is obsolete (Cadnip 0.13.0 + all three subpackages are in General, so `Pkg.add("Cadnip")`); `sp"..."`/`spc"..."` do **not** work in a function body as the README promised — `make_mna_circuit` emits four `using` statements at the head of the generated block, so both die with `syntax: "using" expression not at top level` (`va"..."` is fine); the world-age rule is sharper than "top level only" — an eval'd builder is callable from any *later* top-level statement but not the same one, so `dc!(MNACircuit("amp.sp"))` as a one-liner is a MethodError; and override typos throw now rather than silently keeping the default. Also added AC/noise to the feature list, fixed a `LICENSE.MIT` link to a file that never existed, and refreshed the DC transcripts, which predate terminal currents
-- [ ] Two things the README review turned up that are code, not docs:
-  - [ ] Let `sp"..."`/`spc"..."` expand inside a function body — what the docs promised for years. The blocker is the four `using`s at `src/spc/codegen.jl:3334-3337`, emitted because device constructors go into the generated code *bare* while runtime plumbing is fully qualified (comment at 3330). Measured which are actually load-bearing, by stripping each and eval'ing into a bare module:
-    - `using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource` — **needed**. Ironically not for `Resistor`: an R card lowers through `GlobalRef(SpectreEnvironment, :resistor)`, so only the other four are ever bare
-    - `using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS` — **needed**, but only by E/G/F/H cards
-    - `using Cadnip: ParamLens, IdentityLens, StaticArrays` — **no deck needed it**. `StaticArrays.@SVector` is spliced as a macro *object* (codegen.jl:446) and the lens names are emitted qualified
-    - `using Cadnip.SpectreEnvironment` — **no deck needed it**. Every SPICE function lowers to a `GlobalRef(SpectreEnvironment, …)` (codegen.jl:225, 298); `dc`/`ac`/`tran` appear only as kwarg *names*, never as value references. Checked against `pulse`/`temper`/`agauss`/`$scale`/`sqrt`/`ln`/`pow` and a Spectre `type=dc` deck
-    Rewriting the bare device names to `GlobalRef`s and dropping all four reproduces the baseline answer exactly on passives, E/G/F/H, `.param`, subckt, PWL/SIN/PULSE, `temper`, `agauss`, `$scale`, and — with VADistillerModels loaded — diode (0.669317), MOS1 (1.68) and BJT (4.9433). Spliced into a function body, plain and subckt decks then work (2.5 V, 1.25 V). **A second blocker remains for `.model` decks**: `model_defs` emits `const` bindings (codegen.jl:3340), and `const` is illegal on a local, so those need to become plain locals in the in-function case. Note also that the PDK-module path at 3533-3535 emits a *different* import list (adds `spicecall`/`ParsedModel`, drops the controlled sources and StaticArrays) — the two have drifted and should be derived from one place
-  - [ ] `MNACircuit(path)` trips Julia 1.12's "access to binding in a world prior to its definition world" warning even at top level, where it still returns the right answer. `_eval_deck_into_module` takes care to avoid this with `Expr(:toplevel)`; the `MNACircuit(path)` route apparently does not. 1.12 says "this will error in future versions"
+- [ ] Codegen unification — three items from the README review, in dependency
+  order. The first is a live bug, and the natural place the other two hang off:
+  - [ ] **One import list for both codegen paths.** The SPICE circuit path
+    (`_make_mna_circuit_with_sema`, `src/spc/codegen.jl:3334-3337`) and the PDK
+    module path (`make_mna_pdk_module`, 3533-3535) each hand-maintain their own
+    list of what generated code needs in scope, and they have drifted: the PDK
+    list adds `spicecall`/`ParsedModel` and drops `StaticArrays` *and the four
+    controlled sources*. That last omission is a real bug rather than untidiness
+    — codegen emits `VCVS`/`VCCS` **bare** into PDK subcircuit builders while
+    the module imports neither, so a PDK subckt with an E or G card raises
+    `UndefVarError` the first time it is called. It survives today only because
+    nothing calls it: a bare global in a function body resolves at call time, so
+    `make_mna_pdk_module` + `Core.eval` both report success on a deck that
+    cannot run. Derive both lists from one place and the bug closes on its own
+  - [ ] **Merge the two SPICE codegen paths.** Beyond the imports,
+    `make_mna_pdk_module` (3405-3542) restates `_make_mna_circuit_with_sema`
+    (3256-3382) four times over: building `subckt_semas`, propagating parent
+    models into subcircuit semas, looping subcircuits to emit builders, and —
+    the big one — ~65 lines (3421-3486) hand-inlining the `.model` card lowering
+    already implemented by `codegen_toplevel_models!`/`cg_model_value!`. The
+    copies have diverged where it counts: the circuit path's propagation loop
+    also pushes `model_param_deps` into `exposed_parameters`, which is what
+    makes `.model nch nmos vto=vt0` work, and the PDK copy has no such step — so
+    a process corner as a sweep axis is a circuit-path-only feature by accident.
+    Two entry points is fine; two implementations of one lowering is what should
+    go
+  - [ ] **Runtime warnings.** Two fire in normal use:
+    - `MNACircuit(path_or_code)` reads its freshly-installed builder with
+      `getfield(mod, eff_name)` immediately after `Base.include`/`Base.eval`
+      (`src/spc/interface.jl:374` and `:383`), tripping Julia 1.12's "Detected
+      access to binding … in a world prior to its definition world … This code
+      will error in future versions of Julia". It still returns the right answer
+      today. The fix is already written down in the same file:
+      `_eval_deck_into_module` (interface.jl:130-133) hit exactly this and
+      solved it by letting the world update before the read; Julia's own hint is
+      to wrap the access in `invokelatest`
+    - `WARNING: Imported binding SciMLBase.MatrixOperator was undeclared at
+      import time during import to MNA`, on every load of Cadnip
+- [ ] Let `sp"..."`/`spc"..."` expand inside a function body — what the docs
+  promised for years. The blocker is the four `using`s at
+  `src/spc/codegen.jl:3334-3337`, emitted because device constructors go into
+  generated code *bare* while runtime plumbing is fully qualified (comment at
+  3330). Measured which are load-bearing by stripping each and eval'ing into a
+  bare module:
+  - `using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource`
+    — **needed**, though not for `Resistor`: an R card lowers through
+    `GlobalRef(SpectreEnvironment, :resistor)`, so only the other four are bare
+  - `using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS` — **needed**, by E/G/F/H cards only
+  - `using Cadnip: ParamLens, IdentityLens, StaticArrays` — **no deck needed
+    it**. `StaticArrays.@SVector` is spliced as a macro *object*
+    (codegen.jl:446) and the lens names are emitted qualified
+  - `using Cadnip.SpectreEnvironment` — **no deck needed it**. Every SPICE
+    function lowers to a `GlobalRef(SpectreEnvironment, …)` (codegen.jl:225,
+    298); `dc`/`ac`/`tran` appear only as kwarg *names*, never as value
+    references. Checked against `pulse`/`temper`/`agauss`/`$scale`/`sqrt`/`ln`/
+    `pow` and a Spectre `type=dc` deck
+
+  Rewriting the bare device names to `GlobalRef`s and dropping all four
+  reproduces the baseline answer exactly on passives, E/G/F/H, `.param`, subckt,
+  PWL/SIN/PULSE, `temper`, `agauss`, `$scale`, and — with VADistillerModels
+  loaded — diode (0.669317), MOS1 (1.68) and BJT (4.9433). Spliced into a
+  function body, plain and subckt decks then work (2.5 V, 1.25 V). **A second
+  blocker remains for `.model` decks**: `model_defs` emits `const` bindings
+  (codegen.jl:3340), and `const` is illegal on a local, so those have to become
+  plain locals in the in-function case. Best done after the import unification
+  above, which is where the one shared list would live
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
