@@ -4,6 +4,13 @@ Don't take big tasks head on, break them up in planning docs and prerequisite gr
 
 Spread your effort across different pillars.
 
+**Keep entries to one short line.** This file exists to balance work across the
+pillars, avoid duplicating effort, and track what is left to do — it is not a
+design document. One sentence naming the task is enough; a design doc in `doc/`
+and the pull request description do the heavy lifting, so link them instead of
+summarising them here. If an entry needs a paragraph to explain, that paragraph
+belongs in a design doc.
+
 # Things to work on
 
 ## Documentation
@@ -55,106 +62,40 @@ The most nebulous and least important at this stage: copying features from other
 
 # Progress
 
-- [x] UX: enumerable DC operating point — `keys`/`values`/`pairs`/`haskey`/`get` on `DCSolution` so an operating point can be iterated, `Dict`-collected, and diffed without knowing node names up front (nodes + branch currents; string names delegate to the symbol lookup)
+- [x] UX: enumerable DC operating point (`keys`/`values`/`pairs`/`haskey`/`get` on `DCSolution`)
 - [x] AC source phase (`V1 ... AC mag phase`)
 - [x] Combined AC+transient sources, and Spectre `vsource`/`isource` AC support
 - [x] Cleanup: drop dead backward-compat aliases
 - [x] Cleanup: drop dead `netlist_utils.jl` composition operators
 - [x] Control/analysis dot-cards no longer crash sema
 - [x] Cleanup: drop dead DAECompiler-era `aliasextract.jl` and its `net_alias` stub
-- [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API, its two legacy `detect_or_cached!` overloads, and the always-empty codegen `detection_block`
-- [x] Port the Makie extension (`explore`) to the MNA backend and wire it into `[extensions]` with a headless CairoMakie test
-- [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` noise extraction and the unused `SimSpec.ϵω` field
-- [x] UX: Hz-based `magnitude_db`/`phase_deg` for the high-level `ac!` (`ACSol`) result, fixed AC docs/README
-- [x] AC UX: unify the two AC result types onto one Hz-first surface that keeps the ControlSystems interop — retired `ACSolution`/`solve_ac`; `ac!`/`ACSol` is the single AC path (DSS-backed `freqresp`/`ss`/`bode` + SPICE-native `sol[:name]`)
-- [x] AC UX: make `sol[:name]` return-type consistent across AC types — `ACSol` now indexes to a complex response vector (matching DC/tran); the DSS subsystem moved to `subsystem(ac, :name)`; `ac!(circuit, freqs)` carries a Hz grid and 2-arg `magnitude_db`/`phase_deg`
-- [x] AC UX: hierarchical device-observable access in AC — subcircuit nodes flatten into the name table so `ac[:x1_out]` resolves, and a `NodeRef` from `scope(...)` indexes an `ACSol` (parity with DC/tran); genuine device-across voltages remain node differences
-- [x] Noise N0: deferred noise-source channel on `MNAContext`, no-op on `DirectStampContext` (zero transient cost); resistor Johnson–Nyquist thermal noise (`4kT·G`) is the first registered source, PSD helper covers thermal/shot/white/flicker — design: `doc/noise_analysis_design.md`. Still to wire for N1: builtin diode/BJT/MOSFET shot+flicker and the VA `white_noise`/`flicker_noise` codegen path (needs branch context at the contribution site).
-- [x] Noise N2: noise transfer functions via the AC linearization — `noise!(circuit, output; freqs)` adjoint-solves `(jωC+G)ᵀ x_adj = e_out` per frequency, transfer `H_k = x_adj[p_k]-x_adj[n_k]` for every source at O(1) (`src/noise.jl`, `test/noise.jl`)
-- [x] Noise N3 (partial): `noise!()` output PSD `Σ_k |H_k|² S_k`, per-source contributions (`ns[:onoise]`/`ns[:devname]`), band-integrated `total_noise` validated against RC `4kTR`-shaped noise and `kT/C`. Source-agnostic: every registered source (thermal, diode shot, MOSFET channel thermal) lights up for free
-- [x] Noise N1: per-source PSD at the DC bias — thermal (done), and:
-  - [x] builtin diode shot noise (`2q·|I|`) registered from the junction bias via `register_shot_noise!`
-  - [x] builtin MOSFET channel thermal noise (`4kT·(2/3)·gm`) registered from the bias gm via `register_channel_thermal_noise!`
-  - [x] VA `white_noise`/`flicker_noise` register on the noise channel — the contribution codegen binds the LHS branch into `_mna_noise_p_`/`_mna_noise_n_`, the call still evaluates to `0.0`, and an `if noise_enabled(ctx)` gate (constant-false on `DirectStampContext`) folds the whole registration — power expression included — out of the transient hot path. Sources are named `<instance>_<label>` (`:q1_rb`, `:q1_flicker`) and scale with `$mfactor`. This lights up **every** VADistiller model's SPICE3 noise model at once (resistor, diode, BJT, MOS1/2/3/6/9, JFET, MESFET, BSIM3/4) plus any PDK/user Verilog-A, so BJT shot+flicker and MOSFET flicker come in through the models rather than as builtin-stamp special cases
-  - [x] builtin `Diode`/`DiodeWithCap`/`SimpleMOSFET` flicker (1/f) noise (`KF·|I|^AF / f^FFE`) — `KF`/`AF`/`FFE` cards (off by default) register through the **same** `register_flicker_noise!(ctx, p, n, pwr, exp)` entry point the VA `flicker_noise(pwr, exp)` lowering uses (no parallel construction), reading the flicker coefficient from the DC bias current; exercises the `FLICKER` kind end-to-end through `noise!` for the reference builtins (`test/mna/noise.jl`, `test/noise.jl`)
-- [x] Noise N3 rest (input-referral): `noise!(circuit, output; freqs, input=:V1)` refers the output noise back to a voltage-source input via the same adjoint — the unit-voltage transfer `H(jω)=x_adjᵀ b_in` is read for free per frequency, `ns[:inoise] = onoise/|H|²`, `total_noise(ns; referred=:input)`. Validated: divider input-referred `4kT·2000` and RC input-referred flattening to the bare `4kTR` (`src/noise.jl`, `test/noise.jl`)
-- [x] UX/design: netlist `.param` overrides reach the netlist — `MNACircuit(ckt; vbias=1.2)` and `Sweep(vbias=…)` used to resolve to the default at every point, so a swept design read as a flat transfer curve with no error. Restored `canonicalize_params` in `ParamLens` (one rule: a leaf is a parameter, a group is a child), codegen precedence lens > instance line > `.subckt` default, `alter` inserting along the path, and one `alter` instead of two shadowing ones — design: `doc/parameter_overrides.md`
-- [x] UX/design: `test/design_flow.jl` walks a hand-sized NMOS common-source stage op → DC transfer curve → AC → transient → noise against the square-law derivation; the two `test/mna/audio_integration.jl` sweeps now assert the swept value reaches the source (they used to pass as no-ops)
-- [ ] Finish the override design: reach raw device instance parameters (`r1=(r=2e3,)`, `m1=(w=…)`) through the lens. Named parameters land; device instance parameters were meant to be in the same tree (see the commented-out "device == param" test in `test/basic.jl`) and codegen never consults the lens at device sites — design: `doc/parameter_overrides.md`
-- [x] Diagnose unknown override names — `ParamObserver` (the recording `AbstractParamLens`) already reports every name a circuit declares, so building once with it in place of `ParamLens` yields the whole tree and `src/param_overrides.jl` diffs the override tuple against it; dispatch keeps observation off the hot path and the result is memoized per builder, so `alter` pays once per sweep, not per point. `MNACircuit`/`alter`/sweeps all check, and the message names the fix ("`x1` is an instance, write `x1=(rv=…)`"). Two overrides that reached nothing fixed alongside: dotted selectors at construction (`MNACircuit(c; var"x1.r1val"=…)`) and `CircuitSweep`'s base circuit — design: `doc/parameter_overrides.md` §2
-- [x] Codegen: a deck is a namespace — `Base.include(mod, SpiceFile(...))` used to eval generated code straight into the caller's module, so two netlists that each define `.subckt divider` overwrote each other's builder; identical positional signatures meant no error, just the second deck answering for the first. `SpiceFile`/`SpectreFile` load a *complete* deck (they parse with `implicit_title=true`), and a `.subckt` is deck-local in SPICE, so each deck now gets a module of its own and only the circuit builder is bound in the caller's module — the isolation VA files, PDKs, and `MNACircuit(path)` already had. Two `sp"..."` decks in one *local* scope still collide, which is ordinary Julia redefinition in a scope the author wrote (`src/spc/interface.jl`, `test/mna/subckt_scoping.jl`, `doc/parameter_overrides.md` §3)
-- [x] Sema/codegen: let a `.model` card read a `.param` (`.model nch nmos vto=vt0`), so a process corner is an ordinary sweep axis. Took three designs; the two discarded ones and the measurements that retired them are in `doc/parameter_overrides.md` §4
+- [x] Cleanup: drop superseded `stamp_reactive_with_detection!` API and the always-empty codegen `detection_block`
+- [x] Port the Makie extension (`explore`) to the MNA backend, with a headless CairoMakie test
+- [x] Cleanup: drop dead DAECompiler-era `noiseparams`/`modelfields` extraction and the unused `SimSpec.ϵω`
+- [x] UX: Hz-based `magnitude_db`/`phase_deg` for `ac!` (`ACSol`)
+- [x] AC UX: one Hz-first AC surface keeping the ControlSystems interop — retired `ACSolution`/`solve_ac` — design: `doc/ac_result_unification.md`
+- [x] AC UX: `sol[:name]` return-type consistent across AC types; DSS subsystem moved to `subsystem(ac, :name)` — design: `doc/ac_result_unification.md`
+- [x] AC UX: hierarchical device-observable access in AC (`ac[:x1_out]`, `NodeRef` indexing) — design: `doc/ac_result_unification.md`
+- [x] Noise N0: deferred noise-source channel on `MNAContext` + resistor thermal noise — design: `doc/noise_analysis_design.md`
+- [x] Noise N2: noise transfer functions via the AC linearization (`src/noise.jl`, `test/noise.jl`)
+- [x] Noise N3 (partial): output PSD, per-source contributions, band-integrated `total_noise`
+- [x] Noise N1: per-source PSD at the DC bias — diode shot, MOSFET channel thermal, VA `white_noise`/`flicker_noise`, builtin flicker
+- [x] Noise N3 rest (input-referral): `noise!(…; input=:V1)`, `ns[:inoise]`, `total_noise(…; referred=:input)`
+- [x] UX/design: netlist `.param` overrides reach the netlist — design: `doc/parameter_overrides.md`
+- [x] UX/design: `test/design_flow.jl` walks an NMOS common-source stage op → DC → AC → transient → noise
+- [ ] Finish the override design: reach raw device instance parameters (`r1=(r=2e3,)`) through the lens — design: `doc/parameter_overrides.md`
+- [x] Diagnose unknown override names — design: `doc/parameter_overrides.md` §2
+- [x] Codegen: a deck is a namespace — each loaded netlist gets its own module — design: `doc/parameter_overrides.md` §3
+- [x] Sema/codegen: let a `.model` card read a `.param`, so a process corner is an ordinary sweep axis — design: `doc/parameter_overrides.md` §4
 - [ ] UX/design follow-ups from the same walkthrough:
-  - [x] Report device terminal currents in the operating point, via an op-info channel on `MNAContext` — a deferred channel mirroring the noise one (nothing on `DirectStampContext`, `op_enabled(ctx)` constant-false there, so transient restamping is untouched). Builtin R/D/MOSFET/current-source register at their stamp; the Verilog-A stamp codegen accumulates one current per port over every branch that reaches it, following the `V(int,ext) <+ 0` collapse a model does when `rd=0` — so it lights up every VADistiller/PDK/user model at once. `dc!` reads the channel off the rebuild it already does at the converged point: `op[:i_m1_d]`, `terminal_currents(op)`, and they join `keys`/`values`/`pairs`/`haskey`/`show` — design: `doc/operating_point_info.md`
-  - [x] Report device small-signal parameters and region (gm, gds, triode/saturation) via Verilog-A operating-point variables — a module-level `real`/`integer` declaration carrying a `desc`/`units` attribute *is* an operating-point variable (`(* desc = "Transconductance" *) real gm;`), which is exactly how every VADistiller/PDK/CMC model already spells its `.op` output, so no per-model list is needed. They ride the terminal-current channel with the branch machinery removed (nothing to accumulate — the model computed the value), behind the same constant-false `op_enabled(ctx)` gate, so `DirectStampContext` restamping is untouched. `op[:m1_gm]`, `op[:m1_gds]`, `op_vars(op)`, and they join `keys`/`values`/`pairs`/`haskey`/`show`; region is `op[:m1_vds] > op[:m1_vdsat]`, the model's numbers rather than a hand-derived overdrive. Lights up MOS1/2/3/6/9, BSIM3/4, BJT, JFET/MESFET, diode and resistor at once — design: `doc/operating_point_info.md`
-  - [x] `.dc` sweep with continuation: `dc_solve_with_ctx`/`solve_dc`/`dc!` take a `u0`, and `dc!(::CircuitSweep)` warm-starts each point from the previous *converged* one (`continuation=true` by default, as SPICE `.dc` does). `DCSolution` carries `converged`, which is what gates the hand-off; a guess of the wrong length (a point that changed the system size) is dropped, and the GMIN/source-stepping fallbacks still restart from zeros, so a bad guess costs iterations and never a solution. Transient sweeps still DC-init cold per point — `tran!(::CircuitSweep)` inits through `CedarDCOp`, which has no `u0` seam yet
-- [x] Documentation: README reviewed against a running Cadnip, building on #256 (@tdunning). Kept that PR's structure — simple case before complications — and rebased it onto current main, which it predates (taking it wholesale would have reverted the `.model`-reads-`.param`, terminal-current and op-var sections). Four claims did not survive measurement: the install dance is obsolete (Cadnip 0.13.0 + all three subpackages are in General, so `Pkg.add("Cadnip")`); `sp"..."`/`spc"..."` do **not** work in a function body as the README promised — `make_mna_circuit` emits four `using` statements at the head of the generated block, so both die with `syntax: "using" expression not at top level` (`va"..."` is fine); the world-age rule is sharper than "top level only" — an eval'd builder is callable from any *later* top-level statement but not the same one, so `dc!(MNACircuit("amp.sp"))` as a one-liner is a MethodError; and override typos throw now rather than silently keeping the default. Also added AC/noise to the feature list, fixed a `LICENSE.MIT` link to a file that never existed, and refreshed the DC transcripts, which predate terminal currents
-- [ ] Codegen unification — three items from the README review, in dependency
-  order. The first is a live bug, and the natural place the other two hang off:
-  - [ ] **One import list for both codegen paths.** The SPICE circuit path
-    (`_make_mna_circuit_with_sema`, `src/spc/codegen.jl:3334-3337`) and the PDK
-    module path (`make_mna_pdk_module`, 3533-3535) each hand-maintain their own
-    list of what generated code needs in scope, and they have drifted: the PDK
-    list adds `spicecall`/`ParsedModel` and drops `StaticArrays` *and the four
-    controlled sources*. That last omission is a real bug rather than untidiness
-    — codegen emits `VCVS`/`VCCS` **bare** into PDK subcircuit builders while
-    the module imports neither, so a PDK subckt with an E or G card raises
-    `UndefVarError` the first time it is called. It survives today only because
-    nothing calls it: a bare global in a function body resolves at call time, so
-    `make_mna_pdk_module` + `Core.eval` both report success on a deck that
-    cannot run. Derive both lists from one place and the bug closes on its own
-  - [ ] **Merge the two SPICE codegen paths.** Beyond the imports,
-    `make_mna_pdk_module` (3405-3542) restates `_make_mna_circuit_with_sema`
-    (3256-3382) four times over: building `subckt_semas`, propagating parent
-    models into subcircuit semas, looping subcircuits to emit builders, and —
-    the big one — ~65 lines (3421-3486) hand-inlining the `.model` card lowering
-    already implemented by `codegen_toplevel_models!`/`cg_model_value!`. The
-    copies have diverged where it counts: the circuit path's propagation loop
-    also pushes `model_param_deps` into `exposed_parameters`, which is what
-    makes `.model nch nmos vto=vt0` work, and the PDK copy has no such step — so
-    a process corner as a sweep axis is a circuit-path-only feature by accident.
-    Two entry points is fine; two implementations of one lowering is what should
-    go
-  - [ ] **Runtime warnings.** Two fire in normal use:
-    - `MNACircuit(path_or_code)` reads its freshly-installed builder with
-      `getfield(mod, eff_name)` immediately after `Base.include`/`Base.eval`
-      (`src/spc/interface.jl:374` and `:383`), tripping Julia 1.12's "Detected
-      access to binding … in a world prior to its definition world … This code
-      will error in future versions of Julia". It still returns the right answer
-      today. The fix is already written down in the same file:
-      `_eval_deck_into_module` (interface.jl:130-133) hit exactly this and
-      solved it by letting the world update before the read; Julia's own hint is
-      to wrap the access in `invokelatest`
-    - `WARNING: Imported binding SciMLBase.MatrixOperator was undeclared at
-      import time during import to MNA`, on every load of Cadnip
-- [ ] Let `sp"..."`/`spc"..."` expand inside a function body — what the docs
-  promised for years. The blocker is the four `using`s at
-  `src/spc/codegen.jl:3334-3337`, emitted because device constructors go into
-  generated code *bare* while runtime plumbing is fully qualified (comment at
-  3330). Measured which are load-bearing by stripping each and eval'ing into a
-  bare module:
-  - `using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource`
-    — **needed**, though not for `Resistor`: an R card lowers through
-    `GlobalRef(SpectreEnvironment, :resistor)`, so only the other four are bare
-  - `using Cadnip.MNA: VCVS, VCCS, CCVS, CCCS` — **needed**, by E/G/F/H cards only
-  - `using Cadnip: ParamLens, IdentityLens, StaticArrays` — **no deck needed
-    it**. `StaticArrays.@SVector` is spliced as a macro *object*
-    (codegen.jl:446) and the lens names are emitted qualified
-  - `using Cadnip.SpectreEnvironment` — **no deck needed it**. Every SPICE
-    function lowers to a `GlobalRef(SpectreEnvironment, …)` (codegen.jl:225,
-    298); `dc`/`ac`/`tran` appear only as kwarg *names*, never as value
-    references. Checked against `pulse`/`temper`/`agauss`/`$scale`/`sqrt`/`ln`/
-    `pow` and a Spectre `type=dc` deck
-
-  Rewriting the bare device names to `GlobalRef`s and dropping all four
-  reproduces the baseline answer exactly on passives, E/G/F/H, `.param`, subckt,
-  PWL/SIN/PULSE, `temper`, `agauss`, `$scale`, and — with VADistillerModels
-  loaded — diode (0.669317), MOS1 (1.68) and BJT (4.9433). Spliced into a
-  function body, plain and subckt decks then work (2.5 V, 1.25 V). **A second
-  blocker remains for `.model` decks**: `model_defs` emits `const` bindings
-  (codegen.jl:3340), and `const` is illegal on a local, so those have to become
-  plain locals in the in-function case. Best done after the import unification
-  above, which is where the one shared list would live
+  - [x] Report device terminal currents in the operating point — design: `doc/operating_point_info.md`
+  - [x] Report device small-signal parameters and region via Verilog-A operating-point variables — design: `doc/operating_point_info.md`
+  - [x] `.dc` sweep with continuation (`dc!(::CircuitSweep)` warm-starts each point); transient sweeps still init cold
+- [x] Documentation: README reviewed against a running Cadnip, building on #256 — install, world-age, string-macro and override-validation claims corrected
+- [ ] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
+- [ ] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
+- [ ] Codegen: clear the two runtime warnings (world-age binding access, SciMLBase import) — design: `doc/codegen_unification.md` §3
+- [ ] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
