@@ -9,51 +9,10 @@ the loading step is where a netlist stops being text and becomes code.
 `MNACircuit` pairs a builder with a set of parameters. All the entry points
 below produce one.
 
-## From a file
-
-The canonical form. The language is inferred from the extension: `.scs` is
-Spectre, anything else is SPICE.
-
-```julia
-circuit = MNACircuit("amp.sp")      # SPICE
-circuit = MNACircuit("amp.scs")     # Spectre
-sol = dc!(circuit)
-```
-
-For performance-sensitive code, define the builder at module top level instead.
-`Base.include` on a `SpiceFile` / `SpectreFile` evaluates the
-generated code into your module, binding a function named after the file:
-
-```julia
-Base.include(@__MODULE__, SpiceFile("amp.sp"))   # defines `amp(params, spec, ...)`
-
-c = MNACircuit(amp; R1=1e3)
-sol = dc!(c)
-```
-
-!!! warning "Runtime parsing is top-level only"
-    `MNACircuit(path)` and `MNACircuit(code; lang=...)` call `Base.eval` to
-    install the freshly generated builder. Julia freezes a function's world age
-    at entry, so calling either *inside a function body* and then simulating
-    fails with a "method too new" error. At the REPL or module top level they
-    are fine.
-
-    Inside a function body, load the deck at top level (as above) and pass the
-    builder function. The string macros expand at the call site and work in
-    both contexts.
-
 ## From a string
 
-`sp"..."` is SPICE, `spc"..."` is Spectre, `va"..."` is Verilog-A. They are
-macros, so the netlist is compiled when the surrounding code is — there is no
-world-age caveat and no parse cost at run time.
-
-!!! note "The first line of a SPICE deck is its title"
-    `sp"..."` parses a complete deck, and SPICE decks open with a title line, so
-    the first line is *not* read as a circuit element. Give the deck a comment
-    line (`* divider`) as below, or pass the `i` flag — `sp"..."i` — to treat
-    the string as inline content with no title. Spectre has no title line, so
-    `spc"..."` needs neither.
+The shortest way in. `sp"..."` is SPICE, `spc"..."` is Spectre, `va"..."` is
+Verilog-A:
 
 ```@example netlists
 using Cadnip
@@ -69,7 +28,21 @@ R2 out 0 1k
 dc!(divider)[:out]
 ```
 
-The same circuit in Spectre syntax:
+They are macros, so the netlist is compiled when the surrounding code is — no
+parse cost at run time, and no world-age tax, because nothing is eval'd.
+
+!!! note "The first line of a SPICE deck is its title"
+    `sp"..."` parses a complete deck, and SPICE decks open with a title line, so
+    the first line is *not* read as a circuit element. That is what the
+    `* divider` line above is for. For a snippet with no title of its own, pass
+    the `i` (inline) flag — `sp"..."i`.
+
+    Getting this wrong is silent: drop the title and the `V1` card is eaten as
+    one, leaving a circuit with no source that solves to all zeros and has no
+    `I_v1` to read — see the transcript in the README.
+
+The same circuit in Spectre syntax. Spectre has no title line, so `spc"..."`
+needs no flag:
 
 ```@example netlists
 divider_scs = MNACircuit(spc"""
@@ -81,9 +54,31 @@ r2 (out 0) resistor r=1k
 dc!(divider_scs)[:out]
 ```
 
+## From a file
+
+For anything larger than a snippet, keep the netlist in a file. The language is
+inferred from the extension: `.scs` is Spectre, anything else is SPICE.
+
+```julia
+circuit = MNACircuit("amp.sp")      # SPICE
+circuit = MNACircuit("amp.scs")     # Spectre
+sol = dc!(circuit)
+```
+
+For performance-sensitive code, define the builder at module top level instead.
+`Base.include` on a `SpiceFile` / `SpectreFile` evaluates the generated code
+into your module, binding a function named after the file:
+
+```julia
+Base.include(@__MODULE__, SpiceFile("amp.sp"))   # defines `amp(params, spec, ...)`
+
+c = MNACircuit(amp; R1=1e3)
+sol = dc!(c)
+```
+
 A netlist string that only exists at run time (read from a database, generated
 by a script) goes through the string form of `MNACircuit`, which parses and
-evals on the spot — subject to the top-level rule above:
+evals on the spot:
 
 ```julia
 circuit = MNACircuit(read("amp.sp", String); lang=:spice, source_dir=@__DIR__)
@@ -92,6 +87,58 @@ circuit = MNACircuit(read("amp.sp", String); lang=:spice, source_dir=@__DIR__)
 `source_dir` is what relative `.include` / `.hdl` paths inside such a string
 resolve against; a netlist loaded from a file resolves them against its own
 directory.
+
+## Loading happens at top level
+
+Two separate rules, both of which come down to loading a netlist where Julia
+can see the result.
+
+!!! warning "Runtime parsing defines a builder, so mind the world age"
+    `MNACircuit(path)` and `MNACircuit(code; lang=...)` parse the netlist and
+    `Base.eval` a builder function for it. Julia freezes the world age of a
+    top-level statement while it runs, so the fresh builder can only be
+    *called* from a **later** statement:
+
+    ```julia
+    circuit = MNACircuit("amp.sp")   # statement 1: defines the builder
+    sol = dc!(circuit)               # statement 2: calls it — fine
+
+    dc!(MNACircuit("amp.sp"))        # ✗ same statement: MethodError, "method too new"
+    ```
+
+    A function body freezes its world age at entry the same way, so building
+    *and* solving inside one call fails for the same reason. Load the deck at
+    top level, and the function is free to build and solve as it likes:
+
+    ```julia
+    Base.include(@__MODULE__, SpiceFile("amp.sp"))   # top level: defines `amp`
+
+    function run_sim()
+        c = MNACircuit(amp; R1=1e3)                  # no eval, no world-age tax
+        dc!(c)
+    end
+    ```
+
+!!! warning "A netlist macro is top-level too"
+    `sp"..."` and `spc"..."` expand to a block that carries `using` statements,
+    and Julia allows those only at top level, so neither can appear inside a
+    function body:
+
+    ```julia
+    function bad()
+        MNACircuit(sp"""
+        * divider
+        V1 vcc 0 DC 5
+        R1 vcc out 1k
+        R2 out 0 1k
+        """)
+    end
+    # ERROR: syntax: "using" expression not at top level
+    ```
+
+    `va"..."` carries no such block and expands anywhere. So a netlist — inline
+    or from a file — is loaded at top level, and functions take it from there.
+    (Lifting this is tracked in `doc/codegen_unification.md` §4.)
 
 | Input | Loader |
 | ----- | ------ |

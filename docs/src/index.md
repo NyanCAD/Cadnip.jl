@@ -10,18 +10,18 @@ differentiable, sweepable, and composable with the rest of the ecosystem.
 
 ## Installation
 
+Cadnip is in the General registry:
+
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanLexers.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanSpectreNetlistParser.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="NyanVerilogAParser.jl")
-Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl")
+Pkg.add("Cadnip")
 ```
 
-Cadnip itself provides the passives, sources, and the analyses. Transistor
-model cards (`.model nch nmos level=1`, `.model dmod d`, …) resolve through
-[model packages](@ref "Model cards and the two-tier lookup") such as
-`VADistillerModels`, which you install and `using` alongside Cadnip.
+Cadnip itself provides the passives, sources, and the analyses. Transistor and
+diode model cards (`.model nch nmos level=1`, `.model dmod d`, …) resolve
+through [model packages](@ref "Model cards and the two-tier lookup") — the ones
+this repository ships live under `models/` (`VADistillerModels`, `PSPModels`,
+`CMCModels`, …) and are loaded alongside Cadnip with `using`.
 
 ## A first circuit
 
