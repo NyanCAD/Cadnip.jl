@@ -38,5 +38,13 @@ end
 
 deploydocs(
     repo = "github.com/NyanCAD/Cadnip.jl.git",
-    branch = "docs",
+    # GitHub Pages serves this repository from `gh-pages` — that is the branch
+    # https://nyancad.github.io/Cadnip.jl/ is built from. The old `branch =
+    # "docs"` named a branch that does not exist, so a deploy would have landed
+    # somewhere nothing serves.
+    branch = "gh-pages",
+    # Explicit rather than auto-detected: Documenter's default runs
+    # `git remote show origin` and falls back to "master" if that call fails,
+    # which would silently skip the deploy on a push to main.
+    devbranch = "main",
 )

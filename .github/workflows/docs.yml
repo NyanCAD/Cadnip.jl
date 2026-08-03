@@ -16,6 +16,13 @@ jobs:
     name: Build docs
     runs-on: ubuntu-latest
 
+    # `deploydocs` pushes the built site to gh-pages on a push to main. Without
+    # a DOCUMENTER_KEY secret it authenticates with GITHUB_TOKEN over HTTPS,
+    # which needs write access to the repository contents. Pull requests only
+    # build — Documenter does not deploy for them.
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v7
 
