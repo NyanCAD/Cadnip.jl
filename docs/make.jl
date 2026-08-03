@@ -1,15 +1,19 @@
 using Cadnip
+using VADistillerModels     # model cards used by the examples in devices.md
 using Documenter
-using OrdinaryDiffEq
-using UnicodePlots
 
 makedocs(
     sitename = "Cadnip",
+    # Pin the source links instead of deriving them from `origin`, so a
+    # checkout with a mirror/proxy remote builds the same site as CI does.
+    repo = Documenter.Remotes.GitHub("NyanCAD", "Cadnip.jl"),
     format = Documenter.HTML(),
     modules = [Cadnip],
     pages = Any[
         "Home" => "index.md",
-        "circuits.md",
+        "netlists.md",
+        "parameters.md",
+        "analyses.md",
         "devices.md",
     ],
     warnonly = true,
@@ -33,6 +37,6 @@ catch e
 end
 
 deploydocs(
-    repo = "github.com/JuliaComputing/Cadnip.jl.git",
+    repo = "github.com/NyanCAD/Cadnip.jl.git",
     branch = "docs",
 )

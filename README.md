@@ -8,7 +8,8 @@ Cadnip is an MNA-based analog circuit simulator written in Julia, focused on sim
 
 - Import of multi-dialect SPICE/Spectre netlists
 - Import of Verilog-A models
-- DC and transient analyses
+- DC, transient, AC and noise analyses
+- Operating point with device terminal currents and model small-signal variables
 - Full differentiability via ForwardDiff (for sensitivities, optimization, ML, etc.)
 - Parameter sweeps with `CircuitSweep`
 - Works with standard Julia releases (1.11+)
@@ -135,10 +136,10 @@ axis rather than a second netlist:
 dc!(CircuitSweep(amp, Sweep(vt0 = [0.6, 0.7, 0.8])))
 ```
 
-Two limits worth knowing: device instance parameters are not reachable this way
-(`r1=(r=2e3,)` does nothing — give the netlist a `.param` and use that), and
-override names are not validated against the netlist, so a typo silently leaves
-the default in place.
+Two limits worth knowing, and both throw at construction rather than running as
+a silent no-op: device instance parameters are not reachable this way
+(`r1=(r=2e3,)` — give the netlist a `.param` and use that), and neither is a
+name no scope declares, i.e. a typo.
 
 ### Analyses
 

@@ -1,210 +1,185 @@
-# Implementing devices
+# Devices and models
 
-!!! warning
+## Built-in devices
 
-    This documentation describes Cadnip internals. At the moment, this is not supported as
-    a stable API, but is intended to help users understand how Cedar works and to aid in
-    experimentation. For end-users needing custom devices, Verilog-A is the recommended model
-    representation.
+Cadnip stamps the primitives itself. These need no model package and no `.model`
+card:
 
-!!! warning
+| SPICE line | Device |
+| ---------- | ------ |
+| `R1 a b 1k` | resistor |
+| `C1 a b 1n` | capacitor |
+| `L1 a b 1m` | inductor |
+| `V1 a b DC 5 AC 1` | independent voltage source (DC and AC excitation) |
+| `I1 a b DC 1m` | independent current source |
+| `V1 a b PWL(0 0 1u 1)` / `PULSE(...)` / `SIN(...)` | time-dependent sources |
+| `E/G/H/F` lines | voltage- and current-controlled sources (VCVS, VCCS, CCVS, CCCS) |
+| `X1 a b sub` | subcircuit instance |
 
-    Device equations may be specified in a subset of valid Julia. However, this subset is currently
-    not precisely specified and no tooling is currently available to verify whether or not a device
-    implementation complies with the supported subset.
+Sources take a DC value, an AC magnitude and phase, and a transient waveform on
+the same line; each analysis reads the part that applies to it, so one netlist
+serves `dc!`, `ac!` and `tran!` without editing.
 
-## Basic concepts
-
-In the previous chapter, we saw how circuits can be represented as julia functions. However,
-the circuits we defined were still composed of the basic primitive SPICE devices. In this
-chapter, we will explore the implementation of these devices and how to implement new kinds
-of devices or model representations. The basic idea is to implement the mathematical equations
-for a particular device in terms of the primitives provided by DAECompiler. See the DAECompiler
-docs for a detailed description of these intrinsic.
-
-To begin, we will study some illustrative and simplified device implementations, gradually building
-up some additional features and complexity.
-
-# A basic resistor
-To begin with, consider a resistor:
-
-```
-struct MyResistor
-    resistance::Float64
-end
-
-(R::MyResistor)(A, B) = branch!((V, I)->V - I*R.resistance, A, B)
+```spice
+V1 in 0 DC 1.2 AC 1 SIN(1.2 5m 1meg)
 ```
 
-Here, we use the Cadnip `branch!` helper, which is used to introduce a branch between two nodes
-and is very helpful for implementing two terminal devices. `branch!` provides the voltage
-difference across, as well as the current through the branch to the provided callback. This callback
-in turn, should implement (and return) the relation that must hold between voltage and current
-for this device. In the case of a resistor, this is simply `V = I*R` or as expressed here `0 = V - I*R`.
-This is a fully functional implementation of a resitor. Cadnip and DAECompiler will figure out
-everything else.
+## Model cards and the two-tier lookup
 
-# Using custom devices from a SPICE circuit
+Anything with a `.model` card — diodes, MOSFETs, BJTs, JFETs — resolves through
+two tiers:
 
-Now that we have a custom device, how do we use it? The first option is to simply use it directly in
-a julia-defined circuit as we saw in the previous chapter:
+**Tier 1, the registry.** Level-dispatched built-in and library models. A model
+package adds methods to `Cadnip.ModelRegistry.getmodel`, so loading the package
+is all it takes for the matching `.model` card to resolve:
 
-```
-using Cadnip.DeviceShorthands
-using CedarEDA.SIFactors: k, μ
+```@example devices
+using Cadnip
+using Cadnip.MNA: MNACircuit
+using VADistillerModels        # registers the SPICE3 model library
 
-circuit() = (MyResistor(1k) ∥ C(1μ))(net(), gnd())
-```
+amp = MNACircuit(sp"""
+* NMOS common-source stage
+.model nch nmos level=1 vto=0.7 kp=100u lambda=0.01
+Vdd vdd 0 DC 5
+Vin gate 0 DC 1.1472
+M1 drain gate 0 0 nch w=20u l=1u
+Rd vdd drain 10k
+""")
 
-This is equivalent to the RC example we saw at the end of the previous chapter.
-However, as written, the variable representing the current through the resistor is unnamed and can
-thus not be referenced symbolically. To fix this, and allow our custom device to participate in
-the `"R1"(MyResistor(1k))` syntax for providing device names, we need to slightly tweak our
-device definition to subtype `CircuitElement` (which provides the string overload) and thread through
-the debug scope (which is used to give the branch a symbolic name):
-
-```
-using Cadnip.DeviceUtils
-struct MyResistor <: CircuitElement
-    resistance::Float64
-end
-
-(R::MyResistor)(A, B; dscope=:R) = branch!((V, I)->V - I*R.resistance, dscope, A, B)
+op = dc!(amp)
+op[:drain], op[:i_m1_d], op[:m1_gm]
 ```
 
-With this definition, even without providing a name, we can query the current through the resistor as
-`sys.R1`. The `:R` default we provided to `dscope` means that all devices of this type will default
-to names starting with `R` - the names are stable for a particular circuit definition, but can change
-arbitrarily when the circuit is modified, so providing explicit names is recommended. See the circuit
-definition docs for further details.
+`VADistillerModels` claims the SPICE3 model cards: `nmos`/`pmos` at levels 1, 2,
+3, 6, 9, BSIM3v3 (levels 8/49) and BSIM4v8 (levels 14/54), `npn`/`pnp`
+(Gummel–Poon), `njf`/`pjf` (levels 1/2), and `d`. The library carries more
+models than it registers cards for (MESFET, passives), reachable by name from
+the netlist scope. Other model packages in this repository register their own
+cards — `PSPModels` (PSP103, JUNCAP200), `CMCModels`, `VACASKModels`,
+`PhotonicModels`.
 
-With this set, we are now also ready to use this device from SPICE. The simplest way to do so is to use
-the string interpolation syntax:
+The `:r`, `:c` and `:l` cards resolve to Cadnip's own primitives. The `:d` card
+deliberately does *not*: `MNA.Diode` is an incomplete reference implementation
+(no `cjo`, `m`, `bv`, `tt`), so a diode model card needs a Tier-1 provider such
+as `VADistillerModels` rather than silently getting a partial device.
+
+**Tier 2, the netlist scope.** PDK-specific and custom Verilog-A devices come
+from the netlist's own directives — `.hdl "foo.va"`, `.include "foo.sp"`,
+`.lib "foo.sp" section`, and their `jlpkg://Package/path` forms. The most recent
+include wins.
+
+## Verilog-A models
+
+Verilog-A is the supported way to add a device. Cadnip compiles the module into
+the same stamping code its built-in devices use, so a VA device is a first-class
+device: it takes part in DC, AC, transient and noise, contributes terminal
+currents and operating-point variables, and is differentiable.
+
+```@example devices
+va"""
+module VAResistor(p, n);
+    parameter real R = 1000.0;
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n)/R;
+endmodule
+"""
+nothing # hide
+```
+
+!!! warning "Disciplines are implicit"
+    `electrical`, `V()` and `I()` are built into the parser. Do **not**
+    `include "disciplines.vams"` — it triggers parser bugs.
+
+!!! note "ForwardDiff must be loadable"
+    The code generated for a Verilog-A module imports `ForwardDiff` (it is what
+    carries the derivatives through the device equations), so `ForwardDiff` has
+    to be resolvable in the environment that loads the model — add it to the
+    project that contains your `va"..."` or `.hdl`-including netlist.
+
+From a netlist, a `.hdl` directive brings the module into scope and the module
+name becomes the device's model name:
+
+```spice
+.hdl "myresistor.va"
+N1 a b varesistor r=2k
+```
+
+Two model features are picked up from ordinary Verilog-A declarations, with
+nothing extra to configure:
+
+- a module-level `real`/`integer` with a `desc`/`units` attribute is an
+  **operating-point variable**, reported as `op[:m1_gm]` and friends:
+
+  ```verilog
+  (* desc = "Transconductance", units = "S" *) real gm;
+  ```
+
+- `white_noise(pwr)` and `flicker_noise(pwr, exp)` register **noise sources**
+  named `<instance>_<label>`, which `noise!` then decomposes by name. The call
+  itself evaluates to zero in the time domain, and the whole registration folds
+  away on the transient path.
+
+## PDKs as packages
+
+A PDK author bakes netlist and Verilog-A content into a package at build time:
 
 ```julia
-using Cadnip.DeviceShorthands
-function circuit()
-    sp"""
-    * A simple RC circuit with a custom resistor device
-    R1 1 0 $(MyResistor(1k))
-    C1 1 0 1u
-    """e
-end
+Cadnip.precompile_pdk(@__MODULE__, "pdk.spice")
+Cadnip.precompile_va(@__MODULE__, "device.va")
 ```
 
-custom devices may be used in model position for any SPICE device type. No extra parameters should be passed on
-the SPICE instantiation line, as parameters are provided directly to the julia constructor.
+Users then reference the baked content from their netlist, and pay no parse or
+compile cost for it at run time:
 
-# Using DAECompiler intrinsics
-
-So far, we've seen how to use the `branch!` abstraction provided by Cadnip. This is sufficient for many linear
-and non-linear devices whose constituent equations are simply a function of the branch voltage and current.
-However, if the device has additional internal state, you may need to introduce additional variables directly
-using the DAECompiler API. In this example, we shall consider a resistor with self-heating thermal effects.
-In particular, we will model:
-
-- The current through the resistor increasing the temperature
-- Radiative and other thermal losses to the environment
-- Thermal effects on the resistance of the resistor
-
-Note that in general, one may want to instead build a generic thermal resistor with a thermal port that can
-be connected for a full multi-physics simulation, but that is outside the scope of this tutorial.
-
+```spice
+.lib "jlpkg://MyPDK/models/corners.sp" typical
 ```
-struct ThermalResistor
-    "Nominal resistance of the resistor at room temperature (20 °C)"
-    R₀::Float64
-    "Thermal capacitance of the resistor in J/K"
-    Cth::Float64
-    "Temperature coefficient of the resistor in Ω/K"
-    TR::Float64
-    "Thermal loss coefficient to the environment in 1/s"
-    k::Float64
+
+PDK modules are `baremodule`s so that SPICE names like `inv`, `log` and `exp`
+cannot collide with Julia's; generated code spells out `Base.` for anything it
+needs from `Base`.
+
+## Custom devices in Julia
+
+Below the netlist layer, a device is a type with a `stamp!` method that writes
+its contributions into an `MNAContext`. This is Cadnip's internal API — it is
+what the built-in devices and the Verilog-A codegen both target — and is
+documented in the repository's `doc/mna_architecture.md` and
+`doc/mna_ad_stamping.md`.
+
+```@example devices
+using Cadnip.MNA
+
+function rc(params, spec, t=0.0; x=Float64[], ctx=MNAContext())
+    reset_for_restamping!(ctx)
+    src = get_node!(ctx, :src)
+    out = get_node!(ctx, :out)
+    stamp!(VoltageSource(params.vin; name=:V1), ctx, src, 0)
+    stamp!(Resistor(params.R), ctx, src, out)
+    stamp!(Capacitor(params.C), ctx, out, 0)
+    return ctx
 end
 
-function (this::ThermalResistor)(A, B, dscope=defaultscope(:TR))
-    branch!(dscope, A, B) do V, I
-        # Introduce a new variable to hold the current temperature of the resistor
-        (; T) = variables(dscope)
-        # Instantaneous resistance
-        R = this.R₀ + (T - 293.15) * this.TR
-        # Instantaneous power dissipation
-        P = R * I^2
-        # Self-heating and radiative losses
-        equation!(ddt(T) - this.Cth * P + this.k * (T - var"$temperature"()))
-        # Ohm's law
-        return V - I * R
-    end
-end
+dc!(MNACircuit(rc; vin=1.0, R=1e3, C=1e-9))[:out]
 ```
 
-A couple of aspects here deserve explanation. First, we used `Cadnip.defaultscope` to
-create a scope for our variables. The higher-level Cadnip `branch!` can take either
-a scope or a raw symbol (in which case it will call `defaultscope` internally).
-However, for raw DAECompiler APIs, we need a reference to the scope that `branch!`
-would have otherwise created implicitly, so we explicitly call `defaultscope` here.
+A builder written this way is an ordinary `MNACircuit` builder: sweeps, `alter`
+and every analysis work on it. What it does *not* get is the netlist's parameter
+bookkeeping — it declares no parameter names, so overrides are not checked
+against it, and it has to read `params.<name>` itself.
 
-With this in hand, we used the `variables` helper from DAECompiler to introduce a variable
-for our resistor temperature. We could have also used a lower level `variable(dscope(:T))`
-call here, but `variables` conveniently allows us to avoid writing the variable name twice
-(as `nets` would in Cadnip).
+For a custom device meant to be used from a netlist, prefer Verilog-A: it gets
+model-card parameter handling, noise, operating-point variables and terminal
+currents for free.
 
-Next we used DAECompiler's `ddt` to write the equation for the derivative of our temperature.
+## ModelingToolkit components
 
-Lastly, we used Cadnip's `var"$temperature"` to access the declared ambient temperature of
-the simulation.
-
-Note that we could have also used `V*I` for the power disscipation and calculated the resistance
-last. Such a rearrangement is semantically equivalent and in fact DAECompiler will happily
-rearrange such equations according to its heuristics.
-
-# The implementation of `branch!`
-
-Finally, we're ready to see how `branch!` itself is implemented. For two terminal devices,
-it is recommended to just use `branch!` directly, but for devices with more terminals,
-it can be useful to work directly with the underlying nets.
-
-First, here is the implementation of `branch!`:
-
-```
-function branch!(scope::AbstractScope, net₊::AbstractNet, net₋::AbstractNet)
-    # Branch current - semantically flows from net₊ to net₋
-    I = variable(scope(:I))
-    kcl!(net₊, -I)
-    kcl!(net₋,  I)
-    V = net₊.V - net₋.V
-    observed!(ForwardDiff.value(SimTag, V), scope(:V))
-    (V, I)
-end
-```
-
-Here we used another Cadnip abstraction, `kcl!` to add the current contributions into
-the KCL for each for the two nets. Using the abstraction is recommended in case of
-any future changes to the implementation of `Net`. However, for completeness, here is
-(a slightly simplified version of) the current implementation:
-
-```
-struct Net{T} <: AbstractNet
-    V::T
-    kcl!::equation
-    function Net(name::AbstractScope)
-        V = variable(name)
-        kcl! = equation(name)
-        return new(V, kcl!)
-    end
-end
-kcl!(net::AbstractNet, current) = net.kcl!(current)
-```
-
-Here we are simply making use of the capability of DAECompiler to split the contributions
-to an equation across multiple invocations to that equation (in particular, this use case
-was motivating for that feature).
-
-# Using ModelingToolkit
-You can implement also devices using [ModelingToolkit.jl](https://github.com/SciML/ModelingToolkit.jl) and the [ModelingToolkitStandardLibary.jl](https://docs.sciml.ai/ModelingToolkitStandardLibrary/stable/), and then connect them to Cadnip circuits.
-For many users this will be the best way to implement custom devices, as you can fully use the MTK ecosystem to develop and debug them in isolation then hook them up to a greater circuit in Cedar.
+With ModelingToolkit loaded, `@declare_MSLConnector` wraps an MTK component with
+electrical pins into a Cadnip device, so a model developed and validated in the
+MTK ecosystem can be dropped into a SPICE circuit:
 
 ```@docs; canonical=false
 @declare_MSLConnector
 ```
-
