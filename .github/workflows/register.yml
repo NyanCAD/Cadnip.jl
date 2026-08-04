@@ -1,0 +1,163 @@
+name: Register
+
+# Releases are triggered by merging a version bump. When a push to main changes
+# the `version` field of any registered package's Project.toml, this workflow
+# asks Registrator to register that version; General's AutoMerge merges the
+# registry PR, and tagbot.yml then creates the tag and GitHub release. No manual
+# `@JuliaRegistrator` comment, and nothing to remember about subdir syntax.
+#
+# Deciding the version — whether a change is breaking — stays a human call,
+# expressed as the Project.toml edit in the pull request, where it gets reviewed
+# alongside the change that motivated it.
+#
+# ## Required setup: REGISTRATOR_TOKEN
+#
+# Registrator only honours comments from collaborators on the repository or
+# public members of the organization. The default GITHUB_TOKEN comments as
+# `github-actions[bot]`, which is neither, so it would be silently ignored.
+# This workflow therefore needs a classic PAT with `public_repo` scope,
+# belonging to a repository collaborator, stored as the REGISTRATOR_TOKEN
+# secret. Registration comments will appear under that account.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to register (defaults to the tip of main)
+        required: false
+
+concurrency:
+  group: register
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    name: Register bumped packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # detect-version-bumps.sh reads Project.toml at both ends of the push,
+          # so the pushed-from commit has to be in the clone.
+          fetch-depth: 0
+
+      - name: Detect version bumps
+        id: detect
+        run: |
+          set -euo pipefail
+          after="${{ github.event.inputs.sha || github.sha }}"
+          before="${{ github.event.before }}"
+
+          # A manual dispatch, the first push to a new branch, or a force push
+          # leaves no usable "before" — compare against the first parent so a
+          # merge commit still reports what it introduced.
+          if [ -z "${before}" ] || [ "${before}" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            before="${after}^"
+          fi
+
+          echo "Comparing ${before}...${after}"
+          .github/scripts/detect-version-bumps.sh "${before}" "${after}" > bumps.txt
+          cat bumps.txt
+
+          if [ -s bumps.txt ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No version bumps in this push; nothing to register."
+          fi
+          echo "sha=${after}" >> "$GITHUB_OUTPUT"
+          echo "before=${before}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Registrator
+        if: steps.detect.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRATOR_TOKEN }}
+          SHA: ${{ steps.detect.outputs.sha }}
+          BEFORE: ${{ steps.detect.outputs.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::REGISTRATOR_TOKEN is not set. See the comment at the top of this workflow."
+            exit 1
+          fi
+
+          # Registrator registers the commit the comment is attached to, so
+          # comment on the pushed commit directly — no tracking issue needed.
+          comment() {
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/comments" \
+              -f body="$1" --jq '.html_url'
+          }
+
+          # Wait for a version to appear in General, so a package is not
+          # registered before an in-repo dependency whose compat bound it may
+          # have just raised. Best effort: on timeout we register anyway and let
+          # AutoMerge re-evaluate the PR once the dependency lands.
+          await_registration() {
+            local name="$1" version="$2" shard="${1:0:1}" waited=0
+            local url="https://raw.githubusercontent.com/JuliaRegistries/General/master/${shard}/${name}/Versions.toml"
+            while [ "${waited}" -lt 1800 ]; do
+              if curl -sf "${url}" | grep -qF "\"${version}\""; then
+                echo "  ${name} ${version} is in General."
+                return 0
+              fi
+              sleep 60
+              waited=$((waited + 60))
+            done
+            echo "::warning::${name} ${version} did not appear in General within 30m; continuing anyway."
+          }
+
+          # AutoMerge rejects a breaking release with no release notes, so the
+          # message body of the commit that bumped the version becomes the
+          # notes. That makes the changelog a reviewed part of the bump PR
+          # rather than something remembered afterwards. Trailers are dropped —
+          # they are metadata, not user-facing notes.
+          release_notes_for() {
+            local manifest="$1" bump_commit
+            bump_commit="$(git log --format=%H -1 "${BEFORE}..${SHA}" -- "${manifest}")"
+            [ -n "${bump_commit}" ] || return 0
+            git log -1 --format=%b "${bump_commit}" |
+              sed -E '/^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session):/d' |
+              sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+          }
+
+          previous_tier=""
+          while IFS=: read -r name subdir version tier breaking; do
+            [ -n "${name}" ] || continue
+
+            # Everything in a tier registers together; only pause when moving to
+            # a tier that might depend on what the previous one just registered.
+            if [ -n "${previous_tier}" ] && [ "${tier}" != "${previous_tier}" ]; then
+              echo "Waiting for tier ${previous_tier} to land in General..."
+              while IFS=: read -r p_name _ p_version p_tier _; do
+                [ "${p_tier}" = "${previous_tier}" ] && await_registration "${p_name}" "${p_version}"
+              done < bumps.txt
+            fi
+
+            if [ -n "${subdir}" ]; then
+              body="@JuliaRegistrator register subdir=${subdir}"
+              manifest="${subdir}/Project.toml"
+            else
+              body="@JuliaRegistrator register"
+              manifest="Project.toml"
+            fi
+
+            notes="$(release_notes_for "${manifest}")"
+            if [ -z "${notes}" ] && [ "${breaking}" = "yes" ]; then
+              echo "::error::${name} ${version} is a breaking release with no release notes."
+              echo "::error::AutoMerge will reject it. Describe the breaking change in the body of"
+              echo "::error::the commit that bumps ${manifest}, then re-run this workflow."
+              exit 1
+            fi
+            [ -n "${notes}" ] && body="${body}"$'\n\n'"Release notes:"$'\n\n'"${notes}"
+
+            echo "Registering ${name} ${version} (breaking=${breaking})"
+            comment "${body}"
+
+            previous_tier="${tier}"
+          done < bumps.txt

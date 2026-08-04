@@ -172,6 +172,47 @@ level (`const c = sp"""..."""i`, or `Base.include(@__MODULE__,
 SpiceFile(path))`) and pass the builder to `MNACircuit` — see **File-First
 Circuit Loading** below for the world-age rules.
 
+## Releasing
+
+**A release is a merged version bump. Nothing else is manual.**
+
+Bump the `version` in the package's `Project.toml` as part of the PR that
+motivates it, and merge to `main`. `.github/workflows/register.yml` notices the
+changed version, comments at Registrator on the merge commit, and General's
+AutoMerge merges the registry PR; `.github/workflows/tagbot.yml` then creates
+the git tag and GitHub release. Subpackage tags are prefixed
+(`NyanSpectreNetlistParser.jl-v0.7.0`); the root package tags as `v0.14.0`.
+
+Four packages are registered in General — `Cadnip` and the three
+`Nyan*` parsers. The `models/` packages and `SpiceArmyKnife.jl` are not
+registered, so bumping their versions does nothing.
+
+**Release early.** The one thing that makes this awkward is letting changes pile
+up. When a parser feature and the Cadnip code consuming it land in the same
+release, Cadnip's compat bound needs a parser version that isn't registered yet,
+and AutoMerge rejects it. `register.yml` handles that case — it registers in
+dependency order (NyanLexers → parsers → Cadnip) and waits for each tier to
+land — but the case only exists because of the gap. Release each side as it
+lands and the constraint never forms.
+
+**The bump commit message is the changelog.** `register.yml` sends the body of
+the commit that changed the `version` as the release notes, so they land on the
+registry PR and in the GitHub release. AutoMerge *rejects* a breaking release
+that has none, so a breaking bump with an empty commit body fails the workflow
+before it registers anything. Write the body as user-facing notes: what broke
+and what to do about it. Bump one package per commit when a release touches
+several, or they all get the same notes.
+
+**Version choice is the other human call.** `0.x.y` treats `x` as the breaking
+component: adding a struct field or an enum member is breaking, because it
+changes a positional constructor or shifts later enum values. Only widen a
+compat bound to a range the code actually works across — `"0.6, 0.7"` is free
+when the code spans both and a lie when it reads a field only `0.7` has.
+
+Registration requires the `REGISTRATOR_TOKEN` secret: Registrator only honours
+comments from repository collaborators or public org members, so the default
+`GITHUB_TOKEN` (which comments as `github-actions[bot]`) is silently ignored.
+
 ## Gotchas and Patterns
 
 ### Builder Function Signature
