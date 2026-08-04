@@ -26,6 +26,23 @@ Xn out in vss vss nmos_1v8 W={WN} L={L}
 Xp out in vdd vdd pmos_1v8 W={WP} L={L}
 .ENDS inv_x1
 
+* Controlled sources inside a PDK subcircuit.
+* A PDK module imports nothing from Cadnip, so E/G/F/H have to resolve without
+* an import preamble. Each stage drives a port so the deck can observe it.
+.SUBCKT ctrl_amp in eout gout gnd GAIN=10 GM=1e-3
+E1 eout gnd in gnd {GAIN}
+R1 eout gnd 1k
+G1 gnd gout eout gnd {GM}
+R2 gout gnd 1k
+.ENDS ctrl_amp
+
+* A .model card at section level, used from a subcircuit. Resolved through the
+* model registry (tier 1), the same lowering the deck path uses.
+.MODEL pdk_diode d is=1e-14 n=1.0
+.SUBCKT diode_1v8 a c
+D1 a c pdk_diode
+.ENDS diode_1v8
+
 * Two-input NAND gate
 .SUBCKT nand2_x1 a b out vdd vss
 * Pull-up network: PMOS in parallel

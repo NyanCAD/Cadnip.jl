@@ -94,9 +94,10 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Documentation: README reviewed against a running Cadnip, building on #256 — install, world-age, string-macro and override-validation claims corrected
 - [x] Documentation: user manual (`docs/src`) rewritten against the MNA backend, with a CI job that runs every `@example` in it
 - [ ] Documentation: the `doc/*.jmd` Weave set is CedarSim/DAECompiler-era — port what is still true into `docs/src` or drop it
-- [ ] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
-- [ ] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
+- [x] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
+- [x] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
 - [ ] Codegen: clear the two runtime warnings (world-age binding access, SciMLBase import) — design: `doc/codegen_unification.md` §3
+- [ ] Bug: an F/H card inside a `.subckt` looks its sense source up unprefixed, so it errors with `Current variable I_vs1 not found`; the same card at top level is fine (`codegen.jl` `get_current_idx` call sites vs `_scoped_sym_expr`)
 - [ ] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API

@@ -8,6 +8,7 @@ directives; these tests exercise the bake-time codegen path directly.
 
 using Test
 using Cadnip
+using VADistillerModels  # registers the tier-1 `d` model the test PDK's .model card uses
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit
 using Cadnip: dc!
 using Cadnip: ParamLens
@@ -135,6 +136,73 @@ const va_device_mod = Cadnip.precompile_va(@__MODULE__, test_va_path)
         @test i_typical > i_slow
     end
 
+end
+
+#==============================================================================#
+# A PDK module imports nothing from Cadnip — generated code names every Cadnip
+# binding fully-qualified or interpolates the value itself. These two
+# subcircuits are what proves it: one built from E and G cards, one from a
+# `.model` card. Both fail at *call* time, not at codegen or eval time, if the
+# module is missing a name, which is why nothing short of solving them catches
+# it.
+#
+# Called through the builder directly, like the rest of this file: a deck
+# reaches a *precompiled* PDK through `.lib "jlpkg://Pkg/..."`, which needs the
+# PDK to be a package. The test PDK is a file, so the builder is the surface.
+#==============================================================================#
+@testset "PDK subcircuits that need more than passives" begin
+
+    @testset "controlled sources (E and G cards)" begin
+        function build_ctrl_amp_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                Cadnip.MNA.reset_for_restamping!(ctx)
+            end
+            lens = ParamLens(params)
+
+            inp = get_node!(ctx, :inp)
+            eout = get_node!(ctx, :eout)
+            gout = get_node!(ctx, :gout)
+
+            typical.ctrl_amp_mna_builder(lens, spec, t, ctx, inp, eout, gout, 0, (;), x;
+                                         gain=10.0, gm=1e-3)
+            stamp!(VoltageSource(0.5), ctx, inp, 0)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(build_ctrl_amp_test))
+
+        # E (VCVS): 10 * 0.5 V
+        @test sol[:eout] ≈ 5.0 atol=1e-9
+        # G (VCCS): 1 mS * V(eout) into a 1k load
+        @test abs(sol[:gout]) ≈ 5.0 atol=1e-9
+    end
+
+    @testset ".model card (registry device)" begin
+        function build_pdk_diode_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                Cadnip.MNA.reset_for_restamping!(ctx)
+            end
+            lens = ParamLens(params)
+
+            inp = get_node!(ctx, :inp)
+            out = get_node!(ctx, :out)
+
+            typical.diode_1v8_mna_builder(lens, spec, t, ctx, inp, out, (;), x)
+            stamp!(Cadnip.MNA.Resistor(1000.0), ctx, out, 0)
+            stamp!(VoltageSource(1.0), ctx, inp, 0)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(build_pdk_diode_test))
+
+        # Series diode + 1k across 1 V: the diode takes a forward drop and the
+        # rest lands on the resistor.
+        @test 0.3 < sol[:out] < 0.8
+    end
 end
 
 @testset "VA Device Precompilation" begin
