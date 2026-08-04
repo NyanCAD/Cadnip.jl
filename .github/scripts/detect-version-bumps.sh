@@ -5,7 +5,11 @@
 #
 # Output is one colon-separated record per changed package:
 #
-#   <name>:<subdir>:<version>:<tier>
+#   <name>:<subdir>:<version>:<tier>:<breaking>
+#
+# `breaking` is yes/no. General's AutoMerge refuses a breaking release that
+# carries no release notes, so the caller has to know which bumps are breaking
+# before it writes the Registrator comment.
 #
 # The separator is deliberately not a tab: `read` collapses runs of IFS
 # *whitespace*, so the root package's empty subdir field would silently vanish
@@ -51,6 +55,25 @@ version_at() {
     head -1
 }
 
+# Julia reads 0.x as "x is the breaking component"; from 1.0 on it is the major.
+# A package with no previous version is a new registration, not a breaking one.
+is_breaking() {
+  local old="$1" new="$2" o_major o_minor n_major n_minor
+  if [ -z "${old}" ]; then
+    echo "no"
+    return
+  fi
+  IFS=. read -r o_major o_minor _ <<<"${old}"
+  IFS=. read -r n_major n_minor _ <<<"${new}"
+  if [ "${o_major}" != "${n_major}" ]; then
+    echo "yes"
+  elif [ "${o_major}" = "0" ] && [ "${o_minor}" != "${n_minor}" ]; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
 for entry in "${packages[@]}"; do
   IFS=: read -r name subdir tier <<<"${entry}"
   manifest="Project.toml"
@@ -65,5 +88,6 @@ for entry in "${packages[@]}"; do
   old_version="$(version_at "${before}" "${manifest}")"
   [ "${old_version}" = "${new_version}" ] && continue
 
-  printf '%s:%s:%s:%s\n' "${name}" "${subdir}" "${new_version}" "${tier}"
+  printf '%s:%s:%s:%s:%s\n' "${name}" "${subdir}" "${new_version}" "${tier}" \
+    "$(is_breaking "${old_version}" "${new_version}")"
 done

@@ -195,7 +195,15 @@ dependency order (NyanLexers → parsers → Cadnip) and waits for each tier to
 land — but the case only exists because of the gap. Release each side as it
 lands and the constraint never forms.
 
-**Version choice is the one human call.** `0.x.y` treats `x` as the breaking
+**The bump commit message is the changelog.** `register.yml` sends the body of
+the commit that changed the `version` as the release notes, so they land on the
+registry PR and in the GitHub release. AutoMerge *rejects* a breaking release
+that has none, so a breaking bump with an empty commit body fails the workflow
+before it registers anything. Write the body as user-facing notes: what broke
+and what to do about it. Bump one package per commit when a release touches
+several, or they all get the same notes.
+
+**Version choice is the other human call.** `0.x.y` treats `x` as the breaking
 component: adding a struct field or an enum member is breaking, because it
 changes a positional constructor or shifts later enum values. Only widen a
 compat bound to a range the code actually works across — `"0.6, 0.7"` is free

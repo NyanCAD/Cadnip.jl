@@ -72,12 +72,14 @@ jobs:
             echo "No version bumps in this push; nothing to register."
           fi
           echo "sha=${after}" >> "$GITHUB_OUTPUT"
+          echo "before=${before}" >> "$GITHUB_OUTPUT"
 
       - name: Trigger Registrator
         if: steps.detect.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.REGISTRATOR_TOKEN }}
           SHA: ${{ steps.detect.outputs.sha }}
+          BEFORE: ${{ steps.detect.outputs.before }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then
@@ -110,25 +112,51 @@ jobs:
             echo "::warning::${name} ${version} did not appear in General within 30m; continuing anyway."
           }
 
+          # AutoMerge rejects a breaking release with no release notes, so the
+          # message body of the commit that bumped the version becomes the
+          # notes. That makes the changelog a reviewed part of the bump PR
+          # rather than something remembered afterwards. Trailers are dropped —
+          # they are metadata, not user-facing notes.
+          release_notes_for() {
+            local manifest="$1" bump_commit
+            bump_commit="$(git log --format=%H -1 "${BEFORE}..${SHA}" -- "${manifest}")"
+            [ -n "${bump_commit}" ] || return 0
+            git log -1 --format=%b "${bump_commit}" |
+              sed -E '/^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session):/d' |
+              sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+          }
+
           previous_tier=""
-          while IFS=: read -r name subdir version tier; do
+          while IFS=: read -r name subdir version tier breaking; do
             [ -n "${name}" ] || continue
 
             # Everything in a tier registers together; only pause when moving to
             # a tier that might depend on what the previous one just registered.
             if [ -n "${previous_tier}" ] && [ "${tier}" != "${previous_tier}" ]; then
               echo "Waiting for tier ${previous_tier} to land in General..."
-              while IFS=: read -r p_name _ p_version p_tier; do
+              while IFS=: read -r p_name _ p_version p_tier _; do
                 [ "${p_tier}" = "${previous_tier}" ] && await_registration "${p_name}" "${p_version}"
               done < bumps.txt
             fi
 
             if [ -n "${subdir}" ]; then
               body="@JuliaRegistrator register subdir=${subdir}"
+              manifest="${subdir}/Project.toml"
             else
               body="@JuliaRegistrator register"
+              manifest="Project.toml"
             fi
-            echo "Registering ${name} ${version}"
+
+            notes="$(release_notes_for "${manifest}")"
+            if [ -z "${notes}" ] && [ "${breaking}" = "yes" ]; then
+              echo "::error::${name} ${version} is a breaking release with no release notes."
+              echo "::error::AutoMerge will reject it. Describe the breaking change in the body of"
+              echo "::error::the commit that bumps ${manifest}, then re-run this workflow."
+              exit 1
+            fi
+            [ -n "${notes}" ] && body="${body}"$'\n\n'"Release notes:"$'\n\n'"${notes}"
+
+            echo "Registering ${name} ${version} (breaking=${breaking})"
             comment "${body}"
 
             previous_tier="${tier}"
