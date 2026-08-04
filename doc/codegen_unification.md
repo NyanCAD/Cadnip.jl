@@ -5,6 +5,12 @@ needs. Three related pieces of work: one shared import list, one lowering
 instead of two, and two runtime warnings. All line numbers are against
 `src/spc/codegen.jl` and `src/spc/interface.jl` as of this writing.
 
+**Status.** §1 and §2 are done — `_codegen_preamble` is the single import list,
+and the PDK path now calls `codegen_toplevel_models!` /
+`_propagate_toplevel_models!` / `_codegen_subckt_builders` instead of its own
+copies. §3 and §4 are open. §4's measured table below is corrected at the end of
+this document: `SpectreEnvironment` *is* load-bearing.
+
 ## 1. Two hand-maintained import lists, drifted apart
 
 Both SPICE codegen paths emit a preamble of `using` statements so that names

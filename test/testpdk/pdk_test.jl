@@ -8,6 +8,7 @@ directives; these tests exercise the bake-time codegen path directly.
 
 using Test
 using Cadnip
+using VADistillerModels  # registers the tier-1 `d` model the test PDK's .model card uses
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, VoltageSource, MNACircuit
 using Cadnip: dc!
 using Cadnip: ParamLens
@@ -135,6 +136,57 @@ const va_device_mod = Cadnip.precompile_va(@__MODULE__, test_va_path)
         @test i_typical > i_slow
     end
 
+end
+
+#==============================================================================#
+# A PDK module imports nothing from Cadnip — generated code names every Cadnip
+# binding fully-qualified. These two decks are what proves it: a subcircuit built
+# from E/G/F/H cards, and one built from a `.model` card. Both are lowered by the
+# same code as a deck's own subcircuits, and both fail at *call* time, not at
+# codegen time, when the module is missing a name.
+#==============================================================================#
+@testset "PDK subcircuits that need more than passives" begin
+    using NyanSpectreNetlistParser
+
+    function pdk_deck(code::String, circuit_name::Symbol)
+        ast = NyanSpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=true)
+        @test !ast.ps.errored
+        sema_result = Cadnip.sema(ast; imported_hdl_modules=Module[typical])
+        return Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name)
+    end
+
+    @testset "controlled sources (E and G cards)" begin
+        builder = @eval $(pdk_deck("""
+        * controlled sources through a PDK subcircuit
+        V1 in 0 DC 0.5
+        X1 in e g 0 ctrl_amp
+        .END
+        """, :ctrl_amp_deck))
+
+        sol = dc!(MNACircuit(builder))
+
+        # E (VCVS): 10 * 0.5 V
+        @test sol[:e] ≈ 5.0 atol=1e-9
+        # G (VCCS): 1 mS * V(e) into a 1k load
+        @test abs(sol[:g]) ≈ 5.0 atol=1e-9
+    end
+
+    @testset ".model card (registry device)" begin
+        builder = @eval $(pdk_deck("""
+        * a PDK .model card driving a diode inside a PDK subcircuit
+        V1 in 0 DC 1.0
+        X1 in out diode_1v8
+        R1 out 0 1k
+        .END
+        """, :pdk_diode_deck))
+
+        sol = dc!(MNACircuit(builder))
+
+        # Series diode + 1k across 1 V: the diode takes a forward drop and the
+        # rest lands on the resistor.
+        @test 0.3 < sol[:out] < 0.8
+        @test sol[:out] < 1.0
+    end
 end
 
 @testset "VA Device Precompilation" begin
