@@ -1,0 +1,51 @@
+name: TagBot
+
+# TagBot creates the git tag and GitHub release for a version *after* it has
+# been registered in General. It does not register anything itself — that is
+# register.yml's job.
+#
+# Subpackage tags are prefixed with the package name, e.g.
+# `NyanSpectreNetlistParser.jl-v0.7.0`; the root package tags as `v0.14.0`.
+#
+# To backfill tags for versions registered before this workflow existed, run it
+# manually with a large `lookback` (in days) — 120 covers everything back to the
+# v0.13.0 release in April.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      lookback:
+        description: How many days back to look for registered versions
+        default: "3"
+        required: false
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  issues: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  TagBot:
+    # `issue_comment` fires on every comment in the repo; only act on TagBot's
+    # own trigger comments, or on a manual dispatch.
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        subdir:
+          - ""
+          - NyanLexers.jl
+          - NyanSpectreNetlistParser.jl
+          - NyanVerilogAParser.jl
+    steps:
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          subdir: ${{ matrix.subdir }}
+          lookback: ${{ github.event.inputs.lookback || 3 }}
