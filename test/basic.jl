@@ -1112,6 +1112,66 @@ end
     @test isapprox(sol[:out], 1.0; atol=deftol)
 end
 
+@testset "SPICE CCVS/CCCS sense a source in their own .subckt" begin
+    # A sense source inside a subckt allocates its current under the instance
+    # prefix (`I_x1_vsense`), so the F/H card must resolve the local name it
+    # spells against that prefix — and two instances of the same subckt must
+    # each sense their own copy.
+    circuit = MNACircuit(sp"""
+    .subckt tia inp outp
+    R1 inp sense 1k
+    Vsense sense 0 DC 0
+    H1 outp 0 Vsense 200
+    .ends
+    .subckt mirror inp outp
+    R1 inp sense 1k
+    Vsense sense 0 DC 0
+    F1 outp 0 Vsense 2
+    .ends
+    V1 vcc 0 DC 5
+    V2 vcc2 0 DC 2
+    X1 vcc outh tia
+    X2 vcc2 outh2 tia
+    X3 vcc outf mirror
+    Rl1 outh 0 1Meg
+    Rl2 outh2 0 1Meg
+    Rl3 outf 0 100
+    """i)
+    sol = dc!(circuit)
+
+    # Each instance senses its own current: 5V/1kΩ = 5mA and 2V/1kΩ = 2mA.
+    @test isapprox(sol[:I_x1_vsense], 5e-3; atol=deftol)
+    @test isapprox(sol[:I_x2_vsense], 2e-3; atol=deftol)
+
+    # CCVS: rm · I = 200 · 5mA = 1V, and 200 · 2mA = 0.4V.
+    @test isapprox(sol[:outh], 1.0; atol=deftol)
+    @test isapprox(sol[:outh2], 0.4; atol=deftol)
+
+    # CCCS: gain · I · Rload = 2 · 5mA · 100Ω = 1V.
+    @test isapprox(sol[:outf], 1.0; atol=deftol)
+end
+
+@testset "SPICE CCVS senses through a nested .subckt" begin
+    # The prefix chains, so the sense current is `I_xw_xin_vsense`.
+    circuit = MNACircuit(sp"""
+    .subckt tia inp outp
+    R1 inp sense 1k
+    Vsense sense 0 DC 0
+    H1 outp 0 Vsense 200
+    .ends
+    .subckt wrapper a b
+    Xin a b tia
+    .ends
+    V1 vcc 0 DC 5
+    Xw vcc outh wrapper
+    Rl outh 0 1Meg
+    """i)
+    sol = dc!(circuit)
+
+    @test isapprox(sol[:I_xw_xin_vsense], 5e-3; atol=deftol)
+    @test isapprox(sol[:outh], 1.0; atol=deftol)
+end
+
 @testset "DCSolution operating-point introspection" begin
     # Resistive divider: out = 6·2k/(1k+2k) = 4 V, in = 6 V.
     circuit = MNACircuit(sp"""
