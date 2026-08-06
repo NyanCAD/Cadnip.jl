@@ -195,6 +195,52 @@ end
 _option_value_node(p::SNode{SP.Parameter}) = p.val
 _option_value_node(p::SNode{SP.TempStatement}) = p.temp
 
+"""
+    _globalref_value(ref::GlobalRef)
+
+The value `ref` is bound to, read in the latest world.
+
+Codegen peeks at a model's Julia type to case-fold its parameter names, and for
+a `.hdl` device that type was defined by a Verilog-A module eval'd moments
+earlier — during this same codegen pass, and so after the world our caller was
+frozen in. A plain `getglobal` reads it from that older world, which Julia 1.12
+warns about ("access to binding ... in a world prior to its definition world")
+and a future version will reject.
+"""
+_globalref_value(ref::GlobalRef) = Base.invokelatest(getglobal, ref.mod, ref.name)
+
+"""
+    _is_declared_param(state, id) -> Bool
+
+Whether the builder for this scope binds a local named `id` — a `.param` of the
+scope or a `.subckt` formal. Those are the names that must stay bare so they
+resolve to that local.
+
+`exposed_parameters` deliberately does *not* count: a name inherited from an
+enclosing scope is left free by codegen (`parent_params` is passed but never
+destructured), so treating it as a parameter would only turn a name the
+environment could have resolved into an `UndefVarError`.
+"""
+_is_declared_param(state::CodegenState, id::Symbol) =
+    haskey(state.sema.params, id) || id in state.sema.formal_parameters
+
+"""
+    _spectre_env_binding(id) -> Symbol or nothing
+
+The `SpectreEnvironment` name `id` refers to, or `nothing` if it names nothing
+there. SPICE lowercases every identifier on the way in, so a deck writing
+`M_1_PI` arrives here as `m_1_pi` while the binding is the uppercase one; Spectre
+is case-sensitive and matches on the first try. Function *calls* already resolve
+case-insensitively (`cg_expr!` on `FunctionCall`), so this is the same rule for
+the identifiers.
+"""
+function _spectre_env_binding(id::Symbol)
+    isdefined(SpectreEnvironment, id) && return id
+    upper = Symbol(uppercase(String(id)))
+    isdefined(SpectreEnvironment, upper) && return upper
+    return nothing
+end
+
 function cg_expr!(state::CodegenState, id::Symbol)
     if id == Symbol("true")
         true
@@ -210,6 +256,18 @@ function cg_expr!(state::CodegenState, id::Symbol)
         Expr(:call, GlobalRef(SpectreEnvironment, Symbol("\$time")))
     elseif id == Symbol("temper")
         Expr(:call, GlobalRef(SpectreEnvironment, :temper))
+    elseif _is_declared_param(state, id)
+        # A parameter is a local of the builder; emit the bare name so it binds
+        # to that local. This is checked *before* the environment so a `.param`
+        # can shadow an environment constant, which is the precedence a netlist
+        # writer expects.
+        id
+    elseif (env = _spectre_env_binding(id)) !== nothing
+        # An identifier that no scope declares, but the environment does — a
+        # constant like `M_1_PI`. Naming the binding is what retires the last
+        # `using` a generated deck carried, and it resolves whether or not the
+        # environment happens to be in scope where the code is eval'd.
+        GlobalRef(SpectreEnvironment, env)
     else
         # TODO: Request parameter generation here.
         id
@@ -521,7 +579,7 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
     lhs = Symbol(LString(model.name))
 
     @assert isdefined(modelref.mod, modelref.name)
-    T = getglobal(modelref.mod, modelref.name)
+    T = _globalref_value(modelref)
 
     # Peek at the fieldnames of the model to find the correct case for all params.
     # This obviates the need for using `spicecall`, saving us a bunch of compilation work.
@@ -726,7 +784,7 @@ function va_device_type(state::CodegenState, model_sym::Symbol)
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = getglobal(model_globalref.mod, model_globalref.name)
+            T = _globalref_value(model_globalref)
             # Handle ParsedModel{InnerT} - extract the inner type
             if T isa DataType && T <: Cadnip.ParsedModel
                 return T.parameters[1]
@@ -2299,7 +2357,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = getglobal(model_globalref.mod, model_globalref.name)
+            T = _globalref_value(model_globalref)
             if T isa DataType && T <: Cadnip.ParsedModel
                 T = T.parameters[1]
             end
@@ -2388,7 +2446,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = getglobal(model_globalref.mod, model_globalref.name)
+            T = _globalref_value(model_globalref)
             case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
         end
     elseif model_sym in state.sema.exposed_models
@@ -2738,7 +2796,7 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref;
     elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
         # VA model from imported HDL module or external package
         # Get the model type to build case-insensitive parameter lookup
-        T = getglobal(model_ref.mod, model_ref.name)
+        T = _globalref_value(model_ref)
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
 
         model_params = Expr[]
@@ -3239,6 +3297,9 @@ Generate an MNA builder function from a SPICE/Spectre AST.
 The generated function has signature:
     function circuit_name(params, spec::MNASpec) -> MNAContext
 
+The result is a block of definitions to be eval'd at module scope — a `const`
+per hoisted `.model` card, a function per `.subckt`, and the circuit builder.
+
 # Example
 ```julia
 ast = NyanSpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code)
@@ -3258,31 +3319,27 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit,
 end
 
 """
-    _codegen_preamble(; bare::Bool=false) -> Vector{Expr}
+    _baremodule_prelude() -> Vector{Expr}
 
-The import list generated SPICE code is eval'd under. One definition, used by
-both entry points: a deck's builder module and a PDK `baremodule`. They used to
-carry a hand-written list each, and had drifted — the PDK list was missing the
-controlled sources, so a PDK subcircuit with an E or G card raised
-`UndefVarError` the first time it was *called*.
+The `Base` essentials a PDK `baremodule` does not get for free. Generated code
+names everything else it needs: devices and MNA plumbing as `\$(MNA).Resistor(…)`,
+`ParamLens`/`StaticArrays`/`spicecall` as the interpolated values themselves, and
+SPICE environment names as `GlobalRef`s into `SpectreEnvironment`. So a deck's
+builder needs no imports at all, and nothing it references depends on what is in
+scope where it is eval'd.
 
-Almost nothing needs to be here. Device constructors and MNA plumbing are
-emitted as `\$(MNA).Resistor(...)`, and `ParamLens`/`StaticArrays`/`spicecall`
-are interpolated as the values themselves. What remains is
-`SpectreEnvironment`: a netlist identifier that is neither a parameter nor a net
-lowers to a bare symbol (`M_1_PI`), so it resolves through this `using`.
-
-`bare=true` adds the `Base` essentials a `baremodule` does not get for free.
+There used to be two hand-written import lists here, one per entry point, and
+they had drifted: the PDK list was missing the controlled sources, so a PDK
+subcircuit with an E or G card raised `UndefVarError` the first time it was
+*called*. Nothing is left to drift now — this is the whole of it.
 """
-function _codegen_preamble(; bare::Bool=false)
-    exprs = Expr[]
-    if bare
-        # Note: baremodule requires explicit imports for functions used in generated code
-        push!(exprs, :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse))
-        push!(exprs, :(import Base))  # Needed for explicit Base.X references in generated code
-    end
-    push!(exprs, :(using Cadnip.SpectreEnvironment))
-    return exprs
+function _baremodule_prelude()
+    # baremodule requires explicit imports for the Base functions generated code
+    # uses bare, plus `import Base` for its explicit `Base.X` references.
+    return Expr[
+        :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
+        :(import Base),
+    ]
 end
 
 """
@@ -3386,8 +3443,9 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
                         deferred_models=deferred_models)
 
     return quote
-        # The one import list, shared with the PDK path (`_codegen_preamble`).
-        $(_codegen_preamble()...)
+        # No import list. Everything generated code names is a `GlobalRef` or an
+        # interpolated value — see `_baremodule_prelude` for what is left, which
+        # is nothing on this path.
 
         # Top-level model factory functions (accessible by subcircuit builders and main circuit)
         $(model_defs...)
@@ -3479,8 +3537,9 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
     # This allows eval(expr) to work at any level
     return Expr(:module, false, name,
         Expr(:block,
-            # The one import list, shared with the deck path (`_codegen_preamble`).
-            _codegen_preamble(; bare=true)...,
+            # A `baremodule` needs the `Base` essentials named; nothing else is
+            # imported here or in the deck path (`_baremodule_prelude`).
+            _baremodule_prelude()...,
             # Model definitions (e.g., psp103n = spicecall(ParsedModel, PSP103VA, params))
             model_defs...,
             builders...,

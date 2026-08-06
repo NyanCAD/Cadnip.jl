@@ -233,9 +233,9 @@ all world-age and invokelatest overhead.
 
 A file is a *deck*, and a deck is a namespace: its generated code lands in a
 module of its own and only the builder is bound in yours, so two netlists that
-each define `.subckt divider` do not overwrite each other. (Two `sp"..."` decks
-in the same *local* scope still do — a module cannot be defined in expression
-position, and that case is an ordinary Julia redefinition.)
+each define `.subckt divider` do not overwrite each other. An `sp"..."` deck goes
+down the same path at macro-expansion time, so it gets a module too — including
+two in one local scope.
 
 ```julia
 # File path — language inferred from extension (.scs → Spectre, else SPICE)
@@ -272,8 +272,11 @@ function run_sim()
 end
 ```
 
-The `sp"..."` / `spc"..."` / `va"..."` macros expand at the call site and
-work in both contexts.
+The `sp"..."` / `spc"..."` / `va"..."` macros compile their deck when the macro
+expands — which is before the enclosing code runs, and before an enclosing
+function is even defined — and expand to the builder itself. No world-age tax,
+and nothing at the call site Julia restricts to top level, so they work in both
+contexts.
 
 ### Two-tier model resolution
 

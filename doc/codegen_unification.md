@@ -5,11 +5,14 @@ needs. Three related pieces of work: one shared import list, one lowering
 instead of two, and two runtime warnings. All line numbers are against
 `src/spc/codegen.jl` and `src/spc/interface.jl` as of this writing.
 
-**Status.** §1 and §2 are done — `_codegen_preamble` is the single import list,
-and the PDK path now calls `codegen_toplevel_models!` /
-`_propagate_toplevel_models!` / `_codegen_subckt_builders` instead of its own
-copies. §3 and §4 are open. §4's measured table below is corrected at the end of
-this document: `SpectreEnvironment` *is* load-bearing.
+**Status.** All four are done. §1 and §2: the PDK path calls
+`codegen_toplevel_models!` / `_propagate_toplevel_models!` /
+`_codegen_subckt_builders` instead of its own copies, and the import list is
+`_baremodule_prelude` — now the `Base` essentials for the PDK `baremodule` and
+nothing else, because §4 removed the last name a deck resolved through a `using`.
+§3 and §4 have their own "how it was fixed" sections below. §4's measured table
+is corrected twice over: `SpectreEnvironment` *was* load-bearing, and the fix
+was not the one this document predicted.
 
 ## 1. Two hand-maintained import lists, drifted apart
 
@@ -169,6 +172,38 @@ time during import to MNA.
 
 Fires on every load of Cadnip.
 
+### How it was fixed
+
+Three warnings, not two — a third of the same family turned up while measuring.
+
+**The builder read-back.** `_eval_deck_into_module` now *returns* the builder:
+its `:toplevel` sequence ends with the circuit name, so the read is a top-level
+statement of its own, in the world the definition created. `MNACircuit(path)`
+takes what `Base.include` hands back instead of reading the binding itself, and
+the inline-string branch does the same with `Expr(:toplevel, builder_code,
+eff_name)`. `Base.include(mod, SpiceFile(...))` returning the builder is also the
+more conventional thing for an `include` method to do.
+
+**`SciMLBase.MatrixOperator`.** Nothing in the repository referenced it — the
+import was the only mention. Deleted.
+
+**`getglobal` on a freshly-eval'd Verilog-A type.** Codegen reads a model's Julia
+type to case-fold its parameter names (`T = getglobal(ref.mod, ref.name)`, five
+sites). For a `.hdl` device that type was defined by a module eval'd during this
+same codegen pass, so the read is from a world older than the binding:
+
+```
+WARNING: Detected access to binding `TM2D_module.TM2D` in a world prior to its
+definition world.
+```
+
+Here the world genuinely cannot be advanced first — codegen is mid-expression —
+so this is the case for Julia's own hint. `_globalref_value(ref)` wraps the read
+in `invokelatest`, once, for all five.
+
+Also gone: `_eval_builder_into_module`, dead since the deck-module change, whose
+body was the very `Base.eval`-then-`getfield` pattern above.
+
 ## 4. Related: `sp"..."` / `spc"..."` inside a function body
 
 The README claimed for a long time that the string macros "work transparently
@@ -221,9 +256,8 @@ the whole time. `$time` (`test/basic.jl:221`, in a `bsource`) was the same.
 Both are now `GlobalRef`s: they are special-cased before any parameter lookup,
 so a `.param temper` cannot shadow them and naming the binding directly changes
 nothing but where it resolves. What is left is the fallback — an identifier that
-is neither a parameter nor a net, such as `M_1_PI` — which is why
-`_codegen_preamble` still carries `using Cadnip.SpectreEnvironment`, and why §4
-is not just a matter of deleting it. Resolving that fallback against
+is neither a parameter nor a net, such as `M_1_PI` — which is why the preamble
+still carries `using Cadnip.SpectreEnvironment`. Resolving that fallback against
 `SpectreEnvironment` (without letting it outrank a `.param` of the same name) is
 the remaining piece.
 
@@ -238,3 +272,65 @@ Spliced into a function body, plain and subckt decks then work (2.5 V, 1.25 V).
 A **second blocker** remains for `.model` decks: `model_defs` emits `const`
 bindings (codegen.jl:3340) and `const` is illegal on a local, so those have to
 become plain locals in the in-function case.
+
+### How it was fixed — and why not this way
+
+Both blockers were cleared, the whole thing was measured, and then it was thrown
+away. The record is worth keeping, because the plan above looks right until you
+benchmark it.
+
+**The identifier fallback.** `cg_expr!(state, ::Symbol)` now resolves a name no
+scope declares against `SpectreEnvironment` and emits a `GlobalRef`; a `.param`
+of the same name is checked first and still wins. `_is_declared_param` is that
+check, and it is *narrower* than it first looks: only `params` and
+`formal_parameters` count, not `exposed_parameters`. A name inherited from an
+enclosing scope is left free by codegen — `parent_params` is passed to a subckt
+builder and never destructured — so counting it as a parameter turns a name the
+environment could have resolved into an `UndefVarError`. (That free variable is
+a real bug of its own: a `.subckt` body reading a parent `.param` it has no
+local default for raises `UndefVarError` today, on `main` as much as here. It
+is filed on the scratchpad, not fixed here.)
+
+The lookup is case-insensitive, matching what function calls already did.
+`M_1_PI` reaches codegen from SPICE lowercased to `m_1_pi`, so it had never
+resolved from a SPICE deck — the `using` only ever served Spectre. It works from
+both now.
+
+With that, the deck path emits no imports at all and `_baremodule_prelude` is
+just the PDK `baremodule`'s `Base` essentials.
+
+**The `const` blocker, and why the `let` was abandoned.** The obvious answer to
+"`const` is illegal on a local" is to make the spliced block a `let`: plain
+assignments in the header, `function` definitions in the body, the builder as
+the block's value. That works — every case runs, two decks in one scope stop
+colliding — and it costs too much. Subcircuit builders defined in a `let` body
+are captured by the circuit builder through a `Core.Box`, every call through the
+box infers to `Any`, and a `tran!` over a two-instance subckt deck went from
+603,872 allocations to 811,168. Moving the model bindings into the `let` header
+fixed *their* capture and not this one; typed captures for the subckt builders
+need them bound in the header too, which means topologically sorting the subckt
+call graph so no builder is named before it exists.
+
+So the macros do what every other loader already did: `_eval_deck_into_module`,
+at macro-expansion time, into a module of the caller's. The macro's *result* is
+the builder object, which is a constant — no `using`, no `const`, no closure,
+nothing for Julia to reject in expression position. Allocation parity is exact
+(603,872 either way; 397,2xx on the MOSFET stage), a deck is a namespace on this
+path too, and there is one loading path instead of two.
+
+Three things had to be checked before believing it, and all three hold:
+
+- **World age.** The methods are defined during expansion, which for a top-level
+  statement is before that statement's thunk runs, and for a function body is
+  when the enclosing `function` is defined. `dc!(MNACircuit(sp"..."))` as a
+  single top-level statement works, and so does the same inside a function.
+- **Precompilation.** A package with `const c = sp"..."` at module scope *and*
+  an `sp"..."` inside a function body precompiles and runs from the cache. It
+  matters that the deck module is a *child* of the caller's: the same macro
+  written against a free-standing `Module(gensym(...))` fails with "Evaluation
+  into the closed module `##deck#277` breaks incremental compilation". Which is
+  why the macros reuse `_eval_deck_into_module` rather than
+  `_fresh_netlist_module` — the latter is fine for `MNACircuit(path)`, which
+  only ever runs at runtime.
+- **Expansion-time side effects.** Already the norm here: `.hdl` Verilog-A
+  modules are `Core.eval`'d into the caller during the same call.

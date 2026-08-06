@@ -432,7 +432,6 @@ function phase_deg end
 using NonlinearSolve
 using LinearSolve: LinearProblem, KLUFactorization
 using SciMLBase
-using SciMLBase: MatrixOperator
 using ADTypes
 
 #==============================================================================#

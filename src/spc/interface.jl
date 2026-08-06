@@ -85,21 +85,6 @@ function codegen_hdl!(cache::CedarParseCache, path::String)
 end
 
 #==============================================================================#
-# Internal helper: eval a builder expression into a module
-#
-# Shared by Base.include(mod, SpiceFile/SpectreFile), MNACircuit(path), and
-# MNACircuit(code; lang). Returns the builder function bare (no invokelatest
-# wrapper) — MNACircuit{F,...} specializes on F, and dc!/tran!/ac! cross the
-# function-barrier boundary in the current world. See docs on Invokelatest policy.
-#==============================================================================#
-function _eval_builder_into_module(mod::Module, code::Expr, circuit_name::Symbol)
-    # After codegen hygiene pass, `mod` does not need any Cadnip `using` statements —
-    # generated code emits fully-qualified references.
-    Base.eval(mod, code)
-    return getfield(mod, circuit_name)
-end
-
-#==============================================================================#
 # A deck is a namespace
 #
 # `SpiceFile`/`SpectreFile` load a *complete* netlist — they parse with
@@ -122,6 +107,12 @@ end
 # The parse cache stays on the caller's module, so `.hdl` Verilog-A modules are
 # still shared across decks loaded into it — one compile of a PSP/BSIM model, not
 # one per netlist.
+#
+# `sp"..."` and `spc"..."` come through here too, at macro-expansion time, under
+# a gensym'd circuit name. That is what lets them be written inside a function
+# body: the macro's *result* is the builder object itself, so the call site is
+# left holding a constant rather than a block of `using`/`const`/`function` forms
+# that Julia only accepts at top level.
 #==============================================================================#
 function _eval_deck_into_module(mod::Module, sa, circuit_name::Symbol)
     parse_cache = ensure_cache!(mod)
@@ -131,10 +122,14 @@ function _eval_deck_into_module(mod::Module, sa, circuit_name::Symbol)
     # world updated — before the alias that reads a binding out of it runs.
     # Reading it with `getfield` right after `Base.eval` instead trips Julia
     # 1.12's "access to binding in a world prior to its definition world".
-    Base.eval(mod, Expr(:toplevel,
+    #
+    # The last statement's value is the builder, and returning it is how callers
+    # get hold of one without a `getfield` of their own — which would trip that
+    # same warning, from a world frozen before the binding existed.
+    return Base.eval(mod, Expr(:toplevel,
         Expr(:module, true, deck_name, code),
-        :(const $circuit_name = $deck_name.$circuit_name)))
-    return nothing
+        :(const $circuit_name = $deck_name.$circuit_name),
+        circuit_name))
 end
 
 # Derived from the circuit name, so two decks colliding here collide on the
@@ -147,6 +142,12 @@ _deck_module_name(circuit_name::Symbol) = Symbol("#", circuit_name, "#deck")
 Parse SPICE code and generate an MNA builder function.
 
 The result is a callable that takes (params, spec) and returns an MNAContext.
+
+The deck is compiled where the macro expands, into a module of its own inside
+the caller's, and the macro's result is the builder — so this is an expression
+like any other and works inside a function body as well as at top level. Two
+decks in one scope that each define `.subckt divider` get a module each and do
+not collide.
 
 # Flags
 - No flag (default): `implicit_title=true` - first line is treated as title
@@ -180,17 +181,11 @@ macro sp_str(str, flag="")
     sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
         implicit_title = !inline, fname=String(__source__.file), srcline=__source__.line)
 
-    # Generate MNA builder function. Pass the caller's cache so `.hdl` VA
-    # includes codegen into the caller's module alongside the SPICE builder.
-    parse_cache = ensure_cache!(__module__)
-    circuit_name = gensym(:circuit)
-    code = make_mna_circuit(sa; circuit_name, parse_cache)
-
-    # Return the builder function
-    return esc(quote
-        $code
-        $circuit_name
-    end)
+    # Compile the deck into a module of the caller's, right here at expansion
+    # time — the same path `Base.include(mod, SpiceFile(...))` takes, so `.hdl`
+    # Verilog-A modules land in the caller's parse cache and are shared with
+    # every other deck it loads. The macro expands to the builder itself.
+    return _eval_deck_into_module(__module__, sa, gensym(:circuit))
 end
 
 """
@@ -213,14 +208,7 @@ macro spc_str(str, flag="")
     sa = NyanSpectreNetlistParser.parse(IOBuffer(str); start_lang=:spectre, enable_julia_escape,
         fname=String(__source__.file), srcline=__source__.line)
 
-    parse_cache = ensure_cache!(__module__)
-    circuit_name = gensym(:circuit)
-    code = make_mna_circuit(sa; circuit_name, parse_cache)
-
-    return esc(quote
-        $code
-        $circuit_name
-    end)
+    return _eval_deck_into_module(__module__, sa, gensym(:circuit))
 end
 
 #==============================================================================#
@@ -326,6 +314,10 @@ If `path_or_code` names an existing file, loads the netlist from disk and infers
 language from the extension (`.scs` → Spectre, else SPICE). Otherwise treats the
 string as an inline netlist (default `:spice`, override with `lang=`).
 
+A string is a *complete* deck, parsed the same way a file is: for SPICE that
+means the first line is the deck title, so it has to be there. `sp"..."i` is the
+form that takes a title-less snippet.
+
 `source_dir` is used to resolve relative `.hdl` / `.include` paths for inline
 netlists; absent, relative paths fail.
 
@@ -350,7 +342,7 @@ netlists; absent, relative paths fail.
 ```julia
 # Top level:
 circuit = MNACircuit("amp.sp")              # file
-circuit = MNACircuit("V1 vcc 0 5\\nR1 vcc 0 1k"; lang=:spice)  # inline
+circuit = MNACircuit("* divider\\nV1 vcc 0 5\\nR1 vcc 0 1k"; lang=:spice)  # inline
 sol = dc!(circuit)
 ```
 """
@@ -366,12 +358,13 @@ function MNA.MNACircuit(path_or_code::AbstractString;
         eff_name = name === nothing ?
             Symbol(first(splitext(basename(path)))) : name
         mod = _fresh_netlist_module(eff_name)
-        if eff_lang === :spice
+        # `Base.include` returns the builder, read in the world the definition
+        # created; a `getfield` here would read it from ours, which predates it.
+        builder = if eff_lang === :spice
             Base.include(mod, SpiceFile(path; name=eff_name))
         else
             Base.include(mod, SpectreFile(path; name=eff_name))
         end
-        builder = getfield(mod, eff_name)
     else
         eff_lang = something(lang, :spice)
         sa = _parse_netlist_string(path_or_code, eff_lang; source_dir=source_dir)
@@ -379,8 +372,9 @@ function MNA.MNACircuit(path_or_code::AbstractString;
         mod = _fresh_netlist_module(:netlist)
         parse_cache = ensure_cache!(mod)
         builder_code = make_mna_circuit(sa; circuit_name=eff_name, parse_cache)
-        Base.eval(mod, builder_code)
-        builder = getfield(mod, eff_name)
+        # Same reason as above: reading the name back as a following `:toplevel`
+        # statement puts the definition in a world of its own.
+        builder = Base.eval(mod, Expr(:toplevel, builder_code, eff_name))
     end
     # Return the bare builder. This constructor is documented as top-level-only;
     # the call to `Base.eval` has advanced the world so a following top-level

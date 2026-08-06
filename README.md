@@ -158,25 +158,26 @@ function run_sim()
 end
 ```
 
-The string macros expand at the call site rather than eval'ing, so they have no
-world-age tax. But a netlist macro (`sp"..."`, `spc"..."`) expands to a block
-carrying `using` statements, which Julia only allows at top level, so those two
-cannot go inside a function body either:
+The string macros have no such restriction. They compile their deck when the
+macro *expands* — before the enclosing statement runs, and before an enclosing
+function is even defined — so the builder always predates any call to it, and
+what lands at the call site is just the builder. `sp"..."`, `spc"..."` and
+`va"..."` are as good inside a function body as at top level:
 
 ```julia
-function bad()
+function run_sim()
     dc!(MNACircuit(sp"""
     * divider
     V1 vcc 0 DC 5
     R1 vcc out 1k
     R2 out 0 1k
-    """))
+    """))[:out]     # 2.5
 end
-# ERROR: syntax: "using" expression not at top level
 ```
 
-So a netlist — inline or from a file — is loaded at top level, and functions
-take it from there.
+So a netlist read at *runtime* — from a path or a string — is loaded at top
+level and functions take it from there; a netlist written *in the source* can go
+wherever it reads best.
 
 ### Parameters and sweeps
 

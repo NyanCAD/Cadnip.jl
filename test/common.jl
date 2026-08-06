@@ -39,9 +39,7 @@ allapprox_deftol(itr) = isempty(itr) ? true : all(isapprox_deftol(first(itr)), i
 # runtime-parsed circuits.
 function _eval_spice_builder(spice_code, imported_hdl_modules)
     code = parse_spice_to_mna(spice_code; circuit_name=:circuit, imported_hdl_modules)
-    m = Module()
-    Base.eval(m, code)
-    builder = getfield(m, :circuit)
+    builder = _eval_builder(code)
     return (args...; kwargs...) -> Base.invokelatest(builder, args...; kwargs...)
 end
 
@@ -49,10 +47,16 @@ function _eval_spectre_builder(spectre_code, imported_hdl_modules)
     ast = Cadnip.NyanSpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
     sema_result = Cadnip.sema(ast; imported_hdl_modules)
     code = Cadnip._make_mna_circuit_with_sema(sema_result; circuit_name=:circuit)
-    m = Module()
-    Base.eval(m, code)
-    builder = getfield(m, :circuit)
+    builder = _eval_builder(code)
     return (args...; kwargs...) -> Base.invokelatest(builder, args...; kwargs...)
+end
+
+# Read the builder back as a following `:toplevel` statement, so the read runs in
+# the world the definition created. `getfield` right after `Base.eval` reads it
+# from ours, which predates it — Julia 1.12 warns and will eventually error.
+function _eval_builder(code)
+    m = Module()
+    return Base.eval(m, Expr(:toplevel, code, :circuit))
 end
 
 function solve_mna_spice_code(spice_code::AbstractString; temp::Real=27.0, maxiters::Int=100,

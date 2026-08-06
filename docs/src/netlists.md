@@ -119,26 +119,27 @@ can see the result.
     end
     ```
 
-!!! warning "A netlist macro is top-level too"
-    `sp"..."` and `spc"..."` expand to a block that carries `using` statements,
-    and Julia allows those only at top level, so neither can appear inside a
-    function body:
+!!! note "A netlist macro is not"
+    `sp"..."`, `spc"..."` and `va"..."` compile their deck when the macro
+    *expands*, which happens before the enclosing code runs — so the builder
+    always predates any call to it, and the macro leaves nothing at the call
+    site but the builder. No world-age tax, and they go wherever an expression
+    goes, a function body included:
 
-    ```julia
-    function bad()
-        MNACircuit(sp"""
+    ```@example netlists
+    function run_sim()
+        dc!(MNACircuit(sp"""
         * divider
         V1 vcc 0 DC 5
         R1 vcc out 1k
         R2 out 0 1k
-        """)
+        """))[:out]
     end
-    # ERROR: syntax: "using" expression not at top level
+    run_sim()
     ```
 
-    `va"..."` carries no such block and expands anywhere. So a netlist — inline
-    or from a file — is loaded at top level, and functions take it from there.
-    (Lifting this is tracked in `doc/codegen_unification.md` §4.)
+    Each expansion gets a deck module of its own, so two decks in one function
+    that both define `.subckt divider` do not collide.
 
 | Input | Loader |
 | ----- | ------ |
