@@ -209,14 +209,19 @@ import was the only mention. Deleted.
 Also gone: `_eval_builder_into_module`, dead since the deck-module change, whose
 body was the very `Base.eval`-then-`getfield` pattern above.
 
-**What is left.** One site survives, in the `.hdl` Verilog-A path: running
-`test/basic.jl` still prints `access to binding
-BasicVAResistor_module.BasicVAResistor` six times (down from eighteen across four
-distinct bindings). It is not any of the reads listed above — those are wrapped —
-and it did not yield to inspection. Localising it wants a stack trace, which
-means `--depwarn=error`, which currently dies first on an unrelated deprecation:
-`SemaResult(ast)` passes `Dict()` for the `params` and `instances` fields, which
-are `OrderedDict`. Fixing that constructor is the way in. Filed on the scratchpad.
+**What is left.** One *shape* survives, in the `.hdl` Verilog-A path: reading a
+device type out of the module that defines it. `test/basic.jl` went from
+eighteen warnings across four distinct bindings to six across one
+(`BasicVAResistor_module.BasicVAResistor`); the full suite prints eight, at three
+VA modules — `BasicVAResistor`, `TM2D`, `TMRoundTrip` — which is that one shape
+at three decks, not three separate problems.
+
+It is not any of the reads listed above; those are wrapped, and the count fell
+when they were. It did not yield to inspection either. Localising it wants a
+stack trace, which means `--depwarn=error`, which currently dies first on an
+unrelated deprecation: `SemaResult(ast)` passes `Dict()` for the `params` and
+`instances` fields, which are `OrderedDict`. Fixing that constructor is the way
+in. Filed on the scratchpad.
 
 ## 4. Related: `sp"..."` / `spc"..."` inside a function body
 
