@@ -11,6 +11,13 @@ function __init__()
     model_cache_dir[] = @get_scratch!("model_path")
 end
 
+# The loaded package holds a `<name>_module` submodule holding the device type.
+# Both hops go through `latest_global`: the package was `require`d after our
+# caller's world was frozen, so reading either binding directly is Julia 1.12's
+# "access to binding in a world prior to its definition world".
+_va_model_type(pkg::Module, name::AbstractString) =
+    Cadnip.latest_global(Cadnip.latest_global(pkg, Symbol(name, "_module")), Symbol(name))
+
 """
     load_VA_model(model_path::AbstractString)
 
@@ -25,7 +32,7 @@ function load_VA_model(model_path::AbstractString)
     # Check if model of that name has already been loaded in session
     loaded_mod = get(Base.loaded_modules, Base.PkgId(nothing, module_name), nothing)
     if loaded_mod !== nothing
-        return getglobal(getglobal(loaded_mod, Symbol(name * "_module")), Symbol(name))
+        return _va_model_type(loaded_mod, name)
     end
 
     scratch_model_path = joinpath(model_cache_dir[], module_name * ".jl")
@@ -52,7 +59,7 @@ function load_VA_model(model_path::AbstractString)
     pushfirst!(DEPOT_PATH, model_cache_dir[])
     try
         mod = Base.require(Base.PkgId(nothing, module_name))
-        return getglobal(getglobal(mod, Symbol(name * "_module")), Symbol(name))
+        return _va_model_type(mod, name)
     finally
         copy!(LOAD_PATH, old_load_path)
         copy!(DEPOT_PATH, old_depot_path)

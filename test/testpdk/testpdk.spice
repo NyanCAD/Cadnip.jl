@@ -43,6 +43,16 @@ R2 gout gnd 1k
 D1 a c pdk_diode
 .ENDS diode_1v8
 
+* A `.model` card whose parameter is an arithmetic expression. Codegen hoists it
+* to a module-level `const`, so the operators run when the PDK module is
+* *defined* — unlike a subcircuit body, which is only checked when it is called.
+* A `baremodule` has no `Base`, so this is what catches a missing operator
+* import, and it is the shape that broke VACASKModels.
+.MODEL pdk_diode_scaled d is='2e-14 - 1e-14' n='0.5 + 0.5'
+.SUBCKT diode_scaled a c
+D1 a c pdk_diode_scaled
+.ENDS diode_scaled
+
 * Two-input NAND gate
 .SUBCKT nand2_x1 a b out vdd vss
 * Pull-up network: PMOS in parallel

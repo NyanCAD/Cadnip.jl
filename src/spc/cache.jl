@@ -1,3 +1,8 @@
+# `latest_global`: the binding was created by a `Core.eval` (see `ensure_cache!`),
+# in a world newer than the one these callers are frozen in. Reading it directly
+# is Julia 1.12's "access to binding in a world prior to its definition world".
+_parse_cache(thismod::Module) = latest_global(thismod, :var"#cedar_parse_cache#")
+
 struct CedarParseCache
     thismod::Module
     spc_cache::Dict{String, Any #=SemaResult=#}
@@ -47,28 +52,28 @@ parse_and_cache_va!(cache::CedarParseCache, path::AbstractString) = parse_and_ca
 
 function cache_spc!(thismod::Module, path::String, sr #=::SemaResult=#; abspath=nothing)
     ccall(:jl_check_top_level_effect, Cvoid, (Any, Cstring), thismod, "cache_spc!")
-    thismod.var"#cedar_parse_cache#".spc_cache[path] = sr
+    _parse_cache(thismod).spc_cache[path] = sr
     include_dependency(abspath !== nothing ? abspath : path)
 end
 
 function recache_spc!(thismod::Module, path::String, sr #=::SemaResult=#)
     ccall(:jl_check_top_level_effect, Cvoid, (Any, Cstring), thismod, "recache_spc!")
-    existing = get(thismod.var"#cedar_parse_cache#".spc_cache, path, nothing)
+    existing = get(_parse_cache(thismod).spc_cache, path, nothing)
     @assert existing !== nothing && isa(existing, SNode)
-    thismod.var"#cedar_parse_cache#".spc_cache[path] = sr
+    _parse_cache(thismod).spc_cache[path] = sr
 end
 
 function cache_va!(thismod::Module, path::String, vm::Union{VANode, Pair{VANode, Module}}; abspath=nothing)
     ccall(:jl_check_top_level_effect, Cvoid, (Any, Cstring), thismod, "cache_va!")
-    @assert !haskey(thismod.var"#cedar_parse_cache#".va_cache, path)
-    thismod.var"#cedar_parse_cache#".va_cache[path] = vm
+    @assert !haskey(_parse_cache(thismod).va_cache, path)
+    _parse_cache(thismod).va_cache[path] = vm
     # TODO: Verilog-side includes
     include_dependency(abspath !== nothing ? abspath : path)
 end
 
 function recache_va!(thismod::Module, path::String, vm::Pair{VANode, Module})
     ccall(:jl_check_top_level_effect, Cvoid, (Any, Cstring), thismod, "recache_va!")
-    existing = get(thismod.var"#cedar_parse_cache#".va_cache, path, nothing)
+    existing = get(_parse_cache(thismod).va_cache, path, nothing)
     @assert existing !== nothing && isa(existing, VANode)
-    thismod.var"#cedar_parse_cache#".va_cache[path] = vm
+    _parse_cache(thismod).va_cache[path] = vm
 end

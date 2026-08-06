@@ -174,35 +174,49 @@ Fires on every load of Cadnip.
 
 ### How it was fixed
 
-Three warnings, not two — a third of the same family turned up while measuring.
+Two warnings were listed; the family turned out to be larger. There are two
+shapes of fix, and which applies depends on whether the read can wait:
 
-**The builder read-back.** `_eval_deck_into_module` now *returns* the builder:
-its `:toplevel` sequence ends with the circuit name, so the read is a top-level
-statement of its own, in the world the definition created. `MNACircuit(path)`
-takes what `Base.include` hands back instead of reading the binding itself, and
-the inline-string branch does the same with `Expr(:toplevel, builder_code,
-eff_name)`. `Base.include(mod, SpiceFile(...))` returning the builder is also the
-more conventional thing for an `include` method to do.
+- **The world can be advanced first.** Put the read in a following `:toplevel`
+  statement, so it runs in the world the definition created. This is what
+  `_eval_deck_into_module` already did for its alias, and it is the better fix
+  where it applies — no dynamic dispatch, and the value comes back typed.
+- **It cannot** — codegen is mid-expression, with no later statement to move the
+  read into. Then it is Julia's own hint: `latest_global(mod, name)` in
+  `src/util.jl`, one `invokelatest`-wrapped `getglobal` shared by every such site.
+
+Applied:
+
+| site | shape |
+| --- | --- |
+| `_eval_deck_into_module` returning its builder | `:toplevel` |
+| `MNACircuit(code; lang=)`'s inline branch | `:toplevel` |
+| `codegen_hdl!` reading back a `.hdl` module | `:toplevel` |
+| `parse_and_eval_vafile`, both branches (`vasim.jl`) | `:toplevel` |
+| `precompile_pdk` reading back a PDK module | `:toplevel` |
+| the five `getglobal`s on a model's Julia type (`codegen.jl`) | `latest_global` |
+| `ensure_cache!` and the four `cache.jl` accessors | `latest_global` |
+| `ModelLoader.load_VA_model`'s two hops | `latest_global` |
+
+`MNACircuit(path)` and `Base.include(mod, SpiceFile(...))` therefore hand the
+builder back rather than leaving callers to `getfield` it; that is also the more
+conventional thing for an `include` method to do. The `test/common.jl` shims got
+the same treatment.
 
 **`SciMLBase.MatrixOperator`.** Nothing in the repository referenced it — the
 import was the only mention. Deleted.
 
-**`getglobal` on a freshly-eval'd Verilog-A type.** Codegen reads a model's Julia
-type to case-fold its parameter names (`T = getglobal(ref.mod, ref.name)`, five
-sites). For a `.hdl` device that type was defined by a module eval'd during this
-same codegen pass, so the read is from a world older than the binding:
-
-```
-WARNING: Detected access to binding `TM2D_module.TM2D` in a world prior to its
-definition world.
-```
-
-Here the world genuinely cannot be advanced first — codegen is mid-expression —
-so this is the case for Julia's own hint. `_globalref_value(ref)` wraps the read
-in `invokelatest`, once, for all five.
-
 Also gone: `_eval_builder_into_module`, dead since the deck-module change, whose
 body was the very `Base.eval`-then-`getfield` pattern above.
+
+**What is left.** One site survives, in the `.hdl` Verilog-A path: running
+`test/basic.jl` still prints `access to binding
+BasicVAResistor_module.BasicVAResistor` six times (down from eighteen across four
+distinct bindings). It is not any of the reads listed above — those are wrapped —
+and it did not yield to inspection. Localising it wants a stack trace, which
+means `--depwarn=error`, which currently dies first on an unrelated deprecation:
+`SemaResult(ast)` passes `Dict()` for the `params` and `instances` fields, which
+are `OrderedDict`. Fixing that constructor is the way in. Filed on the scratchpad.
 
 ## 4. Related: `sp"..."` / `spc"..."` inside a function body
 
@@ -296,8 +310,27 @@ The lookup is case-insensitive, matching what function calls already did.
 resolved from a SPICE deck — the `using` only ever served Spectre. It works from
 both now.
 
-With that, the deck path emits no imports at all and `_baremodule_prelude` is
-just the PDK `baremodule`'s `Base` essentials.
+With that, a *deck's* generated code needs no imports at all. A PDK
+`baremodule` still needs a list, and the reason is narrower than it looks: not
+the device names or the environment functions, which are all named outright now,
+but the **operators**. An expression lowers to `Expr(:call, :-, lhs, rhs)` — a
+bare `-`. A deck's builder module is an ordinary `module`, so that resolves
+through `Base`; a `baremodule` has no `Base`.
+
+Dropping `using Cadnip.SpectreEnvironment` from `_baremodule_prelude` therefore
+broke VACASKModels at *precompile* time, with `UndefVarError: - not defined in
+VACASKModels.vacask_models` — and the test PDK did not catch it, because its
+arithmetic all lives in subcircuit bodies, which a `baremodule` only type-checks
+when they are called. The card that catches it is one whose value is hoisted to
+module scope, so the operator runs when the module is *defined*:
+
+```spice
+.MODEL pdk_diode_scaled d is='2e-14 - 1e-14' n='0.5 + 0.5'
+```
+
+`test/testpdk/testpdk.spice` carries that now, and `pdk_test.jl` solves with it.
+Verified the way a regression test has to be: with the import removed the test
+reproduces `UndefVarError: -`, with it restored it passes.
 
 **The `const` blocker, and why the `let` was abandoned.** The obvious answer to
 "`const` is illegal on a local" is to make the spliced block a `let`: plain

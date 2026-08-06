@@ -43,8 +43,10 @@ function _fresh_netlist_module(name::Symbol)
 end
 
 function ensure_cache!(mod::Module)
+    # `latest_global`: an earlier call created this binding with `Core.eval`, in
+    # a world newer than the one our caller is frozen in.
     if isdefined(mod, :var"#cedar_parse_cache#")
-        return mod.var"#cedar_parse_cache#"
+        return latest_global(mod, :var"#cedar_parse_cache#")
     end
     cache = CedarParseCache(mod)
     Core.eval(mod, :(const var"#cedar_parse_cache#" = $cache))
@@ -78,8 +80,9 @@ function codegen_hdl!(cache::CedarParseCache, path::String)
     module_def = expr.args[1]
     @assert module_def.head === :module
     mod_name = module_def.args[2]::Symbol
-    Core.eval(cache.thismod, expr)
-    sm = getfield(cache.thismod, mod_name)
+    # Read the module back as a following `:toplevel` statement, in the world its
+    # definition created rather than in ours, which predates it.
+    sm = Core.eval(cache.thismod, Expr(:toplevel, expr.args..., mod_name))
     recache_va!(cache.thismod, path, Pair{VANode, Module}(va, sm))
     return sm
 end

@@ -196,20 +196,6 @@ _option_value_node(p::SNode{SP.Parameter}) = p.val
 _option_value_node(p::SNode{SP.TempStatement}) = p.temp
 
 """
-    _globalref_value(ref::GlobalRef)
-
-The value `ref` is bound to, read in the latest world.
-
-Codegen peeks at a model's Julia type to case-fold its parameter names, and for
-a `.hdl` device that type was defined by a Verilog-A module eval'd moments
-earlier — during this same codegen pass, and so after the world our caller was
-frozen in. A plain `getglobal` reads it from that older world, which Julia 1.12
-warns about ("access to binding ... in a world prior to its definition world")
-and a future version will reject.
-"""
-_globalref_value(ref::GlobalRef) = Base.invokelatest(getglobal, ref.mod, ref.name)
-
-"""
     _is_declared_param(state, id) -> Bool
 
 Whether the builder for this scope binds a local named `id` — a `.param` of the
@@ -579,7 +565,7 @@ function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, Glo
     lhs = Symbol(LString(model.name))
 
     @assert isdefined(modelref.mod, modelref.name)
-    T = _globalref_value(modelref)
+    T = latest_global(modelref)
 
     # Peek at the fieldnames of the model to find the correct case for all params.
     # This obviates the need for using `spicecall`, saving us a bunch of compilation work.
@@ -784,7 +770,7 @@ function va_device_type(state::CodegenState, model_sym::Symbol)
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = _globalref_value(model_globalref)
+            T = latest_global(model_globalref)
             # Handle ParsedModel{InnerT} - extract the inner type
             if T isa DataType && T <: Cadnip.ParsedModel
                 return T.parameters[1]
@@ -797,7 +783,7 @@ function va_device_type(state::CodegenState, model_sym::Symbol)
     if model_sym in state.sema.exposed_models
         for hdl_mod in state.sema.imported_hdl_modules
             if isdefined(hdl_mod, model_sym)
-                val = getfield(hdl_mod, model_sym)
+                val = latest_global(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT} - extract the inner type
                 if T <: Cadnip.ParsedModel
@@ -2357,7 +2343,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = _globalref_value(model_globalref)
+            T = latest_global(model_globalref)
             if T isa DataType && T <: Cadnip.ParsedModel
                 T = T.parameters[1]
             end
@@ -2446,14 +2432,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
         (_, def) = last(state.sema.models[model_sym])
         model_globalref = def.val[2]
         if model_globalref isa GlobalRef
-            T = _globalref_value(model_globalref)
+            T = latest_global(model_globalref)
             case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
         end
     elseif model_sym in state.sema.exposed_models
         # Also try imported_hdl_modules for exposed models
         for hdl_mod in state.sema.imported_hdl_modules
             if isdefined(hdl_mod, model_sym)
-                val = getfield(hdl_mod, model_sym)
+                val = latest_global(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT}
                 if T <: Cadnip.ParsedModel
@@ -2796,7 +2782,7 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref;
     elseif model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment
         # VA model from imported HDL module or external package
         # Get the model type to build case-insensitive parameter lookup
-        T = _globalref_value(model_ref)
+        T = latest_global(model_ref)
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
 
         model_params = Expr[]
@@ -3321,12 +3307,15 @@ end
 """
     _baremodule_prelude() -> Vector{Expr}
 
-The `Base` essentials a PDK `baremodule` does not get for free. Generated code
-names everything else it needs: devices and MNA plumbing as `\$(MNA).Resistor(…)`,
-`ParamLens`/`StaticArrays`/`spicecall` as the interpolated values themselves, and
-SPICE environment names as `GlobalRef`s into `SpectreEnvironment`. So a deck's
-builder needs no imports at all, and nothing it references depends on what is in
-scope where it is eval'd.
+What a PDK `baremodule` does not get for free, and a deck's own module does.
+
+Generated code names almost everything it needs outright: devices and MNA
+plumbing as `\$(MNA).Resistor(…)`, `ParamLens`/`StaticArrays`/`spicecall` as the
+interpolated values themselves, and SPICE environment names as `GlobalRef`s into
+`SpectreEnvironment`. What it does *not* name is the operators — an expression
+lowers to `Expr(:call, :-, lhs, rhs)`, a bare `-`. A deck's builder module is an
+ordinary `module`, so those resolve through `Base` and it needs no imports at
+all; a `baremodule` has no `Base`, which is what this list is for.
 
 There used to be two hand-written import lists here, one per entry point, and
 they had drifted: the PDK list was missing the controlled sources, so a PDK
@@ -3334,11 +3323,15 @@ subcircuit with an E or G card raised `UndefVarError` the first time it was
 *called*. Nothing is left to drift now — this is the whole of it.
 """
 function _baremodule_prelude()
-    # baremodule requires explicit imports for the Base functions generated code
-    # uses bare, plus `import Base` for its explicit `Base.X` references.
     return Expr[
+        # The Base functions generated code uses bare, plus `import Base` for its
+        # explicit `Base.X` references.
         :(using Base: !, ===, !==, getfield, hasfield, typeof, Symbol, Float64, NamedTuple, nothing, ifelse),
         :(import Base),
+        # The operators, which generated expressions emit bare. `SpectreEnvironment`
+        # re-exports Base's, so this is the same binding a deck module reaches
+        # through `Base` — spelled here because a `baremodule` cannot.
+        :(using Cadnip.SpectreEnvironment),
     ]
 end
 
@@ -3659,8 +3652,9 @@ function precompile_pdk(into::Module, file::String; names=nothing,
     # Eval each module into the target module and collect results
     result_modules = Dict{Symbol, Module}()
     for (mod_name, mod_expr) in module_exprs
-        Core.eval(into, mod_expr)
-        result_modules[mod_name] = getfield(into, mod_name)
+        # Read the module back as a following `:toplevel` statement, in the world
+        # its definition created rather than in ours, which predates it.
+        result_modules[mod_name] = Core.eval(into, Expr(:toplevel, mod_expr, mod_name))
     end
 
     return NamedTuple(result_modules)

@@ -96,7 +96,8 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Documentation: the `doc/*.jmd` Weave set is CedarSim/DAECompiler-era — port what is still true into `docs/src` or drop it
 - [x] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
 - [x] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
-- [x] Codegen: clear the runtime warnings (world-age binding access ×2, SciMLBase import) — design: `doc/codegen_unification.md` §3
+- [x] Codegen: clear the runtime warnings (world-age binding access, SciMLBase import) — design: `doc/codegen_unification.md` §3
+- [ ] Codegen: one world-age warning left, in the `.hdl` path (`BasicVAResistor_module.BasicVAResistor`); tracing it needs `--depwarn=error`, which first needs the `OrderedDict` deprecation in `SemaResult(ast)` fixed — design: `doc/codegen_unification.md` §3
 - [ ] Bug: an F/H card inside a `.subckt` looks its sense source up unprefixed, so it errors with `Current variable I_vs1 not found`; the same card at top level is fine (`codegen.jl` `get_current_idx` call sites vs `_scoped_sym_expr`)
 - [x] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [ ] Bug: a `.subckt` body reading a parent `.param` it has no local default for emits it as a free variable, so it raises `UndefVarError` (`parent_params` is passed to the builder and never destructured)
