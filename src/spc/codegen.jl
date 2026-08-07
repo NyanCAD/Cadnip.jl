@@ -744,6 +744,23 @@ _scoped_sym_expr(local_name::Symbol) =
     :(_mna_prefix_ == Symbol("") ? $(QuoteNode(local_name)) :
                                    Symbol(_mna_prefix_, "_", $(QuoteNode(local_name))))
 
+"""
+    _scoped_current_expr(sense_name::Symbol) -> Expr
+
+Emit a Julia expression that evaluates, at runtime inside a generated builder,
+to the name of the current variable belonging to sense source `sense_name` in
+the enclosing scope.
+
+A voltage source allocates its current as `Symbol(:I_, V.name)`, and `V.name`
+is already scoped by `_scoped_sym_expr`, so `Vsense` inside instance `x1` owns
+`:I_x1_vsense` — the `I_` sits *outside* the instance prefix. F/H cards name
+their sense source with an unprefixed local name, so this is how that name is
+resolved back to the allocated one.
+"""
+_scoped_current_expr(sense_name::Symbol) =
+    :(_mna_prefix_ == Symbol("") ? $(QuoteNode(Symbol(:I_, sense_name))) :
+                                   Symbol(:I_, _mna_prefix_, "_", $(QuoteNode(sense_name))))
+
 # Helper to get a param value
 function getparam(params, name, default=nothing)
     for p in params
@@ -1117,8 +1134,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     @assert isa(current_ctrl, SNode{SP.CurrentControl})
 
     # Get the voltage source name that provides the controlling current
-    vname_sym = if current_ctrl.vnam !== nothing
-        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    sense_expr = if current_ctrl.vnam !== nothing
+        _scoped_current_expr(LSymbol(current_ctrl.vnam))
     else
         error("CCVS $name requires a voltage source name for current sensing")
     end
@@ -1135,7 +1152,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     return quote
         let rm = $rm_expr
             # Get the current index of the referenced voltage source
-            I_in_idx = $(MNA).get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            I_in_idx = $(MNA).get_current_idx(ctx, $sense_expr)
             $(MNA).stamp!($(MNA).CCVS(rm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
     end
@@ -1156,8 +1173,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     @assert isa(current_ctrl, SNode{SP.CurrentControl})
 
     # Get the voltage source name that provides the controlling current
-    vname_sym = if current_ctrl.vnam !== nothing
-        Symbol(:I_, LSymbol(current_ctrl.vnam))  # Current variable is named I_<vname>
+    sense_expr = if current_ctrl.vnam !== nothing
+        _scoped_current_expr(LSymbol(current_ctrl.vnam))
     else
         error("CCCS $name requires a voltage source name for current sensing")
     end
@@ -1174,7 +1191,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
     return quote
         let gain = $gain_expr
             # Get the current index of the referenced voltage source
-            I_in_idx = $(MNA).get_current_idx(ctx, $(QuoteNode(vname_sym)))
+            I_in_idx = $(MNA).get_current_idx(ctx, $sense_expr)
             $(MNA).stamp!($(MNA).CCCS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
     end
