@@ -4188,10 +4188,11 @@ function precompile_va(into::Module, file::String)
         @assert expr.head == :toplevel
         module_def = expr.args[1]
         using_stmt = expr.args[2]
-        Core.eval(into, module_def)
-        Core.eval(into, using_stmt)
         mod_name = module_def.args[2]
-        return getfield(into, mod_name)
+        # The module name is the last `:toplevel` statement, so it is read in
+        # the world its definition created rather than in ours, which predates
+        # it — Julia 1.12 warns on the latter and will eventually error.
+        return Core.eval(into, Expr(:toplevel, module_def, using_stmt, mod_name))
     end
 
     # Multi-module: create one submodule per VA module
@@ -4216,10 +4217,10 @@ function precompile_va(into::Module, file::String)
             $(device_expr.args...)
         end)
 
-        Core.eval(into, module_expr)
-        Core.eval(into, :(using .$mod_name))
-
-        result_modules[mod_name] = getfield(into, mod_name)
+        # Same as the single-module branch: read the module back as a following
+        # `:toplevel` statement, not with a `getfield` from our own world.
+        result_modules[mod_name] = Core.eval(into,
+            Expr(:toplevel, module_expr, :(using .$mod_name), mod_name))
     end
 
     return NamedTuple(result_modules)

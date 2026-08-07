@@ -18,6 +18,25 @@ Base.showerror(io::IO, err::CedarError) = println(io, err.msg)
 cedarthrow(err) = throw(WrappedCedarException(err))
 cedarerror(msg) = throw(CedarError(msg))
 
+"""
+    latest_global(mod, name)
+    latest_global(ref::GlobalRef)
+
+The value bound to `name` in `mod`, read in the latest world.
+
+Cadnip creates modules at runtime — a deck's builder module, a Verilog-A device
+module, a PDK `baremodule` — and then reads things back out of them, from a
+world that was frozen before they existed. A plain `getglobal` there is the
+Julia 1.12 warning "access to binding ... in a world prior to its definition
+world", and a future version will make it an error.
+
+Where the read can be deferred to a following top-level statement, do that
+instead — see `_eval_deck_into_module`. This is for the rest: reads that happen
+mid-expression, where there is no later statement to put them in.
+"""
+latest_global(mod::Module, name::Symbol) = Base.invokelatest(getglobal, mod, name)
+latest_global(ref::GlobalRef) = latest_global(ref.mod, ref.name)
+
 struct Default{T}
     val::T
 end

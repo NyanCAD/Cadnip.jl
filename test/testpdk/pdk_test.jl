@@ -203,6 +203,35 @@ end
         # rest lands on the resistor.
         @test 0.3 < sol[:out] < 0.8
     end
+
+    @testset ".model card with an arithmetic expression" begin
+        # `is='2e-14 - 1e-14'` hoists to a module-level `const`, so the `-` runs
+        # when the PDK `baremodule` is defined. A `baremodule` has no `Base`, so
+        # this is the case that catches a missing operator import — and it fails
+        # at *definition* time, where the subcircuit bodies above would only fail
+        # when called.
+        @test isdefined(typical, :pdk_diode_scaled)
+
+        function build_scaled_diode_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                Cadnip.MNA.reset_for_restamping!(ctx)
+            end
+            lens = ParamLens(params)
+
+            inp = get_node!(ctx, :inp)
+            out = get_node!(ctx, :out)
+
+            typical.diode_scaled_mna_builder(lens, spec, t, ctx, inp, out, (;), x)
+            stamp!(Cadnip.MNA.Resistor(1000.0), ctx, out, 0)
+            stamp!(VoltageSource(1.0), ctx, inp, 0)
+            return ctx
+        end
+
+        sol = dc!(MNACircuit(build_scaled_diode_test))
+        @test 0.3 < sol[:out] < 0.8
+    end
 end
 
 @testset "VA Device Precompilation" begin
