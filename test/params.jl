@@ -425,6 +425,47 @@ X1 drain g mixedstage
 Rd vdd drain 10k
 """i
 
+# A `.subckt` reading a parent `.param` it has no local default for. The name is
+# not a formal, not a local `.param`, and the instance line does not set it — the
+# only place it can come from is the enclosing scope.
+const inherit_ckt = sp"""
+.param rtop=1k
+.subckt idivider a out b
+R1 a out {rtop}
+R2 out b 1k
+.ends
+V1 in 0 DC 3
+X1 in vout 0 idivider
+"""i
+
+# The same, two levels down, with the middle subcircuit declaring nothing: the
+# name has to be forwarded through a scope that never mentions it.
+const inherit2_ckt = sp"""
+.param rtop=1k
+.subckt ileaf a out b
+R1 a out {rtop}
+R2 out b 1k
+.ends
+.subckt imid a out b
+X1 a out b ileaf
+.ends
+V1 in 0 DC 3
+X1 in vout 0 imid
+"""i
+
+# An inherited name feeding a *source* value rather than a device value, and
+# mixed into an expression with a `.subckt` formal the instance line sets.
+const inherit_src_ckt = sp"""
+.param vamp=2.0
+.param rbase=1k
+.subckt iload p n mult=1
+V2 p mid DC vamp
+R1 mid n 'rbase*mult'
+.ends
+X1 top 0 iload mult=3
+R2 top 0 1k
+"""i
+
 @testset "netlist .param overrides" begin
     # Baseline: the netlist's own values.
     @test dc!(MNACircuit(divider_ckt))[:out] ≈ 0.5
@@ -589,6 +630,34 @@ end
 
     # A `.subckt` default the instance line does not set stays overridable.
     @test dc!(MNACircuit(hier_ckt; x1=(r2val=3e3,)))[:vout] ≈ 1.8
+end
+
+@testset "subcircuits inherit the parent's .param" begin
+    # A name a `.subckt` reads but does not declare is the parent's. It reaches
+    # the builder as `parent_params` and is bound as a local there, so a device
+    # value inside the subcircuit can spell it bare — it used to be emitted as a
+    # free variable and raise `UndefVarError: rtop` on the first solve.
+    @test dc!(MNACircuit(inherit_ckt))[:vout] ≈ 1.5
+
+    # It is still the parent's parameter, so the parent's overrides move it.
+    @test dc!(MNACircuit(inherit_ckt; rtop=3e3))[:vout] ≈ 0.75
+    @test dc!(alter(MNACircuit(inherit_ckt); rtop=3e3))[:vout] ≈ 0.75
+    cs = CircuitSweep(inherit_ckt, Sweep(rtop = [1e3, 3e3]))
+    @test [sol[:vout] for (_, sol) in dc!(cs)] ≈ [1.5, 0.75]
+
+    # ...and only the parent's: the instance declares no such knob.
+    @test_throws ArgumentError MNACircuit(inherit_ckt; x1=(rtop=3e3,))
+
+    # Through a middle subcircuit that never mentions the name itself.
+    @test dc!(MNACircuit(inherit2_ckt))[:vout] ≈ 1.5
+    @test dc!(MNACircuit(inherit2_ckt; rtop=3e3))[:vout] ≈ 0.75
+
+    # A source value inside the subcircuit, and an inherited name multiplied by
+    # a formal the instance line sets: V(top) = vamp · 1k/(rbase·mult + 1k).
+    @test dc!(MNACircuit(inherit_src_ckt))[:top] ≈ 0.5
+    @test dc!(MNACircuit(inherit_src_ckt; vamp=5.0))[:top] ≈ 1.25
+    @test dc!(MNACircuit(inherit_src_ckt; rbase=3e3))[:top] ≈ 0.2
+    @test dc!(MNACircuit(inherit_src_ckt; x1=(mult=1,)))[:top] ≈ 1.0
 end
 
 @testset "parameter/instance name collision" begin

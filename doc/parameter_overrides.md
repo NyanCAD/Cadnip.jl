@@ -2,7 +2,7 @@
 
 How a netlist `.param`, a `.subckt` formal parameter, or a builder keyword
 reaches the thing it names — what the design covers, the one piece of it that is
-unimplemented, and three adjacent defects, sized against the code so the next
+unimplemented, and the adjacent defects, sized against the code so the next
 session doesn't re-derive them or walk into the traps.
 
 Context: `src/spectre.jl` (the lens), `src/spc/codegen.jl` (parameter
@@ -67,10 +67,10 @@ wrapped in a subcircuit whose W/L are formal parameters as in
 instance line spells out, two levels down.
 
 An override that names nothing no longer passes silently (§2). One piece of the
-design is still unimplemented — device instance parameters (§1). The two
-sections after those are adjacent defects, not parts of this design: §3 and §4
-are independent bugs that happened to surface nearby, both since fixed and kept
-here for the reasoning.
+design is still unimplemented — device instance parameters (§1). The sections
+after those are adjacent defects, not parts of this design: §3, §4 and §5 are
+independent bugs that happened to surface nearby, all since fixed and kept here
+for the reasoning.
 
 ## 1. Raw device instance parameters are not overridable (unfinished here)
 
@@ -310,8 +310,9 @@ predates this change and is a much larger topic than model cards.
 
 The two copies of the card-lowering logic — `codegen_toplevel_models!` and the
 `codegen_mna!` body, previously verbatim duplicates — are now one
-`cg_model_value!`, parameterized by how a value expression is lowered. That hook
-is what lets a subcircuit-local card read the parent's `.param` too.
+`cg_model_value!`. It took a hook for how a value expression is lowered, so that
+a subcircuit-local card could reach the parent's `.param` through
+`parent_params`; §5 binds those names as locals instead, and the hook is gone.
 
 Contracts in `test/params.jl` (`".model cards read .param"`): the card reads the
 netlist values, `MNACircuit(…; vt0=…)` / `alter` / a sweep axis all reach it, two
@@ -323,3 +324,64 @@ Not covered: a `.model` inside a `.lib` section reading a `.param` from the
 enclosing file, and the `make_mna_pdk_module` path, which parses model card
 values as literals (`tryparse`) and skips anything it cannot, rather than going
 through `cg_expr!` at all.
+
+## 5. A subcircuit reading the parent's `.param` (fixed — same family as §4)
+
+The general case of §4, and it failed the same way with no override in play.
+`.param rtop=1k` at the top level, `R1 a out {rtop}` inside a `.subckt` that
+declares no `rtop` of its own: `UndefVarError: rtop` on the first solve — while
+the value sat right there in the call that raised it.
+
+```
+idivider_mna_builder(…, parent_params::@NamedTuple{rtop::Float64}, …)
+```
+
+Every call site had always built `parent_params` from the callee's exposed
+names. The callee only ever *read* it in two places: a `.subckt` default
+expression (`foo=foo+2000`) and, since §4, a `.model` card propagated into it.
+Anything else in the body — a device value, a source value, an expression mixing
+an inherited name with a formal — was emitted as a bare identifier that resolved
+to nothing.
+
+So the fix is not a third redirect but binding them once. The builder
+destructures `parent_params` into locals at the top of its body, and every
+expression in the scope spells the name bare, exactly as it would at the top
+level. §4's `cg_val` hook and the `cg_scoped` branch that chose it are gone with
+it; `cg_expr_with_parent_params!` survives for the one case where the local and
+the parent's value genuinely differ — a self-referencing default, where `foo` on
+the right of `foo=foo+2000` means the parent's.
+
+`CodegenState` carries the bound names (`inherited_params`) so `_is_declared_param`
+can count them, which settles precedence the way a reader expects: an inherited
+`.param` outranks a `SpectreEnvironment` binding of the same name inside a
+subcircuit, just as a declared one does at the top level.
+
+### The set to bind is the transitive one, not the sema one
+
+The obvious set is the wrong one, and picking it leaves the two-level case still
+broken. A `.subckt` sema's `exposed_parameters` covers what its own body reads
+plus what subcircuits defined **inside** it read: `resolve_scopes!` resolves a
+callee through that scope's own `subckts` table, and a sibling defined at the top
+level is not in it. The call sites have always used
+`collect_exposed_parameters_*` instead — the transitive closure over callees —
+so a middle subcircuit that instantiates a sibling and never mentions the name
+itself *receives* it in `parent_params` and does not have it in
+`exposed_parameters`.
+
+Binding the sema set therefore fixed the one-level case and left the two-level
+one failing with `UndefVarError: rtop` in the middle builder. `codegen_mna_subcircuit`
+computes the same closure its callers do, which is by construction the field set
+of the `parent_params` it will be handed.
+
+That equality is also what let the three call sites collapse to one line. They
+used to split on whether the caller declared the name (bare) or inherited it
+(`parent_params.name`), with `isempty(subckt_semas)` standing in for "are we
+inside a subcircuit" at the Spectre site. Both cases are locals of the calling
+scope now, so all three just say `cg_expr!(state, name)`.
+
+Contracts in `test/params.jl` (`"subcircuits inherit the parent's .param"`): a
+device value one level down and two levels down through a subcircuit that never
+mentions the name, a source value, an inherited name multiplied by a formal the
+instance line sets, `MNACircuit`/`alter`/a sweep axis all reaching it at the
+parent, and the instance rejecting it as a knob of its own — it is the parent's
+parameter, so `x1=(rtop=…)` names nothing.

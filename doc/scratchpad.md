@@ -100,7 +100,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Codegen: one world-age warning shape left — reading a VA device type out of its own module (`BasicVAResistor_module.BasicVAResistor` and two more); tracing it needs `--depwarn=error`, which first needs the `OrderedDict` deprecation in `SemaResult(ast)` fixed — design: `doc/codegen_unification.md` §3
 - [x] Bug: an F/H card inside a `.subckt` looks its sense source up unprefixed — fixed by scoping the sense name at the `get_current_idx` call sites
 - [x] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
-- [ ] Bug: a `.subckt` body reading a parent `.param` it has no local default for emits it as a free variable, so it raises `UndefVarError` (`parent_params` is passed to the builder and never destructured)
+- [x] Bug: a `.subckt` body reading a parent `.param` it has no local default for raised `UndefVarError` — the builder now binds `parent_params` as locals — design: `doc/parameter_overrides.md` §5
 - [ ] Noise N3 rest: `.noise` netlist card driven through the high-level API
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise

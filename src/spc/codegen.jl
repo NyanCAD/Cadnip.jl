@@ -2,7 +2,16 @@ using StaticArrays
 
 struct CodegenState
     sema::SemaResult
+    # Whether this scope is a `.subckt` body: its parameters are function kwargs
+    # and its lens is the `lens` argument, where a top-level builder reads the
+    # `params` argument.
+    is_subcircuit::Bool
+    # The names this scope does not declare but its builder binds anyway, from
+    # the `parent_params` it is called with. Empty at the top level, where such
+    # a name is left free for the environment (`M_1_PI`) to resolve.
+    inherited_params::OrderedSet{Symbol}
 end
+CodegenState(sema::SemaResult) = CodegenState(sema, false, OrderedSet{Symbol}())
 
 # LString and LSymbol are defined in spectre.jl
 # LineNumberNode is defined in SpectreNetlistCSTParser
@@ -199,16 +208,19 @@ _option_value_node(p::SNode{SP.TempStatement}) = p.temp
     _is_declared_param(state, id) -> Bool
 
 Whether the builder for this scope binds a local named `id` — a `.param` of the
-scope or a `.subckt` formal. Those are the names that must stay bare so they
-resolve to that local.
+scope, a `.subckt` formal, or a name inherited from the enclosing scope. Those
+are the names that must stay bare so they resolve to that local.
 
-`exposed_parameters` deliberately does *not* count: a name inherited from an
-enclosing scope is left free by codegen (`parent_params` is passed but never
-destructured), so treating it as a parameter would only turn a name the
-environment could have resolved into an `UndefVarError`.
+An *inherited* name counts too, wherever codegen binds one: a `.subckt` builder
+destructures `parent_params` into locals, so such a name resolves there like any
+other parameter, and takes precedence over an environment binding of the same
+name exactly as a declared one does. At the top level `inherited_params` is
+empty, and leaving such a name free is what lets the environment resolve it
+(`M_1_PI`) or the load fail on a typo.
 """
 _is_declared_param(state::CodegenState, id::Symbol) =
-    haskey(state.sema.params, id) || id in state.sema.formal_parameters
+    haskey(state.sema.params, id) || id in state.sema.formal_parameters ||
+    id in state.inherited_params
 
 """
     _spectre_env_binding(id) -> Symbol or nothing
@@ -376,8 +388,8 @@ scope as a `const` (see `codegen_toplevel_models!`), where it is shared by the
 top-level builder and every subcircuit builder and infers concretely. A card
 that reads a `.param` cannot live there — the parameter is a local of the
 builder function, so the hoisted `const` would fail to resolve it at load time.
-Those cards become module-level factory functions of exactly these names
-instead, called once per builder pass.
+Those cards are emitted inline in every builder that binds them instead, after
+that scope's parameter assignments.
 
 Only names some scope actually declares count. An identifier that is *not* a
 declared parameter (a bare `type=n` value, a function name) is left alone, so
@@ -1787,24 +1799,17 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     # Get the callee's sema to find exposed_parameters
     callee_sema = get(subckt_semas, subckt_name, nothing)
 
-    # Build parent_params NamedTuple with all exposed parameters from caller's scope
-    # This is passed to the subcircuit so it can evaluate default expressions
-    # For exposed params that the caller defines locally, reference them directly
-    # For exposed params that come from caller's parent_params, forward them
+    # Build parent_params NamedTuple with all exposed parameters from caller's
+    # scope. This is passed to the subcircuit so it can resolve the names it
+    # reads but does not declare. Each is named in *this* scope, where it is a
+    # local either way - declared here, or inherited from this scope's own
+    # parent and bound at the top of this builder.
     parent_param_pairs = Expr[]
     if callee_sema !== nothing
         # Collect exposed_parameters transitively using subckt_semas as the lookup
         all_exposed = collect_exposed_parameters_from_dict(subckt_semas, callee_sema)
-        # Get the set of locally-defined params in the caller
-        locally_defined = Set{Symbol}(keys(state.sema.params))
         for name in all_exposed
-            if name in locally_defined
-                # Param is locally defined in caller - reference it directly
-                push!(parent_param_pairs, Expr(:(=), name, name))
-            else
-                # Param comes from caller's parent_params - forward it
-                push!(parent_param_pairs, Expr(:(=), name, :(parent_params.$name)))
-            end
+            push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
         end
     end
 
@@ -2148,16 +2153,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             else
                 collect_exposed_parameters_recursively(state.sema, ssema)
             end
-            locally_defined = Set{Symbol}(keys(state.sema.params))
-            parent_param_pairs = Expr[]
-            for name in all_exposed
-                if isempty(subckt_semas) || name in locally_defined
-                    push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
-                else
-                    # Forward from caller's parent_params when we're inside a subckt.
-                    push!(parent_param_pairs, Expr(:(=), name, :(parent_params.$name)))
-                end
-            end
+            parent_param_pairs = Expr[
+                Expr(:(=), name, cg_expr!(state, name)) for name in all_exposed]
             parent_params_expr = if isempty(parent_param_pairs)
                 :((;))
             else
@@ -2166,11 +2163,10 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
 
             # Chain `_mna_prefix_` with this instance's name so nested subckt
             # internals get uniquely scoped flat names (:outer_inner_mid etc).
-            # Pick the lens variable name based on is_subcircuit context: when
-            # codegen runs inside a subckt body, `lens` is the parameter;
-            # at top level, `var"*lens#"` is the gensym'd lens variable.
+            # Inside a subckt body `lens` is the parameter; at top level,
+            # `var"*lens#"` is the gensym'd lens variable.
             chained_prefix_expr = _scoped_sym_expr(instance_name)
-            lens_var = isempty(subckt_semas) ? Symbol("*lens#") : :lens
+            lens_var = state.is_subcircuit ? :lens : Symbol("*lens#")
             return quote
                 let subckt_lens = Base.getproperty($lens_var, $(QuoteNode(instance_name)))
                     $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
@@ -2767,21 +2763,20 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 end
 
 """
-    cg_model_value!(state, model_ast, model_ref; cg_val=…) -> Union{Expr, Nothing}
+    cg_model_value!(state, model_ast, model_ref) -> Union{Expr, Nothing}
 
 Build the right-hand side a `.model` card lowers to: a NamedTuple for an `r`
 card, a `spicecall(ParsedModel, …)` for a VA/registry model. Returns `nothing`
 for a card that needs no binding of its own (a legacy `SpectreEnvironment`
 device, which the instance site constructs directly).
 
-`cg_val` lowers a parameter's value expression. It is a hook because the same
-card is lowered into different scopes: at module level and in a top-level
-builder its identifiers are plain locals, while inside a subcircuit builder a
-name the subcircuit doesn't declare is the parent's and has to be read from
-`parent_params`.
+The same card is lowered into different scopes — module level, the top-level
+builder, a subcircuit builder — but its identifiers are locals of whichever
+scope binds it, including the ones a subcircuit inherits from its parent
+(`codegen_mna_subcircuit` binds those from `parent_params`).
 """
-function cg_model_value!(state::CodegenState, model_ast, model_ref;
-                         cg_val = node -> cg_expr!(state, node))
+function cg_model_value!(state::CodegenState, model_ast, model_ref)
+    cg_val(node) = cg_expr!(state, node)
     typ = LSymbol(model_ast.typ)
     if typ == :r
         # Resistor model: a plain NamedTuple of the card's parameters.
@@ -2910,7 +2905,7 @@ function codegen_toplevel_models!(state::CodegenState)
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, deferred_models=Set{Symbol}())
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, deferred_models=Set{Symbol}())
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2918,8 +2913,9 @@ Returns code that builds an MNAContext with all devices stamped.
 `skip_nets` specifies nets that should NOT have get_node! generated
 (used for subcircuit ports which are passed in as arguments).
 
-When `is_subcircuit=true`, params are function kwargs and lens is named `lens`.
-When `is_subcircuit=false` (top-level), params come from the `params` argument.
+For a subcircuit scope (`state.is_subcircuit`), params are function kwargs and
+the lens is the `lens` argument; at the top level params come from the `params`
+argument.
 
 `subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
 to look up exposed_parameters when generating subcircuit instance calls.
@@ -2931,10 +2927,11 @@ read a `.param`; those are emitted here regardless, a value that depends on a
 parameter being per-scope by construction. A subcircuit passes neither and emits
 every card it can see.
 """
-function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
+function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
                       subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
                       models_at_toplevel::Bool=false,
                       deferred_models::Set{Symbol}=Set{Symbol}())
+    is_subcircuit = state.is_subcircuit
     block = Expr(:block)
     ret = block
 
@@ -3065,17 +3062,13 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     #
     # A parameter a card reads may be one this scope does not declare - the
     # parent's, whether the card itself was written at the top level or inside
-    # this subcircuit. Those names are exposed parameters, reached through
-    # `parent_params`, exactly like a `.subckt` default expression that reads
-    # the parent scope.
-    cg_scoped(node) = is_subcircuit ?
-        cg_expr_with_parent_params!(state, node, state.sema.exposed_parameters) :
-        cg_expr!(state, node)
+    # this subcircuit. Inside a subcircuit builder those are locals like any
+    # other, bound from `parent_params` by `codegen_mna_subcircuit`.
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
         models_at_toplevel && !(model_name in deferred_models) && continue
         (_, def) = last(defs)  # Use most recent definition
-        value = cg_model_value!(state, def.val[1], def.val[2]; cg_val=cg_scoped)
+        value = cg_model_value!(state, def.val[1], def.val[2])
         value === nothing && continue
         push!(block.args, :($(cg_model_name!(state, model_name)) = $value))
     end
@@ -3216,7 +3209,13 @@ to look up exposed_parameters when this subcircuit calls other subcircuits.
 """
 function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
                                  subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
-    state = CodegenState(sema)
+    # What this builder is called with: the names this scope reads but does not
+    # declare, *and* the ones the subcircuits it instantiates need, since every
+    # call site builds `parent_params` from the same transitive collection.
+    # (A `.subckt` sema only knows the callees defined inside itself, so its own
+    # `exposed_parameters` stops at a sibling's needs - the collector doesn't.)
+    inherited = collect_exposed_parameters_from_dict(subckt_semas, sema)
+    state = CodegenState(sema, true, inherited)
 
     # Extract ports from AST
     subckt_ports = extract_subcircuit_ports(sema)
@@ -3274,9 +3273,24 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         end
     end
 
+    # Bind each inherited name as a local, so anything written inside the
+    # `.subckt` — a device value, a source value, a `.model` card — can spell it
+    # bare exactly as it would at the top level. Names this scope only passes
+    # further down are bound too and simply go unused.
+    #
+    # A name this scope *declares* is not inherited even when a parent declares
+    # it as well: the nearest declaration wins, and it is the local resolved by
+    # `param_resolution_exprs` below. A self-referencing default (`.subckt inner
+    # a b foo=foo+2000`) puts `foo` in both sets, and the parent's value reaches
+    # it through `cg_expr_with_parent_params!` above — binding a local here would
+    # clobber the instance-line kwarg.
+    inherited_param_exprs = Expr[
+        :($name = Base.getfield(parent_params, $(QuoteNode(name))))
+        for name in inherited if !haskey(sema.params, name)]
+
     # Generate body, skipping get_node! for ports (they're passed as args)
-    # is_subcircuit=true means params are function kwargs and lens is named `lens`
-    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas)
+    # `state.is_subcircuit` means params are function kwargs and lens is named `lens`
+    body = codegen_mna!(state; skip_nets=subckt_ports, subckt_semas=subckt_semas)
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
@@ -3284,7 +3298,8 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
-            # Make parent_params available for default expression evaluation
+            # The enclosing scope's parameters, then this scope's own
+            $(inherited_param_exprs...)
             $(param_resolution_exprs...)
             $body
             return nothing
