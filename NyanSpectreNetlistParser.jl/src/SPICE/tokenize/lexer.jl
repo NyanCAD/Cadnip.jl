@@ -541,7 +541,7 @@ function lex_identifier(l::Lexer{IO_t,T}, c) where {IO_t,T}
         end
         if t.is_key
             # some dot commands are implicit expressions
-            if l.last_nontriv_token == DOT && t.value in (PARAMETERS, IC, MEASURE, PRINT, IF, ELSEIF)
+            if l.last_nontriv_token == DOT && t.value in (PARAMETERS, IC, MEASURE, PRINT, NOISE, IF, ELSEIF)
                 push!(l.lexing_expression_stack, t.value)
             end
             return emit(l, t.value)

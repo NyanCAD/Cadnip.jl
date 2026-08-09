@@ -55,6 +55,7 @@ function parse_dot(ps, dot)
         IC   => parse_ic(ps, dot)
         MEASURE => parse_measure(ps, dot)
         TRAN => parse_tran(ps, dot)
+        NOISE => parse_noise(ps, dot)
         PRINT => parse_print(ps, dot)
         TEMP => parse_temp(ps, dot)
         WIDTH => parse_width(ps, dot)
@@ -459,6 +460,19 @@ function parse_ac(ps, dot)
     @trynext command = parse_ac_command(ps)
     @trynext nl = accept_newline(ps)
     return EXPR(ACStatement(dot, kw, command, nl))
+end
+
+function parse_noise(ps, dot)
+    @trysetup NoiseStatement dot
+    @trynext kw = take_kw(ps, NOISE)
+    @trynext output = parse_expression(ps)   # v(out) / v(out, ref) / i(vsrc)
+    @trynext src = take_identifier(ps)
+    @trynext sweep = parse_ac_command(ps)
+    pts_per_summary = if !eol(ps)
+        @trynext parse_expression(ps)
+    end
+    @trynext nl = accept_newline(ps)
+    return EXPR(NoiseStatement(dot, kw, output, src, sweep, pts_per_summary, nl))
 end
 
 function parse_ac_command(ps)
