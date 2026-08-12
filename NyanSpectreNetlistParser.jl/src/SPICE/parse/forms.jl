@@ -220,6 +220,21 @@ struct ACStatement <: AbstractASTNode
     nl::EXPR{Notation}
 end
 
+# .NOISE <output> <input source> <dec|oct|lin> <n> <fstart> <fstop> [pts_per_summary]
+#
+# `output` is an output expression like `v(out)` or `v(out, ref)`, spelled the
+# same way `.print` spells one. The frequency sweep is an `ACCommand`, so
+# `.noise v(out) v1 dec 10 1 100k` and `.ac dec 10 1 100k` share a shape.
+struct NoiseStatement <: AbstractASTNode
+    dot::EXPR{Notation}
+    kw::EXPR{Keyword}
+    output::EXPR
+    src::EXPR{Identifier}
+    sweep::EXPR{ACCommand}
+    pts_per_summary::Union{Nothing, EXPR}
+    nl::EXPR{Notation}
+end
+
 struct IncludeStatement <: AbstractASTNode
     dot::EXPR{Notation}
     kw::EXPR{Keyword}

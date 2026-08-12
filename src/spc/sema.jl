@@ -63,10 +63,23 @@ mutable struct SemaResult
     imps::Union{Nothing, Module, Dict{Symbol, Module}}
 end
 
+# Each empty container is spelled at its field's own type. The bare `Dict()`
+# this used to pass for `params`/`instances` is a `Dict{Any,Any}`, and
+# converting one to an `OrderedDict` is deprecated in OrderedCollections — so
+# every `SemaResult` construction emitted a deprecation warning, which is what
+# stood between the codegen work and running the suite under `--depwarn=error`
+# (`doc/codegen_unification.md` §3).
 function SemaResult(ast::SNode)
     SemaResult(ast, nothing, nothing, nothing, UInt64(0), SpectreCircuit,
-        Vector{Pair{UInt, MaybeConditional{SNode}}}(), Vector{UInt}(),
-        Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Dict(), Vector(),
+        Vector{Pair{UInt, MaybeConditional{SNode}}}(), Int[],
+        Dict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}(),
+        OrderedDict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}(),
+        Dict{Symbol, Vector{Pair{UInt, MaybeConditional{Pair{SNode, GlobalRef}}}}}(),
+        Dict{Symbol, Vector{Pair{UInt, MaybeConditional{SemaResult}}}}(),
+        Dict{Symbol, Vector{Union{Pair{UInt, SemaSpec}, Pair{UInt, SemaResult}}}}(),
+        Dict{Symbol, Vector{Pair{UInt, SNode}}}(),
+        OrderedDict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}(),
+        Vector(),
         OrderedSet{Symbol}(), OrderedSet{Symbol}(), OrderedSet{Symbol}(),
         OrderedSet{Symbol}(),
         Int[], Module[], nothing)
@@ -535,14 +548,16 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
             end
         elseif isa(stmt, SNode{SP.Tran}) || isa(stmt, SNode{SP.EndStatement}) ||
                isa(stmt, SNode{SP.ACStatement}) || isa(stmt, SNode{SP.DCStatement}) ||
+               isa(stmt, SNode{SP.NoiseStatement}) ||
                isa(stmt, SNode{SP.PrintStatement}) || isa(stmt, SNode{SP.WidthStatement}) ||
                isa(stmt, SNode{SP.ICStatement}) || isa(stmt, SNode{SP.MeasurePointStatement}) ||
                isa(stmt, SNode{SP.MeasureRangeStatement}) ||
                isa(stmt, SNode{SP.DataStatement}) || isa(stmt, SNode{SP.CSParamStatement})
-            # Analysis (.ac/.dc/.tran), output (.print/.width/.meas), and
+            # Analysis (.ac/.dc/.tran/.noise), output (.print/.width/.meas), and
             # initial-condition/data (.ic/.data/.csparam) control cards carry no
             # information the MNA netlist builder consumes. Ignore them rather
-            # than crashing; the frequency/time sweep is driven by ac!/tran!.
+            # than crashing; Julia is the simulation API, so the analysis is
+            # driven by ac!/tran!/noise! and not by the deck.
         elseif isa(stmt, SNode{SP.IfBlock})
             depth = length(scope.condition_stack)
             for case in stmt.cases

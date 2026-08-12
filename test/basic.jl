@@ -636,6 +636,11 @@ end
     for card in (
         ".ac dec 10 1 1e6",
         ".dc V1 0 5 0.1",
+        # `.noise` used to fail one step earlier than the others — it had no
+        # branch in the parser's dot dispatch, so the card came back an error
+        # node and the deck would not load at all.
+        ".noise v(out) V1 dec 10 1 1e6",
+        ".noise v(out,vcc) V1 oct 3 10 1k 5",
         ".print dc v(out)",
         ".width out=80",
         ".ic v(out)=1",

@@ -14,9 +14,9 @@ MOSFET channel thermal+flicker) *and* from Verilog-A `white_noise`/`flicker_nois
 which means every VADistiller model's full SPICE3 noise model — resistor, diode,
 BJT, MOS1/2/3/6/9, JFET, MESFET, BSIM3/BSIM4 — is live. The builtin flicker
 sources register through the very same `register_flicker_noise!` entry point the
-VA lowering uses, so there is one noise code path, not two. The remaining work is
-the `.noise` netlist card surface and the ngspice cross-validation (N4). The
-scaffolding this builds on:
+VA lowering uses, so there is one noise code path, not two. N3 is done — a
+`.noise` card is not a surface Cadnip drives (see below) — so the remaining work
+is the ngspice cross-validation (N4). The scaffolding this builds on:
 
 - `src/ac.jl` — the AC path builds a linearized descriptor state-space system
   (`E·dx = A·x + B·u, y = C·x`) at the DC operating point, which is exactly the
@@ -234,7 +234,21 @@ high-level API.
   flattens to the bare `4kTR` because the gain pole cancels the noise-shaping
   pole (`test/noise.jl`).
 
-  **Still open:** the `.noise` netlist card driven through the high-level API.
+  **The `.noise` card is not an analysis surface, by decision.** The roadmap
+  used to end with "the `.noise` netlist card driven through the high-level
+  API", i.e. `noise!(circuit)` taking its output, input source and grid from a
+  `.noise` card in the deck. That is not the direction: **Julia is the
+  simulation API.** A netlist describes a circuit; what to run on it is Julia
+  code, which is what makes an analysis composable with sweeps, optimization
+  and everything else in the ecosystem. Reading the run out of the deck would
+  mint a second, weaker way to say the same thing — one that cannot express a
+  parameterized grid, and that goes stale the moment a sweep overrides the
+  parameters it was written against.
+
+  The card still has to *parse*, though, which it did not: `.noise` had no
+  branch in the SPICE parser's dot dispatch, so a real ngspice deck carrying one
+  failed to load at all — unlike `.ac`/`.dc`/`.tran`, which parse and are
+  ignored. That is fixed; `.noise` now joins the control cards sema skips.
 - **N4 — Tests + validation.** Netlist tests (thermal noise of an RC = `4kT·R`
   shaped by the RC pole; op-amp input-referred noise) cross-checked against
   ngspice `.noise`, driven through the high-level API.

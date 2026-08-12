@@ -300,3 +300,36 @@ let conditional_after_binop = """
     ast = SPICENetlistParser.SPICENetlistCSTParser.parse(conditional_after_binop)
     @test ast.stmts[3].params[1].val.operand.inner.expr.form isa SPICENetlistParser.SPICENetlistCSTParser.TernaryExpr
 end
+
+# .noise: an output expression, an input source, and an AC-shaped frequency
+# sweep, with the optional points-per-summary trailing it.
+let noise_deck = """
+* Noise cards
+v1 in 0 dc 0 ac 1
+r1 in out 1k
+.noise v(out) v1 dec 10 1 100k
+.noise v(out,ref) v1 lin 100 1 1meg 5
+.noise i(v1) v1 oct 3 10 1k
+"""
+    ast = SPICENetlistParser.SPICENetlistCSTParser.parse(noise_deck)
+    stmts = ast.expr.form.stmts
+    for i in 4:6
+        @test stmts[i].form isa SPICENetlistParser.SPICENetlistCSTParser.NoiseStatement
+    end
+
+    single = ast.stmts[4]
+    @test single.output.expr.form isa SPICENetlistParser.SPICENetlistCSTParser.FunctionCall
+    @test String(single.output.id) == "v"
+    @test String(single.src) == "v1"
+    @test String(single.sweep.srcname) == "dec"
+    @test String(single.sweep.n) == "10"
+    @test String(single.sweep.fstart) == "1"
+    @test String(single.sweep.fstop) == "100k"
+    @test single.pts_per_summary === nothing
+
+    differential = ast.stmts[5]
+    @test length(collect(differential.output.args)) == 2
+    @test String(differential.pts_per_summary) == "5"
+
+    check_roundtrip(noise_deck)
+end
