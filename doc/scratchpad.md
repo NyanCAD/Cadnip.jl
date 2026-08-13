@@ -104,3 +104,17 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Noise N3 rest: dropped — Julia is the simulation API, a deck does not drive an analysis; `.noise` only had to stop failing to parse — design: `doc/noise_analysis_design.md` N3
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
+- [ ] Bug: a `.temp`/`.options temp` card outranks the caller's spec, so a temperature sweep over a carded deck returns one point forever — `doc/FINDINGS.rst` §1
+- [ ] Bug: the card's spec rebinding carries `temp`/`mode` only, defaulting `tnom`/`gmin`/`gshunt`/`srcFact`/`time` and the four tolerances — `doc/FINDINGS.rst` §1
+- [ ] Bug: `with_temp(::MNACircuit, T)` drops the same fields with no card in sight, where `with_temp(::MNASpec, T)` carries them — `doc/FINDINGS.rst` "Re-measured upstream"
+- [ ] Bug: `noise!` reads `circuit.spec.temp` while the devices see the builder's rebound spec, so a carded deck puts the two at different temperatures — `doc/FINDINGS.rst` §1
+- [ ] Bug: `temper()` in a `.param` reads a ScopedValue nothing on the MNA path writes (`test/basic.jl` `@test_broken`) — `doc/FINDINGS.rst` §3
+- [ ] Bug: override names go unchecked whenever the observed tree is empty, so in a deck with no `.param` and no subckt a typo is a silent no-op — `doc/FINDINGS.rst` §4
+- [ ] Codegen: `MNACircuit(path)` from inside a function body still trips 1.12's "access to binding in a world prior to its definition world" — `doc/FINDINGS.rst` "Re-measured upstream"
+- [ ] Cleanup: delete the unreachable pre-MNA codegen path (~410 lines of `codegen.jl`, plus `interface.jl`/`generated.jl`/`query.jl`), keeping `is_ambiguous`, `spicecall` and `UnimplementedDevice` — `doc/FINDINGS.rst` §6
+- [ ] Cleanup: `.options gmin=`/`scale=` are parsed and dropped on the MNA path — their only consumer is that dead codegen — `doc/FINDINGS.rst` §2
+- [ ] Cleanup: `test/sensitivity.jl` is a DAECompiler-era file no `runtests.jl` runs — port it to MNA or drop it
+- [ ] Documentation: the README's world-age example is right (re-measured on 1.11.9 and 1.12.6); add the one escape hatch, `invokelatest` around the *solve* — `doc/FINDINGS.rst` §5
+- [ ] UX: `node_names(sol)`/`branch_names(sol)`, because `keys(sol)` mixes node voltages, branch currents and device terminal currents — `doc/FINDINGS.rst` gaps
+- [ ] UX: hierarchical names flatten to `x1_out` and cannot be reversed, so no script names a subcircuit node portably — `doc/FINDINGS.rst` gaps
+- [ ] Features: the analysis gaps an external backend hits — `.dc` of a device, `.sens`, `.pz`, `.tf`, `.disto`, `.meas`, `.ic` values, `.nodeset`, `.ac oct`/`.ac lin`, transient SAVECURRENTS, AC op variables, `.noise v(a,b)` — `doc/FINDINGS.rst` gaps

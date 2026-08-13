@@ -360,3 +360,93 @@ The probes are small enough to inline.  With a Julia environment holding Cadnip:
 
     # finding 2
     isdefined(Cadnip, :SimOptions), isdefined(Cadnip, :options)      # (false, false)
+
+Re-measured upstream
+====================
+
+Every finding above was re-run against ``main`` @ af21755 (Cadnip 0.14.1) on
+Julia 1.11.9 and 1.12.6, to turn it into work items in
+:file:`doc/scratchpad.md`.  Four reproduce exactly, one reproduces with a
+different shape, one does not reproduce at all, and two new defects fell out of
+the probes.
+
+**1 — reproduces, all three consequences.**  The generated builder emits
+``spec = (MNASpec)(temp = 100.0, mode = spec.mode)`` for both ``.temp 100`` and
+``.options temp=100``, unguarded, where the Spectre-side ``codegen!`` guards
+each field with ``isdefault``.  Measured device-side on a Verilog-A resistor
+whose value tracks ``$temperature`` — a temperature sweep over a carded deck
+returns V(out) = 2.2289469775731474 at 0, 27, 100 *and* 200 °C, while the same
+deck without the card gives 2.6177 / 2.5000 / 2.2289 / 1.9407.  The noise PSDs
+reproduce to the last digit.
+
+**2 — reproduces.**  ``SimOptions`` and ``options`` are still undefined and
+still referenced only from the dead ``codegen!``.  On the MNA path
+``.options gmin=`` and ``.options scale=`` emit no spec rebinding at all.
+
+**3 — reproduces.**  V(out) = 3.937007874015748 under all five routes.
+``temper()`` reads the ``Cadnip.spec`` ``SimSpec`` ScopedValue
+(:file:`src/Cadnip.jl`), which nothing on the MNA path writes — and which the
+dead ``codegen!`` block would not have written either, since it targets
+``Cadnip.options``, a *different* (and nonexistent) ScopedValue.
+
+**4 — reproduces, but as one failure mode rather than three.**  With no
+``.param`` in the deck, the constructor no longer raises a ``MethodError``: it
+builds and the override is silently ignored, exactly as ``alter`` does.  That
+holds for a plain typo too — ``MNACircuit(deck; nosuch=1.0)`` returns the
+baseline 2.5.  Add any ``.param``, *or* any subcircuit instance, and both the
+constructor and ``alter`` raise the same ``ArgumentError``.  The rule is
+``observed_params`` (:file:`src/param_overrides.jl`) returning ``nothing`` for
+an empty tree, which skips the check entirely.
+
+**5 — does not reproduce.**  On 1.11.9 and 1.12.6 alike, in a script and at a
+real REPL, a same-statement build-and-solve fails; only two separate top-level
+statements work.  The README's claim is correct as written::
+
+    same-statement build+solve (top level)      MethodError
+    two statements (top level)                  OK, V(out) = 2.5
+    inside a function body                      MethodError
+    invokelatest wrapping build+solve           MethodError
+    invokelatest around the *solve* only        OK, V(out) = 2.5
+    build in one call, solve in the next        MethodError
+      ... as two separate top-level statements  OK, V(out) = 2.5
+
+The last two rows are the ones worth noting: a driver that builds in one call
+and solves in the next *does* need the two calls to be separate top-level
+statements, and the only escape hatch inside a function body is an
+``invokelatest`` placed around the solve — one wrapping the whole build+solve
+cannot work, since it fixes the world before the builder is eval'd.  That
+placement is the likely origin of the original measurement.
+
+**6 — reproduces.**  All four greps land, with 1-2 lines of drift from the
+numbers quoted above (``sema_assign_ids`` at 824, its recursion at 830, the
+``SpCircuit`` in its returned quote at 840; ``UnimplementedDevice`` at
+``sema.jl:345``).  One addition: ``Named``'s remaining uses are not only the
+``#= =#`` blocks in :file:`test/basic.jl` — :file:`test/sensitivity.jl` is a
+whole DAECompiler-era file using it live, and no ``runtests.jl`` runs it.
+
+**New: ``with_temp`` loses the spec on its own.**
+``with_temp(::MNACircuit, temp)`` (:file:`src/mna/solve.jl`) rebuilds the spec
+from ``temp`` and ``mode`` only, exactly like the card rebinding and with no
+card involved, while ``with_temp(::MNASpec, temp)`` a few lines away carries
+every field through.  Measured: a caller spec with ``gmin=1e-9, tnom=25.0,
+reltol=1e-4`` comes back out of ``with_temp(circuit, 100)`` as
+``gmin=1e-12, tnom=27.0, reltol=1e-3``.
+
+**New: a live 1.12 world-age warning.**  ``MNACircuit(path)`` called from
+inside any function body prints, on 1.12.6::
+
+    WARNING: Detected access to binding `#amp#deck.amp` in a world prior to
+    its definition world.
+    !!! This code will error in future versions of Julia.
+
+``_eval_deck_into_module`` (:file:`src/spc/interface.jl`) already evals through
+an ``Expr(:toplevel, …)`` specifically to avoid this, and the comment there says
+so; the mitigation holds for a bare top-level call but not for one made from a
+frozen world.
+
+**Gaps.**  Spot-checked and still open: ``acdec`` is the only grid
+(``acoct``/``aclin`` undefined); no ``node_names``/``branch_names`` accessor
+exists, and ``keys(sol)`` on the hierarchical deck returns ``[:out, :vcc,
+:I_v1, :i_x1_r1_p, :i_x1_r1_n, :i_r2_p, :i_r2_n]`` — node voltages, a branch
+current and device terminal currents in one list, separated only by the ``I_``
+/ ``i_`` prefixes; hierarchical names flatten with an underscore.
