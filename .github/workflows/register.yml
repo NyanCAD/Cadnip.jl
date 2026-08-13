@@ -40,7 +40,7 @@ jobs:
     name: Register bumped packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # detect-version-bumps.sh reads Project.toml at both ends of the push,
           # so the pushed-from commit has to be in the clone.
