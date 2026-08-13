@@ -209,19 +209,41 @@ import was the only mention. Deleted.
 Also gone: `_eval_builder_into_module`, dead since the deck-module change, whose
 body was the very `Base.eval`-then-`getfield` pattern above.
 
-**What is left.** One *shape* survives, in the `.hdl` Verilog-A path: reading a
-device type out of the module that defines it. `test/basic.jl` went from
-eighteen warnings across four distinct bindings to six across one
-(`BasicVAResistor_module.BasicVAResistor`); the full suite prints eight, at three
-VA modules — `BasicVAResistor`, `TM2D`, `TMRoundTrip` — which is that one shape
-at three decks, not three separate problems.
+**What was left (now fixed).** One *shape* survived, in the `.hdl` Verilog-A
+path: reading a device type out of the module that defines it. `test/basic.jl`
+went from eighteen warnings across four distinct bindings to six across one
+(`BasicVAResistor_module.BasicVAResistor`); the full suite printed eight, at
+three VA modules — `BasicVAResistor`, `TM2D`, `TMRoundTrip` — which was that one
+shape at three decks, not three separate problems.
 
-It is not any of the reads listed above; those are wrapped, and the count fell
-when they were. It did not yield to inspection either. Localising it wants a
-stack trace, which means `--depwarn=error`, which currently dies first on an
-unrelated deprecation: `SemaResult(ast)` passes `Dict()` for the `params` and
-`instances` fields, which are `OrderedDict`. Fixing that constructor is the way
-in. Filed on the scratchpad.
+It was not any of the reads listed above; those were wrapped, and the count
+fell when they were. It did not yield to inspection either — localising it
+needed a stack trace, which meant `--depwarn=error`, which used to die first on
+an unrelated deprecation (`SemaResult(ast)` passing `Dict()` for `OrderedDict`
+fields, since fixed).
+
+With that blocker gone, `--depwarn=error` on `test/basic.jl` didn't print the
+predicted warning-turned-error at all — it died somewhere else first, with a
+plain `KeyError: key :basicvaresistor not found` out of `resolve_subckt`, no
+world-age wording anywhere near it. `cg_mna_instance!` (and three siblings that
+repeat the same lookup for VCVS/VCCS/subcircuit contexts) detect a `.hdl`
+instance with `isdefined(hdl_mod, subckt_name)`, ahead of the `getfield` reads
+this section already fixed. `isdefined` doesn't print the binding-partition
+warning `getfield`/`getglobal` do — it just answers against the calling frame's
+world, silently, and for a device module defined earlier in the very same
+codegen call that answer can still be `false`. So the VA-module branch was
+skipped, codegen fell through to "this must be a subcircuit", and *that*
+failed loudly because no subcircuit by that name exists. Worse than the reads
+this section already covered: those at least warn before they mislead.
+
+Ten call sites had the pattern (`codegen.jl:814,1594,1601,1734,1742,2067,2074,
+2454,2950,3456`), all `isdefined(hdl_mod, name)` immediately gating a `GlobalRef`
+or `latest_global` read of that same name. A new `latest_isdefined(mod, name)`
+in `src/util.jl` (`Base.invokelatest(isdefined, mod, name)`, the same shape as
+`latest_global`) replaces all ten. `test/basic.jl`, `test/mna/table_model.jl`
+(the `TM2D`/`TMRoundTrip`/`TM1D` fixtures) and `test/mna/vadistiller.jl` now run
+clean under `--depwarn=error` — no warnings, no errors — and `test/mna/core.jl`
+and `test/mna/va.jl` are unaffected under the normal flags.
 
 ## 4. Related: `sp"..."` / `spc"..."` inside a function body
 

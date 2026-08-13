@@ -811,7 +811,7 @@ function va_device_type(state::CodegenState, model_sym::Symbol)
     # Check imported_hdl_modules (for precompiled models like psp103n)
     if model_sym in state.sema.exposed_models
         for hdl_mod in state.sema.imported_hdl_modules
-            if isdefined(hdl_mod, model_sym)
+            if latest_isdefined(hdl_mod, model_sym)
                 val = latest_global(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT} - extract the inner type
@@ -1591,14 +1591,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     va_module_ref = nothing
     va_hdl_mod = nothing
     for hdl_mod in state.sema.imported_hdl_modules
-        if isdefined(hdl_mod, subckt_name)
+        if latest_isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
             va_hdl_mod = hdl_mod
             break
         end
         # Try original case (VA modules like Polar2Cartesian use CamelCase)
         model_orig = Symbol(String(instance.model))
-        if isdefined(hdl_mod, model_orig)
+        if latest_isdefined(hdl_mod, model_orig)
             va_module_ref = GlobalRef(hdl_mod, model_orig)
             va_hdl_mod = hdl_mod
             subckt_name = model_orig
@@ -1610,7 +1610,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         # This is a VA module instance, not a subcircuit
         # Build kwargs from explicit parameters
         # Need to adjust case since SPICE is case-insensitive but Julia is not
-        va_type = getfield(va_hdl_mod, subckt_name)
+        va_type = latest_global(va_hdl_mod, subckt_name)
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
 
         explicit_kwargs = Expr[]
@@ -1731,7 +1731,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     va_hdl_mod = nothing
     va_type_name = subckt_name
     for hdl_mod in state.sema.imported_hdl_modules
-        if isdefined(hdl_mod, subckt_name)
+        if latest_isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
             va_hdl_mod = hdl_mod
             va_type_name = subckt_name
@@ -1739,7 +1739,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         end
         # Try original case (SPICE is case-insensitive but VA modules may be case-sensitive)
         orig_name = Symbol(String(instance.model))
-        if isdefined(hdl_mod, orig_name)
+        if latest_isdefined(hdl_mod, orig_name)
             va_module_ref = GlobalRef(hdl_mod, orig_name)
             va_hdl_mod = hdl_mod
             va_type_name = orig_name
@@ -1769,7 +1769,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         # For very large models (200+ parameters), use invokelatest to prevent the compiler
         # from attempting to compile the massive stamp! function inline. This adds ~3-4%
         # runtime overhead but prevents LLVM from blowing up with 90k+ IR statements.
-        va_type = getfield(va_hdl_mod, va_type_name)
+        va_type = latest_global(va_hdl_mod, va_type_name)
         is_large_model = fieldcount(va_type) >= 200
 
         if is_large_model
@@ -2064,14 +2064,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
         va_type_name = master_sym
         for hdl_mod in state.sema.imported_hdl_modules
             # Try both lowercase and original case
-            if isdefined(hdl_mod, master_sym)
+            if latest_isdefined(hdl_mod, master_sym)
                 va_module_ref = GlobalRef(hdl_mod, master_sym)
                 va_hdl_mod = hdl_mod
                 va_type_name = master_sym
                 break
             end
             master_orig = Symbol(String(instance.master))
-            if isdefined(hdl_mod, master_orig)
+            if latest_isdefined(hdl_mod, master_orig)
                 va_module_ref = GlobalRef(hdl_mod, master_orig)
                 va_hdl_mod = hdl_mod
                 va_type_name = master_orig
@@ -2098,7 +2098,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             # For very large models (200+ parameters), use invokelatest to prevent the compiler
             # from attempting to compile the massive stamp! function inline.
             local_name = QuoteNode(Symbol(name))
-            va_type = getfield(va_hdl_mod, va_type_name)
+            va_type = latest_global(va_hdl_mod, va_type_name)
             is_large_model = fieldcount(va_type) >= 200
 
             if is_large_model
@@ -2451,7 +2451,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     elseif model_sym in state.sema.exposed_models
         # Also try imported_hdl_modules for exposed models
         for hdl_mod in state.sema.imported_hdl_modules
-            if isdefined(hdl_mod, model_sym)
+            if latest_isdefined(hdl_mod, model_sym)
                 val = latest_global(hdl_mod, model_sym)
                 T = typeof(val)
                 # Handle ParsedModel{InnerT}
@@ -2947,7 +2947,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
         model_name = cg_model_name!(state, model)
         # Search for the model in imported HDL modules
         for hdl_mod in state.sema.imported_hdl_modules
-            if isdefined(hdl_mod, model)
+            if latest_isdefined(hdl_mod, model)
                 # Generate: model_name = HDLModule.model_name
                 push!(block.args, :($model_name = $(GlobalRef(hdl_mod, model))))
                 break
@@ -3453,7 +3453,7 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     for subckt_name in sema_result.exposed_subckts
         builder_name = Symbol(subckt_name, "_mna_builder")
         for hdl_mod in sema_result.imported_hdl_modules
-            if isdefined(hdl_mod, builder_name)
+            if latest_isdefined(hdl_mod, builder_name)
                 push!(subckt_builder_imports, :($builder_name = $(GlobalRef(hdl_mod, builder_name))))
                 break
             end

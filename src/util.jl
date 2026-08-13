@@ -37,6 +37,21 @@ mid-expression, where there is no later statement to put them in.
 latest_global(mod::Module, name::Symbol) = Base.invokelatest(getglobal, mod, name)
 latest_global(ref::GlobalRef) = latest_global(ref.mod, ref.name)
 
+"""
+    latest_isdefined(mod, name)
+
+`isdefined(mod, name)`, read in the latest world — the same rationale as
+`latest_global`. `isdefined` does not print the world-age warning `latest_global`
+guards against, so a stale-world call fails silently: it answers as of the
+calling frame's world, which for a module created earlier in the same codegen
+call (a `.hdl` device module, say) can still be `false` after the module has
+been fully defined. That false negative sends codegen down the wrong branch
+(e.g. treating a Verilog-A module instance as an unresolved subcircuit) with no
+warning at all — worse than the cases `latest_global` covers, which at least
+print before they mislead.
+"""
+latest_isdefined(mod::Module, name::Symbol) = Base.invokelatest(isdefined, mod, name)
+
 struct Default{T}
     val::T
 end

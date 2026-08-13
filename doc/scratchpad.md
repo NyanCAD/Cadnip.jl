@@ -97,7 +97,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
 - [x] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
 - [x] Codegen: clear the runtime warnings (world-age binding access, SciMLBase import) — design: `doc/codegen_unification.md` §3
-- [ ] Codegen: one world-age warning shape left — reading a VA device type out of its own module (`BasicVAResistor_module.BasicVAResistor` and two more); tracing it needs `--depwarn=error`, whose `OrderedDict` blocker in `SemaResult(ast)` is now fixed — design: `doc/codegen_unification.md` §3
+- [x] Codegen: last world-age warning shape — an `isdefined(hdl_mod, …)` gate on a `.hdl` device-type lookup answered against a stale world with no warning at all (worse than the `getfield` reads already fixed); `latest_isdefined` in `src/util.jl` replaces all ten call sites — `test/basic.jl`, `test/mna/table_model.jl`, `test/mna/vadistiller.jl` now run clean under `--depwarn=error` — design: `doc/codegen_unification.md` §3
 - [x] Bug: an F/H card inside a `.subckt` looks its sense source up unprefixed — fixed by scoping the sense name at the `get_current_idx` call sites
 - [x] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [x] Bug: a `.subckt` body reading a parent `.param` it has no local default for raised `UndefVarError` — the builder now binds `parent_params` as locals — design: `doc/parameter_overrides.md` §5
