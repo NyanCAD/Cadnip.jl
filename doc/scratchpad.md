@@ -104,3 +104,5 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Noise N3 rest: dropped — Julia is the simulation API, a deck does not drive an analysis; `.noise` only had to stop failing to parse — design: `doc/noise_analysis_design.md` N3
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
+- [x] Bug: a netlist `.temp`/`.option temp` card outranked a caller's explicit `MNASpec(temp=...)`/`with_temp(...)` and dropped the rest of `spec` (gmin, tnom, tolerances) on rebind — design/measurements: `doc/FINDINGS.rst` finding 1
+- [ ] `noise!` still disagrees with the devices when a `.temp` card sets the temperature and the caller passes no override at all — `circuit.spec` has no channel to receive the resolved value — `doc/FINDINGS.rst` finding 1 (residual)

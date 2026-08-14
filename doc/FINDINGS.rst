@@ -85,6 +85,19 @@ one does; carry the incoming spec's other fields through the rebinding; and give
 ``noise!`` the same temperature the builder ended up using rather than
 ``circuit.spec``.
 
+*Status*: the first two consequences are fixed. ``MNASpec`` has no
+``DefaultOr``-style ``temp`` field to guard with ``isdefault`` itself, so the
+rebinding now compares against ``MNA.DEFAULT_TEMP`` (the same 27 °C the field
+defaults to) instead — a caller-supplied spec that already differs from that
+default is treated as an explicit override and wins over the card; one that
+doesn't still lets the card apply. The rebinding goes through ``with_temp``, so
+``tnom``/``gmin``/``gshunt``/``srcFact``/tolerances (and the ``time`` field's
+type, needed for ForwardDiff duals) survive it. The third consequence — a
+netlist-only card (no caller override at all) still leaves ``circuit.spec.temp``
+at 27 °C, so ``noise!`` disagrees with the devices in exactly that case — is
+unchanged; fixing it needs ``circuit.spec`` itself to carry the resolved
+temperature, which the codegen has no channel back to today.
+
 2. ``Cadnip.SimOptions`` and ``Cadnip.options`` do not exist
 -----------------------------------------------------------
 
