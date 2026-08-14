@@ -2935,15 +2935,14 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     block = Expr(:block)
     ret = block
 
-    # Handle temperature option - a `.temp`/`.option temp` card sets the
-    # default temperature, but a caller who already asked for a specific one
-    # (an explicit `MNASpec(temp=...)`, `with_temp(circuit, ...)`, a sweep
-    # axis) outranks it — same precedence as any other override. `with_temp`
-    # keeps the rest of `spec` (gmin, tnom, tolerances, ...) intact instead of
-    # resetting it to defaults.
+    # Handle temperature option - `.temp`/`.option temp` sets this deck's
+    # analysis temperature, unconditionally: it's the netlist's own control
+    # card, not a default a caller happens to shadow. `with_temp` carries the
+    # rest of `spec` (gmin, tnom, tolerances, the `time` field's type) through
+    # the rebind instead of resetting it to defaults.
     if haskey(state.sema.options, :temp)
         temp_expr = cg_expr!(state, _option_value_node(state.sema.options[:temp][end][2]))
-        push!(block.args, :(spec = spec.temp == $(MNA.DEFAULT_TEMP) ? $(MNA).with_temp(spec, $temp_expr) : spec))
+        push!(block.args, :(spec = $(MNA).with_temp(spec, $temp_expr)))
     end
 
     # Import exposed models from HDL modules (VA-generated device types)

@@ -54,14 +54,8 @@ Unlike Cadnip's ScopedValue-based SimSpec, MNASpec is passed explicitly.
 This enables full JIT optimization since Julia's closure boxing issue
 prevents optimization of captured ScopedValue accesses.
 """
-# Also the sentinel codegen compares `spec.temp` against to decide whether a
-# netlist `.temp`/`.option temp` card should apply: a caller-supplied spec that
-# already differs from this default is assumed to be an explicit override and
-# wins over the card.
-const DEFAULT_TEMP = 27.0
-
 Base.@kwdef struct MNASpec{T<:Real}
-    temp::Float64 = DEFAULT_TEMP
+    temp::Float64 = 27.0
     mode::Symbol = :tran
     time::T = 0.0
     # Common simulator parameters (for $simparam access)

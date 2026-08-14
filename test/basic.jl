@@ -621,11 +621,17 @@ end
     @test isapprox_deftol(sol[:vcc], -27.0)
 end
 
-# A `.temp`/`.option temp` card sets the *default* device temperature — it
-# must not override a caller who already asked for a specific one (an
-# explicit `MNASpec(temp=...)`, `with_temp(circuit, ...)`, a sweep axis).
-# doc/FINDINGS.rst finding 1.
-@testset "SPICE .temp card is a default, not an override" begin
+# `.temp`/`.option temp` is the deck's own analysis temperature — it applies
+# unconditionally, the same way it always has (a caller who wants a different
+# temperature should not be emitting the card in the first place; that's on
+# whoever generates the deck, not a precedence Cadnip should adjudicate). What
+# used to be broken: the rebind reset every other `MNASpec` field (`gmin`,
+# `tnom`, `gshunt`, `srcFact`, the four tolerances, and the `time` field's
+# ForwardDiff-dual-carrying type) to their defaults on the way past. It now
+# goes through `with_temp`, which `test/mna/core.jl` already unit-tests for
+# preserving the rest of the spec — this just confirms the card is still
+# honored end to end through the netlist path. doc/FINDINGS.rst finding 1.
+@testset "SPICE .temp card sets the deck's temperature" begin
     rect = sp"""
     V1 vin 0 DC 5
     R1 vin out 1k
@@ -642,16 +648,17 @@ end
 
     v_100_via_card = dc!(MNACircuit(carded))[:out]
     v_100_via_spec = dc!(MNACircuit(rect; spec=MNASpec(temp=100.0)))[:out]
-    v_50_via_spec  = dc!(MNACircuit(rect; spec=MNASpec(temp=50.0)))[:out]
+    v_27_via_spec  = dc!(MNACircuit(rect))[:out]
 
-    # No caller override: the card supplies the default temperature.
+    # The card sets the operating point the same as an equivalent explicit
+    # spec with no card — and differently from the 27 C default.
     @test isapprox_deftol(v_100_via_card, v_100_via_spec)
+    @test !isapprox_deftol(v_100_via_card, v_27_via_spec)
 
-    # An explicit caller override outranks the card, and actually changes
-    # the operating point (not silently ignored).
-    v_50_vs_card = dc!(MNACircuit(carded; spec=MNASpec(temp=50.0)))[:out]
-    @test isapprox_deftol(v_50_vs_card, v_50_via_spec)
-    @test !isapprox_deftol(v_50_vs_card, v_100_via_card)
+    # The card wins even over a caller-supplied spec (unconditionally, by
+    # design — see the comment above).
+    v_via_carded_and_spec = dc!(MNACircuit(carded; spec=MNASpec(temp=50.0)))[:out]
+    @test isapprox_deftol(v_via_carded_and_spec, v_100_via_card)
 end
 
 # Analysis (.ac/.dc/.tran), output (.print/.width), and initial-condition

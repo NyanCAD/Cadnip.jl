@@ -85,18 +85,39 @@ one does; carry the incoming spec's other fields through the rebinding; and give
 ``noise!`` the same temperature the builder ended up using rather than
 ``circuit.spec``.
 
-*Status*: the first two consequences are fixed. ``MNASpec`` has no
-``DefaultOr``-style ``temp`` field to guard with ``isdefault`` itself, so the
-rebinding now compares against ``MNA.DEFAULT_TEMP`` (the same 27 °C the field
-defaults to) instead — a caller-supplied spec that already differs from that
-default is treated as an explicit override and wins over the card; one that
-doesn't still lets the card apply. The rebinding goes through ``with_temp``, so
+*Status*: the second consequence is fixed; the first is now treated as
+intended behavior, not a defect. ``.temp``/``.option temp`` is the netlist's
+own control card — SPICE has no notion of a caller-language override
+outranking it, and manufacturing that precedence inside Cadnip would mean
+guessing "did the caller mean this" from whether ``spec.temp`` happens to
+differ from ``MNASpec``'s own default, which is exactly the kind of ambiguous,
+unmeasurable claim this document exists to avoid. (The InSpice backend writing
+``.options TEMP=27`` into every deck is a translation choice on that side, not
+a precedence bug here.) So the card wins unconditionally, same as before — what
+changed is that the rebind now goes through ``with_temp`` instead of
+reconstructing ``MNASpec`` with only ``temp``/``mode`` set, so
 ``tnom``/``gmin``/``gshunt``/``srcFact``/tolerances (and the ``time`` field's
-type, needed for ForwardDiff duals) survive it. The third consequence — a
-netlist-only card (no caller override at all) still leaves ``circuit.spec.temp``
-at 27 °C, so ``noise!`` disagrees with the devices in exactly that case — is
-unchanged; fixing it needs ``circuit.spec`` itself to carry the resolved
-temperature, which the codegen has no channel back to today.
+type, needed for ForwardDiff duals) survive it instead of resetting to
+defaults. The third consequence is unchanged and, with the card winning
+unconditionally, is now simply "whenever a `.temp` card is present at all":
+``circuit.spec.temp`` never reflects it, so ``noise!`` disagrees with the
+devices any time a deck carries the card. Fixing that needs ``circuit.spec``
+itself to carry the resolved temperature, which the codegen has no channel
+back to today.
+
+A cleaner long-term shape, not attempted here: route ``.temp`` through
+``ParamLens`` the way a ``.subckt`` default or a ``.param`` already work — the
+card supplies the *default*, and an explicit override (``alter(circuit;
+temp=...)``, a sweep axis) is unambiguous because it is either present in the
+override tree or it isn't, with no magic-default guessing. That would also
+give ``circuit.spec``/``noise!`` a real value to read, closing the third
+consequence for free. Two things stand in the way: ``temp`` would need a name
+that cannot collide with a user's own ``.param temp=...`` in the same scope
+(unlike the ``x1``/``X1`` case, both would be leaves in the same namespace),
+and ``MNASpec`` is deliberately kept outside the ``params``/lens tree today —
+"passed explicitly... to enable full JIT optimization" per its own docstring —
+so folding temperature into it crosses a boundary the design has held to so
+far.
 
 2. ``Cadnip.SimOptions`` and ``Cadnip.options`` do not exist
 -----------------------------------------------------------
