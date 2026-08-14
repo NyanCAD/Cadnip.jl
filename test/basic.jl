@@ -6,6 +6,7 @@ using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using Cadnip.MNA: make_ode_problem
 using DiffEqBase: BrownFullBasicInit
+using VADistillerModels                     # .model … d → VA diode model
 
 #=
 NOTE: Tests that require DAECompiler are skipped:
@@ -618,6 +619,39 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # Default temper = 27
     @test isapprox_deftol(sol[:vcc], -27.0)
+end
+
+# A `.temp`/`.option temp` card sets the *default* device temperature — it
+# must not override a caller who already asked for a specific one (an
+# explicit `MNASpec(temp=...)`, `with_temp(circuit, ...)`, a sweep axis).
+# doc/FINDINGS.rst finding 1.
+@testset "SPICE .temp card is a default, not an override" begin
+    rect = sp"""
+    V1 vin 0 DC 5
+    R1 vin out 1k
+    D1 out 0 dmod
+    .model dmod d is=76.9p n=1.45
+    """i
+    carded = sp"""
+    V1 vin 0 DC 5
+    R1 vin out 1k
+    D1 out 0 dmod
+    .model dmod d is=76.9p n=1.45
+    .temp 100
+    """i
+
+    v_100_via_card = dc!(MNACircuit(carded))[:out]
+    v_100_via_spec = dc!(MNACircuit(rect; spec=MNASpec(temp=100.0)))[:out]
+    v_50_via_spec  = dc!(MNACircuit(rect; spec=MNASpec(temp=50.0)))[:out]
+
+    # No caller override: the card supplies the default temperature.
+    @test isapprox_deftol(v_100_via_card, v_100_via_spec)
+
+    # An explicit caller override outranks the card, and actually changes
+    # the operating point (not silently ignored).
+    v_50_vs_card = dc!(MNACircuit(carded; spec=MNASpec(temp=50.0)))[:out]
+    @test isapprox_deftol(v_50_vs_card, v_50_via_spec)
+    @test !isapprox_deftol(v_50_vs_card, v_100_via_card)
 end
 
 # Analysis (.ac/.dc/.tran), output (.print/.width), and initial-condition
