@@ -102,8 +102,17 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [x] Bug: a `.subckt` body reading a parent `.param` it has no local default for raised `UndefVarError` — the builder now binds `parent_params` as locals — design: `doc/parameter_overrides.md` §5
 - [x] Noise N3 rest: dropped — Julia is the simulation API, a deck does not drive an analysis; `.noise` only had to stop failing to parse — design: `doc/noise_analysis_design.md` N3
+- [x] Cleanup: delete the unreachable pre-MNA codegen path (`codegen!`, `SpCircuit`, `query.jl`, `generated.jl`) — design: `doc/codegen_unification.md` §5, `doc/FINDINGS.rst` 2 & 6
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
 - [x] Bug: a netlist `.temp`/`.option temp` card dropped the rest of `spec` (gmin, tnom, tolerances) on rebind — the card still wins unconditionally (it's the deck's own control card, not a default to negotiate against a caller), fixed via `with_temp` — design/measurements: `doc/FINDINGS.rst` finding 1
 - [ ] `noise!` disagrees with the devices whenever a `.temp` card is present at all — `circuit.spec.temp` never reflects it, `noise!` reads `circuit.spec.temp` — `doc/FINDINGS.rst` finding 1 (residual)
 - [ ] UX/design: route `.temp` through `ParamLens` like a `.param`/`.subckt` default, so an explicit override is unambiguous (present-in-tree vs not) instead of magic-default guessing, and `circuit.spec`/`noise!` get a real resolved value for free — needs a collision-safe name (`.temp` and a user's own `.param temp=...` would share a namespace, unlike the `x1`/`X1` case) and crosses `MNASpec`'s current boundary from the `params`/lens tree — `doc/FINDINGS.rst` finding 1
+- [ ] Documentation: the README's world-age example is stricter than measured — `doc/FINDINGS.rst` 5
+- [ ] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
+- [ ] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — port or drop each
+- [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] Features: `.option gmin` / `.option scale` are parsed and dropped; only `temp` reaches the builder — `doc/FINDINGS.rst` 2
+- [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"

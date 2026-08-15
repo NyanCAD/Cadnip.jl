@@ -89,13 +89,11 @@ ModelRegistry.getmodel(::Val{:l}, ::Nothing, ::Nothing, ::Type{<:ModelRegistry.A
 # load `using VADistillerModels` (or another Tier-1 diode provider). Users
 # who want `MNA.Diode` build it directly via `stamp!(Diode(), ctx, a, k)`.
 
-# Phase 4: New SPC SPICE codegen (used by MNA backend)
+# SPC SPICE codegen (used by MNA backend)
 include("spc/cache.jl")  # Must be before sema.jl (CedarParseCache)
 include("spc/sema.jl")
 include("spc/codegen.jl")
 include("spc/interface.jl")
-include("spc/query.jl")
-include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
 include("ac.jl")

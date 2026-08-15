@@ -1,38 +1,3 @@
-struct SpCircuit{CktID, Subckts}
-    params::NamedTuple
-    models::NamedTuple
-end
-
-function getsema end
-getsema(ckt::SpCircuit{CktID}) where {CktID} = getsema(CktID)
-
-function generate_sp_code(world::UInt64, source::LineNumberNode, ::Type{SpCircuit{CktId, Subckts}}, args...) where {CktId, Subckts}
-    sig = Tuple{typeof(getsema), Type{CktId}}
-    mthds = Base._methods_by_ftype(sig, -1, world)
-    gen = Core.GeneratedFunctionStub(identity, Core.svec(:var"self", :args), Core.svec())
-    if mthds === nothing || length(mthds) != 1
-        return gen(world, source, :(getsema($CktID); error("Cedar Internal ERROR: Could not find spice method")))
-    end
-    match = only(mthds)
-
-    mi = Core.Compiler.specialize_method(match)
-    ci = Core.Compiler.retrieve_code_info(mi, world)
-    if ci === nothing
-        return gen(world, source, :(getsema($CktID); error("Cedar Internal ERROR: Could not find spice source")))
-    end
-
-    sema = ci.code[end].val
-    if isa(sema, Core.SSAValue)
-        sema = ci.code[sema.id]
-    end
-    if isa(sema, QuoteNode)
-        sema = sema.value
-    end
-    @assert isa(sema, SemaResult)
-
-    return gen(world, source, codegen(sema))
-end
-
 # Create a fresh top-level-ish module for holding a generated SPICE builder
 # and any on-the-fly VA baremodules. Imports Cadnip so the generated
 # `import ..Cadnip` inside VA baremodules resolves.

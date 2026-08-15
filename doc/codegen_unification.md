@@ -5,7 +5,11 @@ needs. Three related pieces of work: one shared import list, one lowering
 instead of two, and two runtime warnings. All line numbers are against
 `src/spc/codegen.jl` and `src/spc/interface.jl` as of this writing.
 
-**Status.** All four are done. §1 and §2: the PDK path calls
+§5 was added later, from the same measure-don't-read discipline: the *other*
+codegen backend in the same file, the one §1–§4 kept carefully in sync with
+nothing, turned out to be unreachable and was deleted.
+
+**Status.** All five are done. §1 and §2: the PDK path calls
 `codegen_toplevel_models!` / `_propagate_toplevel_models!` /
 `_codegen_subckt_builders` instead of its own copies, and the import list is
 `_baremodule_prelude` — now the `Base` essentials for the PDK `baremodule` and
@@ -394,3 +398,204 @@ Three things had to be checked before believing it, and all three hold:
   only ever runs at runtime.
 - **Expansion-time side effects.** Already the norm here: `.hdl` Verilog-A
   modules are `Core.eval`'d into the caller during the same call.
+
+## 5. The pre-MNA codegen path was dead, and is now gone
+
+`src/spc/codegen.jl` carried two codegen backends against one `SemaResult`:
+`codegen!`, which emitted `Named(spicecall(model; params...))(nets...)` device
+objects for the DAECompiler era, and `codegen_mna!`, which emits `stamp!` calls.
+Everything §1–§4 above unified was work on the second one. The first was
+unreachable, and the trace is short enough to state in full.
+
+### The trace
+
+`codegen!` has one caller, and the chain above it terminates in a value nothing
+constructs. Leaf first:
+
+    codegen!(state)                       codegen.jl
+      <- codegen(scope)                   codegen.jl
+        <- generate_sp_code(...)          interface.jl
+             the @generated body for
+          <- (::SpCircuit)(nets...)       generated.jl
+
+An `SpCircuit` was constructed in exactly two places, and both are inside the
+legacy path itself:
+
+* `cg_instance!(::SNode{SP.SubcktCall})`, reachable only from `codegen!` — the
+  legacy path recursing into itself for a subcircuit;
+* `sema_assign_ids`, whose only caller was its own recursion.
+
+Nothing called `sema_assign_ids`, so no `CktID` was ever assigned,
+`SemaResult.CktID` stayed `nothing` for every deck, no `SpCircuit` was ever
+constructed, the generated function never fired, and `codegen`/`codegen!` never
+ran.
+
+Two undefined names corroborate it from the other side. `Cadnip.Named` and
+`Cadnip.SimOptions`/`Cadnip.options` do not exist:
+
+```julia
+julia> [s => isdefined(Cadnip, s) for s in (:Named, :SimOptions, :options)]
+:Named      => false
+:SimOptions => false
+:options    => false
+```
+
+Both were interpolated as *values* at codegen time — `cg_spice_instance!`
+splices `Named` into every device it emits, and `codegen!`'s option block
+splices `Cadnip.SimOptions`. So the first deck containing a resistor, or an
+`.option temp/gmin/scale`, would have thrown `UndefVarError` while its builder
+was being generated. The test suite compiles exactly such decks without error,
+which is only possible because none of that code runs. (This is finding 2 in
+`doc/FINDINGS.rst`; it is fixed by deletion rather than by defining the missing
+names.)
+
+### What went
+
+| file | what |
+|---|---|
+| `src/spc/codegen.jl` | `cg_params!`, `cg_spice_instance!`, the five `cg_instance!` methods, `cg_model_def!`, `codegen!`, `codegen` |
+| `src/spc/generated.jl` | the whole file — the generated function and its `reload()` |
+| `src/spc/interface.jl` | `SpCircuit`, `getsema`, `generate_sp_code` (the deck-loading API in the rest of the file is untouched and live) |
+| `src/spc/query.jl` | the whole file — `show`, `getproperty`, `SpRef`, `RefKind`, `MultipleKinds`, all dispatching on `SpCircuit` |
+| `src/spc/sema.jl` | `assign_id!`, `sema_assign_ids`, the `SemaResult.CktID` field and its two readers |
+| `src/spectre.jl` | `devtype_param`, superseded by `ModelRegistry.getparams` and with no callers left |
+| `test/compiler_sanity.jl` | orphaned: not in `runtests.jl`, and `using DAECompiler` is not a dependency of the test project |
+
+`query.jl`'s `getproperty` is worth a note, because it reads like a live user
+API — `circuit.r1` returning a typed reference into the netlist. It dispatches on
+`SpCircuit`, so no value of any type reachable today could have hit it, and its
+`Param` branch returns a `SpRef` tagged `Parameter`, a name the `RefKind` enum
+never defined. That branch would have thrown `UndefVarError` on its first
+execution.
+
+### The one thing that had to move
+
+`is_ambiguous` lived in `query.jl` but is load-bearing for the *MNA* path:
+`cg_net_name!` and `cg_model_name!` call it to rename a net or model whose SPICE
+name lands in more than one namespace. It moved to the top of `codegen.jl`, next
+to its two callers.
+
+Two more names read as legacy but are live and were left alone: `spicecall` is
+shared — `cg_mna_instance!` uses it for diodes, MOSFETs and BJTs — and
+`UnimplementedDevice` is what `sema.jl` returns as a `GlobalRef` when no model
+resolves.
+
+### Not swept up
+
+The rest of the Cedar-era surface is untraced and stays: `ParamSim` and the
+netlist-text `alter(io, ast, ::ParamSim)` in `src/spectre.jl`, the
+`CircuitElement`/`AbstractSim` abstract types, and `SimSpec`. `SimSpec` and the
+`Cadnip.spec` ScopedValue in particular are *not* dead — `temper()` and
+`var"$time"` in `src/spectre_env.jl` read them, and MNA-generated expressions can
+reach those. Nothing writes them, which is finding 3 in `doc/FINDINGS.rst`.
+
+### Worth porting, not reinventing
+
+Four designs died with the code. None of them ever *ran* — that is the whole
+point of this section — but each is a considered answer to a problem the MNA
+path still has, and rediscovering them from scratch would be wasted work. The
+deleted source is one command away: `git show 991c27a^:src/spc/codegen.jl`, and
+likewise for `query.jl`, `generated.jl`, `interface.jl`, `sema.jl`.
+
+Everything below was measured against the MNA path as of this writing, not read
+off the source.
+
+#### Model binning — the substantive one
+
+`cg_model_def!` + `codegen!` were the only producer of `BinnedModel` in the
+repo. The **whole runtime half survives** in `src/spectre.jl` and now has nothing
+calling it:
+
+| what | where | note |
+|---|---|---|
+| `BinnedModel{B<:Tuple}` | `spectre.jl:377` | holds `scale` + the bin tuple |
+| `find_bin(bm, l, w)` | `spectre.jl:444` | `@assume_effects` -tuned so it concrete-evals; `test/compiler_sanity.jl` existed to pin exactly that |
+| `NoBinExpection` | `spectre.jl:437` | the diagnostic for an out-of-range geometry |
+| `(bm::BinnedModel)(; l, w, …)` | `spectre.jl:456` | dispatch to the winning bin |
+| `spicecall(bm::BinnedModel; l, w, …)` | `spectre.jl:509` | the `spicecall` entry |
+
+Sema already does the front half too: `binning_rx` matches `nch.1`/`nch.2`, and
+`provided_binned_models` (`sema.jl:786`) stops the base name `nch` being treated
+as an unresolved exposed model. So the missing piece is exactly the codegen
+step: aggregate the numbered cards under the base name and emit a `BinnedModel`.
+
+What the MNA path does today with a binned deck — measured:
+
+```
+.model dm.1 d is=1e-14 lmin=0  lmax=1u  wmin=0 wmax=1u
+.model dm.2 d is=2e-14 lmin=1u lmax=10u wmin=0 wmax=1u
+D1 k 0 dm
+```
+```
+MethodError: no method matching sp_diode(; is::Float64, lmin::Float64,
+                                          lmax::Float64, wmin::Float64,
+                                          wmax::Float64)
+```
+
+It passes the four binning parameters through to the device constructor as if
+they were ordinary model parameters. The deleted code treated them as magic —
+uppercased rather than case-matched against the model's fieldnames — precisely
+because they are not the model's.
+
+Two reasons this is worth real effort rather than a note: every foundry PDK bins
+by L/W, so it blocks the sky130/gf180/ihp coverage the Production-readiness
+pillar asks for; and there is **no binned `.model` card anywhere in the test
+suite**, which is why nothing ever noticed. A port needs a test either way.
+
+#### Netlist source positions in generated code
+
+The legacy path pushed a `LineNumberNode(instance)` — built from the `SNode`, so
+carrying the netlist's own file and line — ahead of each device it emitted.
+
+The MNA path emits none. Measured on a three-device deck, the generated builder
+contains 29 `LineNumberNode`s and every one of them has
+`file = src/spc/codegen.jl`: they are artifacts of the `quote` blocks in the
+codegen itself, not netlist positions. So a runtime error inside a stamp points
+at the compiler, never at the line of SPICE that caused it.
+
+Cheap to port and it improves every error a deck can raise.
+
+#### A guard against two simultaneously active instances
+
+For an instance name defined in more than one conditional branch, `codegen!`
+emitted a counter, incremented it inside each branch, and raised
+`"Multiple simultaneously active instances of $name"` if more than one fired.
+The MNA path (`process_instance`) emits the branches independently with no
+counter, so a deck whose `.if`/`.elseif` conditions both hold stamps the same
+name twice, silently.
+
+Port the *idea*, not the code: the legacy version read
+`cond_syms[abs(instance.cond)]` unconditionally, which `BoundsError`s at
+`abs(0)` on a set mixing conditional and unconditional definitions of one name —
+a case the MNA path already handles correctly.
+
+#### `.option gmin` / `.option scale`, and the `isdefault` precedence
+
+`codegen!`'s option block was the only consumer of `sema.options[:gmin]` and
+`[:scale]`. Measured: neither reaches the generated MNA builder — of the options
+sema collects, the MNA path consumes `temp` alone. That is finding 2's practical
+effect in `doc/FINDINGS.rst`.
+
+The block is also the reference implementation of the precedence question §1 of
+`doc/FINDINGS.rst` raises for `temp`: each option was emitted as
+`isdefault(old_options.<opt>) ? <card value> : old_options.<opt>`, i.e. the card
+fills in only what the caller left at its default. Whether that is the right
+rule is a live argument (#275 decided against it for `temp`), but it is worth
+knowing the shape existed before re-deriving it.
+
+#### Lower priority: netlist introspection
+
+`query.jl` gave `circuit.r1` → an `SpRef` tagged `Param`/`Model`/`Subckt`/
+`Instance`/`SPNet`/`Ambiguous`, with a `show` that printed the defining netlist
+line with its file, line number, and the nets coloured by degree. A genuinely
+nice idea for exploring a deck, and nothing replaces it.
+
+Temper the enthusiasm with what it actually was, though: it dispatched on
+`SpCircuit`, so it never ran, and its parameter branch returned a `SpRef` tagged
+`Parameter` — a name the `RefKind` enum never defined and that has no binding in
+`Cadnip`, so that branch would have thrown `UndefVarError` the first time it
+executed. It is a sketch to work from, not an implementation to restore.
+
+`doc/FINDINGS.rst` separately asks for the more immediately useful cousin:
+`node_names(sol)` / `branch_names(sol)`, classifying names in a *solution*
+rather than in the netlist.
