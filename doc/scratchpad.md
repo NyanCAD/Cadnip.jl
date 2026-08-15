@@ -108,3 +108,8 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Documentation: the README's world-age example is stricter than measured — `doc/FINDINGS.rst` 5
 - [ ] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
 - [ ] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — port or drop each
+- [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [ ] Features: `.option gmin` / `.option scale` are parsed and dropped; only `temp` reaches the builder — `doc/FINDINGS.rst` 2
+- [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"

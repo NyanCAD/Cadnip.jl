@@ -488,3 +488,114 @@ netlist-text `alter(io, ast, ::ParamSim)` in `src/spectre.jl`, the
 `Cadnip.spec` ScopedValue in particular are *not* dead — `temper()` and
 `var"$time"` in `src/spectre_env.jl` read them, and MNA-generated expressions can
 reach those. Nothing writes them, which is finding 3 in `doc/FINDINGS.rst`.
+
+### Worth porting, not reinventing
+
+Four designs died with the code. None of them ever *ran* — that is the whole
+point of this section — but each is a considered answer to a problem the MNA
+path still has, and rediscovering them from scratch would be wasted work. The
+deleted source is one command away: `git show 991c27a^:src/spc/codegen.jl`, and
+likewise for `query.jl`, `generated.jl`, `interface.jl`, `sema.jl`.
+
+Everything below was measured against the MNA path as of this writing, not read
+off the source.
+
+#### Model binning — the substantive one
+
+`cg_model_def!` + `codegen!` were the only producer of `BinnedModel` in the
+repo. The **whole runtime half survives** in `src/spectre.jl` and now has nothing
+calling it:
+
+| what | where | note |
+|---|---|---|
+| `BinnedModel{B<:Tuple}` | `spectre.jl:377` | holds `scale` + the bin tuple |
+| `find_bin(bm, l, w)` | `spectre.jl:444` | `@assume_effects` -tuned so it concrete-evals; `test/compiler_sanity.jl` existed to pin exactly that |
+| `NoBinExpection` | `spectre.jl:437` | the diagnostic for an out-of-range geometry |
+| `(bm::BinnedModel)(; l, w, …)` | `spectre.jl:456` | dispatch to the winning bin |
+| `spicecall(bm::BinnedModel; l, w, …)` | `spectre.jl:509` | the `spicecall` entry |
+
+Sema already does the front half too: `binning_rx` matches `nch.1`/`nch.2`, and
+`provided_binned_models` (`sema.jl:786`) stops the base name `nch` being treated
+as an unresolved exposed model. So the missing piece is exactly the codegen
+step: aggregate the numbered cards under the base name and emit a `BinnedModel`.
+
+What the MNA path does today with a binned deck — measured:
+
+```
+.model dm.1 d is=1e-14 lmin=0  lmax=1u  wmin=0 wmax=1u
+.model dm.2 d is=2e-14 lmin=1u lmax=10u wmin=0 wmax=1u
+D1 k 0 dm
+```
+```
+MethodError: no method matching sp_diode(; is::Float64, lmin::Float64,
+                                          lmax::Float64, wmin::Float64,
+                                          wmax::Float64)
+```
+
+It passes the four binning parameters through to the device constructor as if
+they were ordinary model parameters. The deleted code treated them as magic —
+uppercased rather than case-matched against the model's fieldnames — precisely
+because they are not the model's.
+
+Two reasons this is worth real effort rather than a note: every foundry PDK bins
+by L/W, so it blocks the sky130/gf180/ihp coverage the Production-readiness
+pillar asks for; and there is **no binned `.model` card anywhere in the test
+suite**, which is why nothing ever noticed. A port needs a test either way.
+
+#### Netlist source positions in generated code
+
+The legacy path pushed a `LineNumberNode(instance)` — built from the `SNode`, so
+carrying the netlist's own file and line — ahead of each device it emitted.
+
+The MNA path emits none. Measured on a three-device deck, the generated builder
+contains 29 `LineNumberNode`s and every one of them has
+`file = src/spc/codegen.jl`: they are artifacts of the `quote` blocks in the
+codegen itself, not netlist positions. So a runtime error inside a stamp points
+at the compiler, never at the line of SPICE that caused it.
+
+Cheap to port and it improves every error a deck can raise.
+
+#### A guard against two simultaneously active instances
+
+For an instance name defined in more than one conditional branch, `codegen!`
+emitted a counter, incremented it inside each branch, and raised
+`"Multiple simultaneously active instances of $name"` if more than one fired.
+The MNA path (`process_instance`) emits the branches independently with no
+counter, so a deck whose `.if`/`.elseif` conditions both hold stamps the same
+name twice, silently.
+
+Port the *idea*, not the code: the legacy version read
+`cond_syms[abs(instance.cond)]` unconditionally, which `BoundsError`s at
+`abs(0)` on a set mixing conditional and unconditional definitions of one name —
+a case the MNA path already handles correctly.
+
+#### `.option gmin` / `.option scale`, and the `isdefault` precedence
+
+`codegen!`'s option block was the only consumer of `sema.options[:gmin]` and
+`[:scale]`. Measured: neither reaches the generated MNA builder — of the options
+sema collects, the MNA path consumes `temp` alone. That is finding 2's practical
+effect in `doc/FINDINGS.rst`.
+
+The block is also the reference implementation of the precedence question §1 of
+`doc/FINDINGS.rst` raises for `temp`: each option was emitted as
+`isdefault(old_options.<opt>) ? <card value> : old_options.<opt>`, i.e. the card
+fills in only what the caller left at its default. Whether that is the right
+rule is a live argument (#275 decided against it for `temp`), but it is worth
+knowing the shape existed before re-deriving it.
+
+#### Lower priority: netlist introspection
+
+`query.jl` gave `circuit.r1` → an `SpRef` tagged `Param`/`Model`/`Subckt`/
+`Instance`/`SPNet`/`Ambiguous`, with a `show` that printed the defining netlist
+line with its file, line number, and the nets coloured by degree. A genuinely
+nice idea for exploring a deck, and nothing replaces it.
+
+Temper the enthusiasm with what it actually was, though: it dispatched on
+`SpCircuit`, so it never ran, and its parameter branch returned a `SpRef` tagged
+`Parameter` — a name the `RefKind` enum never defined and that has no binding in
+`Cadnip`, so that branch would have thrown `UndefVarError` the first time it
+executed. It is a sketch to work from, not an implementation to restore.
+
+`doc/FINDINGS.rst` separately asks for the more immediately useful cousin:
+`node_names(sol)` / `branch_names(sol)`, classifying names in a *solution*
+rather than in the netlist.
