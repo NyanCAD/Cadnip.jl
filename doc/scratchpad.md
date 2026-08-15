@@ -102,5 +102,9 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Codegen: let `sp"..."`/`spc"..."` expand inside a function body — design: `doc/codegen_unification.md` §4
 - [x] Bug: a `.subckt` body reading a parent `.param` it has no local default for raised `UndefVarError` — the builder now binds `parent_params` as locals — design: `doc/parameter_overrides.md` §5
 - [x] Noise N3 rest: dropped — Julia is the simulation API, a deck does not drive an analysis; `.noise` only had to stop failing to parse — design: `doc/noise_analysis_design.md` N3
+- [x] Cleanup: delete the unreachable pre-MNA codegen path (`codegen!`, `SpCircuit`, `query.jl`, `generated.jl`) — design: `doc/codegen_unification.md` §5, `doc/FINDINGS.rst` 2 & 6
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
+- [ ] Documentation: the README's world-age example is stricter than measured — `doc/FINDINGS.rst` 5
+- [ ] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
+- [ ] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — port or drop each

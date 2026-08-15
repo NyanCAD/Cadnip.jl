@@ -365,19 +365,6 @@ function spice_select_device(devkind, level, version, stmt; dialect=:ngspice)
     return :UnimplementedDevice
 end
 
-function devtype_param(model_kind, mosfet_kind)
-    if model_kind == :bsim4
-        return :TYPE => (mosfet_kind == :pmos ? -1 : 1)
-    elseif startswith(String(model_kind), "bsimcmg")
-        return :DEVTYPE => (mosfet_kind == :pmos ? 0 : 1)
-    elseif model_kind == :UnimplementedDevice
-        # skip
-        return nothing
-    else
-        error("Needs to be filled in per model")
-    end
-end
-
 function hasparam(params, name)
     for p in params
         if LString(p.name) == name

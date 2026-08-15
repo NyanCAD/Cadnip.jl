@@ -28,7 +28,6 @@ end
 
 mutable struct SemaResult
     ast::SNode
-    CktID::Union{Nothing, Type}
     parse_cache::Union{Nothing, CedarParseCache}
 
     title::Union{SNode, Nothing}
@@ -70,7 +69,7 @@ end
 # stood between the codegen work and running the suite under `--depwarn=error`
 # (`doc/codegen_unification.md` §3).
 function SemaResult(ast::SNode)
-    SemaResult(ast, nothing, nothing, nothing, UInt64(0), SpectreCircuit,
+    SemaResult(ast, nothing, nothing, UInt64(0), SpectreCircuit,
         Vector{Pair{UInt, MaybeConditional{SNode}}}(), Int[],
         Dict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}(),
         OrderedDict{Symbol, Vector{Pair{UInt, MaybeConditional{SNode}}}}(),
@@ -697,7 +696,6 @@ function resolve_scopes!(sr::SemaResult)
     for (name, subckts) in sr.subckts
         for i = 1:length(subckts)
             (pos, cd) = subckts[i]
-            cd.val.CktID !== nothing && continue
             resolve_scopes!(cd.val)
         end
     end
@@ -812,30 +810,3 @@ function resolve_scopes!(sr::SemaResult)
     sr.exposed_models = new_exposed_models
     sr.exposed_subckts = new_exposed_subckts
 end
-
-#================================= ID Assignment ==============================#
-function assign_id!(scope::SemaResult, @nospecialize(CktID))
-    if scope.CktID !== nothing
-        error("Circuit ID already assigned")
-    end
-    scope.CktID = CktID
-end
-
-function sema_assign_ids(r::SemaResult)
-    r.CktID !== nothing && return nothing
-    s = gensym()
-    subs = Expr(:block)
-    for (_, sublist) in r.subckts
-        for (_, sub) in sublist
-            push!(subs.args, sema_assign_ids(sub.val))
-        end
-    end
-    quote
-        abstract type $s end
-        $(assign_id!)($r, $s)
-        (::$(typeof(getsema)))(::Type{$s}) = $r
-        $(subs.args...)
-        $(SpCircuit){$s, Tuple{}}((;), (;))
-    end
-end
-
