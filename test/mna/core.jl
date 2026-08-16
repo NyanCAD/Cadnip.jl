@@ -1579,6 +1579,17 @@ using NyanVerilogAParser
         @test spec4.temp == 27.0  # unchanged
         @test spec4.mode == :ac
 
+        # Neither one may quietly reset the rest of the spec — a circuit built
+        # with a tightened tolerance or a raised gmin keeps it across a
+        # temperature sweep or the `:dcop` rebind a DC sweep does internally.
+        custom = MNASpec(temp=27.0, mode=:tran, gmin=1e-9, gshunt=1e-11,
+                         srcFact=0.5, tnom=25.0, abstol=1e-15, reltol=1e-6,
+                         vntol=1e-9, iabstol=1e-15)
+        rest(s) = (s.gmin, s.gshunt, s.srcFact, s.tnom, s.abstol, s.reltol,
+                   s.vntol, s.iabstol)
+        @test rest(with_temp(custom, 100.0)) == rest(custom)
+        @test rest(with_mode(custom, :dcop)) == rest(custom)
+
         # Test temperature-dependent circuit
         function build_temp_dependent(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing
@@ -1624,6 +1635,36 @@ using NyanVerilogAParser
         circuit_85 = with_spec(circuit_27, new_spec)
         @test circuit_85.spec.temp == 85.0
         @test circuit_85.spec.mode == :dcop
+
+        # The circuit-level `with_temp`/`with_mode` carry the rest of the spec
+        # too — they used to rebuild an `MNASpec` from `temp` and `mode` alone,
+        # so a circuit built with a tightened tolerance silently reverted to the
+        # defaults on a temperature sweep or the internal `:dcop` rebind.
+        circuit_custom = MNACircuit(build_temp_dependent; spec=custom,
+                            Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0)
+        @test rest(with_temp(circuit_custom, 100.0).spec) == rest(custom)
+        @test with_temp(circuit_custom, 100.0).spec.mode == :tran   # mode kept
+        @test rest(with_mode(circuit_custom, :dcop).spec) == rest(custom)
+        @test with_mode(circuit_custom, :dcop).spec.temp == 27.0    # temp kept
+
+        # And the spec survives `dc!`, which rebinds the mode to `:dcop`
+        # internally — that rebind used to be where a caller's `gmin`, `tnom`
+        # or tolerances were quietly replaced by the defaults on the way to the
+        # solver and the device models. A builder reading `spec.tnom` sees it.
+        function build_tnom_dependent(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            ctx === nothing ? (ctx = MNAContext()) : reset_for_restamping!(ctx)
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+            R_tnom = params.R0 * (1 + params.tc * (spec.tnom - 27.0))
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(R_tnom), ctx, vcc, out)
+            stamp!(Resistor(params.R2), ctx, out, 0)
+            return ctx
+        end
+        # tnom = 127 °C → R = 1000·(1 + 0.004·100) = 1400 Ω, out = 10·1000/2400.
+        c_tnom = MNACircuit(build_tnom_dependent; spec=MNASpec(tnom=127.0),
+                            Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0)
+        @test dc!(c_tnom)[:out] ≈ 10.0 * 1000.0 / 2400.0 rtol=1e-6
 
         # Test eval_circuit directly
         sys = eval_circuit(build_temp_dependent,

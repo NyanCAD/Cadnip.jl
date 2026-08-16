@@ -145,7 +145,13 @@ function noise!(circuit::MNA.MNACircuit, output::Symbol;
     # input→output gain is then `H = x_adjᵀ b_in`, sharing the noise adjoint.
     in_idx = input === nothing ? 0 : _noise_input_index(ctx, input)
 
-    temp_c = circuit.spec.temp
+    # The temperature the devices were stamped at, which is the deck's own
+    # `.temp`/`.option temp` card when it carries one — that card rebinds `spec`
+    # inside the builder and never reaches `circuit.spec`, so reading the latter
+    # would evaluate the thermal PSDs at a temperature no device saw. A
+    # hand-written builder records nothing; then the caller's spec is all there
+    # is, and it is also what the devices got.
+    temp_c = something(MNA.stamped_temp(ctx), circuit.spec.temp)
     e_out = zeros(ComplexF64, n)
     e_out[out_idx] = 1.0
 

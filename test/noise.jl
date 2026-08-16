@@ -108,6 +108,55 @@ Q1 c b 0 qn
         @test vrms2 ≈ _kT / C rtol=2e-2
     end
 
+    @testset "thermal noise follows the temperature the devices stamped at" begin
+        # A `.temp`/`.option temp` card rebinds `spec` *inside* the builder, so
+        # `circuit.spec.temp` is not what the devices saw. `noise!` evaluates the
+        # thermal PSDs outside the devices, so it has to read the temperature
+        # back off the context — otherwise a carded deck stamps its resistors at
+        # 100 °C and computes their noise at 27 °C (doc/FINDINGS.rst finding 1).
+        plain = sp"""
+        V1 in 0 DC 0
+        R1 in out 1k
+        R2 out 0 1k
+        """i
+        carded = sp"""
+        V1 in 0 DC 0
+        R1 in out 1k
+        R2 out 0 1k
+        .temp 100
+        """i
+
+        Rpar = 500.0
+        S(T) = 4 * K_BOLTZMANN * (T + 273.15) * Rpar
+        f = [1.0]
+        psd(c) = noise!(c, :out; freqs=f)[:onoise][1]
+
+        @test psd(MNACircuit(plain)) ≈ S(27.0) rtol=1e-6
+
+        # The three ways of getting to 100 °C agree with each other and with 4kTR.
+        ns_card = noise!(MNACircuit(carded), :out; freqs=f)
+        @test ns_card[:onoise][1] ≈ S(100.0) rtol=1e-6
+        @test ns_card.temp == 100.0            # reported, not just used
+        @test psd(MNACircuit(plain; spec=MNASpec(temp=100.0))) ≈ S(100.0) rtol=1e-6
+        @test psd(with_temp(MNACircuit(plain), 100.0)) ≈ S(100.0) rtol=1e-6
+
+        # The card wins over a caller-supplied spec, in the noise the same way it
+        # already does in the devices (test/basic.jl covers the DC side).
+        @test psd(MNACircuit(carded; spec=MNASpec(temp=50.0))) ≈ S(100.0) rtol=1e-6
+
+        # A hand-written builder records no temperature; the caller's spec is
+        # both what the devices got and what the PSDs are evaluated at.
+        function hand_divider(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
+            reset_for_restamping!(ctx)
+            i = get_node!(ctx, :in); o = get_node!(ctx, :out)
+            stamp!(VoltageSource(0.0; name=:V1), ctx, i, 0)
+            stamp!(Resistor(1e3; name=:R1), ctx, i, o)
+            stamp!(Resistor(1e3; name=:R2), ctx, o, 0)
+            return ctx
+        end
+        @test psd(MNACircuit(hand_divider; spec=MNASpec(temp=100.0))) ≈ S(100.0) rtol=1e-6
+    end
+
     @testset "input-referred: resistor divider" begin
         # Gain from the input source V1 (drives node `in`) to `out` is the
         # divider ratio R2/(R1+R2) = 0.5, flat in frequency. Input-referring the

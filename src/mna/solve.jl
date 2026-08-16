@@ -1971,21 +1971,26 @@ end
 """
     with_mode(circuit::MNACircuit, mode::Symbol) -> MNACircuit
 
-Create a new circuit with a different mode (:dcop, :tran, :ac).
+Create a new circuit with a different mode (:dcop, :tran, :ac). The rest of the
+spec — temperature, gmin, tnom, the tolerances — carries through.
 """
 function with_mode(circuit::MNACircuit, mode::Symbol)
-    new_spec = MNASpec(temp=circuit.spec.temp, mode=mode)
-    return with_spec(circuit, new_spec)
+    return with_spec(circuit, with_mode(circuit.spec, mode))
 end
 
 """
     with_temp(circuit::MNACircuit, temp::Real) -> MNACircuit
 
-Create a new circuit with a different temperature.
+Create a new circuit with a different temperature. The rest of the spec — mode,
+gmin, tnom, the tolerances — carries through, as it does for the spec-level
+[`with_temp`](@ref).
+
+A deck that carries its own `.temp`/`.option temp` card overrides this: the card
+is the netlist's own control card and wins unconditionally (see
+`doc/FINDINGS.rst` finding 1).
 """
 function with_temp(circuit::MNACircuit, temp::Real)
-    new_spec = MNASpec(temp=Float64(temp), mode=circuit.spec.mode)
-    return with_spec(circuit, new_spec)
+    return with_spec(circuit, with_temp(circuit.spec, temp))
 end
 
 """
