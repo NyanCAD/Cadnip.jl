@@ -231,11 +231,12 @@ ERROR: ArgumentError: unknown parameter override `vbais` — the top level
 declares no parameter `vbais`. It declares: rd, vbias.
 ```
 
-The same check runs for `alter` and for sweep axes. Two limits worth knowing:
-device instance parameters are not reachable this way (`r1=(r=2e3,)` throws —
-give the netlist a `.param` and use that instead), and a builder that declares
-nothing at all — a hand-written builder, or a netlist with no `.param` and no
-subcircuit instance — has no knob to typo, so nothing is checked for it.
+The same check runs for `alter` and for sweep axes, and for a netlist that
+declares nothing at all — there the message ends "It declares no parameters at
+all." Two limits worth knowing: device instance parameters are not reachable
+this way (`r1=(r=2e3,)` throws — give the netlist a `.param` and use that
+instead), and a hand-written builder is not checked, since only it knows what
+its parameters mean.
 
 ### Analyses
 

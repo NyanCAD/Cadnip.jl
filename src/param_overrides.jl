@@ -45,9 +45,11 @@ function observed_params(@nospecialize(builder))
             # parameters mean; we don't, so we check nothing.
             nothing
         end
-        # An empty tree means the builder never consulted the lens — a
-        # hand-written builder, or a netlist with no `.param` and no subcircuit
-        # instance, which has no knob to typo in the first place.
+        # An empty tree means the builder never consulted the lens at all,
+        # which only a hand-written builder does: a generated one registers its
+        # scope even when the deck declares nothing (`codegen_mna!`), so a bare
+        # netlist observes as `(params = (),)` — "declares nothing", which is
+        # checkable — rather than as an empty tree.
         (tree === nothing || isempty(tree)) ? nothing : tree
     end
 end
