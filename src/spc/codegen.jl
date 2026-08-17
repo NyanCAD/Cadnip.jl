@@ -2693,9 +2693,25 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     # The lens variable name differs between subcircuit and top-level
     lens_var = is_subcircuit ? :lens : :var"*lens#"
 
-    if needs_lens && !is_subcircuit
-        # Top-level: wrap params argument in lens
-        push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
+    if !is_subcircuit
+        if needs_lens
+            # Top-level: wrap params argument in lens
+            push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
+        else
+            # A deck that declares nothing — no `.param`, no subcircuit instance
+            # — has no reason to consult its lens, and an unconsulted lens
+            # observes as an empty tree, which `observed_params` cannot tell
+            # apart from a hand-written builder that ignores `params` entirely.
+            # The two get opposite treatment (check everything vs check
+            # nothing), so the bare deck used to take the hand-written one and
+            # every override on it passed silently. Calling the lens with no
+            # parameters registers the (empty) scope, which makes the
+            # observation say "declares nothing" instead of "cannot be
+            # observed". `params` is a `NamedTuple` on every path that solves,
+            # so the `isa` folds away and the call is emitted for the observer
+            # alone.
+            push!(block.args, :(params isa $(AbstractParamLens) && params()))
+        end
     end
 
     # NOTE: Don't pre-initialize exposed_parameters to 0.0!

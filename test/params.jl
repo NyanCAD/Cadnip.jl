@@ -357,6 +357,16 @@ V1 in 0 DC vin
 X1 in vout 0 divider r1val=2k r2val=1k
 """i
 
+# A deck that declares nothing at all — no `.param`, no subcircuit instance. It
+# has nothing to override, which is exactly why every override on it is a
+# mistake worth reporting. This is also the shape a translated deck tends to
+# have, so it is the first thing a foreign-language driver hits.
+const bare_ckt = sp"""
+V1 vcc 0 DC 5
+R1 vcc out 1k
+R2 out 0 1k
+"""i
+
 # `.param x1` next to an `X1` instance: the one case where a name means two
 # different things in the same scope.
 const collide_ckt = sp"""
@@ -547,6 +557,25 @@ end
     # override is still rejected rather than quietly ignored.
     @test_throws ArgumentError MNACircuit(divider_ckt; r1=(r=2e3,))
     @test_throws ArgumentError MNACircuit(divider_ckt; r1=2e3)
+
+    # A deck that declares nothing is still a deck. "Declares an empty set" and
+    # "cannot be observed" are opposite verdicts — check everything vs check
+    # nothing — and a bare netlist used to be read as the latter, so every
+    # override on it passed silently. A generated builder registers its scope
+    # even with nothing in it, so the bare deck lands on the first verdict.
+    msg = errmsg(() -> MNACircuit(bare_ckt; vbais=1.0))
+    @test occursin("vbais", msg)
+    @test occursin("the top level", msg)
+    @test occursin("no parameters at all", msg)
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); vbais=1.0)
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); r1=(r=2e3,))
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); var"r1.r"=2e3)
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); v1=(dc=2.0,))
+    # The sweep axis is the case this matters most for: unchecked, it came back
+    # a flat curve — every point at the netlist default — rather than an error.
+    @test_throws ArgumentError dc!(CircuitSweep(bare_ckt, Sweep(vbais=[1.0, 2.0])))
+    # ...and the deck itself still builds and solves, overrides aside.
+    @test dc!(MNACircuit(bare_ckt))[:out] ≈ 2.5
 
     # A name that is both a `.param` and an instance stays legal in both
     # spellings — the collision rule is what decides, not the checker.

@@ -85,6 +85,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] UX/design: `test/design_flow.jl` walks an NMOS common-source stage op → DC → AC → transient → noise
 - [ ] Finish the override design: reach raw device instance parameters (`r1=(r=2e3,)`) through the lens — design: `doc/parameter_overrides.md`
 - [x] Diagnose unknown override names — design: `doc/parameter_overrides.md` §2
+- [x] Bug: a deck declaring nothing (no `.param`, no subckt) observed as unobservable, so every override on it passed silently — `doc/FINDINGS.rst` 4
 - [x] Codegen: a deck is a namespace — each loaded netlist gets its own module — design: `doc/parameter_overrides.md` §3
 - [x] Sema/codegen: let a `.model` card read a `.param`, so a process corner is an ordinary sweep axis — design: `doc/parameter_overrides.md` §4
 - [ ] UX/design follow-ups from the same walkthrough:

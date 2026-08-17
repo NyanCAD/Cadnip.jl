@@ -136,6 +136,20 @@ throws on the observer and is left alone — which is right, since only it knows
 what its parameters mean. Generated builders are observable because they accept
 whatever lens they are handed (`params isa AbstractParamLens ? params : …`).
 
+The line between the two is *whether the lens was consulted*, and that is why a
+deck declaring nothing needed a nudge. A netlist with no `.param` and no
+subcircuit instance has no reason to touch its lens, so it observed as an empty
+tree — the same thing a hand-written builder that ignores `params` produces.
+The two get opposite verdicts (check everything vs check nothing), the bare deck
+took the wrong one, and every override on it passed silently; a swept axis on
+such a deck came back a flat curve, which is the failure this whole path exists
+to prevent. `codegen_mna!` now calls the lens with no parameters when the deck
+declares none, so the observation reads "declares nothing" — checkable — instead
+of "cannot be observed". The call is guarded by the same `params isa
+AbstractParamLens` test the lens wrapping uses, which is decided at compile time
+for the `NamedTuple`/`ParamLens` a solve actually passes, so nothing reaches the
+hot path.
+
 The one case where observation succeeds but *lies* is a hand-written builder
 that takes its lens as a parameter (`p = params.lens(; R=…)`, as in
 `test/mna/core.jl`): reading `params.lens` off the observer mints a phantom

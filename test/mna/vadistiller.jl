@@ -289,9 +289,21 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             # KCL rows of the chain and internal nodes must carry no
             # residual at the exact solution. The old gmin-to-ground anchor
             # put 5e-11 A on each internal node's row.
+            #
+            # "No residual" has to be read against the floating-point floor,
+            # not against zero. Each of these rows cancels Rs branch terms of
+            # 50 V / 0.042 Ω ≈ 1.2e3 A, two per row, so one ulp of what is
+            # being subtracted is eps(2.4e3) = 4.5e-13 — and whether the
+            # cancellation lands on exactly 0.0 or one rounding step away is
+            # decided by summation order, which is not ours to pin (it moved
+            # once already under a dependency bump, with no change here). A
+            # 1e-15 bound is ~450x *below* one ulp, so it only ever passed by
+            # luck. 1e-12 sits 20x above the noise floor and still 50x below
+            # the 5e-11 leak this regression exists to catch; measured
+            # residuals at the exact point are ~3e-14, i.e. 0.07 ulp.
             for (i, name) in enumerate(ctx.node_names)
                 name == :n1 && continue   # source row balances the branch current
-                @test abs(F[i]) < 1e-15
+                @test abs(F[i]) < 1e-12
             end
 
             # End-to-end sanity: the solved chain must sit near 50 V. The
