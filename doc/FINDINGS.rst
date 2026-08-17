@@ -182,6 +182,37 @@ empty and the override is either ignored (``alter``) or reported as a raw
 *Suggested fix*: check overrides against the empty tree too, and let the
 constructor path raise the same ``ArgumentError`` the ``alter`` path does.
 
+*Status*: fixed.  A generated builder now registers its scope with the lens even
+when the deck declares nothing (``codegen_mna!``), so a bare deck observes as
+``(params = (),)`` — "declares nothing", which is checkable — rather than as an
+empty tree indistinguishable from a hand-written builder that ignores its
+``params``.  Both spellings now raise the same ``ArgumentError``, and so does a
+sweep axis, which previously came back as a flat curve.
+
+One correction to the measurements above, made while reproducing them on
+``main`` @ fbce56d.  The constructor's ``MethodError`` was not a second failure
+mode of the override path: it is the world-age error of finding 5, and it
+appeared here only because the probe built the circuit inside a closure.  Built
+at top level, the ``MNACircuit(deck; r1=(r=2e3,))`` of the table simply returned
+a circuit and solved to 2.5 V, exactly like the ``alter`` rows.  What the two
+spellings had in common was the silence, not the inconsistency.  The remaining
+rows reproduce as written::
+
+    # deck with no .param at all, all four measured at top level
+    MNACircuit(deck; r1=(r=2e3,))      silently ignored, V(out) = 2.5
+    alter(circuit; r1=(r=2e3,))        silently ignored, V(out) = 2.5
+    alter(circuit; var"r1.r"=2e3)      silently ignored, V(out) = 2.5
+    alter(circuit; v1=(dc=2.0,))       silently ignored, V(out) = 2.5
+    CircuitSweep(deck, Sweep(vbais=…)) silently ignored, [2.5, 2.5]
+
+    # after the fix, every one of the five
+    ArgumentError: unknown parameter override `…` — the top level declares no
+    parameter `…`. It declares no parameters at all.
+
+A deck with a subcircuit instance but no top-level ``.param`` was already
+checked before the fix — instances register on the observer through
+``getproperty`` — which is why the gap only ever showed up on the barest decks.
+
 5. The README's world-age example is stricter than reality
 ----------------------------------------------------------
 

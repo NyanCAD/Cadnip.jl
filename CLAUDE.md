@@ -342,9 +342,11 @@ spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
 a sweep axis. Two things are *not* reachable — device instance parameters
 (`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist with a `.param` instead),
 and a name no scope declares at all, i.e. a typo — and both now throw at
-construction instead of running as a no-op. Codegen emits the declared names of
-each scope beside the builder (`src/mna/param_scope.jl`); a hand-written builder
-emits none, so its `params` are never checked.
+construction instead of running as a no-op. Nothing is tabulated for this: the
+names come from building once with a `ParamObserver` in place of the `ParamLens`
+(`src/param_overrides.jl`), which every generated builder accepts. A
+hand-written builder that reads `params` as a plain NamedTuple throws on the
+observer and is left unchecked, since only it knows what its parameters mean.
 
 ### Parameter Sweeps (the sweep API)
 
