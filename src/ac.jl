@@ -273,6 +273,11 @@ function MNA.phase_deg(ac::ACSol, name::Symbol)
     return rad2deg.(angle.(ac[name]))
 end
 
+# The AC readout classifies its names the same way the DC one does — see
+# `node_names` / `branch_names` in src/mna/solve.jl.
+MNA.node_names(ac::ACSol) = copy(ac.node_names)
+MNA.branch_names(ac::ACSol) = copy(ac.current_names)
+
 """
     _get_node_index(ac::ACSol, node::Symbol) -> Int
 

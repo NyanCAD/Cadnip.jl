@@ -45,6 +45,35 @@ knowing the node names up front:
 Dict(pairs(op))
 ```
 
+### …and classified
+
+`keys` returns one flat list — node voltages, branch currents, device terminal
+currents and device operating-point variables together — and the `I_` spelling
+of a source current is a convention, not something to parse. `node_names` and
+`branch_names` say which is which:
+
+```@example analyses
+node_names(op), branch_names(op)
+```
+
+Ground names no column (it is not an unknown), even though `op[:gnd]` reads as
+`0.0`. Together with the two device channels below, the four lists partition the
+enumeration in `keys` order:
+
+```@example analyses
+keys(op) == vcat(node_names(op), branch_names(op),
+                 first.(terminal_currents(op)), first.(op_vars(op)))
+```
+
+Both read the same on a transient solution, on an AC solution, and on the
+`MNAData` system or `MNAContext` a circuit was stamped into, so a readout that
+walks the nodes of one analysis walks them in all of them:
+
+```julia
+node_names(tran!(circuit, (0.0, 1e-6)))   # same list, from the system the problem carries
+node_names(ac!(circuit, acdec(10, 1, 1e6)))
+```
+
 ### Terminal currents
 
 The solution vector cannot tell you a device's terminal current: KCL has

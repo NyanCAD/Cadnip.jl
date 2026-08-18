@@ -60,7 +60,7 @@ function Cadnip.explore(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
 
     # Circuit structure (and therefore the node set) is constant across parameter
     # changes, so the names only need to be resolved once.
-    node_names = assemble!(circuit).node_names
+    nodes = node_names(assemble!(circuit))
     names = Tuple(first(p) for p in params)
 
     slider_values = [s.value for s in sg.sliders]
@@ -69,7 +69,7 @@ function Cadnip.explore(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
         return tran!(altered, tspan; solver, kwargs...)
     end
 
-    for name in node_names
+    for name in nodes
         (name === :gnd || name === Symbol("0")) && continue
         trace = lift(solution) do sol
             StructArray{Point2f}((Float64.(sol.t), Float64.(sol[name])))
