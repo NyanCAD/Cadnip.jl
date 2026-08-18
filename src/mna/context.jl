@@ -369,6 +369,14 @@ mutable struct MNAContext
     # linearization starts in the conductive region. Set by the PCNR loop
     # for the first iteration of a cold start only.
     initjct::Bool
+
+    # The temperature (Celsius) the builder actually stamped at, recorded by
+    # `record_temp!` on the way in. A netlist's own `.temp`/`.option temp` card
+    # rebinds `spec` inside the builder, so the caller's `circuit.spec.temp` is
+    # not what the devices saw; an analysis that needs the device temperature
+    # (noise) reads it back from here. `nothing` when no builder recorded one —
+    # a hand-written builder does not, so callers fall back to their own spec.
+    stamped_temp::Union{Nothing,Float64}
 end
 
 """
@@ -424,6 +432,7 @@ function MNAContext()
         BreakpointSpec[],   # breakpoints (recomputed every build)
         false,              # finalized
         false,              # initjct
+        nothing,            # stamped_temp (recorded by the builder, if any)
     )
 end
 
@@ -1146,6 +1155,36 @@ function noise_sources(ctx::MNAContext)
      for i in 1:num_noise_sources(ctx)]
 end
 
+"""
+    record_temp!(ctx, temp)
+
+Record the temperature (Celsius) this stamping pass ran at, as the builder
+resolved it. Generated builders call this once per build, after any
+`.temp`/`.option temp` card has rebound `spec` — so what lands here is the
+temperature the devices were stamped with, which is *not* `circuit.spec.temp`
+whenever the deck carries a temperature card.
+
+The temperature is not a stamp: it exists so an analysis that evaluates a
+temperature-dependent quantity *outside* the devices — [`noise!`](@ref)'s
+thermal PSDs — uses the same temperature the devices did. No-op on
+[`DirectStampContext`](@ref); the transient hot path never reads it.
+"""
+@inline function record_temp!(ctx::MNAContext, temp::Real)
+    ctx.stamped_temp = Float64(temp)
+    return nothing
+end
+
+"""
+    stamped_temp(ctx) -> Union{Float64,Nothing}
+
+The temperature (Celsius) the last build stamped at, or `nothing` if no builder
+recorded one — a hand-written builder does not, and a caller that needs a number
+falls back to its own `spec.temp`. See [`record_temp!`](@ref).
+"""
+@inline stamped_temp(ctx::MNAContext) = ctx.stamped_temp
+
+export record_temp!, stamped_temp
+
 #==============================================================================#
 # Operating-point info channel: device terminal currents
 #
@@ -1591,6 +1630,10 @@ function reset_for_restamping!(ctx::MNAContext)
     # Breakpoints are recomputed from scratch every build (not a cache)
     empty!(ctx.breakpoints)
 
+    # Re-recorded from scratch every build, like the breakpoints: the builder
+    # resolves the temperature again on the way in.
+    ctx.stamped_temp = nothing
+
     ctx.finalized = false
     return nothing
 end
@@ -1659,6 +1702,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.limit_init)
     empty!(ctx.limit_w)
     empty!(ctx.breakpoints)
+    ctx.stamped_temp = nothing
     ctx.finalized = false
     return nothing
 end

@@ -208,6 +208,17 @@ high-level API.
   parallel construction. The diode reads the junction current, the MOSFET the
   drain current, at the operating point the channel is built at — same zero-cost
   contract (`test/mna/noise.jl`, `test/noise.jl`).
+
+  **Which temperature. _(landed)_** `T` in `4kT·g` is evaluated by `noise!`,
+  outside the devices, so it has to be the temperature the devices were stamped
+  with — and that is not `circuit.spec.temp` for a deck carrying a
+  `.temp`/`.option temp` card, which rebinds `spec` *inside* the builder. A
+  generated builder records what it resolved onto the context it stamps into
+  (`record_temp!`, read back with `stamped_temp`), and `noise!` reads that,
+  falling back to `circuit.spec.temp` for a hand-written builder, which records
+  nothing and rebinds nothing. Same zero-cost contract as the rest of the
+  channel: the record is a `Union{Nothing,Float64}` field on `MNAContext` and a
+  no-op on `DirectStampContext` (`test/noise.jl`, `doc/FINDINGS.rst` finding 1).
 - **N2 — Transfer functions via the AC system. _(landed)_** Reuse `ac!`'s
   linearized `(jωC + G)`; per output+frequency, one adjoint solve
   `(jωC+G)ᵀ x_adj = e_out` gives the transfer from every source at O(1) each

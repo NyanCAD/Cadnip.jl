@@ -224,6 +224,44 @@ ns = noise!(lowpass, :out; freqs=acdec(10, 1e3, 1e8), input=:V1)
 ns[:inoise][1], total_noise(ns; referred=:input)
 ```
 
+## Temperature
+
+Every analysis runs at the temperature of the circuit's `MNASpec`, 27 °C by
+default. `with_temp` gives back the same circuit at another one, keeping the rest
+of the spec (`gmin`, `tnom`, the tolerances) as it was:
+
+```@example analyses
+using Cadnip.MNA: with_temp
+
+hot = with_temp(lowpass, 85.0)
+total_noise(noise!(hot, :out; freqs=acdec(10, 1e3, 1e8))) /
+    total_noise(noise!(lowpass, :out; freqs=acdec(10, 1e3, 1e8)))
+```
+
+Thermal noise goes as `√T` in kelvin, so that ratio is `√(358.15/300.15)`.
+
+A deck may also carry its own temperature, as `.temp 85` or `.option temp=85`.
+That card is a control card of the netlist and wins unconditionally — it is
+applied inside the builder, on top of whatever spec the analysis was called
+with:
+
+```@example analyses
+carded = MNACircuit(sp"""
+* the deck names its own temperature
+V1 in 0 DC 1
+R1 in out 1k
+C1 out 0 1n
+.temp 85
+""")
+
+noise!(carded, :out; freqs=[1e3]).temp        # 85.0, not the caller's 27.0
+```
+
+So a temperature *sweep* wants a deck without a temperature card — one that
+carries one pins every point at the card's value. `NoiseSol.temp` above reports
+which temperature the PSDs were actually evaluated at, which is the one the
+devices were stamped with either way.
+
 ## Sweeping an analysis
 
 `dc!` and `tran!` accept a `CircuitSweep` and return a `SweepResult` of

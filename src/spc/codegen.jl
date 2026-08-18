@@ -2639,6 +2639,17 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
         push!(block.args, :(spec = $(MNA).with_temp(spec, $temp_expr)))
     end
 
+    # Record the resolved temperature on the context, so an analysis that
+    # evaluates a temperature-dependent quantity outside the devices (`noise!`'s
+    # thermal PSDs) reads what the devices were stamped with rather than the
+    # caller's `circuit.spec.temp`, which a temperature card above just replaced.
+    # Emitted for the top-level scope only — a `.subckt` has no temperature card
+    # of its own, so its `spec` is the one already recorded here. No-op on
+    # `DirectStampContext`.
+    if !is_subcircuit
+        push!(block.args, :($(MNA).record_temp!(ctx, spec.temp)))
+    end
+
     # Import exposed models from HDL modules (VA-generated device types)
     # These are types like nmos_lvt, pmos_lvt from BSIMCMG that have stamp! methods
     for model in state.sema.exposed_models

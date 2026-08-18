@@ -98,20 +98,32 @@ changed is that the rebind now goes through ``with_temp`` instead of
 reconstructing ``MNASpec`` with only ``temp``/``mode`` set, so
 ``tnom``/``gmin``/``gshunt``/``srcFact``/tolerances (and the ``time`` field's
 type, needed for ForwardDiff duals) survive it instead of resetting to
-defaults. The third consequence is unchanged and, with the card winning
-unconditionally, is now simply "whenever a `.temp` card is present at all":
-``circuit.spec.temp`` never reflects it, so ``noise!`` disagrees with the
-devices any time a deck carries the card. Fixing that needs ``circuit.spec``
-itself to carry the resolved temperature, which the codegen has no channel
-back to today.
+defaults. The third consequence is fixed too: ``noise!`` no longer reads
+``circuit.spec.temp``. A generated builder now records the temperature it
+resolved onto the context it stamps into (``record_temp!``, read back with
+``stamped_temp``), after any card has rebound ``spec``, so the thermal PSDs are
+evaluated at the temperature the devices were stamped with. Measured on the same
+1 kΩ + 1 µF circuit, output PSD at 1 Hz::
+
+    no card, default spec (27 C)     1.6575415088490336e-17
+    .options temp=100 in the deck    2.0606750425687716e-17   <- was unchanged
+    .temp 100 in the deck            2.0606750425687716e-17   <- was unchanged
+    MNASpec(temp=100.0)              2.0606750425687716e-17
+    with_temp(circuit, 100)          2.0606750425687716e-17
+
+``circuit.spec.temp`` still does not reflect a card — the record lives on the
+context, which is where an analysis holds the stamped circuit anyway, and a
+``MNACircuit`` does not run its builder at construction. A hand-written builder
+records nothing, and ``noise!`` falls back to ``circuit.spec.temp``, which for
+such a builder is also what the devices got.
 
 A cleaner long-term shape, not attempted here: route ``.temp`` through
 ``ParamLens`` the way a ``.subckt`` default or a ``.param`` already work — the
 card supplies the *default*, and an explicit override (``alter(circuit;
 temp=...)``, a sweep axis) is unambiguous because it is either present in the
-override tree or it isn't, with no magic-default guessing. That would also
-give ``circuit.spec``/``noise!`` a real value to read, closing the third
-consequence for free. Two things stand in the way: ``temp`` would need a name
+override tree or it isn't, with no magic-default guessing. That would also give
+``circuit.spec`` a real value to read, without an analysis having to build the
+circuit before it can know the temperature. Two things stand in the way: ``temp`` would need a name
 that cannot collide with a user's own ``.param temp=...`` in the same scope
 (unlike the ``x1``/``X1`` case, both would be leaves in the same namespace),
 and ``MNASpec`` is deliberately kept outside the ``params``/lens tree today —
