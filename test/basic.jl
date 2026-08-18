@@ -5,6 +5,7 @@ include("common.jl")
 using Cadnip.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using Cadnip.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using Cadnip.MNA: make_ode_problem
+using Cadnip.MNA: terminal_currents, op_vars, nameat
 using DiffEqBase: BrownFullBasicInit
 using VADistillerModels                     # .model … d → VA diode model
 
@@ -1266,6 +1267,68 @@ end
     @test sol["out"] ≈ 4.0
     @test haskey(sol, "out")
     @test get(sol, "does_not_exist", -1.0) == -1.0
+end
+
+@testset "node_names / branch_names classify a solution's names" begin
+    # One RC low-pass, driven so the same circuit answers DC, AC and transient:
+    # two nodes (`in`, `out`), one branch current (V1's), and the device
+    # terminal-current channel on top.
+    circuit = MNACircuit(sp"""
+    * classified readout
+    V1 in 0 DC 1 AC 1
+    R1 in out 1k
+    R2 out 0 3k
+    C1 out 0 1n
+    """i)
+
+    op = dc!(circuit)
+
+    @test node_names(op) == [:in, :out]
+    @test op[:out] ≈ 0.75                        # 1 V · 3k/(1k+3k)
+    cur = only(branch_names(op))                 # one voltage source ⇒ one branch
+    @test op[cur] ≈ -1 / 4000                    # 1 V across 4 kΩ, out of V1
+
+    # Ground is not an unknown, so it names no column — even though `op[:gnd]`
+    # reads as 0.0.
+    @test :gnd ∉ node_names(op) && Symbol("0") ∉ node_names(op)
+    @test isempty(intersect(node_names(op), branch_names(op)))
+
+    # The classification partitions the enumeration: node voltages, then branch
+    # currents, then the two device channels, in `keys` order. This is what
+    # `keys(sol)` alone cannot tell you — the `I_` spelling of a source current
+    # is a convention, not an interface.
+    @test keys(op) == vcat(node_names(op), branch_names(op),
+                           [p.first for p in terminal_currents(op)],
+                           [p.first for p in op_vars(op)])
+    @test all(n -> haskey(op, n), node_names(op))
+    @test all(n -> haskey(op, n), branch_names(op))
+
+    # The lists are copies: mutating one cannot corrupt the solution.
+    push!(node_names(op), :bogus)
+    @test :bogus ∉ node_names(op)
+
+    # A transient solution reads the same, through the MNA system its problem
+    # carries — the object `nameat` looks names up in.
+    tsol = tran!(circuit, (0.0, 20e-6))
+    @test node_names(tsol) == node_names(op)
+    @test branch_names(tsol) == branch_names(op)
+    @test nameat(tsol, first(node_names(tsol)), 0.0) ≈ 1.0
+
+    # So does an AC solution.
+    acsol = ac!(circuit, acdec(4, 1e3, 1e6))
+    @test node_names(acsol) == node_names(op)
+    @test branch_names(acsol) == branch_names(op)
+    @test length(acsol[first(node_names(acsol))]) == length(acsol.freqs)
+
+    # And so do the system and the context it was assembled from, which is where
+    # the names are actually born.
+    ctx = MNAContext()
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+    sys = assemble!(ctx)
+    @test node_names(ctx) == node_names(op)
+    @test branch_names(ctx) == branch_names(op)
+    @test node_names(sys) == node_names(op)
+    @test branch_names(sys) == branch_names(op)
 end
 
 end # basic_tests

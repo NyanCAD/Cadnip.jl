@@ -377,6 +377,16 @@ bridge reads the ``node_names`` / ``current_names`` fields of ``DCSolution``,
 ``ACSol`` and ``MNAData`` instead.  ``node_names(sol)`` / ``branch_names(sol)``
 would make that a supported operation.
 
+*Status*: fixed.  ``node_names`` and ``branch_names`` are exported from Cadnip
+and answer for a ``DCSolution``, an ``ACSol``, a transient solution (through the
+``MNAData`` its problem carries), an ``MNAData`` and an ``MNAContext`` — the
+same list off any of them, so a bridge no longer reaches for the fields.  They
+hand out copies, and with the pairs ``terminal_currents(sol)`` / ``op_vars(sol)``
+already return they partition the enumeration::
+
+    keys(sol) == vcat(node_names(sol), branch_names(sol),
+                      first.(terminal_currents(sol)), first.(op_vars(sol)))
+
 **Hierarchical nodes flatten with an underscore.**  ``x1_out`` where SPICE
 writes ``x1.out``.  Reversing it is unsafe — an underscore is legal in a net
 name — so a portable script cannot name a subcircuit node the same way across

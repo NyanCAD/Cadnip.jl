@@ -297,10 +297,20 @@ knowing the names up front:
 
 ```julia
 sol = dc!(circuit)
-keys(sol)                 # nodes, branch currents, terminal currents, device variables: [:in, :out, :I_V1, :i_r1_p, …]
+keys(sol)                 # nodes, branch currents, terminal currents, device variables: [:in, :out, :I_v1, :i_r1_p, …]
 Dict(pairs(sol))          # the whole operating point as name => value
 get(sol, :out, NaN)       # non-throwing lookup (sol[:out] throws if absent)
 haskey(sol, :out)         # true
+```
+
+That list is flat, so two accessors say which name is which — no parsing of the
+`I_` spelling required. They read the same on a DC, transient or AC solution
+(and on the `MNAData`/`MNAContext` a circuit was stamped into), so a readout
+written for one analysis walks the same nodes in the others:
+
+```julia
+node_names(sol)           # [:in, :out] — ground names no column
+branch_names(sol)         # [:I_v1] — SPICE names are lowercased
 ```
 
 `ac!(circuit, freqs)` returns an `ACSol` — a linearized descriptor state-space

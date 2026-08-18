@@ -13,6 +13,7 @@ using LinearAlgebra
 using SparseArrays
 using Accessors
 using Random
+using SciMLBase
 
 # real_time is defined in precompile.jl (handles ForwardDiff.Dual for tgrad)
 
@@ -331,6 +332,89 @@ Base.get(sol::DCSolution, name::Symbol, default) =
 Base.get(sol::DCSolution, name::AbstractString, default) =
     get(sol, Symbol(name), default)
 
+#==============================================================================#
+# Name classification: node_names / branch_names
+#
+# `keys(sol)` enumerates an operating point as one flat list — node voltages,
+# branch currents, device terminal currents and device operating-point variables
+# all mixed together — and nothing in it says which is which; the `I_` spelling
+# of a source current is a convention, not an interface. These two accessors are
+# that classification, and they read the same on everything that carries the
+# names: a DC solution, an AC solution, a transient solution (through the
+# `MNAData` its problem carries), the assembled system, and the context it was
+# assembled from. The other two classes are already classified by the pairs
+# `terminal_currents(sol)` and `op_vars(sol)` return, so
+#
+#     keys(sol) == vcat(node_names(sol), branch_names(sol),
+#                       first.(terminal_currents(sol)), first.(op_vars(sol)))
+#
+# partitions the whole operating point.
+#==============================================================================#
+
+"""
+    node_names(x) -> Vector{Symbol}
+
+The voltage-node names of `x`, in solution-vector order — the names for which
+`sol[name]` is a node voltage. Ground is not among them: it is not an unknown,
+though `sol[:gnd]` still reads as `0.0`.
+
+`x` is anything that carries the names: a [`DCSolution`](@ref), an `ACSol`, a
+transient solution from `tran!`, an [`MNAData`](@ref) system, or the
+[`MNAContext`](@ref) it was stamped into.
+
+```julia
+op = dc!(circuit)
+node_names(op)                       # [:in, :out]
+[op[n] for n in node_names(op)]      # every node voltage, and nothing else
+```
+
+See also [`branch_names`](@ref).
+"""
+function node_names end
+
+"""
+    branch_names(x) -> Vector{Symbol}
+
+The branch-current names of `x`, in solution-vector order — the current unknowns
+MNA adds for voltage sources, inductors and the other devices that need one
+(`:I_v1`), for which `sol[name]` is a current. These are the *solution vector's*
+currents; a device's terminal currents are a separate channel, reported by
+[`terminal_currents`](@ref).
+
+```julia
+op = dc!(circuit)
+branch_names(op)                     # [:I_v1]
+```
+
+See also [`node_names`](@ref).
+"""
+function branch_names end
+
+# The name vectors are the solution's own; hand out copies so a caller cannot
+# mutate a circuit's naming out from under it.
+node_names(sol::DCSolution) = copy(sol.node_names)
+branch_names(sol::DCSolution) = copy(sol.current_names)
+
+node_names(sys::MNAData) = copy(sys.node_names)
+branch_names(sys::MNAData) = copy(sys.current_names)
+
+node_names(ctx::MNAContext) = copy(ctx.node_names)
+branch_names(ctx::MNAContext) = copy(ctx.current_names)
+
+# A transient solution keeps its names on the `MNAData` its problem carries —
+# the same object `nameat` reads through SII.
+function _mna_sys(sol::SciMLBase.AbstractTimeseriesSolution)
+    sys = sol.prob.f.sys
+    sys isa MNAData || error(
+        "node_names/branch_names: this solution carries no MNA system " *
+        "(prob.f.sys is a $(typeof(sys))), so its variables cannot be classified.")
+    return sys
+end
+node_names(sol::SciMLBase.AbstractTimeseriesSolution) = node_names(_mna_sys(sol))
+branch_names(sol::SciMLBase.AbstractTimeseriesSolution) = branch_names(_mna_sys(sol))
+
+export node_names, branch_names
+
 """
     nameat(sol, name::Symbol, t::Real)
 
@@ -431,7 +515,6 @@ function phase_deg end
 
 using NonlinearSolve
 using LinearSolve: LinearProblem, KLUFactorization
-using SciMLBase
 using ADTypes
 
 #==============================================================================#

@@ -9,6 +9,11 @@ include("mna/MNA.jl")
 using .MNA
 export MNA
 
+# Solution readout: `node_names` / `branch_names` classify the names a solution
+# answers to. Declared in MNA (src/mna/solve.jl), with the AC methods in
+# src/ac.jl.
+export node_names, branch_names
+
 # re-exports
 export DAEProblem
 export @dyn, @requires, @provides, @isckt_or

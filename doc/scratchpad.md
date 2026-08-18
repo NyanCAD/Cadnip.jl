@@ -110,7 +110,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] `noise!` disagrees with the devices whenever a `.temp` card is present at all — `circuit.spec.temp` never reflects it, `noise!` reads `circuit.spec.temp` — `doc/FINDINGS.rst` finding 1 (residual)
 - [ ] UX/design: route `.temp` through `ParamLens` like a `.param`/`.subckt` default, so an explicit override is unambiguous (present-in-tree vs not) instead of magic-default guessing, and `circuit.spec`/`noise!` get a real resolved value for free — needs a collision-safe name (`.temp` and a user's own `.param temp=...` would share a namespace, unlike the `x1`/`X1` case) and crosses `MNASpec`'s current boundary from the `params`/lens tree — `doc/FINDINGS.rst` finding 1
 - [ ] Documentation: the README's world-age example is stricter than measured — `doc/FINDINGS.rst` 5
-- [ ] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
+- [x] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
 - [ ] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — port or drop each
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
