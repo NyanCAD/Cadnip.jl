@@ -893,17 +893,100 @@ end
     @test p[:a] === p[:b]
 end
 
+# `.option` cards that name an `MNASpec` field (`Cadnip.SPEC_OPTIONS`) rebind
+# that field for the deck. Only `temp` used to, and the rest were parsed, stored
+# and dropped (doc/FINDINGS.rst finding 2). `gmin` is the one with a device-side
+# effect that does not need a temperature to observe: a Verilog-A model reads it
+# back through `$simparam("gmin")`.
+const _OPT_FIXTURE_DIR = mktempdir(; cleanup=true)
+write(joinpath(_OPT_FIXTURE_DIR, "simparam_probe.va"), raw"""
+module SimParamProbe(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n) * $simparam("gmin", 1e-30);
+endmodule
+""")
+
+# Same deck twice: once as written, once with a raised gmin. The probe conducts
+# `gmin` siemens, so I(V1) reads the value the devices were stamped with.
+const _OPT_GMIN_DECK = """
+* gmin through .option
+.hdl "simparam_probe.va"
+V1 vcc 0 DC 1
+X1 vcc 0 SimParamProbe
+"""
+const _OPT_DEFAULT_CIRCUIT, _OPT_GMIN_CIRCUIT = cd(_OPT_FIXTURE_DIR) do
+    (MNACircuit(_OPT_GMIN_DECK; lang=:spice),
+     MNACircuit(_OPT_GMIN_DECK * ".option gmin=1e-3\n"; lang=:spice))
+end
+
+# Every spec option at once, with a `.temp` card alongside the `.option` ones,
+# against a caller spec whose other fields must survive. Top level, so the
+# builder is callable directly below (`MNACircuit(code)` eval's it).
+const _OPT_MULTI_CIRCUIT = MNACircuit("""
+* every spec option at once
+.option gmin=1e-9 tnom=25 abstol=1e-15 reltol=1e-5
+.option vntol=1e-9 iabstol=1e-14
+.temp 40
+V1 vcc 0 DC 1
+R1 vcc 0 1k
+"""; lang=:spice, spec=MNASpec(gshunt=1e-11, srcFact=0.5))
+
 @testset ".option" begin
-    # Same SPICE code as original - just test parsing doesn't error
+    # Bare flags and options the backend does not know are ignored, not fatal.
     spice_ckt = """
     * .option
     .option temp=10 filemode=ascii noinit
     """
     ast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice_ckt)
     code = Cadnip.make_mna_circuit(ast)
-    # Original just tested that f() returns nothing
-    # For MNA, we test that code generation succeeds
     @test code !== nothing
+
+    @testset "a spec option reaches the devices" begin
+        # The probe conducts `gmin` siemens, so I(V1) is the gmin the devices
+        # were stamped with — 1e-12 by default, the card's value with one.
+        @test dc!(_OPT_DEFAULT_CIRCUIT)[:I_v1] ≈ -1e-12 rtol=1e-6
+        @test dc!(_OPT_GMIN_CIRCUIT)[:I_v1] ≈ -1e-3 rtol=1e-6
+    end
+
+    @testset "the deck's resolved spec is recorded on the context" begin
+        # What the builder resolved is readable back off the context it stamped
+        # into — the caller's `circuit.spec` never sees a card.
+        function stamped(circuit)
+            ctx = MNAContext()
+            Base.invokelatest(circuit.builder, circuit.params, circuit.spec, 0.0;
+                              x=ZERO_VECTOR, ctx=ctx)
+            Cadnip.MNA.stamped_spec(ctx)
+        end
+        @test stamped(_OPT_DEFAULT_CIRCUIT).gmin == 1e-12
+        @test stamped(_OPT_GMIN_CIRCUIT).gmin == 1e-3
+        @test _OPT_GMIN_CIRCUIT.spec.gmin == 1e-12   # the card is builder-local
+
+        # Several at once, including the `$simparam` tolerances. Everything no
+        # card names keeps the caller's value.
+        s = stamped(_OPT_MULTI_CIRCUIT)
+        @test (s.gmin, s.tnom, s.abstol, s.reltol, s.vntol, s.iabstol, s.temp) ==
+              (1e-9, 25.0, 1e-15, 1e-5, 1e-9, 1e-14, 40.0)
+        @test (s.gshunt, s.srcFact, s.mode) ==
+              (1e-11, 0.5, _OPT_MULTI_CIRCUIT.spec.mode)
+    end
+
+    @testset "an unimplemented result-affecting option warns" begin
+        # `.option scale=1` is the no-op every PDK that spells the default out
+        # carries; anything else changes what the deck means and we drop it.
+        @test_logs min_level=Base.CoreLogging.Warn MNACircuit("""
+        * scale=1 is a no-op
+        .option scale=1
+        V1 vcc 0 DC 1
+        R1 vcc 0 1k
+        """; lang=:spice)
+        @test_logs (:warn, r"`.option scale` is parsed but not implemented") min_level=Base.CoreLogging.Warn MNACircuit("""
+        * scale=2 is not
+        .option scale=2
+        V1 vcc 0 DC 1
+        R1 vcc 0 1k
+        """; lang=:spice)
+    end
 end
 
 @testset "functions" begin

@@ -213,9 +213,36 @@ end
 # Options can be set either via `.option name=value` (a `Parameter` node with a
 # `.val` field) or, for temperature, via the standalone `.temp value` directive
 # (a `TempStatement` node whose value lives in `.temp`). Normalize both to the
-# underlying value expression node.
+# underlying value expression node. A bare flag (`.option noinit`) has no value
+# node at all, hence the `nothing`.
 _option_value_node(p::SNode{SP.Parameter}) = p.val
 _option_value_node(p::SNode{SP.TempStatement}) = p.temp
+
+"""
+    SPEC_OPTIONS
+
+The `.option` names that name an `MNASpec` field, and so rebind it for the deck
+that carries the card (see `codegen_mna!`). `temp` is the deck's analysis
+temperature; the rest are the `\$simparam` values a Verilog-A model reads —
+`gmin` also stamps the internal-node conductance the VA lowering adds.
+
+Three `MNASpec` fields are deliberately *not* here. `mode` and `time` belong to
+the analysis being run, not to the deck. `gshunt` and `srcFact` are the DC
+homotopy's working state: `solve_dc` rewrites them per continuation step, so a
+card value would be overwritten rather than honoured.
+"""
+const SPEC_OPTIONS = (:temp, :gmin, :tnom, :abstol, :reltol, :vntol, :iabstol)
+
+"""
+    UNIMPLEMENTED_OPTIONS
+
+Options that change what a deck simulates to but that the MNA backend does not
+implement, mapped to the value at which the card is a no-op. Setting one to
+anything else warns at load time rather than being silently dropped
+(`doc/FINDINGS.rst` finding 2). `scale` multiplies every device's geometry;
+nothing consumes it today.
+"""
+const UNIMPLEMENTED_OPTIONS = (scale = 1.0,)
 
 """
     _is_declared_param(state, id) -> Bool
@@ -2629,25 +2656,47 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     block = Expr(:block)
     ret = block
 
-    # Handle temperature option - `.temp`/`.option temp` sets this deck's
-    # analysis temperature, unconditionally: it's the netlist's own control
-    # card, not a default a caller happens to shadow. `with_temp` carries the
-    # rest of `spec` (gmin, tnom, tolerances, the `time` field's type) through
-    # the rebind instead of resetting it to defaults.
-    if haskey(state.sema.options, :temp)
-        temp_expr = cg_expr!(state, _option_value_node(state.sema.options[:temp][end][2]))
-        push!(block.args, :(spec = $(MNA).with_temp(spec, $temp_expr)))
+    # Handle the `.option`/`.temp` cards that name an `MNASpec` field
+    # (`SPEC_OPTIONS`): each rebinds that field for this deck, unconditionally.
+    # They are the netlist's own control cards, not defaults a caller happens to
+    # shadow. The rebind goes through the `MNASpec` copy constructor, so every
+    # field no card names — including the `time` field's ForwardDiff-carrying
+    # type — comes through untouched. A later card of the same name wins (the
+    # `[end]` lookup); a bare flag (`.option gmin`, no value) is not a setting.
+    spec_kws = Expr[]
+    for name in SPEC_OPTIONS
+        haskey(state.sema.options, name) || continue
+        valnode = _option_value_node(state.sema.options[name][end][2])
+        valnode === nothing && continue
+        push!(spec_kws, Expr(:kw, name, cg_expr!(state, valnode)))
+    end
+    if !isempty(spec_kws)
+        push!(block.args, :(spec = $(MNA).MNASpec(spec; $(spec_kws...))))
     end
 
-    # Record the resolved temperature on the context, so an analysis that
-    # evaluates a temperature-dependent quantity outside the devices (`noise!`'s
-    # thermal PSDs) reads what the devices were stamped with rather than the
-    # caller's `circuit.spec.temp`, which a temperature card above just replaced.
-    # Emitted for the top-level scope only — a `.subckt` has no temperature card
+    # An option we recognize as result-affecting but do not implement is worth a
+    # word: dropping it silently means a deck simulates to something other than
+    # what it says. Skipped when the card sets the value that makes it a no-op
+    # (`.option scale=1`), which is what a PDK that spells the default out has.
+    for (name, neutral) in pairs(UNIMPLEMENTED_OPTIONS)
+        haskey(state.sema.options, name) || continue
+        valnode = _option_value_node(state.sema.options[name][end][2])
+        valnode === nothing && continue
+        value = cg_expr!(state, valnode)
+        value isa Number && value == neutral && continue
+        @warn "`.option $name` is parsed but not implemented by the MNA backend; \
+               it does not affect this simulation" value
+    end
+
+    # Record the resolved spec on the context, so an analysis that evaluates a
+    # device-dependent quantity outside the devices (`noise!`'s thermal PSDs read
+    # the temperature) sees what the devices were stamped with rather than the
+    # caller's `circuit.spec`, which the cards above may just have replaced.
+    # Emitted for the top-level scope only — a `.subckt` carries no control cards
     # of its own, so its `spec` is the one already recorded here. No-op on
     # `DirectStampContext`.
     if !is_subcircuit
-        push!(block.args, :($(MNA).record_temp!(ctx, spec.temp)))
+        push!(block.args, :($(MNA).record_spec!(ctx, spec)))
     end
 
     # Import exposed models from HDL modules (VA-generated device types)
