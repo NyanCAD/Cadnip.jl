@@ -168,16 +168,16 @@ transient restamping is untouched (see doc/noise_analysis_design.md).
 @inline register_flicker_noise!(::DirectStampContext, args...; kwargs...) = nothing
 
 """
-    record_temp!(::DirectStampContext, temp)
-    stamped_temp(::DirectStampContext) -> nothing
+    record_spec!(::DirectStampContext, spec)
+    stamped_spec(::DirectStampContext) -> nothing
 
-No-op / `nothing`. The stamping temperature is recorded for the analyses that
-evaluate temperature-dependent quantities outside the devices (noise), all of
+No-op / `nothing`. The resolved spec is recorded for the analyses that evaluate
+device-dependent quantities outside the devices (noise's temperature), all of
 which run against an `MNAContext`; the restamping hot path neither records nor
 reads it.
 """
-@inline record_temp!(::DirectStampContext, ::Real) = nothing
-@inline stamped_temp(::DirectStampContext) = nothing
+@inline record_spec!(::DirectStampContext, ::MNASpec) = nothing
+@inline stamped_spec(::DirectStampContext) = nothing
 
 """
     noise_enabled(::DirectStampContext) -> false

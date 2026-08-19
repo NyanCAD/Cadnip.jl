@@ -262,6 +262,44 @@ carries one pins every point at the card's value. `NoiseSol.temp` above reports
 which temperature the PSDs were actually evaluated at, which is the one the
 devices were stamped with either way.
 
+## Netlist options
+
+Temperature is one of a handful of `.option` names the backend reads. Each names
+a field of the circuit's `MNASpec`, and a card sets it for that deck the same
+unconditional way `.temp` does:
+
+| `.option` | what it sets |
+|---|---|
+| `temp` | the analysis temperature, as `.temp` does |
+| `gmin` | the minimum conductance device models stamp, and `$simparam("gmin")` |
+| `tnom` | the nominal temperature model parameters are specified at |
+| `abstol`, `reltol`, `vntol`, `iabstol` | the tolerances a Verilog-A model reads via `$simparam` |
+
+```@example analyses
+probe = MNACircuit(sp"""
+* the deck names its own gmin
+.option gmin=1e-9
+V1 in 0 DC 1
+R1 in out 1k
+""")
+
+ctx = Cadnip.MNA.MNAContext()
+probe.builder(probe.params, probe.spec, 0.0; ctx)
+Cadnip.MNA.stamped_spec(ctx).gmin, probe.spec.gmin    # (1e-9, 1e-12)
+```
+
+A card rebinds the spec *inside* the builder, so `circuit.spec` keeps whatever
+the caller passed; `stamped_spec(ctx)` is what the devices were actually stamped
+with, and it is where `noise!` reads its temperature from.
+
+The tolerances a solver actually converges against are arguments of the analysis
+— `tran!`'s `abstol`/`reltol` kwargs, `CedarDCOp(abstol=…)` for the operating
+point — not deck options; the `MNASpec` fields of those names exist for
+Verilog-A models to read through `$simparam`. Options
+outside the table are ignored, with one exception: `.option scale` (a geometry
+scale factor, unimplemented) warns when set to anything but `1`, rather than
+being dropped silently.
+
 ## Sweeping an analysis
 
 `dc!` and `tran!` accept a `CircuitSweep` and return a `SweepResult` of

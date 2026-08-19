@@ -44,6 +44,10 @@ using ForwardDiff
 # context.jl's MNAContext field and devices.jl's wave structs
 include("breakpoints.jl")
 
+# Simulation specification (MNASpec) - needed by context.jl's MNAContext field
+# (the spec a build resolved, see record_spec!) and by every stamp
+include("spec.jl")
+
 # Context and stamping primitives
 include("context.jl")
 

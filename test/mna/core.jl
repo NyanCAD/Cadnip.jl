@@ -40,6 +40,7 @@ using Cadnip.MNA: MNACircuit, MNASpec, CedarUICOp
 using OrdinaryDiffEq: Rodas5P, FBDF
 using OrdinaryDiffEqBDF: QNDF
 using DiffEqBase: BrownFullBasicInit
+using ForwardDiff: ForwardDiff
 using LinearSolve: KLUFactorization
 import Sundials
 using NyanVerilogAParser
@@ -1110,7 +1111,7 @@ using NyanVerilogAParser
     #==========================================================================#
 
     # Import MNACircuit and related exports
-    using Cadnip.MNA: MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
+    using Cadnip.MNA: MNASpec, alter, with_mode, with_spec, with_temp, with_time, eval_circuit
     using Cadnip.MNA: MNACircuit
     using SciMLBase: ODEProblem as SciMLODEProblem
 
@@ -1589,6 +1590,21 @@ using NyanVerilogAParser
                    s.vntol, s.iabstol)
         @test rest(with_temp(custom, 100.0)) == rest(custom)
         @test rest(with_mode(custom, :dcop)) == rest(custom)
+
+        # The copy constructor every `with_*` (and the netlist `.option` rebind)
+        # goes through: name the fields to change, the rest carries through.
+        @test MNASpec(custom) === custom
+        several = MNASpec(custom; temp=85.0, gmin=1e-6, tnom=40.0)
+        @test (several.temp, several.gmin, several.tnom) == (85.0, 1e-6, 40.0)
+        @test (several.mode, several.gshunt, several.srcFact, several.abstol,
+               several.reltol, several.vntol, several.iabstol) ==
+              (custom.mode, custom.gshunt, custom.srcFact, custom.abstol,
+               custom.reltol, custom.vntol, custom.iabstol)
+
+        # The `time` field's type is the one a Rosenbrock transient fills with a
+        # ForwardDiff dual, so it has to survive a rebind that does not name it.
+        dual = with_time(custom, ForwardDiff.Dual(1e-3, 1.0))
+        @test MNASpec(dual; temp=85.0).time === dual.time
 
         # Test temperature-dependent circuit
         function build_temp_dependent(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)

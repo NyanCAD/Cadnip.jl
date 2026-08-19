@@ -94,14 +94,15 @@ differ from ``MNASpec``'s own default, which is exactly the kind of ambiguous,
 unmeasurable claim this document exists to avoid. (The InSpice backend writing
 ``.options TEMP=27`` into every deck is a translation choice on that side, not
 a precedence bug here.) So the card wins unconditionally, same as before — what
-changed is that the rebind now goes through ``with_temp`` instead of
-reconstructing ``MNASpec`` with only ``temp``/``mode`` set, so
+changed is that the rebind now goes through the ``MNASpec`` copy constructor
+(``MNASpec(spec; temp=...)``) instead of reconstructing ``MNASpec`` with only
+``temp``/``mode`` set, so
 ``tnom``/``gmin``/``gshunt``/``srcFact``/tolerances (and the ``time`` field's
 type, needed for ForwardDiff duals) survive it instead of resetting to
 defaults. The third consequence is fixed too: ``noise!`` no longer reads
-``circuit.spec.temp``. A generated builder now records the temperature it
-resolved onto the context it stamps into (``record_temp!``, read back with
-``stamped_temp``), after any card has rebound ``spec``, so the thermal PSDs are
+``circuit.spec.temp``. A generated builder now records the spec it resolved onto
+the context it stamps into (``record_spec!``, read back with ``stamped_spec``),
+after any card has rebound ``spec``, so the thermal PSDs are
 evaluated at the temperature the devices were stamped with. Measured on the same
 1 kΩ + 1 µF circuit, output PSD at 1 Hz::
 
@@ -149,6 +150,24 @@ throw ``UndefVarError`` at codegen time if it ever were reached.
 Practical effect: of the options its sema collects, the MNA path consumes only
 ``temp``.  ``.option gmin=`` and ``.option scale=`` are parsed, stored, and
 dropped.
+
+*Status*: the dead ``codegen!`` path is gone (``doc/codegen_unification.md``
+§5), and the practical effect is mostly fixed. ``codegen_mna!`` now threads
+every option that names an ``MNASpec`` field —
+``temp``/``gmin``/``tnom``/``abstol``/``reltol``/``vntol``/``iabstol``
+(``SPEC_OPTIONS`` in ``src/spc/codegen.jl``) — through one ``MNASpec(spec;
+...)`` rebind, so ``.option gmin=1e-3`` reaches the devices that read
+``$simparam("gmin")`` and the internal-node conductance the Verilog-A lowering
+stamps.  ``mode``/``time`` stay the analysis's, and ``gshunt``/``srcFact`` stay
+the DC homotopy's working state (``solve_dc`` rewrites them per continuation
+step, so a card would be overwritten, not honoured).  What the deck resolved to
+is readable back off the context it stamped into (``stamped_spec``).
+
+``.option scale=`` is still not implemented — nothing consumes a geometry scale
+factor — but it no longer disappears quietly: a value other than the no-op ``1``
+warns at load time (``UNIMPLEMENTED_OPTIONS``).  Options that name nothing in
+either list (``.option post``, ``.option method=trap``) are still ignored
+silently, as a simulator that does not need them should.
 
 3. ``temper()`` in a ``.param`` sees no temperature at all
 ---------------------------------------------------------

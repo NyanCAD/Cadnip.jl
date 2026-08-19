@@ -151,7 +151,8 @@ function noise!(circuit::MNA.MNACircuit, output::Symbol;
     # would evaluate the thermal PSDs at a temperature no device saw. A
     # hand-written builder records nothing; then the caller's spec is all there
     # is, and it is also what the devices got.
-    temp_c = something(MNA.stamped_temp(ctx), circuit.spec.temp)
+    stamped = MNA.stamped_spec(ctx)
+    temp_c = stamped === nothing ? circuit.spec.temp : stamped.temp
     e_out = zeros(ComplexF64, n)
     e_out[out_idx] = 1.0
 
