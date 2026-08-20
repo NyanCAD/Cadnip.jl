@@ -10,7 +10,16 @@ struct CodegenState
     # the `parent_params` it is called with. Empty at the top level, where such
     # a name is left free for the environment (`M_1_PI`) to resolve.
     inherited_params::OrderedSet{Symbol}
+    # Bumped by `cg_expr!` every time it lowers an identifier to a *builder
+    # argument* rather than to a binding that exists at module scope (`$time` →
+    # `t`, `temper` → `spec.temp`). `codegen_toplevel_models!` reads it around
+    # one `.model` card to find out whether that card can be hoisted to a
+    # module-level `const`, which observes the lowering that actually happened
+    # instead of re-deriving it from the AST.
+    builder_local_refs::Base.RefValue{Int}
 end
+CodegenState(sema::SemaResult, is_subcircuit::Bool, inherited_params::OrderedSet{Symbol}) =
+    CodegenState(sema, is_subcircuit, inherited_params, Base.RefValue(0))
 CodegenState(sema::SemaResult) = CodegenState(sema, false, OrderedSet{Symbol}())
 
 # LString and LSymbol are defined in spectre.jl
@@ -284,16 +293,23 @@ function cg_expr!(state::CodegenState, id::Symbol)
         true
     elseif id == Symbol("false")
         false
-    # `$time` and `temper` are the two SpectreEnvironment names a netlist writes
-    # as a bare identifier rather than a call, so they are the two that would
-    # otherwise need the environment in scope where the code is eval'd. Neither
-    # can be shadowed by a `.param` of the same name — this branch runs before
-    # any parameter lookup — so naming the binding directly changes nothing but
-    # where it resolves.
+    # `$time` and `temper` are the simulation state a netlist writes as a bare
+    # identifier rather than a call. Both are arguments of the builder that is
+    # being generated — `t` and `spec` — which is where they are read from, the
+    # same way the Verilog-A path lowers `$abstime`/`$temperature` to `_mna_t_`
+    # and `_mna_spec_.temp`. The `SpectreEnvironment` functions of these names
+    # are the DAECompiler-era readers of a `ScopedValue` the MNA backend never
+    # binds, so calling them returned the *default* time and temperature (0 s,
+    # 27 C) no matter what the simulation was doing. `.temp`/`.option temp`
+    # rebind `spec` at the top of the body, before any parameter assignment, so
+    # a card is visible here too. Neither name can be shadowed by a `.param` of
+    # the same name — this branch runs before any parameter lookup.
     elseif id == Symbol("\$time")
-        Expr(:call, GlobalRef(SpectreEnvironment, Symbol("\$time")))
+        state.builder_local_refs[] += 1
+        :t
     elseif id == Symbol("temper")
-        Expr(:call, GlobalRef(SpectreEnvironment, :temper))
+        state.builder_local_refs[] += 1
+        :(spec.temp)
     elseif _is_declared_param(state, id)
         # A parameter is a local of the builder; emit the bare name so it binds
         # to that local. This is checked *before* the environment so a `.param`
@@ -2609,7 +2625,20 @@ function codegen_toplevel_models!(state::CodegenState)
             continue
         end
 
+        # `temper` and `$time` keep a card out of module scope for the same
+        # reason, one step later: they are not parameters, so the check above
+        # cannot see them, and they lower to the builder's own `spec`/`t`
+        # arguments. Generate the value and ask whether the lowering reached
+        # for one — the counter observes what was emitted rather than
+        # re-deriving it from the AST. Nothing has to be exposed to a
+        # subcircuit for them, unlike a `.param` dependency; every builder
+        # takes a `spec` and a `t` of its own.
+        before = state.builder_local_refs[]
         value = cg_model_value!(state, model_ast, model_ref)
+        if state.builder_local_refs[] != before
+            push!(deferred, model_name)
+            continue
+        end
         value === nothing && continue
 
         model_var = cg_model_name!(state, model_name)

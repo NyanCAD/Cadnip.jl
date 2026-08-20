@@ -117,5 +117,9 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
+- [x] Bug: `temper` and `$time` in a netlist expression read a DAECompiler `ScopedValue` nothing binds, so they were frozen at 27 °C / 0 s — codegen lowers them to the builder's own `spec.temp`/`t` — `doc/FINDINGS.rst` 3
+- [ ] Cleanup: `SpectreEnvironment`'s `pwl`/`pulse`/`spsin`/`agauss`/`$scale` and `VAEnvironment`'s `$simparam`/`$temperature`/`$vt` still read the dead `Cadnip.spec` ScopedValue — `doc/FINDINGS.rst` 3
+- [ ] Bug: a Spectre `bsource` is parsed and then silently not stamped — the builder body has no trace of it
+- [ ] Features: Spectre `type=pwl wave=[…]` sources — `sema_visit_ids!` has no `SpectreArray` method and nothing lowers the array
 - [ ] Features: `.option scale` (geometry scale factor) — nothing consumes it; needs every device's geometric parameters to scale
 - [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"
