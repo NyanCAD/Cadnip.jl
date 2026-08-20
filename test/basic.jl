@@ -688,11 +688,10 @@ x1 vcc 0 tsense
     end
 end
 
-# A `.model` card that reads `temper` cannot be hoisted to a module-level
-# `const` — `spec` is an argument of the builder, not a module binding — so
-# `codegen_toplevel_models!` has to defer it into the body the same way it
-# defers a card that reads a `.param`. Before that, this deck failed to *load*
-# with `UndefVarError: spec`.
+# A `.model` card reads `temper` from the builder's `spec` like any other
+# expression, because every card is emitted inline in the builder that binds it.
+# Worth a test of its own: while cards were still hoisted to module-level
+# `const`s, this deck failed to *load* with `UndefVarError: spec`.
 const temper_model_deck = sp"""
 .model rm r r='temper*10'
 v1 vcc 0 DC 1

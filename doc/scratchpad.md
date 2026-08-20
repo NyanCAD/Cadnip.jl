@@ -118,6 +118,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
 - [x] Bug: `temper` and `$time` in a netlist expression read a DAECompiler `ScopedValue` nothing binds, so they were frozen at 27 °C / 0 s — codegen lowers them to the builder's own `spec.temp`/`t` — `doc/FINDINGS.rst` 3
+- [x] Cleanup: `.model` cards are never hoisted to module-level `const`s — on the PDK path it was pure duplication (the `const` went unread, 35% of the module and 5.7 s of eval) — design/measurements: `doc/parameter_overrides.md` §4
 - [ ] Cleanup: `SpectreEnvironment`'s `pwl`/`pulse`/`spsin`/`agauss`/`$scale` and `VAEnvironment`'s `$simparam`/`$temperature`/`$vt` still read the dead `Cadnip.spec` ScopedValue — `doc/FINDINGS.rst` 3
 - [ ] Bug: a Spectre `bsource` is parsed and then silently not stamped — the builder body has no trace of it
 - [ ] Features: Spectre `type=pwl wave=[…]` sources — `sema_visit_ids!` has no `SpectreArray` method and nothing lowers the array
