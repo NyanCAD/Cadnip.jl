@@ -10,7 +10,16 @@ struct CodegenState
     # the `parent_params` it is called with. Empty at the top level, where such
     # a name is left free for the environment (`M_1_PI`) to resolve.
     inherited_params::OrderedSet{Symbol}
+    # Bumped by `cg_expr!` every time it lowers an identifier to a *builder
+    # argument* rather than to a binding that exists at module scope (`$time` →
+    # `t`, `temper` → `spec.temp`). `codegen_toplevel_models!` reads it around
+    # one `.model` card to find out whether that card can be hoisted to a
+    # module-level `const`, which observes the lowering that actually happened
+    # instead of re-deriving it from the AST.
+    builder_local_refs::Base.RefValue{Int}
 end
+CodegenState(sema::SemaResult, is_subcircuit::Bool, inherited_params::OrderedSet{Symbol}) =
+    CodegenState(sema, is_subcircuit, inherited_params, Base.RefValue(0))
 CodegenState(sema::SemaResult) = CodegenState(sema, false, OrderedSet{Symbol}())
 
 # LString and LSymbol are defined in spectre.jl
@@ -296,8 +305,10 @@ function cg_expr!(state::CodegenState, id::Symbol)
     # a card is visible here too. Neither name can be shadowed by a `.param` of
     # the same name — this branch runs before any parameter lookup.
     elseif id == Symbol("\$time")
+        state.builder_local_refs[] += 1
         :t
     elseif id == Symbol("temper")
+        state.builder_local_refs[] += 1
         :(spec.temp)
     elseif _is_declared_param(state, id)
         # A parameter is a local of the builder; emit the bare name so it binds
@@ -428,21 +439,17 @@ end
 The `.param` names a `.model` card's parameter expressions read, in first-seen
 order.
 
-Every card is emitted inline in every builder that binds it, so the values it
-reads have to be locals *there*. That is what this list is for: when a top-level
-card is propagated into a subcircuit (`_propagate_toplevel_models!`), the names
-it reads are added to that subcircuit's `exposed_parameters`, so they arrive
-through `parent_params` and bind as locals like any other inherited parameter.
+A model card with no such dependency is a constant and gets hoisted to module
+scope as a `const` (see `codegen_toplevel_models!`), where it is shared by the
+top-level builder and every subcircuit builder and infers concretely. A card
+that reads a `.param` cannot live there — the parameter is a local of the
+builder function, so the hoisted `const` would fail to resolve it at load time.
+Those cards are emitted inline in every builder that binds them instead, after
+that scope's parameter assignments.
 
 Only names some scope actually declares count. An identifier that is *not* a
-declared parameter (a bare `type=n` value, a function name) is left alone. The
-simulation state a card may also read — `temper`, `$time` — is deliberately not
-here: `cg_expr!` lowers those to the builder's own `spec`/`t` arguments, which
-every builder has, so nothing needs exposing for them.
-
-This used to decide hoisting as well — a card reading no `.param` became a
-module-level `const`. Nothing is hoisted now; `doc/parameter_overrides.md` §4
-has the measurements.
+declared parameter (a bare `type=n` value, a function name) is left alone, so
+this never turns a card that would have hoisted fine into a factory.
 """
 function model_param_deps(state::CodegenState, model_ast)
     deps = Symbol[]
@@ -2576,9 +2583,79 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref)
     return nothing
 end
 
+"""
+    codegen_toplevel_models!(state::CodegenState) -> (model_defs, deferred)
+
+Generate model definitions for the top level of the circuit.
+Returns the Exprs that should be placed at module scope (before subcircuit
+builders), plus the names of the cards that were *not* hoisted because they read
+a `.param` — every scope that binds those emits the card itself.
+
+This extracts model factory definitions (like psp103n, psp103p) so they can be
+accessed by both subcircuit builders and the main circuit function.
+
+A card that reads a `.param` cannot be a `const`: the parameter is a local of
+the builder. It is emitted in the builder body instead, after the parameter
+assignments that give it its values.
+
+Nothing more elaborate is warranted, though this went the long way round. A
+`@noinline` module-level factory of the parameters, so the card would be written
+once rather than once per scope, was tried and measured on PSP103VA (782
+fields): runtime, allocations, cold compile time and native code size were
+identical, and the generated expression was 2% *larger* than emitting inline.
+The premise was wrong — a card lowers to only the parameters it spells out
+(`(VFB = vfbn, TYPE = 1)`), never the model's field count — so there was no
+duplication to avoid. See `doc/parameter_overrides.md` §4 before reaching for it
+again.
+"""
+function codegen_toplevel_models!(state::CodegenState)
+    model_defs = Expr[]
+    deferred = Set{Symbol}()
+
+    for (model_name, defs) in state.sema.models
+        isempty(defs) && continue
+        (_, def) = last(defs)  # Use most recent definition
+        model_ast = def.val[1]  # The model SNode
+        model_ref = def.val[2]  # The GlobalRef
+
+        # A card that reads a `.param` can't be a module-level const - the
+        # parameter is a local of the builder. Emit it in the body instead.
+        if !isempty(model_param_deps(state, model_ast))
+            push!(deferred, model_name)
+            continue
+        end
+
+        # `temper` and `$time` keep a card out of module scope for the same
+        # reason, one step later: they are not parameters, so the check above
+        # cannot see them, and they lower to the builder's own `spec`/`t`
+        # arguments. Generate the value and ask whether the lowering reached
+        # for one — the counter observes what was emitted rather than
+        # re-deriving it from the AST. Nothing has to be exposed to a
+        # subcircuit for them, unlike a `.param` dependency; every builder
+        # takes a `spec` and a `t` of its own.
+        before = state.builder_local_refs[]
+        value = cg_model_value!(state, model_ast, model_ref)
+        if state.builder_local_refs[] != before
+            push!(deferred, model_name)
+            continue
+        end
+        value === nothing && continue
+
+        model_var = cg_model_name!(state, model_name)
+        # const is essential here, not cosmetic: these bindings are captured by
+        # the circuit builder function as module globals (not locals/arguments),
+        # and a plain `=` global is always ::Any at use sites regardless of what
+        # is assigned to it. That made every `spicecall(model_var; ...)` call in
+        # the builder infer to Any, forcing the device struct to be heap-boxed
+        # on every stamp!() call (every Newton iteration).
+        push!(model_defs, :(const $model_var = $value))
+    end
+
+    return model_defs, deferred
+end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[], subckt_semas=Dict{Symbol,SemaResult}())
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], subckt_semas=Dict{Symbol,SemaResult}(), models_at_toplevel=false, deferred_models=Set{Symbol}())
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -2593,12 +2670,17 @@ argument.
 `subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
 to look up exposed_parameters when generating subcircuit instance calls.
 
-Every scope emits every `.model` card it can see, inline, after its parameter
-assignments. Nothing is hoisted to module scope — see `doc/parameter_overrides.md`
-§4 for the measurements that retired the `const`.
+`models_at_toplevel=true` means the constant model cards are already module-level
+`const`s (`codegen_toplevel_models!`), so nothing needs binding for them here.
+`deferred_models` names the ones that could *not* be hoisted, because their cards
+read a `.param`; those are emitted here regardless, a value that depends on a
+parameter being per-scope by construction. A subcircuit passes neither and emits
+every card it can see.
 """
 function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
-                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
+                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}(),
+                      models_at_toplevel::Bool=false,
+                      deferred_models::Set{Symbol}=Set{Symbol}())
     is_subcircuit = state.is_subcircuit
     block = Expr(:block)
     ret = block
@@ -2777,9 +2859,9 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
         end
     end
 
-    # Codegen model definitions for MNA. Every card this scope can see is built
-    # inline, after the parameter assignments above — a local of the builder,
-    # which is where the values a card may read (`.param`s, `spec`, `t`) live.
+    # Codegen model definitions for MNA. A card already hoisted to a module-level
+    # const needs no binding here; everything else this scope can see is built
+    # inline, after the parameter assignments above.
     #
     # A parameter a card reads may be one this scope does not declare - the
     # parent's, whether the card itself was written at the top level or inside
@@ -2787,6 +2869,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     # other, bound from `parent_params` by `codegen_mna_subcircuit`.
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
+        models_at_toplevel && !(model_name in deferred_models) && continue
         (_, def) = last(defs)  # Use most recent definition
         value = cg_model_value!(state, def.val[1], def.val[2])
         value === nothing && continue
@@ -3158,9 +3241,11 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     state = CodegenState(sema_result)
     subckt_semas = _subckt_sema_index(sema_result)
 
-    # Make a top-level `.model` card visible to the subcircuits that reference
-    # it, and expose the `.param`s it reads so they arrive as `parent_params`.
-    # Each scope then emits the card itself; nothing is hoisted to module scope.
+    # Generate top-level model definitions FIRST
+    # These need to be accessible by subcircuit builders and the main circuit.
+    # `deferred_models` are the cards that read a `.param` and so could not be
+    # constants; every scope that binds one emits it in its own body.
+    model_defs, deferred_models = codegen_toplevel_models!(state)
     _propagate_toplevel_models!(state, sema_result)
 
     # Import precompiled subcircuit builders from imported modules.
@@ -3180,12 +3265,18 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
 
     subckt_defs, _ = _codegen_subckt_builders(sema_result, subckt_semas)
 
-    body = codegen_mna!(state; subckt_semas=subckt_semas)
+    # Generate the body - only the deferred models are emitted here, the rest
+    # are the module-level consts above.
+    body = codegen_mna!(state; subckt_semas=subckt_semas, models_at_toplevel=true,
+                        deferred_models=deferred_models)
 
     return quote
         # No import list. Everything generated code names is a `GlobalRef` or an
         # interpolated value — see `_baremodule_prelude` for what is left, which
         # is nothing on this path.
+
+        # Top-level model factory functions (accessible by subcircuit builders and main circuit)
+        $(model_defs...)
 
         # Precompiled subcircuit builders from imported modules
         $(subckt_builder_imports...)
@@ -3257,11 +3348,11 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
     state = CodegenState(sema_result)
     subckt_semas = _subckt_sema_index(sema_result)
 
-    # Same lowering as the deck path: every scope emits the `.model` cards it
-    # binds. This used to also emit a module-level `const` per constant card,
-    # which on this path was pure duplication — a PDK module has no top-level
-    # body, so the builders below emitted their own copies regardless and the
-    # `const` went unread. See `doc/parameter_overrides.md` §4.
+    # Same lowering as the deck path: `.model` cards that read nothing but
+    # literals become module-level consts, the rest are emitted by each scope
+    # that binds them. A PDK module has no top-level body, so the deferred set
+    # is nobody's to emit here — the builders below emit their own copies.
+    model_defs, _ = codegen_toplevel_models!(state)
     _propagate_toplevel_models!(state, sema_result)
 
     builders, builder_exports = _codegen_subckt_builders(sema_result, subckt_semas)
@@ -3277,6 +3368,8 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
             # A `baremodule` needs the `Base` essentials named; nothing else is
             # imported here or in the deck path (`_baremodule_prelude`).
             _baremodule_prelude()...,
+            # Model definitions (e.g., psp103n = spicecall(ParsedModel, PSP103VA, params))
+            model_defs...,
             builders...,
             Expr(:export, all_exports...)
         )
