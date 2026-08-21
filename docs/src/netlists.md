@@ -174,6 +174,37 @@ op[:x1_mid]
 Instance parameters on the `X` line, and the `.param` defaults a `.subckt`
 declares, are covered in [Parameters and sweeps](@ref).
 
+### Multiplicity
+
+`m` is the one name on an instance line that is not an ordinary parameter. It is
+the instance's *multiplicity* — how many identical copies of the device sit in
+parallel — so it scales the device instead of being read by name: a resistance
+and an inductance are divided by `m`, a capacitance and a Verilog-A model's
+`$mfactor` are multiplied by it.
+
+An `X` line carries it too, and there it applies to everything inside the
+subcircuit, composing with the multiplicity of every enclosing instance:
+
+```@example netlists
+dc!(MNACircuit(sp"""
+* three copies of a subcircuit that is itself four resistors wide
+.subckt inner a b m=4
+R1 a b 12k
+.ends
+.subckt outer a b
+X1 a b inner
+.ends
+V1 vcc 0 DC 1
+XO vcc out outer m=3
+R2 out 0 1k
+"""))[:out]
+```
+
+`inner` stamps `12k / 4`, the `m=3` on `XO` divides that again, and the divider
+against `R2` reads `1k / (1k + 1k)`. An `m=` on an instance line *replaces* the
+`.subckt` line's default rather than multiplying with it — the default is
+simply what the instance line would have said.
+
 ## A deck is a namespace
 
 A netlist file is a *deck*, and each loaded deck gets a Julia module of its own;

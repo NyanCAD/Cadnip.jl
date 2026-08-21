@@ -9,32 +9,6 @@ using Cadnip.MNA: terminal_currents, op_vars, nameat
 using DiffEqBase: BrownFullBasicInit
 using VADistillerModels                     # .model … d → VA diode model
 
-#=
-NOTE: Tests that require DAECompiler are skipped:
-- Unimplemented Device (requires CircuitIRODESystem)
-- MC VR Circuit (requires solve_circuit with Monte Carlo)
-- ParallelInstances (requires Cadnip.ParallelInstances)
-=#
-
-#=
-@testset "Unimplemented Device" begin
-    # TODO: This test requires DAECompiler/CircuitIRODESystem
-    # If we try to use it, we get an `UnsupportedIRException`, since the
-    # generated code contains an `error()` which `DAECompiler` doesn't like.
-    function ERRcircuit()
-        vcc = Named(net, "vcc")()
-        gnd = Named(net, "gnd")()
-        Named(Cadnip.UnimplementedDevice(), "U")(vcc, gnd)
-    end
-    # Trying to directly run `ERRcircuit()` throws an error
-    # due to the `error()` in the implementation of `UnimplementedDevice()`
-    @test_throws Cadnip.CedarError ERRcircuit()
-
-    # DAECompiler sees the `error()` and complains that it is unsupported IR:
-    @test_throws Cadnip.DAECompiler.UnsupportedIRException CircuitIRODESystem(ERRcircuit)
-end
-=#
-
 @testset "Simple VR Circuit" begin
     # Simple V-R circuit using sp"..." macro
     circuit = MNACircuit(sp"""
@@ -49,33 +23,6 @@ end
     @test isapprox_deftol(R_v, 5.0)
     @test isapprox_deftol(R_i, 2.5)
 end
-
-#=
-@testset "MC VR Circuit" begin
-    # TODO: This test requires DAECompiler with Monte Carlo support (agauss function)
-    struct MCcircuit
-        seed::UInt
-    end
-    function (ckt::MCcircuit)()
-        vcc = Named(net, "vcc")()
-        gnd = Named(net, "gnd")()
-        Named(V(5.), "V")(vcc, gnd)
-        Named(R(agauss(2, 3, 3)), "R")(vcc, gnd)
-        Gnd()(gnd)
-    end
-
-    sys1, sol1 = solve_circuit(MCcircuit(1))
-    sys2, sol2 = solve_circuit(MCcircuit(2))
-
-    i1 = sol1[sys1.R.I]
-    i2 = sol2[sys2.R.I]
-    # test that the RNG is consistent between timesteps
-    @test allapprox_deftol(i1)
-    @test allapprox_deftol(i2)
-    # but different between runs
-    @test_broken !isapprox_deftol(first(i1), first(i2))
-end
-=#
 
 @testset "Simple IR circuit" begin
     # Simple I-R circuit using sp"..." macro
@@ -142,34 +89,6 @@ const c_val = 1e-6
     @test isapprox(c_i_end, 0.0; atol=1e-6)  # Nearly zero current
 end
 
-#=
-@testset "ParallelInstances" begin
-    # TODO: This test requires Cadnip.ParallelInstances and DAECompiler
-    using Cadnip: ParallelInstances
-    function MultiVRCcircuit()
-        vcc = Named(net, "vcc")()
-        vrc = Named(net, "vrc")()
-        gnd = Named(net, "gnd")()
-        Named(V(v_val), "V")(vcc, gnd)
-        Named(ParallelInstances(R(r_val), 10), "R")(vcc, vrc)
-        Named(C(c_val), "C")(vrc, gnd)
-        Gnd()(gnd)
-    end
-
-    sys, sol = solve_circuit(MultiVRCcircuit; u0=[0.0])
-
-    # This RC circuit has a time constant much smaller than that of
-    # our simulation time domain, so let's ensure that the beginning
-    # and end points of our simulation follow physical laws:
-    c_i = sol[sys.C.I]
-    @test isapprox_deftol(c_i[1], 10*v_val/r_val)
-    @test isapprox_deftol(c_i[end], 0)
-    c_v = sol[sys.C.V]
-    @test isapprox_deftol(c_v[1], 0)
-    @test isapprox_deftol(c_v[end], v_val)
-end
-=#
-
 @testset "Simple Spectre sources" begin
     # Simple resistor divider in Spectre format
     spectre_code = """
@@ -198,7 +117,11 @@ end
     @test isapprox_deftol(sol[:vcc], 1.0)
 end
 
-# TODO: Full Spectre sources test with PWL and B-source (requires transient simulation)
+# Spectre `type=pwl wave=[...]`. Still disabled, but not for the reason the old
+# comment gave ("requires transient simulation" — transient has worked for a
+# while): sema cannot walk a `SpectreArray`, so the deck fails before codegen
+# with `MethodError: no method matching sema_visit_ids!(…, ::SpectreArray, …)`.
+# The `bsource v=$time*V(3)` half of this deck is independent of that.
 #=
 @testset "Full Spectre sources (transient)" begin
     # This is the comprehensive test from the old version
@@ -345,8 +268,9 @@ end
     @test isapprox(sol[:vcc], 2.0; atol=1e-6)
 end
 
-# TODO: Alternate E/G forms with vol=/cur= syntax
-# Currently errors at sema stage - LString(nothing) error on vol=/cur= parsing
+# Alternate E/G forms with vol=/cur= syntax. Measured still failing, in the
+# parser rather than sema: `MethodError: no method matching LString(::Nothing)`
+# — the card has no positional value for `LString` to read.
 #=
 @testset "SPICE controlled sources (alternate syntax)" begin
     spice_code = """
@@ -550,11 +474,10 @@ end
     @test isapprox_deftol(sol[:I_v1], -0.1)
 end
 
-# TODO: Extended parameter scope tests - nested dynamic scoping
-# Currently errors at codegen stage - nested subcircuits not resolved correctly
-#=
 @testset "SPICE parameter scope (nested subcircuits)" begin
-    # Test dynamic parameter scoping in nested subcircuits
+    # A self-referencing `.subckt` default (`foo=foo+2000`) reads the *caller's*
+    # `foo`, through a scope the name is only passed down through: `outer`
+    # neither declares nor reads `foo`, it just carries it to `inner`.
     spice_code = """
     * Dynamic parameters
     .subckt inner a b foo=foo+2000
@@ -574,7 +497,6 @@ end
     # V = I * R = 1 * 2001 = 2001V
     @test isapprox_deftol(sol[:vcc], -2001.0)
 end
-=#
 
 # TODO: Test .option temp / .temp for temperature setting
 @testset "SPICE parameter scope (.option temp)" begin
@@ -693,7 +615,11 @@ end
     end
 end
 
-# Currently errors at runtime - instance param referencing other params not scoped correctly
+# An instance parameter whose value reads another parameter of the same
+# instance line (`x1 … subcircuit1 w=4 nrd='w/2'`). Measured still failing, at
+# codegen rather than runtime: `UndefVarError: w not defined` — the kwarg
+# expressions are built in the *caller's* scope, where `w` is the callee's
+# parameter and so is not bound.
 #=
 @testset "SPICE parameter scope (instance params)" begin
     # Test that instance parameters can refer to other parameters
@@ -714,32 +640,29 @@ end
 end
 =#
 
-# TODO: multimode spice source (DC + AC + SIN)
-#=
+# One source carrying all three specifications at once. Which one is read is the
+# analysis's business, not the card's: `DC 5` is the operating point, `SIN(10 3
+# 1k)` is the transient waveform, `AC 1` the small-signal phasor. The original
+# form of this test asserted the same 10.0 across three DAECompiler
+# initializers; what it was really pinning down is that the SIN offset — not the
+# DC value — is where the transient starts.
 @testset "multimode spice source" begin
-    spice = \"\"\"
+    wrapped = _eval_spice_builder("""
     * multimode spice source
     v1 vcc 0 DC 5 AC 1 SIN(10 3 1k)
     r1 vcc 0 1k
-    \"\"\"
-    # This requires DAECompiler for proper transient simulation with initialization
-    # Tests various initializers: CedarDCOp, ShampineCollocationInit, CedarTranOp
-    sa = NyanSpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
-    code = Cadnip.make_spectre_circuit(sa)
-    circuit = eval(code)
+    """, Module[])
 
-    sys = CircuitIRODESystem(circuit);
-    prob = DAEProblem(sys, rand(5), rand(5), (0.0, 0.01));
-    for (initializealg, vcc_known) in [(CedarDCOp(), 10.0),
-                                (ShampineCollocationInit(), 10.0),
-                                (CedarTranOp(), 10.0)]
+    # DC operating point reads `DC 5`.
+    @test isapprox_deftol(dc!(MNACircuit(wrapped, (;), MNASpec(temp=27.0, mode=:dcop)))[:vcc], 5.0)
 
-        sol = init(prob, DFBDF(autodiff=false); reltol=deftol, abstol=deftol, initializealg)
-        vcc = sol[sys.node_vcc]
-        @test isapprox_deftol(vcc, vcc_known) || (initializealg, vcc, vcc_known)
-    end
+    # Transient reads SIN(offset=10, amplitude=3, freq=1k): starts at the
+    # offset and swings ±3 around it.
+    tr = tran!(MNACircuit(wrapped, (;), MNASpec(temp=27.0, mode=:tran)), (0.0, 2e-3))
+    @test isapprox_deftol(tr[:vcc][1], 10.0)
+    @test isapprox(maximum(tr[:vcc]), 13.0; rtol=1e-2)
+    @test isapprox(minimum(tr[:vcc]), 7.0; rtol=1e-2)
 end
-=#
 
 @testset "SPICE multiplicities" begin
     # Same SPICE code as original
@@ -758,7 +681,11 @@ end
     @test isapprox(sol[Symbol("1")], 10/11; atol=deftol*10)
 end
 
-# TODO: Extended multiplicities tests with subcircuits
+# `m` on a `.subckt` is the instance's multiplicity, not a value the body reads
+# by name: it scales every device inside, and composes with the multiplicity of
+# every enclosing instance. An instance-line `m=` *replaces* the `.subckt`
+# line's default rather than multiplying with it — the default is what the
+# instance line would have said.
 @testset "SPICE multiplicities (subcircuit m=)" begin
     spice_code = """
     * multiplicities with subcircuit
@@ -772,11 +699,9 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # Subcircuit with m=10 divides resistance by 10
-    @test_broken isapprox(sol[Symbol("2")], 10/11; atol=deftol*10)
+    @test isapprox(sol[Symbol("2")], 10/11; atol=deftol*10)
 end
 
-# Currently errors at codegen - nested subcircuits not resolved
-#=
 @testset "SPICE multiplicities (nested subcircuits)" begin
     spice_code = """
     * multiplicities with nested subcircuits
@@ -794,13 +719,11 @@ end
     r4b 4 0 1
     """
     ctx, sol = solve_mna_spice_code(spice_code)
-    # Two x5 each with m=5 on r10 (which has m=10)
+    # Each instance line's m=5 replaces r10's own default of 10, and the two
+    # instances are in parallel: 5 + 5 = 10 copies of a 1Ω resistor.
     @test isapprox(sol[Symbol("4")], 10/11; atol=deftol*10)
 end
-=#
 
-# Currently errors at runtime - subcircuit builder doesn't accept m= kwarg
-#=
 @testset "SPICE multiplicities (nested m=)" begin
     spice_code = """
     * multiplicities with nested m= on subcircuit
@@ -813,10 +736,50 @@ end
     r5b 5 0 1
     """
     ctx, sol = solve_mna_spice_code(spice_code)
-    # r2 has m=2 internally, x5a has m=5, so effective m=10
+    # r2 has m=2 internally, x5a has m=5, so effective m=10.
+    # `r2` never declares `m`, so the instance line's m= is the multiplicity
+    # outright — the builder accepts it either way.
     @test isapprox(sol[Symbol("5")], 10/11; atol=deftol*10)
 end
-=#
+
+@testset "SPICE multiplicities compose across nesting levels" begin
+    # Nothing overrides the inner default, so the two multiply: an m=3 instance
+    # of a `.subckt` whose body instantiates an m=4 one stamps 12 copies.
+    ctx, sol = solve_mna_spice_code("""
+    * multiplicity composes
+    v1 vcc 0 DC 1
+
+    .subckt inner a b m=4
+    ri a b 1
+    .ends
+
+    .subckt outer a b
+    xi a b inner
+    .ends
+    xo vcc 2 outer m=3
+    rb 2 0 1
+    """)
+    @test isapprox(sol[Symbol("2")], 12/13; atol=deftol*10)
+end
+
+@testset "SPICE multiplicities reach reactive devices" begin
+    # The resistor cases above divide by m; a capacitance multiplies and an
+    # inductance divides, off the same enclosing multiplicity.
+    for (card, field, expected) in (("c1 a b 1u", :C, 4e-6),
+                                    ("l1 a b 1u", :C, 0.25e-6))
+        ctx, _ = solve_mna_spice_code("""
+        * reactive under m=
+        v1 vcc 0 DC 0
+        r1 vcc 0 1k
+        .subckt dut a b
+        $card
+        .ends
+        x1 vcc 0 dut m=4
+        """)
+        sys = Cadnip.MNA.assemble!(ctx)
+        @test isapprox(maximum(abs, getfield(sys, field)), expected; rtol=1e-9)
+    end
+end
 
 @testset "SPICE multiplicities (.model)" begin
     spice_code = """
@@ -1123,48 +1086,9 @@ end
     @test Cadnip.canonicalize_params((; params=(;boo=4), foo=2, bar=(; baz=3))) == (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
 end
 
-#=
-@testset "device == param (convert to NamedTuple)" begin
-    # Test converting ParamObserver to NamedTuple for ParamSim roundtrip
-    spice = \"\"\"
-    * device == param
-    .param x1=1
-    .subckt myres p n
-        .param rload=1k
-        rload p n 'rload*x1'
-    .ends
-    i1 vcc 0 DC -1
-    x1 vcc 0 myres
-    \"\"\"
-    mast = NyanSpectreNetlistParser.SPICENetlistParser.parse(spice)
-    mcode = Cadnip.make_spectre_circuit(mast)
-    f = eval(mcode)
-    👀 = Cadnip.ParamObserver(x1=2.0)
-    f(👀)
-    @test @param(👀.x1.rload)*@param(👀.x1) == @param(👀.x1.rload.r)
-    @test convert(NamedTuple, 👀) == (
-        params = (x1 = 2.0,),
-        i1 = (dc = -1,),
-        m = 1.0,
-        x1 = (
-            params = (rload = 1000.0,),
-            m = 1.0,
-            rload = (r = 2000.0,)
-        )
-    )
-    # dense roundtrip actually hits some error
-    sim = ParamSim(f; convert(NamedTuple, 👀)...)
-    @test_broken solve_circuit(sim)[2].retcode == SciMLBase.ReturnCode.Success
-    # but you can definitely specify all the conflicting parameters in a consistent way
-    sim = ParamSim(f; params=(;x1=2.0), x1=(;rload=500,))
-    sim()
-    sys, sol = solve_circuit(sim);
-    @test sol[sys.x1.rload.V][end] ≈ 1000
-end
-=#
-
-# TODO: semiconductor resistor with .model
-# Model resolution for semiconductor resistors (rsh, w, l params) not yet implemented
+# Semiconductor resistor (`.model myres r rsh=500` + `R1 … myres w= l=`).
+# Measured still failing: `FieldError: type NamedTuple has no field R` — the
+# `R`-less model card reaches the resistor path, which reads `.R` unguarded.
 @testset "semiconductor resistor" begin
     @test_skip "Semiconductor resistor model resolution not yet implemented"
     #=
