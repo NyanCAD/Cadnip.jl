@@ -494,6 +494,22 @@ _scoped_current_expr(sense_name::Symbol) =
     :(_mna_prefix_ == Symbol("") ? $(QuoteNode(Symbol(:I_, sense_name))) :
                                    Symbol(:I_, _mna_prefix_, "_", $(QuoteNode(sense_name))))
 
+"""
+    _mfactor_expr!(state, params) -> Expr
+
+Emit the multiplicity a device stamps at: its own `m=`, times the multiplicity
+of every `.subckt` instance enclosing it.
+
+`m` is not an ordinary parameter. A `.subckt` builder binds `_mna_m_` to the
+product of its caller's `_mna_m_` and its own `m` (the instance line's value,
+else the `.subckt` line's default, else 1), so multiplicity composes down the
+hierarchy the way SPICE says it does — `X1 … sub m=5` around a `r a b 1 m=2`
+stamps ten parallel resistors. At the top level `_mna_m_` is `1.0`, so a device
+with no `m=` is unaffected.
+"""
+_mfactor_expr!(state::CodegenState, params) =
+    hasparam(params, "m") ? :($(cg_expr!(state, getparam(params, "m"))) * _mna_m_) : :(_mna_m_)
+
 # Helper to get a param value
 function getparam(params, name, default=nothing)
     for p in params
@@ -674,7 +690,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     end
 
     # Handle multiplicity
-    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+    m_expr = _mfactor_expr!(state, instance.params)
 
     return quote
         let r_val = $r_expr, m_val = $m_expr
@@ -703,7 +719,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Capacitor})
     end
 
     # Handle multiplicity
-    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+    m_expr = _mfactor_expr!(state, instance.params)
 
     return quote
         let c_val = $c_expr, m_val = $m_expr
@@ -731,9 +747,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Inductor})
         1e-6  # Default 1uH
     end
 
+    # Handle multiplicity
+    m_expr = _mfactor_expr!(state, instance.params)
+
     return quote
-        let l_val = $l_expr
-            $(MNA).stamp!($(MNA).Inductor(l_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
+        let l_val = $l_expr, m_val = $m_expr
+            # Parallel inductors: L_eff = L / m
+            $(MNA).stamp!($(MNA).Inductor(l_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -1334,10 +1354,17 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         va_type = latest_global(va_hdl_mod, subckt_name)
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
 
+        # `m=` on the instance line is multiplicity, not a VA struct field — the
+        # model reads it back through `$mfactor`, same as for an M/Q/D card.
+        m_expr = :(_mna_m_)
         explicit_kwargs = Expr[]
         for child in NyanSpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 name = LSymbol(child.name)
+                if name === :m
+                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
+                    continue
+                end
                 # Adjust case to match VA device fieldnames
                 adjusted_name = get(case_insensitive, name, name)
                 def = cg_expr!(state, child.val)
@@ -1362,7 +1389,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
-            stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name))
+            stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -1376,7 +1403,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                        _mna_mfactor_ = $m_expr)
                 end
             end
         end
@@ -1433,7 +1461,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     chained_prefix_expr = _scoped_sym_expr(instance_name)
     return quote
         let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
         end
     end
 end
@@ -1471,11 +1499,18 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     if va_module_ref !== nothing
         # This is a VA module instance
         # Preserve original parameter name case since VA modules may be case-sensitive
+        # `m=` on the instance line is multiplicity, not a VA struct field — the
+        # model reads it back through `$mfactor`, same as for an M/Q/D card.
+        m_expr = :(_mna_m_)
         explicit_kwargs = Expr[]
         for child in NyanSpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 # Use original case for VA modules (they may be case-sensitive)
                 name = Symbol(String(child.name))
+                if LSymbol(child.name) === :m
+                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
+                    continue
+                end
                 def = cg_expr!(state, child.val)
                 push!(explicit_kwargs, Expr(:kw, name, def))
             end
@@ -1495,7 +1530,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
-            stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name))
+            stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     # Build hierarchical instance name from _mna_prefix_ + local instance name
@@ -1511,7 +1546,8 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
                         _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                        _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                        _mna_mfactor_ = $m_expr)
                 end
             end
         end
@@ -1560,7 +1596,9 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
             # Build hierarchical prefix from current _mna_prefix_ + local instance name
             local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
+            # `_mna_m_` is this scope's multiplicity; the callee folds its own
+            # `m` (an `explicit_kwargs` entry, or its `.subckt` default) into it.
+            $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
         end
     end
 end
@@ -1616,7 +1654,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1000.0  # Default 1k
         end
 
-        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+        m_expr = _mfactor_expr!(state, instance.params)
 
         return quote
             let r_val = $r_expr, m_val = $m_expr
@@ -1635,7 +1673,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1e-12  # Default 1pF
         end
 
-        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+        m_expr = _mfactor_expr!(state, instance.params)
 
         return quote
             let c_val = $c_expr, m_val = $m_expr
@@ -1654,7 +1692,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1e-6  # Default 1uH
         end
 
-        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+        m_expr = _mfactor_expr!(state, instance.params)
 
         return quote
             let l_val = $l_expr, m_val = $m_expr
@@ -1804,10 +1842,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             # This is a VA module instance
             port_exprs = [cg_net_name!(state, net) for net in nets]
 
-            # Extract explicit parameters from instance
+            # Extract explicit parameters from instance. `m=` is multiplicity,
+            # not a VA struct field — the model reads it back via `$mfactor`.
+            m_expr = _mfactor_expr!(state, instance.params)
             explicit_kwargs = Expr[]
             for p in instance.params
                 param_name = LSymbol(p.name)
+                param_name === :m && continue
                 param_val = cg_expr!(state, p.val)
                 push!(explicit_kwargs, Expr(:kw, param_name, param_val))
             end
@@ -1824,7 +1865,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
 
             if is_large_model
                 # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
-                stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name))
+                stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
                 return quote
                     let dev = $va_module_ref(; $(explicit_kwargs...))
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -1838,7 +1879,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $(MNA).stamp!(dev, ctx, $(port_exprs...);
                             _mna_t_ = t, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec,
-                            _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_)
+                            _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
+                            _mna_mfactor_ = $m_expr)
                     end
                 end
             end
@@ -1890,7 +1932,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             lens_var = state.is_subcircuit ? :lens : Symbol("*lens#")
             return quote
                 let subckt_lens = Base.getproperty($lens_var, $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
                 end
             end
         else
@@ -1928,7 +1970,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+    m_expr = _mfactor_expr!(state, instance.parameters)
 
     # Build instance parameter kwargs
     param_kwargs = Expr[]
@@ -2004,7 +2046,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+    m_expr = _mfactor_expr!(state, instance.params)
 
     # Build instance parameter kwargs
     param_kwargs = Expr[]
@@ -2093,7 +2135,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     # separately from the case-insensitive model-field lookup below: on a diode
     # *instance* line "m" always means multiplicity (never the model-card-only
     # "m" grading-coefficient parameter aliased to mj).
-    m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1.0
+    m_expr = _mfactor_expr!(state, instance.params)
 
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
@@ -2194,7 +2236,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = hasparam(instance.parameters, "m") ? cg_expr!(state, getparam(instance.parameters, "m")) : 1.0
+    m_expr = _mfactor_expr!(state, instance.parameters)
 
     # Build instance parameter kwargs with case-insensitive lookup
     param_kwargs = Expr[]
@@ -3019,6 +3061,16 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
         end
     end
 
+    # `m` is the subcircuit's multiplicity, not a value the body reads by name:
+    # it scales every device inside (see `_mfactor_expr!`). Accept it whether or
+    # not the `.subckt` line declares a default, so `X1 a b sub m=5` reaches a
+    # subcircuit that never mentions `m`; a declared default flows through the
+    # ordinary parameter path below and this adds nothing.
+    if !haskey(local_params_with_defaults, :m)
+        push!(param_kwargs, Expr(:kw, :m, nothing))
+        local_params_with_defaults[:m] = 1.0
+    end
+
     # Generate parameter resolution code for the body.
     #
     # Precedence, strongest first:
@@ -3046,6 +3098,16 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
             end)
         end
     end
+    # Same resolution for an `m` the `.subckt` line does not declare — the loop
+    # above walks `sema.params`, which is exactly the declared ones.
+    if !haskey(sema.params, :m)
+        netlist_val = gensym(:m_netlist)
+        push!(param_resolution_exprs, quote
+            m = let $netlist_val = m === nothing ? 1.0 : m
+                getfield(lens(; m = $netlist_val), :m)
+            end
+        end)
+    end
 
     # Bind each inherited name as a local, so anything written inside the
     # `.subckt` — a device value, a source value, a `.model` card — can spell it
@@ -3058,9 +3120,10 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     # a b foo=foo+2000`) puts `foo` in both sets, and the parent's value reaches
     # it through `cg_expr_with_parent_params!` above — binding a local here would
     # clobber the instance-line kwarg.
+    # `m` is never inherited: it is this scope's own multiplicity, bound below.
     inherited_param_exprs = Expr[
         :($name = Base.getfield(parent_params, $(QuoteNode(name))))
-        for name in inherited if !haskey(sema.params, name)]
+        for name in inherited if !haskey(sema.params, name) && name !== :m]
 
     # Generate body, skipping get_node! for ports (they're passed as args)
     # `state.is_subcircuit` means params are function kwargs and lens is named `lens`
@@ -3069,12 +3132,15 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""), _mna_m_::Real=1.0; _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # The enclosing scope's parameters, then this scope's own
             $(inherited_param_exprs...)
             $(param_resolution_exprs...)
+            # This instance's multiplicity composes with every enclosing one, so
+            # devices inside stamp at the product (see `_mfactor_expr!`).
+            _mna_m_ = _mna_m_ * m
             $body
             return nothing
         end
@@ -3266,6 +3332,8 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
                                  _mna_h_=nothing, _mna_h_p_=nothing)
             # Default prefix for top-level instances (empty = no prefix)
             _mna_prefix_ = Symbol("")
+            # Top level has no enclosing subcircuit, so no multiplicity
+            _mna_m_ = 1.0
             if ctx === nothing
                 ctx = $(MNAContext)()
             else
@@ -3284,6 +3352,8 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
                                         _mna_h_=nothing, _mna_h_p_=nothing)
             # Default prefix for top-level instances (empty = no prefix)
             _mna_prefix_ = Symbol("")
+            # Top level has no enclosing subcircuit, so no multiplicity
+            _mna_m_ = 1.0
             $(reset_for_restamping!)(ctx)
             $body
             return ctx
