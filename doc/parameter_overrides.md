@@ -314,6 +314,73 @@ The one case where the factory could still pay is a card spelling out ~200
 parameters across many scopes — and those arrive through `make_mna_pdk_module`,
 which does not use this path at all.
 
+**The fifth argument — the `const` itself — is also measured away, but removing
+it is blocked.** The mechanism that survived the three deletions above is still
+here: `codegen_toplevel_models!` emits a module-level `const` per card that
+reads no `.param`. The remaining case for it is inference — "a plain `=` global
+is always `::Any` at use sites, which boxes the device struct on every stamp".
+True, but an argument for `const` *given that you hoist*: the inline form is a
+builder **local**, not a global, so the hazard does not apply — which is what
+the allocation-identical rows above already showed at 782 fields.
+
+Measured on `models/VACASKModels.jl/spice/models.inc` (two PSP103 cards, ~250
+parameters each) and on a deck binding one card from three scopes:
+
+| | hoisting | none | |
+|---|---|---|---|
+| PDK module, expr nodes | 4094 | 2350 | −43% |
+| PDK module, source chars | 24193 | 15750 | −35% |
+| PDK module, `eval` | 5.759 s | 0.022 s | −5.74 s |
+| deck, expr nodes | 984 | 1007 | +2.3% |
+| deck, source chars | 12208 | 12329 | +1.0% |
+
+The deck row is the ~2% inline cost this section predicted. The PDK row is
+something else: **on that path the `const` is dead.**
+`make_mna_pdk_module` emits it and then calls `_codegen_subckt_builders` →
+`codegen_mna!` *without* `models_at_toplevel=true`, so the builder emits its own
+inline copy anyway and rebinds the name locally. Each card appears twice:
+
+```
+4  const  4220 chars   <- psp103n card, hoisted, unread
+5  const  4221 chars   <- psp103p card, hoisted, unread
+6  block  7768 chars   <- nmos builder, containing the psp103n card again
+7  block  7769 chars   <- pmos builder, containing the psp103p card again
+```
+
+The 5.7 s is `eval` constructing two 782-field structs nothing reads, on the
+path baked into precompiled PDK packages.
+
+**What blocks the removal** is that "the builder emits its own copy anyway" is
+not true in general — it depends on `_propagate_toplevel_models!`, which only
+copies a card into a subcircuit when the card is in that subcircuit's
+`exposed_models`, and sema populates that for `SP.MOSFET`, `SP.OSDIDevice` and
+semiconductor `SP.Resistor` **only** (`src/spc/sema.jl` ~line 429). VACASK's
+`nm d g s b psp103n` is a MOSFET card, so it propagates; `test/testpdk`'s
+`D1 a c pdk_diode` is a diode, so it does not, and that builder genuinely
+depends on the `const`. Deleting the hoist without fixing sema turns
+`test/testpdk/pdk_test.jl` red with `UndefVarError: pdk_diode`.
+
+That gap is a live bug in its own right, independent of hoisting: a card that
+reads a `.param` is *deferred*, never hoisted, so behind a diode in a
+subcircuit it has nothing to resolve to. Measured on `main`:
+
+```
+.param isval = 1e-14
+.model dm d is='isval*1' n=1.0
+.subckt dio a c
+D1 a c dm            ->  UndefVarError: `dm` not defined
+.ends
+
+.model nch nmos level=1 vto='vt*1' kp=2e-5
+.subckt amp d g
+M1 d g 0 0 nch ...   ->  works
+.ends
+```
+
+So the order is: populate `exposed_models` for every device card that names a
+model (diode, BJT, capacitor, inductor, …), *then* delete the hoist. Doing the
+second first is what this note exists to prevent.
+
 ⚠️ **Measure cold-compile numbers in separate processes.** Timing both variants
 in one process makes the second inherit the first's compiled PSP103 `stamp!`
 path and reads as a 33× improvement for whichever ran second. That artifact is

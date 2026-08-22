@@ -262,6 +262,27 @@ carries one pins every point at the card's value. `NoiseSol.temp` above reports
 which temperature the PSDs were actually evaluated at, which is the one the
 devices were stamped with either way.
 
+A netlist expression reads that same resolved temperature as `temper`, so a
+device value can depend on it — with a card, or, with no card, on whatever the
+analysis was called with:
+
+```@example analyses
+tsense = MNACircuit(sp"""
+* a resistor that reads the analysis temperature
+.param rt = 'temper*10'
+V1 in 0 DC 1
+R1 in 0 'rt'
+""")
+
+dc!(tsense)[:I_v1], dc!(with_temp(tsense, 85.0))[:I_v1]    # 1/270 A, 1/850 A
+```
+
+Its transient counterpart is `$time`, the simulation time — a Spectre-dialect
+name, as the SPICE lexer has no token for it. Both resolve inside the builder,
+so they work in a `.subckt` body and in a `.model` card as well as at the top
+level. A Verilog-A model reads the same two as `$temperature` (in kelvin) and
+`$abstime`.
+
 ## Netlist options
 
 Temperature is one of a handful of `.option` names the backend reads. Each names

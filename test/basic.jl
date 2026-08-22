@@ -198,6 +198,33 @@ end
     @test isapprox_deftol(sol[:vcc], 1.0)
 end
 
+# `$time` is the simulation time as a netlist expression reads it — the sibling
+# of `temper` below, and broken the same way: it called into
+# `SpectreEnvironment`, which reads a `ScopedValue` the MNA backend never binds,
+# so it was 0 s at every timestep and a deck written against it simulated a
+# constant. Codegen lowers it to the builder's `t` argument now (`$abstime` in
+# the Verilog-A path lowers to `_mna_t_` for the same reason). `$time` is
+# Spectre-only: the SPICE lexer has no token for it.
+const ramp_deck = spc"""
+V1 (out 0) vsource dc=$time*1000
+R1 (out 0) resistor r=1k
+"""
+
+@testset "\$time is the simulation time" begin
+    sol = tran!(MNACircuit(ramp_deck), (0.0, 1e-3))
+    # A 1 V/ms ramp: the source value has to track the timestep, not the
+    # `SimSpec()` default it used to read.
+    @test isapprox_deftol(sol[:out][1], 0.0)
+    @test isapprox(sol[:out][end], 1.0; rtol=1e-6)
+    for t in (2.5e-4, 5e-4, 7.5e-4)
+        @test isapprox(sol(t)[1], t * 1000; rtol=1e-5)
+    end
+
+    # A DC operating point is taken at t = 0, so the ramp is 0 there — the
+    # answer the old path gave by accident, now for the right reason.
+    @test isapprox_deftol(dc!(MNACircuit(ramp_deck))[:out], 0.0)
+end
+
 # TODO: Full Spectre sources test with PWL and B-source (requires transient simulation)
 #=
 @testset "Full Spectre sources (transient)" begin
@@ -576,7 +603,14 @@ end
 end
 =#
 
-# TODO: Test .option temp / .temp for temperature setting
+# `temper` is the analysis temperature as a netlist expression reads it. It used
+# to be a call into `SpectreEnvironment`, which reads a DAECompiler-era
+# `ScopedValue` the MNA backend never binds — so it answered 27 C whatever the
+# simulation was doing, and the two card tests below were `@test_broken`.
+# Codegen now lowers it to the builder's own `spec.temp`, the same way the
+# Verilog-A path lowers `$temperature` to `_mna_spec_.temp`. `.temp`/`.option
+# temp` rebind `spec` at the top of the builder body, ahead of any parameter
+# assignment, so a card is visible to it too.
 @testset "SPICE parameter scope (.option temp)" begin
     # Test that temper in .param picks up .option temp
     spice_code = """
@@ -588,13 +622,11 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo = temper = 10 (from .option temp)
-    @test_broken isapprox_deftol(sol[:vcc], -10.0)
+    @test isapprox_deftol(sol[:vcc], -10.0)
 end
 
 # `.temp <value>` is funneled through the same option channel as `.option
-# temp=<value>` (see sema.jl), so it shares the same (currently broken)
-# temper-in-.param propagation. What it no longer does is crash at the sema
-# stage.
+# temp=<value>` (see sema.jl), so the two agree by construction.
 @testset "SPICE parameter scope (.temp)" begin
     # Test .temp directive
     spice_code = """
@@ -606,7 +638,7 @@ end
     """
     ctx, sol = solve_mna_spice_code(spice_code)
     # foo = temper = 10 (from .temp)
-    @test_broken isapprox_deftol(sol[:vcc], -10.0)
+    @test isapprox_deftol(sol[:vcc], -10.0)
 end
 
 @testset "SPICE parameter scope (default temper)" begin
@@ -620,6 +652,73 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     # Default temper = 27
     @test isapprox_deftol(sol[:vcc], -27.0)
+end
+
+# With no card in the deck, `temper` is whatever the *caller* asked for. This is
+# the case a card cannot cover: a sweep over temperature runs one builder at
+# many `MNASpec`s, and every one of them has to reach the expression.
+const temper_deck = sp"""
+.param foo = temper
+i1 vcc 0 'foo'
+r1 vcc 0 1
+"""i
+
+@testset "temper follows the caller's spec" begin
+    for T in (10.0, 27.0, 85.0)
+        sol = dc!(MNACircuit(temper_deck; spec=MNASpec(temp=T)))
+        @test isapprox_deftol(sol[:vcc], -T)
+    end
+end
+
+# A `.subckt` builder takes a `spec` argument of its own, so the same lowering
+# works one scope down without anything being exposed as a parameter.
+const temper_subckt_deck = sp"""
+.subckt tsense a b
+.param r = temper
+r1 a b 'r'
+.ends
+i1 vcc 0 DC -1
+x1 vcc 0 tsense
+"""i
+
+@testset "temper inside a subcircuit" begin
+    for T in (27.0, 100.0)
+        sol = dc!(MNACircuit(temper_subckt_deck; spec=MNASpec(temp=T)))
+        @test isapprox_deftol(sol[:vcc], T)   # I = 1 A through R = temper
+    end
+end
+
+# A `.model` card that reads `temper` cannot be hoisted to a module-level
+# `const` — `spec` is an argument of the builder, not a module binding — so
+# `codegen_toplevel_models!` has to defer it into the body the same way it
+# defers a card that reads a `.param`. Before that, this deck failed to *load*
+# with `UndefVarError: spec`.
+const temper_model_deck = sp"""
+.model rm r r='temper*10'
+v1 vcc 0 DC 1
+r1 vcc 0 rm
+"""i
+
+const temper_model_subckt_deck = sp"""
+.subckt tsense a b
+.model rm r r='temper*10'
+r1 a b rm
+.ends
+v1 vcc 0 DC 1
+x1 vcc 0 tsense
+"""i
+
+@testset "temper in a .model card" begin
+    for T in (27.0, 50.0)
+        sol = dc!(MNACircuit(temper_model_deck; spec=MNASpec(temp=T)))
+        @test isapprox_deftol(sol[:I_v1], -1 / (T * 10))
+    end
+    # ...and one scope down, where the deferred card is emitted by the
+    # subcircuit builder rather than the top-level one.
+    for T in (27.0, 50.0)
+        sol = dc!(MNACircuit(temper_model_subckt_deck; spec=MNASpec(temp=T)))
+        @test isapprox_deftol(sol[:I_v1], -1 / (T * 10))
+    end
 end
 
 # `.temp`/`.option temp` is the deck's own analysis temperature — it applies

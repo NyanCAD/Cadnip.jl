@@ -186,6 +186,39 @@ route::
     with_temp(circuit, 100)          V(out) = 3.937
                                      (100 C would be 2.5)
 
+*Status*: fixed.  The three-way split is now two-way.  ``cg_expr!`` lowers
+``temper`` to ``spec.temp`` — the builder's own ``spec`` argument, after any
+``.temp``/``.option temp`` card has rebound it — instead of emitting a call to
+``SpectreEnvironment.temper()``, which read the ``Cadnip.spec`` ScopedValue that
+nothing on the MNA path binds.  The Verilog-A path already did this
+(``$temperature`` lowers to ``_mna_spec_.temp`` in ``vasim.jl``); this is the
+netlist-expression path catching up.  ``$time`` had the identical defect and the
+identical fix (``t``, the builder's time argument): a Spectre expression reading
+``$time`` evaluated to 0 s at *every* timestep, so a deck written against it
+simulated a constant.  ``test/basic.jl`` covers ``temper`` against a caller's
+spec, both cards, a ``.subckt`` scope, and a ``.model`` card, and ``$time``
+against a transient ramp.
+
+One consequence worth naming: a ``.model`` card reading ``temper`` can no longer
+be hoisted to a module-level ``const`` (``spec`` is an argument of the builder,
+not a module binding), so ``codegen_toplevel_models!`` defers it into the body
+the way it already defers a card that reads a ``.param``.  It detects this by
+watching a counter ``cg_expr!`` bumps when it lowers one of these names, which
+observes the lowering that happened rather than re-deriving it from the AST —
+``sema_visit_ids!`` deliberately swallows ``$time``/``temper`` so they are never
+mistaken for parameter references, and so cannot answer the question.
+
+What is *not* fixed, and is the remainder of the ScopedValue story: the
+``SpectreEnvironment`` functions that read ``Cadnip.spec[]`` for themselves —
+``pwl``, ``pulse``, ``spsin`` (all via the simulation time), ``agauss`` (the
+RNG), ``$scale`` — and the ``VAEnvironment`` fallbacks ``$simparam``,
+``$temperature``, ``$vt``.  None of these is on a path a source *card* takes
+(``PWL``/``SIN``/``PULSE`` cards lower to ``MNA`` wave objects, and the VA path
+lowers the ``$`` names to ``_mna_spec_`` directly), so they are reachable only
+by a netlist expression that calls one by name, where they would return the
+``SimSpec()`` defaults.  Either they should take what they need as an argument
+or the ScopedValues should go; both are more than this change.
+
 4. An unreachable override fails three different ways
 -----------------------------------------------------
 
