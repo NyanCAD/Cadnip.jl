@@ -94,7 +94,7 @@ The most nebulous and least important at this stage: copying features from other
   - [x] `.dc` sweep with continuation (`dc!(::CircuitSweep)` warm-starts each point); transient sweeps still init cold
 - [x] Documentation: README reviewed against a running Cadnip, building on #256 — install, world-age, string-macro and override-validation claims corrected
 - [x] Documentation: user manual (`docs/src`) rewritten against the MNA backend, with a CI job that runs every `@example` in it
-- [ ] Documentation: the `doc/*.jmd` Weave set is CedarSim/DAECompiler-era — port what is still true into `docs/src` or drop it
+- [x] Documentation: the `doc/*.jmd` Weave set retired — MNA background and troubleshooting ported to `docs/src/background.md` / `docs/src/troubleshooting.md`, the DAECompiler/abstract-interpretation pair and the Weave build dropped
 - [x] Codegen: one shared import list for the circuit and PDK paths — fixes a live `UndefVarError` for PDK subckts with E/G cards — design: `doc/codegen_unification.md` §1
 - [x] Codegen: merge the duplicated `.model` lowering between the circuit and PDK paths — design: `doc/codegen_unification.md` §2
 - [x] Codegen: clear the runtime warnings (world-age binding access, SciMLBase import) — design: `doc/codegen_unification.md` §3
