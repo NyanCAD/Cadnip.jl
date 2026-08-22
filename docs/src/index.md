@@ -86,6 +86,8 @@ magnitude_db(ac, :out)[1:3]     # flat in the passband
 | [Parameters and sweeps](@ref) | `.param` overrides, `alter`, sweep axes, continuation |
 | [Analyses](@ref) | `dc!`, `tran!`, `ac!`, `noise!` and how to read their results |
 | [Devices and models](@ref) | built-in devices, model cards, Verilog-A, custom devices |
+| [How a circuit becomes equations](@ref) | the lumped model, MNA, stamping, where each analysis sits |
+| [When a circuit does not solve](@ref) | typos, floating nodes, DC convergence, transient trouble |
 
 Design notes and internals live in the `doc/` directory of the repository —
 `doc/mna_architecture.md` and `doc/code_tour_mna_pipeline.md` are the entry

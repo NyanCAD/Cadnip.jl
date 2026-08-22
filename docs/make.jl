@@ -15,6 +15,8 @@ makedocs(
         "parameters.md",
         "analyses.md",
         "devices.md",
+        "background.md",
+        "troubleshooting.md",
     ],
     warnonly = true,
 )
