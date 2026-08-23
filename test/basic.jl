@@ -615,14 +615,12 @@ end
     end
 end
 
-# An instance parameter whose value reads another parameter of the same
-# instance line (`x1 … subcircuit1 w=4 nrd='w/2'`). Measured still failing, at
-# codegen rather than runtime: `UndefVarError: w not defined` — the kwarg
-# expressions are built in the *caller's* scope, where `w` is the callee's
-# parameter and so is not bound.
-#=
+# An instance line's parameters are lowered in the caller's scope, but each one
+# also sees its siblings on the same line: `x1 … subcircuit1 w=4 nrd='w/2'` sets
+# `nrd` to 2, whatever `w` the caller happens to have — and it needs no `w` in
+# the caller at all, which used to be an `UndefVarError` out of the builder.
 @testset "SPICE parameter scope (instance params)" begin
-    # Test that instance parameters can refer to other parameters
+    # A sibling on the same line, with no `w` anywhere in the caller's scope.
     spice_code = """
     * Parameter scoping test
 
@@ -637,8 +635,50 @@ end
     # nrd='w/2' where w=4, so nrd=2, R = rsh*nrd = 1*2 = 2
     # I = V/R = 1/2 = 0.5A
     @test isapprox_deftol(sol[:I_v1], -0.5)
+
+    # Same line, reversed: which one is written first is not the netlist
+    # writer's business, so the bindings are emitted in dependency order.
+    ctx, sol = solve_mna_spice_code("""
+    * Parameter scoping test, reversed
+
+    .subckt subcircuit1 vss gnd w=2 rsh=1 nrd=1
+    r1 vss gnd 'rsh*nrd'
+    .ends
+    x1 vss 0 subcircuit1 nrd='w/2' w=4
+    v1 vss 0 1
+    """)
+    @test isapprox_deftol(sol[:I_v1], -0.5)
+
+    # A sibling and a caller `.param` in the same line: `w` is the line's,
+    # `wtop` the caller's.
+    ctx, sol = solve_mna_spice_code("""
+    * Parameter scoping test, mixed scopes
+    .param wtop=3
+
+    .subckt subcircuit1 vss gnd w=1 nrd=1
+    r1 vss gnd 'w*nrd'
+    .ends
+    x1 vss 0 subcircuit1 w='wtop*2' nrd='w/3'
+    v1 vss 0 1
+    """)
+    # w = 3*2 = 6, nrd = 6/3 = 2, R = 12
+    @test isapprox_deftol(sol[:I_v1], -1/12)
+
+    # A parameter reading *itself* scales the caller's binding of that name —
+    # that is the idiom, not a self-reference, so it must not resolve to the
+    # value being defined.
+    ctx, sol = solve_mna_spice_code("""
+    * Parameter scoping test, scaling a caller parameter
+    .param w=5
+
+    .subckt subcircuit1 vss gnd w=1
+    r1 vss gnd 'w'
+    .ends
+    x1 vss 0 subcircuit1 w='w*2'
+    v1 vss 0 1
+    """)
+    @test isapprox_deftol(sol[:I_v1], -0.1)
 end
-=#
 
 # One source carrying all three specifications at once. Which one is read is the
 # analysis's business, not the card's: `DC 5` is the operating point, `SIN(10 3

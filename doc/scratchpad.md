@@ -116,7 +116,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Features: subcircuit multiplicity — `m` on an `X` line / `.subckt` card scales every device inside and composes across nesting
 - [ ] Bug: Spectre `type=pwl wave=[...]` — sema has no `sema_visit_ids!` for a `SpectreArray`, so the deck dies before codegen — disabled block in `test/basic.jl`
 - [ ] Bug: alternate E/G forms (`vol=`/`cur=`) fail in the parser with `LString(::Nothing)` — disabled block in `test/basic.jl`
-- [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
+- [x] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — the line's parameters are bound in dependency order and see each other
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"

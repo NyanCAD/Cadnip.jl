@@ -1313,6 +1313,129 @@ function collect_exposed_parameters_recursively(parent_sema::SemaResult, ssema::
 end
 
 """
+    _instance_param_syms(ex) -> Set{Symbol}
+
+The identifiers an already-lowered instance-parameter expression reads. Three
+positions hold something that is not a parameter: the callee of a `:call` is a
+function, a `getproperty` is a node observable (`V(a)` lowers to `a.V`, and the
+`a` there is a net, not a parameter), and `QuoteNode`s / `GlobalRef`s name
+nothing in the caller's scope at all.
+"""
+function _instance_param_syms(ex, acc::Set{Symbol}=Set{Symbol}())
+    if ex isa Symbol
+        push!(acc, ex)
+    elseif ex isa Expr && ex.head !== :.
+        args = ex.head === :call ? ex.args[2:end] : ex.args
+        for a in args
+            _instance_param_syms(a, acc)
+        end
+    end
+    return acc
+end
+
+"""
+    _subst_instance_params(ex, subs) -> ex
+
+Rewrite the identifiers named in `subs` inside an already-lowered instance
+parameter expression. Mirrors [`_instance_param_syms`](@ref) in what it treats
+as an identifier.
+"""
+function _subst_instance_params(ex, subs::Dict{Symbol,Symbol})
+    if ex isa Symbol
+        return get(subs, ex, ex)
+    elseif ex isa Expr
+        ex.head === :. && return ex
+        if ex.head === :call
+            return Expr(:call, ex.args[1],
+                        (_subst_instance_params(a, subs) for a in ex.args[2:end])...)
+        end
+        return Expr(ex.head, (_subst_instance_params(a, subs) for a in ex.args)...)
+    end
+    return ex
+end
+
+"""
+    cg_instance_params!(state, pairs) -> (bindings, slots)
+
+Lower the `name=value` parameters of one instance line so a value may read the
+*other* parameters of the same line: `X1 a b sub w=4 nrd='w/2'` sets `nrd` to 2,
+whatever `w` the caller happens to have (or not have — before this, a `w` the
+caller did not declare was an `UndefVarError` out of the generated builder).
+
+Each parameter is bound to a temporary in the caller's scope and a reference to
+a sibling parameter is rewritten to that sibling's temporary, with the bindings
+emitted in dependency order. Two references are deliberately left pointing at
+the caller's scope: a parameter reading *itself* (`w='w*2'` scales the caller's
+`w`, it is not a self-reference), and the back edge of a cycle (`a='b' b='a'`),
+which is what the whole line did before.
+
+`pairs` is a vector of `name => value_node`. Returns the `let` bindings and
+`name => tempvar` in declaration order; the caller builds its kwargs from the
+temporaries and wraps its call with [`_wrap_instance_param_let`](@ref).
+"""
+function cg_instance_params!(state::CodegenState, pairs::Vector{<:Pair{Symbol}})
+    isempty(pairs) && return (Expr[], Pair{Symbol,Symbol}[])
+
+    names = first.(pairs)
+    exprs = Any[cg_expr!(state, last(p)) for p in pairs]
+    # `*iparam#` is an invalid identifier in both SPICE and Julia, so the
+    # temporaries cannot collide with anything the netlist names — same trick as
+    # `*net#` and `*lens#`. Only one instance line is ever in scope at a time.
+    tmps = Symbol[Symbol("*iparam#", n) for n in names]
+    nameset = Set(names)
+
+    # Which siblings each value reads. A value reading its own name is reading
+    # the caller's binding, so that is not an edge.
+    deps = [setdiff(intersect(_instance_param_syms(exprs[i]), nameset), (names[i],))
+            for i in eachindex(names)]
+
+    bindings = Expr[]
+    subs = Dict{Symbol,Symbol}()
+    emitted = falses(length(names))
+    while !all(emitted)
+        # Kahn: anything whose siblings are already bound. If nothing qualifies
+        # the remainder is cyclic, so break the cycle at the first of them.
+        i = findfirst(j -> !emitted[j] && all(d -> d in keys(subs), deps[j]), eachindex(names))
+        i === nothing && (i = findfirst(!, emitted))
+        push!(bindings, Expr(:(=), tmps[i], _subst_instance_params(exprs[i], subs)))
+        emitted[i] = true
+        subs[names[i]] = tmps[i]
+    end
+
+    return (bindings, [names[i] => tmps[i] for i in eachindex(names)])
+end
+
+"""
+    _wrap_instance_param_let(bindings, body) -> Expr
+
+Put an instance line's parameter bindings (from [`cg_instance_params!`](@ref))
+in scope for `body`, which is the generated call that consumes them.
+"""
+_wrap_instance_param_let(bindings::Vector{Expr}, body) =
+    isempty(bindings) ? body : Expr(:let, Expr(:block, bindings...), body)
+
+"""
+    spice_instance_params(instance) -> (pairs, orig_names)
+
+The `name=value` parameters of a SPICE instance line, which `SubcktCall` exposes
+as `Parameter` children rather than as a `params` field. `pairs` names each
+parameter the way the netlist's own expressions do — lowercased, since SPICE is
+case-insensitive; `orig_names` is the same list in the netlist's spelling, which
+is what a case-sensitive Verilog-A module wants for its kwargs.
+"""
+function spice_instance_params(instance)
+    pairs = Pair{Symbol,Any}[]
+    orig_names = Symbol[]
+    for child in NyanSpectreNetlistParser.RedTree.children(instance)
+        if child !== nothing && isa(child, SNode{SP.Parameter})
+            push!(pairs, LSymbol(child.name) => child.val)
+            push!(orig_names, Symbol(String(child.name)))
+        end
+    end
+    return pairs, orig_names
+end
+
+"""
 Generate MNA subcircuit call at top level (where lens is var"*lens#").
 
 Explicit params from the netlist (e.g., `X1 vcc 0 myres factor=2`) become
@@ -1354,22 +1477,20 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         va_type = latest_global(va_hdl_mod, subckt_name)
         case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
 
+        param_pairs, _ = spice_instance_params(instance)
+        param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+
         # `m=` on the instance line is multiplicity, not a VA struct field — the
         # model reads it back through `$mfactor`, same as for an M/Q/D card.
         m_expr = :(_mna_m_)
         explicit_kwargs = Expr[]
-        for child in NyanSpectreNetlistParser.RedTree.children(instance)
-            if child !== nothing && isa(child, SNode{SP.Parameter})
-                name = LSymbol(child.name)
-                if name === :m
-                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
-                    continue
-                end
-                # Adjust case to match VA device fieldnames
-                adjusted_name = get(case_insensitive, name, name)
-                def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, adjusted_name, def))
+        for (name, tmp) in param_slots
+            if name === :m
+                m_expr = :($tmp * _mna_m_)
+                continue
             end
+            # Adjust case to match VA device fieldnames
+            push!(explicit_kwargs, Expr(:kw, get(case_insensitive, name, name), tmp))
         end
 
         # Port expressions
@@ -1390,15 +1511,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
             stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-            return quote
+            return _wrap_instance_param_let(param_bindings, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $stamp_expr
                 end
-            end
+            end)
         else
             # Normal model: direct call with @noinline stamp!
-            return quote
+            return _wrap_instance_param_let(param_bindings, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
@@ -1406,7 +1527,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
                         _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                         _mna_mfactor_ = $m_expr)
                 end
-            end
+            end)
         end
     end
 
@@ -1425,18 +1546,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
     end
 
-    # Build kwargs from explicit parameters passed to the subcircuit call
-    # Use the caller's state for cg_expr! since that's where the values are defined
-    explicit_kwargs = Expr[]
-
-    # Find Parameter children in the AST (SubcktCall exposes params as children)
-    for child in NyanSpectreNetlistParser.RedTree.children(instance)
-        if child !== nothing && isa(child, SNode{SP.Parameter})
-            name = LSymbol(child.name)
-            def = cg_expr!(state, child.val)  # Use caller's state, not callee's
-            push!(explicit_kwargs, Expr(:kw, name, def))
-        end
-    end
+    # Build kwargs from explicit parameters passed to the subcircuit call.
+    # Lowered in the caller's scope (that's where the values are defined), but
+    # each one also sees its siblings on the same line — see cg_instance_params!.
+    param_pairs, _ = spice_instance_params(instance)
+    param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+    explicit_kwargs = Expr[Expr(:kw, name, tmp) for (name, tmp) in param_slots]
 
     # Port expressions
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
@@ -1459,11 +1574,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     #    names like :arma_x1_mid.
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     chained_prefix_expr = _scoped_sym_expr(instance_name)
-    return quote
+    return _wrap_instance_param_let(param_bindings, quote
         let subckt_lens = Base.getproperty(var"*lens#", $(QuoteNode(instance_name)))
             $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
         end
-    end
+    end)
 end
 
 # Version for use in subcircuit context (lens is named `lens`)
@@ -1498,22 +1613,20 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
     if va_module_ref !== nothing
         # This is a VA module instance
-        # Preserve original parameter name case since VA modules may be case-sensitive
+        param_pairs, orig_names = spice_instance_params(instance)
+        param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+
         # `m=` on the instance line is multiplicity, not a VA struct field — the
         # model reads it back through `$mfactor`, same as for an M/Q/D card.
         m_expr = :(_mna_m_)
         explicit_kwargs = Expr[]
-        for child in NyanSpectreNetlistParser.RedTree.children(instance)
-            if child !== nothing && isa(child, SNode{SP.Parameter})
-                # Use original case for VA modules (they may be case-sensitive)
-                name = Symbol(String(child.name))
-                if LSymbol(child.name) === :m
-                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
-                    continue
-                end
-                def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, name, def))
+        for (i, (name, tmp)) in enumerate(param_slots)
+            if name === :m
+                m_expr = :($tmp * _mna_m_)
+                continue
             end
+            # Use original case for VA modules (they may be case-sensitive)
+            push!(explicit_kwargs, Expr(:kw, orig_names[i], tmp))
         end
 
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
@@ -1531,16 +1644,16 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
             stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-            return quote
+            return _wrap_instance_param_let(param_bindings, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     # Build hierarchical instance name from _mna_prefix_ + local instance name
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                     $stamp_expr
                 end
-            end
+            end)
         else
             # Normal model: direct call with @noinline stamp!
-            return quote
+            return _wrap_instance_param_let(param_bindings, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     # Build hierarchical instance name from _mna_prefix_ + local instance name
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
@@ -1549,7 +1662,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                         _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                         _mna_mfactor_ = $m_expr)
                 end
-            end
+            end)
         end
     end
 
@@ -1570,16 +1683,12 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         end
     end
 
-    # Build kwargs from explicit parameters passed to the subcircuit call
-    # Use the caller's state for cg_expr! since that's where the values are defined
-    explicit_kwargs = Expr[]
-    for child in NyanSpectreNetlistParser.RedTree.children(instance)
-        if child !== nothing && isa(child, SNode{SP.Parameter})
-            name = LSymbol(child.name)
-            def = cg_expr!(state, child.val)  # Use caller's state, not callee's
-            push!(explicit_kwargs, Expr(:kw, name, def))
-        end
-    end
+    # Build kwargs from explicit parameters passed to the subcircuit call.
+    # Lowered in the caller's scope (that's where the values are defined), but
+    # each one also sees its siblings on the same line — see cg_instance_params!.
+    param_pairs, _ = spice_instance_params(instance)
+    param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+    explicit_kwargs = Expr[Expr(:kw, name, tmp) for (name, tmp) in param_slots]
 
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
@@ -1592,7 +1701,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     end
 
     # Pass hierarchical prefix: combine current prefix with instance name
-    return quote
+    return _wrap_instance_param_let(param_bindings, quote
         let subckt_lens = Base.getproperty(lens, $(QuoteNode(instance_name)))
             # Build hierarchical prefix from current _mna_prefix_ + local instance name
             local new_prefix = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
@@ -1600,7 +1709,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
             # `m` (an `explicit_kwargs` entry, or its `.subckt` default) into it.
             $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, new_prefix, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
         end
-    end
+    end)
 end
 
 #==============================================================================#
@@ -1844,13 +1953,16 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
 
             # Extract explicit parameters from instance. `m=` is multiplicity,
             # not a VA struct field — the model reads it back via `$mfactor`.
-            m_expr = _mfactor_expr!(state, instance.params)
+            param_pairs = Pair{Symbol,Any}[LSymbol(p.name) => p.val for p in instance.params]
+            param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+            m_expr = :(_mna_m_)
             explicit_kwargs = Expr[]
-            for p in instance.params
-                param_name = LSymbol(p.name)
-                param_name === :m && continue
-                param_val = cg_expr!(state, p.val)
-                push!(explicit_kwargs, Expr(:kw, param_name, param_val))
+            for (param_name, tmp) in param_slots
+                if param_name === :m
+                    m_expr = :($tmp * _mna_m_)
+                    continue
+                end
+                push!(explicit_kwargs, Expr(:kw, param_name, tmp))
             end
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
@@ -1866,15 +1978,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             if is_large_model
                 # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
                 stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-                return quote
+                return _wrap_instance_param_let(param_bindings, quote
                     let dev = $va_module_ref(; $(explicit_kwargs...))
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $stamp_expr
                     end
-                end
+                end)
             else
                 # Normal model: direct call with @noinline stamp!
-                return quote
+                return _wrap_instance_param_let(param_bindings, quote
                     let dev = $va_module_ref(; $(explicit_kwargs...))
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $(MNA).stamp!(dev, ctx, $(port_exprs...);
@@ -1882,7 +1994,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
                             _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                             _mna_mfactor_ = $m_expr)
                     end
-                end
+                end)
             end
         elseif haskey(state.sema.subckts, master_sym) || haskey(subckt_semas, master_sym)
             # User-defined subcircuit - generate call to subcircuit builder.
@@ -1895,13 +2007,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             # Port expressions - the nodes connected to this instance
             port_exprs = [cg_net_name!(state, net) for net in nets]
 
-            # Extract explicit parameters from instance
-            explicit_kwargs = Expr[]
-            for p in instance.params
-                param_name = LSymbol(p.name)
-                param_val = cg_expr!(state, p.val)
-                push!(explicit_kwargs, Expr(:kw, param_name, param_val))
-            end
+            # Extract explicit parameters from instance — each sees its siblings
+            # on the same line (see cg_instance_params!), then the caller's scope.
+            param_pairs = Pair{Symbol,Any}[LSymbol(p.name) => p.val for p in instance.params]
+            param_bindings, param_slots = cg_instance_params!(state, param_pairs)
+            explicit_kwargs = Expr[Expr(:kw, name, tmp) for (name, tmp) in param_slots]
 
             # Resolve callee sema: local first, then parent-scope dict.
             ssema = haskey(state.sema.subckts, master_sym) ?
@@ -1930,11 +2040,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             # `var"*lens#"` is the gensym'd lens variable.
             chained_prefix_expr = _scoped_sym_expr(instance_name)
             lens_var = state.is_subcircuit ? :lens : Symbol("*lens#")
-            return quote
+            return _wrap_instance_param_let(param_bindings, quote
                 let subckt_lens = Base.getproperty($lens_var, $(QuoteNode(instance_name)))
                     $builder_name(subckt_lens, spec, t, ctx, $(port_exprs...), $parent_params_expr, x, $chained_prefix_expr, _mna_m_; _mna_h_=_mna_h_, _mna_h_p_=_mna_h_p_, $(explicit_kwargs...))
                 end
-            end
+            end)
         else
             # Unknown master type - skip with warning comment
             return :(nothing)  # TODO: handle $(master)
