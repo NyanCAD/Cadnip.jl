@@ -71,6 +71,31 @@ instance), the shape decides: `x1=2.0` sets the parameter, `x1=(r1val=…)`
 addresses the instance, and `params=(x1=2.0,)` names the parameter explicitly
 when you need both at once.
 
+## An instance line's parameters see each other
+
+The values on an instance line are evaluated in the scope that writes the line,
+so they read the caller's `.param`s — and each other. A geometry derived from a
+width, written once on the line that sets the width, needs no `.param` in the
+caller to hang it on:
+
+```@example params
+sized = sp"""
+* an instance line's parameters read each other
+.subckt sized_res a b w=1 nrd=1
+R1 a b 'w*nrd'
+.ends
+V1 vcc 0 DC 1
+X1 vcc 0 sized_res w=4 nrd='w/2'
+"""
+
+dc!(MNACircuit(sized))[:I_v1]      # w=4, nrd=2, so R=8
+```
+
+The order the parameters are written in does not matter; `nrd='w/2' w=4` means
+the same thing. A parameter that reads *its own* name reads the caller's binding
+of it, which is what makes `w='w*2'` the scaling idiom rather than a circular
+definition.
+
 ## Names that reach nothing throw
 
 An override that names nothing used to be silent, which reads exactly like a
