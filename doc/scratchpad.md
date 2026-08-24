@@ -114,7 +114,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] UX: `node_names(sol)` / `branch_names(sol)` — nothing classifies a name `keys(sol)` returns — `doc/FINDINGS.rst`
 - [x] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — ported or dropped; the four still disabled now record the *measured* failure, not the 2022 guess
 - [x] Features: subcircuit multiplicity — `m` on an `X` line / `.subckt` card scales every device inside and composes across nesting
-- [ ] Bug: Spectre `type=pwl wave=[...]` — sema has no `sema_visit_ids!` for a `SpectreArray`, so the deck dies before codegen — disabled block in `test/basic.jl`
+- [x] Bug: Spectre `type=pwl wave=[...]` — sema now walks a `SpectreArray`, and codegen splits the wave into `SVector`s; re-enabled the `test/basic.jl` "Full Spectre sources" block (#285)
 - [ ] Bug: alternate E/G forms (`vol=`/`cur=`) fail in the parser with `LString(::Nothing)` — disabled block in `test/basic.jl`
 - [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
