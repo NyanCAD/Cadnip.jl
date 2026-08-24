@@ -256,6 +256,15 @@ function sema_visit_ids!(f, cs::Union{SNode{SC.UnaryOp}, SNode{SP.UnaryOp}})
     sema_visit_ids!(f, cs.operand)
 end
 
+# A Spectre vector literal (`wave=[0 1m .5 2m]`). Each item is a constant, a
+# parameter reference, or a parenthesised expression — all of which the visitors
+# above already handle, so the array itself just recurses into its items.
+function sema_visit_ids!(f, cs::SNode{SC.SpectreArray})
+    for item in cs.items
+        sema_visit_ids!(f, item)
+    end
+end
+
 function sema_visit_ids!(f, cs::SNode{SP.Parameter})
     # TODO: Lot/Dev?
     sema_visit_ids!(f, cs.val)

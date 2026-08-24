@@ -347,6 +347,21 @@ end
 cg_expr!(state::CodegenState, n::Union{SNode{SP.Brace}, SNode{SC.Parens}, SNode{SP.Parens}, SNode{SP.Prime}}) = cg_expr!(state, n.inner)
 
 """
+    cg_array_items!(state, cs) -> Vector{Any}
+
+The lowered items of a Spectre vector literal, in order. Kept separate from
+`cg_expr!` because the consumers that care about a vector's *shape* — `type=pwl
+wave=[t1 v1 t2 v2 …]`, where the interleaving is the meaning — want the items
+individually, not a `Vector`-building expression they would have to slice back
+apart at runtime.
+"""
+cg_array_items!(state::CodegenState, cs::SNode{SC.SpectreArray}) =
+    Any[cg_expr!(state, item) for item in cs.items]
+
+cg_expr!(state::CodegenState, cs::SNode{SC.SpectreArray}) =
+    Expr(:vect, cg_array_items!(state, cs)...)
+
+"""
     cg_expr_with_parent_params!(state, node, exposed_params)
 
 Generate an expression where exposed parameters are referenced via `parent_params.name`
@@ -1621,6 +1636,34 @@ function _cg_spectre_ac_expr(state::CodegenState, params)
     end
 end
 
+# `type=pwl wave=[t1 v1 t2 v2 …]` on a Spectre vsource/isource: the vector
+# interleaves times and values. Split it at codegen time into two `SVector`s —
+# the same zero-allocation shape the SPICE `PWL(...)` card lowers to — rather
+# than emitting a runtime `wave[1:2:end]` slice of a heap `Vector`. Items that
+# read a parameter stay expressions; only the length has to be known here, and
+# it always is.
+function _cg_pwl_wave!(state::CodegenState, wave::SNode{SC.SpectreArray})
+    items = cg_array_items!(state, wave)
+    (!isempty(items) && iseven(length(items))) ||
+        error("pwl wave= expects an even, non-empty list of time/value pairs, got $(length(items)) entries")
+    n = length(items) ÷ 2
+    ts, ys = items[1:2:end], items[2:2:end]
+    return :(($(StaticArrays).SVector{$n,Float64}($(ts...)),
+              $(StaticArrays).SVector{$n,Float64}($(ys...))))
+end
+
+# A `wave=` that is not a literal vector (a parameter holding one, say) keeps
+# the runtime split.
+function _cg_pwl_wave!(state::CodegenState, wave)
+    wave_expr = cg_expr!(state, wave)
+    w = gensym(:wave)
+    return quote
+        let $w = $wave_expr
+            ($w[1:2:end], $w[2:2:end])
+        end
+    end
+end
+
 """
 Generate MNA stamp! call for a Spectre instance.
 
@@ -1719,10 +1762,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
 
         if src_type == "pwl" && hasparam(instance.params, "wave")
             # PWL source with wave parameter - create transient function
-            wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
+            wave_pair = _cg_pwl_wave!(state, getparam(instance.params, "wave"))
             return quote
-                let wave = $wave_expr, ac = $ac_expr
-                    ts, ys = wave[1:2:end], wave[2:2:end]
+                let (ts, ys) = $wave_pair, ac = $ac_expr
                     $(MNA).stamp!($(MNA).VoltageSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
@@ -1768,10 +1810,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
 
         if src_type == "pwl" && hasparam(instance.params, "wave")
             # PWL source with wave parameter - create transient function
-            wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
+            wave_pair = _cg_pwl_wave!(state, getparam(instance.params, "wave"))
             return quote
-                let wave = $wave_expr, ac = $ac_expr
-                    ts, ys = wave[1:2:end], wave[2:2:end]
+                let (ts, ys) = $wave_pair, ac = $ac_expr
                     $(MNA).stamp!($(MNA).CurrentSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
