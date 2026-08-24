@@ -117,51 +117,48 @@ end
     @test isapprox_deftol(sol[:vcc], 1.0)
 end
 
-# Spectre `type=pwl wave=[...]`. Still disabled, but not for the reason the old
-# comment gave ("requires transient simulation" — transient has worked for a
-# while): sema cannot walk a `SpectreArray`, so the deck fails before codegen
-# with `MethodError: no method matching sema_visit_ids!(…, ::SpectreArray, …)`.
-# The `bsource v=$time*V(3)` half of this deck is independent of that.
-#=
+# Spectre `type=pwl wave=[...]` on vsource/isource. The old form of this test —
+# disabled because sema had no `sema_visit_ids!` for a `SpectreArray` and the
+# deck died before codegen — indexed a DAECompiler `sys.node_*`/`sys.R*.I`
+# surface that no longer exists, and asserted the pre-flip current-source sign.
+# Rewritten against the MNA high-level API with name-based access.
+#
+# The `wave` vector interleaves time/value pairs; the codegen splits it into two
+# `SVector`s at compile time. Node signs follow the current conventions:
+# `isource (p n)` injects current into `p` (opposite SPICE), `vsource (p n)`
+# holds `V(p)-V(n)`. The `B5 (0 5) bsource v=$time*V(3)` half of the old deck is
+# left out — `$time` in a bsource does not resolve yet (see PR #281).
+const spectre_pwl_sources = spc"""
+I1 (0 1) isource dc=2.2u
+R1 (1 0) resistor r=1000
+
+I2 (0 2) isource type=pwl wave=[0 1m .5 2m 1 1.75m]
+R2 (2 0) resistor r=2k
+
+V3 (0 3) vsource dc=1.5
+R3 (3 0) resistor r=1k
+
+V4 (0 4) vsource type=pwl wave=[0 1 .5 2 1 5]
+R4 (4 0) resistor r=4k
+"""
+
 @testset "Full Spectre sources (transient)" begin
-    # This is the comprehensive test from the old version
-    # Tests PWL sources and B-source with time-varying expression
-    mktempdir() do dir
-        spectre_file = joinpath(dir, "sources.scs")
-        open(spectre_file; write=true) do io
-            write(io, \"\"\"
-            I1 (0 1) isource dc=2.2u
-            R1 (1 0) resistor r=1000
+    tr = tran!(MNACircuit(spectre_pwl_sources, (;), MNASpec(temp=27.0, mode=:tran)), (0.0, 1.0))
 
-            I2 (0 2) isource type=pwl wave=[0 1m .5 2m 1 1.75m]
-            R2 (2 0) resistor r=2k
+    # DC sources are flat across the run.
+    @test all(isapprox_deftol(-2.2e-3), tr[Symbol("1")])   # I1 into node 0 → -I·R at node 1
+    @test all(isapprox_deftol(-1.5), tr[Symbol("3")])      # V3 (0 3) dc=1.5 → V(3) = -1.5
 
-            V3 (0 3) vsource dc=1.5
-            R3 (3 0) resistor r=1k
+    # PWL sources reach their final vertex value by the end of the run.
+    # I2 wave ends at 1.75m: V(2) = -1.75m · 2k = -3.5
+    @test isapprox(tr[Symbol("2")][end], -3.5; rtol=1e-6)
+    # V4 wave ends at 5: V(4) = -5
+    @test isapprox(tr[Symbol("4")][end], -5.0; rtol=1e-6)
 
-            V4 (0 4) vsource type=pwl wave=[ 0 1 .5 2 \\
-                    1 5]
-            R4 (4 0) resistor r=4k
-
-            B5 (0 5) bsource v=\$time*V(3)
-            R5 (5 0) resistor r=1k
-            \"\"\")
-        end
-
-        sys, sol = solve_spectre_file(spectre_file);
-        @test all(isapprox.(sol[sys.node_1], 2.2e-3))
-        @test all(isapprox.(sol[sys.R1.I], 2.2e-6))
-        @test all(isapprox.(sol[sys.node_3], -1.5))
-        @test all(isapprox.(sol[sys.R3.I], -1.5e-3))
-
-        @test isapprox(sol[sys.node_2][end], 3.5)
-        @test isapprox(sol[sys.R2.I][end], 1.75e-3)
-        @test isapprox(sol[sys.node_4][end], -5.)
-        @test isapprox(sol[sys.R4.I][end], -1.25e-3)
-        @test isapprox(sol[sys.node_5][end], 1.5)
-    end
+    # And they start at their first vertex value.
+    @test isapprox(tr[Symbol("2")][1], -1e-3 * 2e3; rtol=1e-6)   # 1m · 2k
+    @test isapprox(tr[Symbol("4")][1], -1.0; rtol=1e-6)          # 1
 end
-=#
 
 @testset "Spectre subcircuit" begin
     # Port of old "Simple Spectre subcircuit" test
