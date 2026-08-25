@@ -117,7 +117,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Bug: Spectre `type=pwl wave=[...]` — sema has no `sema_visit_ids!` for a `SpectreArray`, so the deck dies before codegen — disabled block in `test/basic.jl`
 - [ ] Bug: alternate E/G forms (`vol=`/`cur=`) fail in the parser with `LString(::Nothing)` — disabled block in `test/basic.jl`
 - [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
-- [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
+- [x] Features: semiconductor resistor — a `.model … r` card resolves `rsh`/geometry/`tc1`/`tc2`, instance `tc` too; `docs/src/devices.md`, `test/basic.jl`
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"

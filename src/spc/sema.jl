@@ -438,7 +438,13 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                 end
             end
             if isa(stmt, SNode{SP.Resistor})
-                if stmt.val !== nothing && (hasparam(stmt.params, "l") || hasparam(stmt.params, "r"))
+                # A resistor's value position holds either a resistance or the
+                # name of a `.model … r` card, and only a bare identifier can be
+                # the latter. Which one it is is not knowable here — the card may
+                # be declared further down the file — so every identifier is a
+                # candidate; the ones no card claims are dropped when the scope
+                # closes (see the `exposed_models` filter in `resolve_scopes!`).
+                if isa(stmt.val, SNode{SP.Identifier})
                     push!(scope.exposed_models, LSymbol(stmt.val))
                 end
             end

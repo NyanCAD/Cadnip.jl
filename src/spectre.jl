@@ -462,6 +462,57 @@ function spicecall(model; kwargs...)
     model(;kwargs...)
 end
 
+"""
+    semiconductor_resistance(model::NamedTuple; r, l, w, tc1, tc2, temp, tnom) -> Float64
+
+Resistance of a resistor instance that names a `.model … r` card, at `temp`.
+
+`model` is the card, lowered by `cg_model_value!` to a plain `NamedTuple` of the
+parameters it spells out (`r=` is stored as `R`, everything else keeps its SPICE
+name). `r`/`l`/`w`/`tc1`/`tc2` are the instance line's own values, `nothing`
+where the line does not give them. Every lookup is on a literal symbol, so the
+whole thing folds to a constant when the card and the instance line are constant.
+
+The value at nominal temperature is, in order of precedence:
+
+1. the instance's `r=` (or the value in the value position),
+2. sheet resistance — `rsh * (l - short) / (w - narrow)`, where `l` comes from
+   the instance line else the card's `l`, and `w` from the instance line else
+   the card's `defw` (1e-5 m, as in SPICE3),
+3. the card's own `r=`/`res=`.
+
+It is then scaled by `1 + tc1*ΔT + tc2*ΔT²`, with `ΔT = temp - tnom` and the
+coefficients taken from the instance line if it gives them, else from the card.
+A card's own `tnom=` wins over the simulation's.
+"""
+function semiconductor_resistance(model::NamedTuple; r=nothing, l=nothing, w=nothing,
+                                  tc1=nothing, tc2=nothing, temp::Real, tnom::Real)
+    rsh = get(model, :rsh, nothing)
+    l_eff = l === nothing ? get(model, :l, nothing) : l
+    w_eff = w === nothing ? get(model, :defw, 1e-5) : w
+
+    r_nom = if r !== nothing
+        Float64(r)
+    elseif rsh !== nothing && l_eff !== nothing
+        Float64(rsh) * (Float64(l_eff) - Float64(get(model, :short, 0.0))) /
+            (Float64(w_eff) - Float64(get(model, :narrow, 0.0)))
+    elseif haskey(model, :R)
+        Float64(model.R)
+    elseif haskey(model, :res)
+        Float64(model.res)
+    else
+        throw(ArgumentError(
+            "resistor model card $(model) gives no resistance: it needs `rsh` (with " *
+            "an `l` on the card or the instance line), or `r`/`res`"))
+    end
+
+    c1 = tc1 === nothing ? Float64(get(model, :tc1, 0.0)) : Float64(tc1)
+    c2 = tc2 === nothing ? Float64(get(model, :tc2, 0.0)) : Float64(tc2)
+    (c1 == 0.0 && c2 == 0.0) && return r_nom
+    ΔT = Float64(temp) - Float64(get(model, :tnom, tnom))
+    return r_nom * (1.0 + c1 * ΔT + c2 * ΔT^2)
+end
+
 @Base.assume_effects :foldable function mknondefault_nt(nt::NamedTuple)
     if @generated
         names = Base._nt_names(nt)
