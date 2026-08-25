@@ -628,24 +628,16 @@ Returns an expression that stamps the device into the context.
 function cg_mna_instance! end
 
 """
-Check if a resistor instance references a model (vs a direct value).
-Returns true if the val field is a model name.
+    resistor_model(state, instance) -> Union{Symbol, Nothing}
+
+The `.model … r` card a resistor names in its value position, or `nothing` when
+that position holds a resistance instead (a number, or an expression over
+`.param`s — `R2 vcc 0 res` with a `.param res=1k` is a value, not a card).
 """
-function is_resistor_model_ref(state::CodegenState, instance::SNode{SP.Resistor})
-    # If val is present and there's l= in params, it's a model reference
-    # Or if val is a HierarchialNode that matches a model name
-    if instance.val === nothing
-        return false
-    end
-
-    # Check if params has l= or r= which indicates model usage
-    if hasparam(instance.params, "l") || hasparam(instance.params, "r")
-        return true
-    end
-
-    # Check if val is a known model name
+function resistor_model(state::CodegenState, instance::SNode{SP.Resistor})
+    isa(instance.val, SNode{SP.Identifier}) || return nothing
     val_sym = LSymbol(instance.val)
-    return haskey(state.sema.models, val_sym)
+    return haskey(state.sema.models, val_sym) ? val_sym : nothing
 end
 
 """
@@ -657,36 +649,31 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     n = cg_net_name!(state, nets[2])
     name = LString(instance.name)
 
-    # Check if this resistor uses a model
-    has_model = is_resistor_model_ref(state, instance)
+    # An instance parameter's value, or `nothing` where the line omits it.
+    # `semiconductor_resistance` reads `nothing` as "the card decides".
+    inst(pname) = hasparam(instance.params, pname) ?
+        cg_expr!(state, getparam(instance.params, pname)) : nothing
+    r_param, tc1, tc2 = inst("r"), inst("tc1"), inst("tc2")
+    rsh = inst("rsh")
+    model_sym = resistor_model(state, instance)
 
-    # Get resistance value
-    r_expr = if hasparam(instance.params, "r")
-        # Instance-level R parameter overrides model
-        cg_expr!(state, getparam(instance.params, "r"))
-    elseif has_model && instance.val !== nothing
-        # Using a model - reference the model's R parameter
-        model_name = cg_model_name!(state, instance.val)
-        :($model_name.R)
-    elseif instance.val !== nothing && !has_model
-        # Direct resistance value
-        cg_expr!(state, instance.val)
+    # The card the geometry is resolved against: the one the line names, else
+    # the sheet resistance spelled on the line itself, else no card at all
+    # (a plain resistance, which only the `tc1`/`tc2` scaling can still touch).
+    card = model_sym !== nothing ? cg_model_name!(state, model_sym) :
+           rsh !== nothing ? :((rsh = $rsh,)) : nothing
+
+    r_expr = if card !== nothing
+        :($(semiconductor_resistance)($card; r=$r_param, l=$(inst("l")), w=$(inst("w")),
+                                      tc1=$tc1, tc2=$tc2, temp=spec.temp, tnom=spec.tnom))
     else
-        # Calculate from rsh, l, w if present
-        if hasparam(instance.params, "l") && hasparam(instance.params, "rsh")
-            l_expr = cg_expr!(state, getparam(instance.params, "l"))
-            w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
-            rsh_expr = cg_expr!(state, getparam(instance.params, "rsh"))
-            :($rsh_expr * $l_expr / $w_expr)
-        elseif has_model && hasparam(instance.params, "l")
-            # Model with l parameter - use model's rsh if available
-            model_name = cg_model_name!(state, instance.val)
-            l_expr = cg_expr!(state, getparam(instance.params, "l"))
-            w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
-            :(Base.getproperty($model_name, :rsh, 0.0) * $l_expr / $w_expr)
-        else
-            1000.0  # Default
-        end
+        r_val = r_param !== nothing ? r_param :
+                instance.val !== nothing ? cg_expr!(state, instance.val) :
+                error("resistor $name has no resistance: give it a value, an `r=`, " *
+                      "an `rsh=`, or the name of a `.model … r` card")
+        tc1 === nothing && tc2 === nothing ? r_val :
+            :($(semiconductor_resistance)((;); r=$r_val, tc1=$tc1, tc2=$tc2,
+                                          temp=spec.temp, tnom=spec.tnom))
     end
 
     # Handle multiplicity

@@ -69,6 +69,35 @@ from the netlist's own directives — `.hdl "foo.va"`, `.include "foo.sp"`,
 `.lib "foo.sp" section`, and their `jlpkg://Package/path` forms. The most recent
 include wins.
 
+## Semiconductor resistors
+
+The `:r` card is more than a resistance: a resistor takes the card's name where
+its value would go, and gets its resistance from sheet resistance and geometry
+instead.
+
+```@example devices
+sheet = MNACircuit(sp"""
+* a poly resistor from a sheet-resistance card
+.model rpoly r rsh=50 narrow=0.1u tc1=1.5e-3
+V1 a 0 DC 1
+R1 a 0 rpoly w=1.1u l=10u
+""")
+
+1 / -dc!(sheet)[:I_v1]     # the resistance the card and the geometry resolve to
+```
+
+The value is `rsh * (l - short) / (w - narrow)`, with `l` from the instance line
+else the card's own `l`, and `w` from the instance line else the card's `defw`
+(1e-5 m). A card with no `rsh` can still carry a plain `r=`, and an `r=` on the
+instance line outranks both. `rsh=` works on the instance line too, with no card
+behind it.
+
+Both the card and the instance line take `tc1`/`tc2`, and the resistance is
+scaled by `1 + tc1·ΔT + tc2·ΔT²` at the simulation temperature — ΔT measured
+from the card's `tnom` where it gives one, else the simulation's. The instance
+line's coefficients win over the card's, so `R1 a b 1k tc1=1e-3` is
+temperature-dependent with no card at all.
+
 ## Verilog-A models
 
 Verilog-A is the supported way to add a device. Cadnip compiles the module into

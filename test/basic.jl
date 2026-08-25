@@ -1086,26 +1086,123 @@ end
     @test Cadnip.canonicalize_params((; params=(;boo=4), foo=2, bar=(; baz=3))) == (params = (boo = 4, foo = 2), bar = (params = (baz = 3,),))
 end
 
-# Semiconductor resistor (`.model myres r rsh=500` + `R1 … myres w= l=`).
-# Measured still failing: `FieldError: type NamedTuple has no field R` — the
-# `R`-less model card reaches the resistor path, which reads `.R` unguarded.
+# Semiconductor resistor: `.model … r` + `R1 … themodel w= l=`.
+# The resistance each case is expected to reach is read back through the 1V
+# source: `-I_v1` is `1/R`.
 @testset "semiconductor resistor" begin
-    @test_skip "Semiconductor resistor model resolution not yet implemented"
-    #=
-    spice_code = """
-    * semiconductor resistor
-    .model myres r rsh=500
-    .param res=1k
-    v1 vcc 0 1
-    R1 vcc 0 myres w=1m l=2m
-    R2 vcc 0 res
-    """
-    ctx, sol = solve_mna_spice_code(spice_code)
-    # R1 = rsh * l / w = 500 * 2m / 1m = 1000Ω
-    # R2 = res = 1000Ω
-    # Parallel: R_eq = 500Ω, I = 1/500 = 2mA
-    @test_broken isapprox(sol[:I_v1], -2e-3; atol=deftol*10)
-    =#
+    conductance(code; kwargs...) = -solve_mna_spice_code(code; kwargs...)[2][:I_v1]
+
+    @testset "sheet resistance, geometry from the instance line" begin
+        # R1 = rsh * l / w = 500 * 2m / 1m = 1000Ω; R2 = res = 1000Ω.
+        # In parallel: 500Ω, so I = 2mA. `res` is a `.param`, not a card —
+        # the value position tells the two apart by whether a card owns the name.
+        g = conductance("""
+        * semiconductor resistor
+        .model myres r rsh=500
+        .param res=1k
+        v1 vcc 0 1
+        R1 vcc 0 myres w=1m l=2m
+        R2 vcc 0 res
+        """)
+        @test isapprox(g, 2e-3; atol=deftol*10)
+    end
+
+    @testset "geometry defaulted by the card" begin
+        # Neither `l` nor `w` on the instance line: `l` from the card, `w` from
+        # its `defw`. R = 100 * 2u / 1u = 200Ω.
+        g = conductance("""
+        * card geometry
+        .model rm r rsh=100 l=2u defw=1u
+        v1 vcc 0 1
+        R1 vcc 0 rm
+        """)
+        @test isapprox(g, 1/200; atol=deftol*10)
+    end
+
+    @testset "side etching" begin
+        # R = rsh * (l - short) / (w - narrow) = 100 * 2u / 1u = 200Ω
+        g = conductance("""
+        * etching
+        .model rn r rsh=100 narrow=0.1u short=0.2u
+        v1 vcc 0 1
+        R1 vcc 0 rn l=2.2u w=1.1u
+        """)
+        @test isapprox(g, 1/200; atol=deftol*10)
+    end
+
+    @testset "instance r= outranks the card's geometry" begin
+        g = conductance("""
+        * instance override
+        .model rm r rsh=100 l=2u defw=1u
+        v1 vcc 0 1
+        R1 vcc 0 rm r=400
+        """)
+        @test isapprox(g, 1/400; atol=deftol*10)
+    end
+
+    @testset "a card that is only a resistance" begin
+        g = conductance("""
+        * plain card
+        .model rr r r=2k
+        v1 vcc 0 1
+        R1 vcc 0 rr
+        """)
+        @test isapprox(g, 1/2000; atol=deftol*10)
+    end
+
+    @testset "temperature coefficients" begin
+        # 100°C above the card's own tnom, tc1=1e-3: R = 1000 * 1.1 = 1100Ω
+        card = """
+        * tc on the card
+        .model rt r rsh=1k l=1u defw=1u tc1=1e-3 tnom=27
+        v1 vcc 0 1
+        R1 vcc 0 rt
+        """
+        @test isapprox(conductance(card; temp=27.0), 1/1000; atol=deftol*10)
+        @test isapprox(conductance(card; temp=127.0), 1/1100; atol=deftol*10)
+
+        # tc2 too: R = 1000 * (1 + 1e-3*100 + 1e-5*100^2) = 1200Ω
+        @test isapprox(conductance("""
+        * tc2
+        .model rt2 r rsh=1k l=1u defw=1u tc1=1e-3 tc2=1e-5
+        v1 vcc 0 1
+        R1 vcc 0 rt2
+        """; temp=127.0), 1/1200; atol=deftol*10)
+
+        # The instance line's own coefficients, with no card behind them
+        @test isapprox(conductance("""
+        * instance tc
+        v1 vcc 0 1
+        R1 vcc 0 1k tc1=1e-3
+        """; temp=127.0), 1/1100; atol=deftol*10)
+
+        # and they outrank the card's
+        @test isapprox(conductance("""
+        * instance tc wins
+        .model rt3 r rsh=1k l=1u defw=1u tc1=1e-3
+        v1 vcc 0 1
+        R1 vcc 0 rt3 tc1=2e-3
+        """; temp=127.0), 1/1200; atol=deftol*10)
+    end
+
+    @testset "sheet resistance with no card at all" begin
+        # `rsh` spelled on the instance line: R = 500 * 2m / 1m = 1000Ω
+        g = conductance("""
+        * instance rsh
+        v1 vcc 0 1
+        R1 vcc 0 rsh=500 l=2m w=1m
+        """)
+        @test isapprox(g, 1/1000; atol=deftol*10)
+    end
+
+    @testset "a card with no resistance in it is an error" begin
+        @test_throws Exception conductance("""
+        * nothing to resolve
+        .model rbad r narrow=1u
+        v1 vcc 0 1
+        R1 vcc 0 rbad
+        """)
+    end
 end
 
 @testset "ifelse" begin
