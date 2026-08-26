@@ -811,19 +811,41 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.C
 end
 
 """
+    behavioral_source_expr(params, name, kw) -> SNode
+
+The expression a behavioral E/G card carries, under either its own keyword
+(`vol` for E, `cur` for G) or the `value` both accept.
+"""
+function behavioral_source_expr(params, name, kw)
+    expr = getparam(params, kw, getparam(params, "value"))
+    expr === nothing && error("$name names no control nodes, so it needs a $kw= or value= expression")
+    return expr
+end
+
+"""
 Generate stamp! call for a VCVS (E element) - ControlledSource{:V,:V}.
+
+`E1 p n cp cn gain` is the linear form. `E1 p n vol=expr` (`value=expr` spells the
+same thing) names no control nodes: it is a behavioral voltage source, the E
+spelling of `B1 p n v=expr`.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:V}})
-    nets = sema_nets(instance)
-    out_p = cg_net_name!(state, nets[1])
-    out_n = cg_net_name!(state, nets[2])
-    in_p = cg_net_name!(state, nets[3])
-    in_n = cg_net_name!(state, nets[4])
+    out_p = cg_net_name!(state, instance.pos)
+    out_n = cg_net_name!(state, instance.neg)
     name = LString(instance.name)
 
     # Get the voltage control node which contains the gain
     voltage_ctrl = instance.val
     @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Behavioral form: no control nodes, the branch voltage is an expression
+    if voltage_ctrl.cpos === nothing
+        v_expr = behavioral_source_expr(voltage_ctrl.params, name, "vol")
+        return cg_behavioral_stamp(state, name, out_p, out_n, v_expr, nothing)
+    end
+
+    in_p = cg_net_name!(state, voltage_ctrl.cpos)
+    in_n = cg_net_name!(state, voltage_ctrl.cneg)
 
     # Get the gain value from VoltageControl
     gain_expr = if voltage_ctrl.val !== nothing
@@ -843,18 +865,28 @@ end
 
 """
 Generate stamp! call for a VCCS (G element) - ControlledSource{:V,:C}.
+
+`G1 p n cp cn gm` is the linear form. `G1 p n cur=expr` (`value=expr` spells the
+same thing) names no control nodes: it is a behavioral current source, the G
+spelling of `B1 p n i=expr`.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:C}})
-    nets = sema_nets(instance)
-    out_p = cg_net_name!(state, nets[1])
-    out_n = cg_net_name!(state, nets[2])
-    in_p = cg_net_name!(state, nets[3])
-    in_n = cg_net_name!(state, nets[4])
+    out_p = cg_net_name!(state, instance.pos)
+    out_n = cg_net_name!(state, instance.neg)
     name = LString(instance.name)
 
     # Get the voltage control node which contains the gm
     voltage_ctrl = instance.val
     @assert isa(voltage_ctrl, SNode{SP.VoltageControl})
+
+    # Behavioral form: no control nodes, the branch current is an expression
+    if voltage_ctrl.cpos === nothing
+        i_expr = behavioral_source_expr(voltage_ctrl.params, name, "cur")
+        return cg_behavioral_stamp(state, name, out_p, out_n, nothing, i_expr)
+    end
+
+    in_p = cg_net_name!(state, voltage_ctrl.cpos)
+    in_n = cg_net_name!(state, voltage_ctrl.cneg)
 
     # Get the transconductance value from VoltageControl
     gm_expr = if voltage_ctrl.val !== nothing
@@ -865,9 +897,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
+    # SPICE drives the current from n+ *through* the source to n-, so n- is the node
+    # it is injected into; `VCCS` injects into its first output node. Same swap the
+    # I card and the linear B `i=` fold do.
     return quote
         let gm = $gm_expr
-            $(MNA).stamp!($(MNA).VCCS(gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
+            $(MNA).stamp!($(MNA).VCCS(gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_n, $out_p, $in_p, $in_n)
         end
     end
 end
@@ -941,11 +976,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
+    # Same output-node swap as the G card: SPICE injects the current into n-,
+    # `CCCS` injects into its first output node.
     return quote
         let gain = $gain_expr
             # Get the current index of the referenced voltage source
             I_in_idx = $(MNA).get_current_idx(ctx, $sense_expr)
-            $(MNA).stamp!($(MNA).CCCS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
+            $(MNA).stamp!($(MNA).CCCS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_n, $out_p, I_in_idx)
         end
     end
 end
@@ -965,6 +1002,12 @@ Analyze an expression to see if it's a simple linear VCVS expression like:
 Returns (control_node, gain) if it's a simple VCVS, nothing otherwise.
 """
 function extract_linear_vcvs_params(state::CodegenState, expr)
+    # `'V(a,b)*2'` and `{V(a,b)*2}` are the same expression as `V(a,b)*2` — unwrap
+    # the quoting so a quoted card folds to the same linear stamp as a bare one.
+    while expr isa Union{SNode{SP.Prime}, SNode{SP.Brace}, SNode{SP.Parens}}
+        expr = expr.inner
+    end
+
     # Case 1: Just V(node)
     if expr isa SNode{SP.FunctionCall}
         fname = lowercase(String(expr.id))
@@ -1149,6 +1192,21 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
         i_expr = getparam(instance.params, "cur")
     end
 
+    return cg_behavioral_stamp(state, name, p, n, v_expr, i_expr)
+end
+
+"""
+    cg_behavioral_stamp(state, name, p, n, v_expr, i_expr)
+
+Stamp a behavioral branch between `p` and `n` from a netlist expression: either
+`v_expr` (the branch voltage) or `i_expr` (the current through it, flowing `p` → `n`).
+
+Shared by the B element and by the behavioral forms of E and G
+(`E1 p n vol=expr`, `G1 p n cur=expr`), which are the same device written
+differently. A linear `V(a,b)*gain` expression folds to a VCVS/VCCS stamp; anything
+else is stamped as a contribution and differentiated by ForwardDiff.
+"""
+function cg_behavioral_stamp(state::CodegenState, name, p, n, v_expr, i_expr)
     # Helper to get voltage from solution vector
     # (defined here to be available in generated code)
     # Ground (node 0) always returns 0.0, empty vectors are handled by ZERO_VECTOR
@@ -1220,7 +1278,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
         end
     else
         # No recognized parameter - skip
-        @warn "B-source $name has no recognized v= or i= parameter"
+        @warn "Behavioral source $name has no recognized voltage or current expression"
         return :(nothing)
     end
 end

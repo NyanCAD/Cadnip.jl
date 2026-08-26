@@ -126,8 +126,16 @@ sema_nets(instance::SNode{SP.OSDIDevice}) = instance.nodes
 sema_nets(instance::SNode{SC.Instance}) = Tuple(n.node for n in instance.nodelist.nodes)
 # Controlled sources: output nodes + control nodes
 # ControlledSource{:V,:V} (VCVS) and ControlledSource{:V,:C} (VCCS): pos, neg are output; val.cpos, val.cneg are control
-sema_nets(instance::SNode{SP.ControlledSource{:V,:V}}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
-sema_nets(instance::SNode{SP.ControlledSource{:V,:C}}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
+# The behavioral forms (`E1 p n vol=expr`, `G1 p n cur=expr`) name no control nodes
+# at all — the control nodes are `nothing` and the nets they read live inside the
+# expression, which `sema_visit_expr!` walks.
+function sema_nets(instance::Union{SNode{SP.ControlledSource{:V,:V}}, SNode{SP.ControlledSource{:V,:C}}})
+    ctrl = instance.val
+    nets = Any[instance.pos, instance.neg]
+    ctrl.cpos !== nothing && push!(nets, ctrl.cpos)
+    ctrl.cneg !== nothing && push!(nets, ctrl.cneg)
+    return Tuple(nets)
+end
 # ControlledSource{:C,:V} (CCVS) and ControlledSource{:C,:C} (CCCS): pos, neg are output (current control via reference)
 sema_nets(instance::SNode{SP.ControlledSource{:C,:V}}) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.ControlledSource{:C,:C}}) = (instance.pos, instance.neg)

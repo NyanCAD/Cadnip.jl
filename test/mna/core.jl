@@ -560,8 +560,9 @@ using NyanVerilogAParser
     @testset "DC: VCCS amplifier" begin
         # Input: 1V source, gm = 10mS
         # Output: into 1k resistor
-        # Expected: Iout = gm * Vin = 0.01 * 1 = 10mA
-        # Vout = Iout * R = 0.01 * 1000 = 10V
+        # Iout = gm * Vin = 0.01 * 1 = 10mA, and a G card drives its current from
+        # n+ (`out`) through the source to n- (ground), so it is drawn *out* of
+        # `out`: Vout = -0.01 * 1000 = -10V.
         circuit = MNACircuit(sp"""
         V1 inp 0 DC 1
         G1 out 0 inp 0 0.01
@@ -569,7 +570,7 @@ using NyanVerilogAParser
         """i)
         sol = dc!(circuit)
         @test sol[:inp] ≈ 1.0
-        @test sol[:out] ≈ 10.0 atol=1e-10
+        @test sol[:out] ≈ -10.0 atol=1e-10
     end
 
     @testset "DC: Inverting amplifier with VCVS" begin
@@ -604,7 +605,8 @@ using NyanVerilogAParser
         # Current source I = 1mA through sensing branch
         # Gain = 2
         # Output into 1k resistor
-        # Expected: I_out = 2mA, V_out = 2mA * 1kΩ = 2V
+        # I_out = 2mA, drawn out of `out` like any SPICE current-output card:
+        # V_out = -2mA * 1kΩ = -2V
         circuit = MNACircuit(sp"""
         I1 0 inp DC 1m
         F1 out 0 V_sense 2.0
@@ -612,7 +614,7 @@ using NyanVerilogAParser
         R1 out 0 1k
         """i)
         sol = dc!(circuit)
-        @test sol[:out] ≈ 2.0 atol=1e-10
+        @test sol[:out] ≈ -2.0 atol=1e-10
     end
 
     @testset "DC: Multi-node network" begin

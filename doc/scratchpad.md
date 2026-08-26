@@ -115,7 +115,10 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Cleanup: `test/basic.jl` carries twelve `#= =#` DAECompiler-era blocks — ported or dropped; the four still disabled now record the *measured* failure, not the 2022 guess
 - [x] Features: subcircuit multiplicity — `m` on an `X` line / `.subckt` card scales every device inside and composes across nesting
 - [ ] Bug: Spectre `type=pwl wave=[...]` — sema has no `sema_visit_ids!` for a `SpectreArray`, so the deck dies before codegen — disabled block in `test/basic.jl`
-- [ ] Bug: alternate E/G forms (`vol=`/`cur=`) fail in the parser with `LString(::Nothing)` — disabled block in `test/basic.jl`
+- [x] Bug: the behavioral E/G forms (`vol=`/`cur=`/`value=`) died on `LString(::Nothing)` — in sema, not the parser, which handles them fine; they are the E/G spelling of a `B` source and now stamp as one
+- [x] Bug: the current-output controlled sources (`G`, `F`) stamped their output current backwards — all four E/F/G/H checked against ngspice, three test expectations were wrong
+- [ ] Bug?: the Spectre `isource`/`vccs` path deliberately skips the output-node swap the SPICE `I`/`G` cards do — unmeasured, no Spectre here to check against
+- [ ] Bug: a nonlinear `v=` and a nonlinear `i=` contribution in one deck break each other — `evaluate_contribution` reads a partial the solver's own duals don't carry — reproduction in the `behavioral_e`/`behavioral_g` comment in `test/basic.jl`
 - [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
