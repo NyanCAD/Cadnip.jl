@@ -195,30 +195,95 @@ end
     @test isapprox_deftol(sol[Symbol("1")], -1.0)
 end
 
-@testset "Simple SPICE controlled sources" begin
-    # Original SPICE code testing E (VCVS) and G (VCCS)
-    spice_code = """
-    * Simple SPICE sources with controlled sources
-    V1 0 1 1
-    R1 1 0 1k
+# The four linear controlled sources, and the two behavioral spellings of E and G.
+# Every number asserted below is what ngspice-42 prints for this netlist, not a
+# derivation: the sign conventions of the current-output cards (G, F) are exactly
+# what used to be wrong here, so a hand-derived expectation is worth nothing.
+const controlled_sources = sp"""
+* controlled sources, all with + at ground
+V1 0 1 1
+R1 1 0 1k
+Vsense 2 0 DC 0
+Rsense 1 2 1k
+* linear forms
+E1 0 e1 0 1 2
+Re1 e1 0 1k
+G1 0 g1 0 1 2m
+Rg1 g1 0 1k
+F1 0 f1 Vsense 2
+Rf1 f1 0 1k
+H1 0 h1 Vsense 2
+Rh1 h1 0 1k
+* behavioral E and G: no control nodes, an expression instead
+E2 0 e2 vol='V(0,1)*2'
+Re2 e2 0 1k
+E3 0 e3 value=V(0,1)*2
+Re3 e3 0 1k
+G2 0 g2 cur='V(0,1)*2m'
+Rg2 g2 0 1k
+G3 0 g3 value=V(0,1)*2m
+Rg3 g3 0 1k
+"""i
 
-    E6 0 6 0 1 2
-    R6 6 0 r=1k
+# The genuinely nonlinear behavioral forms, which stamp a contribution instead of
+# folding to a gain. Two decks rather than one, deliberately: a nonlinear voltage
+# contribution and a nonlinear current contribution in the *same* deck still break
+# each other, and that is not an E/G bug — measured, the same pair of plain B cards
+#
+#     B1 0 b1 v='V(0,1)*V(0,1)*3'
+#     B2 0 b2 i='V(0,1)*V(0,1)*3m'
+#
+# fails identically with `BoundsError: attempt to access Tuple{Float64} at index
+# [2]`. The voltage contribution adds an auxiliary current variable, so the Newton
+# solve differentiates the residual and hands `stamp_current_contribution!` an `x`
+# of solver duals; `evaluate_contribution` (src/mna/contrib.jl) assumes real
+# voltages and reads a second partial that a solver dual does not carry.
+const behavioral_e = sp"""
+* nonlinear behavioral E
+V1 0 1 1
+R1 1 0 1k
+E4 0 e4 vol='V(0,1)*V(0,1)*3'
+Re4 e4 0 1k
+"""i
 
-    G7 0 7 0 1 2
-    R7 7 0 r=1k
-    """
+const behavioral_g = sp"""
+* nonlinear behavioral G
+V1 0 1 1
+R1 1 0 1k
+G4 0 g4 cur='V(0,1)*V(0,1)*3m'
+Rg4 g4 0 1k
+"""i
 
-    ctx, sol = solve_mna_spice_code(spice_code)
-    # V1 makes node 1 = -1V (+ at 0, - at 1)
-    # E6: VCVS with gain=2, Vout = 2 * V(0,1) = 2 * 1 = 2V at node 6 relative to 0
-    # Since E6 has + at 0 and - at 6, node 6 = -2V
+@testset "SPICE controlled sources" begin
+    sol = dc!(MNACircuit(controlled_sources))
+
     @test isapprox_deftol(sol[Symbol("1")], -1.0)
-    @test isapprox(sol[Symbol("6")], -2.0; atol=deftol*10)
-    # G7: VCCS with gm=2, I = 2 * V(0,1) = 2A into node 7
-    # With R7=1k to ground: V = I*R = 2*1000 = 2000V (but sign depends on convention)
-    # G7 outputs current from 0 to 7, so 2A flows into 7, V7 = -2000V
-    @test isapprox(sol[Symbol("7")], -2000.0; atol=deftol*10)
+    @test isapprox_deftol(sol[:I_vsense], -1.0e-3)
+
+    @testset "linear forms" begin
+        # A voltage-output card drives V(n+,n-); a current-output card drives its
+        # current from n+ through the source into n-, so with + at ground the two
+        # families land on opposite signs.
+        @test isapprox(sol[:e1], -2.0; atol=deftol*10)     # E: V(0,e1) = 2*V(0,1)
+        @test isapprox(sol[:g1], 2.0; atol=deftol*10)      # G: 2mA into g1, over 1k
+        @test isapprox(sol[:f1], -2.0; atol=deftol*10)     # F: 2*I(Vsense) = -2mA
+        @test isapprox(sol[:h1], 2.0e-3; atol=deftol*10)   # H: V(0,h1) = 2*I(Vsense)
+    end
+
+    @testset "behavioral E and G" begin
+        # `vol=`/`cur=` (and `value=` for either) name no control nodes: the card is
+        # the E/G spelling of `B … v=`/`B … i=`.
+        @test isapprox(sol[:e2], -2.0; atol=deftol*10)
+        @test isapprox(sol[:e3], -2.0; atol=deftol*10)
+        @test isapprox(sol[:g2], 2.0; atol=deftol*10)
+        @test isapprox(sol[:g3], 2.0; atol=deftol*10)
+    end
+
+    @testset "nonlinear behavioral E and G" begin
+        # Stamped as a contribution and differentiated, not folded to a gain.
+        @test isapprox(dc!(MNACircuit(behavioral_e))[:e4], -3.0; atol=deftol*10)
+        @test isapprox(dc!(MNACircuit(behavioral_g))[:g4], 3.0; atol=deftol*10)
+    end
 end
 
 @testset "SPICE B-source" begin
@@ -267,30 +332,6 @@ end
     # V_vcc = 2V
     @test isapprox(sol[:vcc], 2.0; atol=1e-6)
 end
-
-# Alternate E/G forms with vol=/cur= syntax. Measured still failing, in the
-# parser rather than sema: `MethodError: no method matching LString(::Nothing)`
-# — the card has no positional value for `LString` to read.
-#=
-@testset "SPICE controlled sources (alternate syntax)" begin
-    spice_code = """
-    * Alternate E/G syntax
-    V1 0 1 1
-    R1 1 0 1k
-
-    E8 0 8 vol=V(0, 1)*2
-    R8 8 0 r=1k
-
-    G9 0 9 cur=V(0, 1)*2
-    R9 9 0 r=1k
-    """
-    ctx, sol = solve_mna_spice_code(spice_code)
-    # E8: vol=V(0,1)*2 = 1*2 = 2V, since + at 0, - at 8, node 8 = -2V
-    # G9: cur=V(0,1)*2 = 1*2 = 2A into node 9, V = 2*1000 = 2000V
-    @test isapprox(sol[Symbol("8")], -2.0; atol=deftol*10)
-    @test isapprox(sol[Symbol("9")], -2000.0; atol=deftol*10)
-end
-=#
 
 @testset "Simple SPICE subcircuit" begin
     # Same SPICE code as original
@@ -1159,11 +1200,11 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
 
     # Current through Vsense = 5V/1kΩ = 5mA
-    # I_out = gain * I = 2 * 5mA = 10mA
-    # V_out = I_out * R = 10mA * 100Ω = 1V
+    # I_out = gain * I = 2 * 5mA = 10mA, drawn out of `out` (SPICE drives the
+    # current from n+ through the source to n-), so V_out = -10mA * 100Ω = -1V.
     @test isapprox(sol[:vcc], 5.0; atol=deftol)
     @test isapprox(sol[:sense], 0.0; atol=deftol)
-    @test isapprox(sol[:out], 1.0; atol=deftol)
+    @test isapprox(sol[:out], -1.0; atol=deftol)
 end
 
 @testset "SPICE CCVS/CCCS sense a source in their own .subckt" begin
@@ -1201,8 +1242,8 @@ end
     @test isapprox(sol[:outh], 1.0; atol=deftol)
     @test isapprox(sol[:outh2], 0.4; atol=deftol)
 
-    # CCCS: gain · I · Rload = 2 · 5mA · 100Ω = 1V.
-    @test isapprox(sol[:outf], 1.0; atol=deftol)
+    # CCCS: gain · I · Rload = 2 · 5mA · 100Ω, drawn out of `outf`, so -1V.
+    @test isapprox(sol[:outf], -1.0; atol=deftol)
 end
 
 @testset "SPICE CCVS senses through a nested .subckt" begin

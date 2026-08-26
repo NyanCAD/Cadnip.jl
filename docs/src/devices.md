@@ -14,6 +14,7 @@ card:
 | `I1 a b DC 1m` | independent current source |
 | `V1 a b PWL(0 0 1u 1)` / `PULSE(...)` / `SIN(...)` | time-dependent sources |
 | `E/G/H/F` lines | voltage- and current-controlled sources (VCVS, VCCS, CCVS, CCCS) |
+| `B1 a b v=…` / `i=…` | behavioral source, an arbitrary expression |
 | `X1 a b sub` | subcircuit instance |
 
 Sources take a DC value, an AC magnitude and phase, and a transient waveform on
@@ -23,6 +24,30 @@ serves `dc!`, `ac!` and `tran!` without editing.
 ```spice
 V1 in 0 DC 1.2 AC 1 SIN(1.2 5m 1meg)
 ```
+
+### Controlled and behavioral sources
+
+`E` and `G` take an expression in place of a pair of control nodes, which makes
+them behavioral sources — the same device a `B` line writes:
+
+```spice
+* linear: V(out,0) = 2·V(in,0), and 2mA per volt
+E1 out 0 in 0 2
+G1 outg 0 in 0 2m
+* behavioral: the same devices as B2 outb 0 v='…' and B3 outc 0 i='…'
+E2 outb 0 vol='V(in)*V(in)'
+G2 outc 0 cur='V(in)*1m'
+```
+
+`value=` spells either one (`E2 outb 0 value=…`, `G2 outc 0 value=…`). A linear
+expression folds to the plain controlled-source stamp; anything else is stamped
+as a contribution and differentiated with the rest of the Newton residual, so a
+nonlinear expression is solved, not linearised once.
+
+The current-output cards — `I`, `G`, `F` and `B … i=` — all follow the SPICE
+convention that the current flows *from* the first node, through the source, to
+the second. A `G1 out 0 …` sourcing 1mA therefore pulls 1mA out of `out`; write
+`G1 0 out …` to push it in.
 
 ## Model cards and the two-tier lookup
 
