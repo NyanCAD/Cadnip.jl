@@ -87,6 +87,7 @@ elseif RUN_CORE
         @testset "basic.jl" include("basic.jl")
         @testset "transients.jl" include("transients.jl")
         @testset "params.jl" include("params.jl")
+        @testset "source_positions.jl" include("source_positions.jl")
     end
 
     # Photonic unit tests (array ports, custom access functions, module instantiation)

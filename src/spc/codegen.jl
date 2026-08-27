@@ -17,6 +17,92 @@ CodegenState(sema::SemaResult) = CodegenState(sema, false, OrderedSet{Symbol}())
 # LineNumberNode is defined in SpectreNetlistCSTParser
 # hasparam is defined in spectre.jl
 
+#========================================= Netlist source positions ============================================#
+
+"""
+    _relocate_lines!(x, lnn::LineNumberNode) -> x
+
+Replace every `LineNumberNode` inside the generated expression `x` with `lnn`.
+
+Generated code arrives full of them already: one per statement written inside a
+`quote` block in this file, carrying *this* file's positions. Julia attributes a
+statement to the nearest preceding `LineNumberNode`, so those win over anything
+pushed ahead of the expression — which is why giving generated code a netlist
+position is a rewrite and not an insertion.
+
+Quoted sub-ASTs are left alone: they are data the generated code carries, not
+code it runs.
+"""
+function _relocate_lines!(x, lnn::LineNumberNode)
+    x isa Expr || return x
+    (x.head === :quote || x.head === :inert) && return x
+    for (i, a) in enumerate(x.args)
+        if a isa LineNumberNode
+            x.args[i] = lnn
+        else
+            _relocate_lines!(a, lnn)
+        end
+    end
+    return x
+end
+
+"""
+    _relocate_shallow!(block::Expr, lnn::LineNumberNode) -> block
+
+`_relocate_lines!` for one level only: the statements written directly in
+`block`, not the expressions spliced into it. Used on a `quote` whose arguments
+are generated code that already carries positions of its own.
+"""
+function _relocate_shallow!(block::Expr, lnn::LineNumberNode)
+    for (i, a) in enumerate(block.args)
+        a isa LineNumberNode && (block.args[i] = lnn)
+    end
+    return block
+end
+
+"""
+    _relocate_wrapper!(block::Expr, lnn::LineNumberNode, body) -> block
+
+Relocate every statement of a builder function's `block` to `lnn` — the scope's
+own card — except `body`, the one argument spliced in whose statements already
+point at the cards that produced them.
+"""
+function _relocate_wrapper!(block::Expr, lnn::LineNumberNode, body)
+    for (i, a) in enumerate(block.args)
+        a === body && continue
+        if a isa LineNumberNode
+            block.args[i] = lnn
+        else
+            _relocate_lines!(a, lnn)
+        end
+    end
+    return block
+end
+
+"""
+    _at_netlist(expr, node) -> Expr
+
+Give `expr` — the code generated for the netlist construct `node` — `node`'s own
+file and line, so an error raised while it runs points at the SPICE that caused
+it rather than at `codegen.jl`.
+
+Returns a block of the position followed by the (relocated) expression, so the
+statements that carry none of their own are covered too.
+"""
+_at_netlist(expr, node) = (lnn = LineNumberNode(node); Expr(:block, lnn, _relocate_lines!(expr, lnn)))
+
+"""
+    _push_at_netlist!(block::Expr, node, expr) -> block
+
+`_at_netlist`, pushed onto a statement block without the extra nesting.
+"""
+function _push_at_netlist!(block::Expr, node, expr)
+    lnn = LineNumberNode(node)
+    push!(block.args, lnn)
+    push!(block.args, _relocate_lines!(expr, lnn))
+    return block
+end
+
 # A SPICE name can land in more than one of the four namespaces sema tracks
 # (`.param foo` next to a `foo` net, a model named after a subckt, ...). Codegen
 # renames such a net or model to `*net#foo` / `*model#foo` so the two do not
@@ -2661,7 +2747,7 @@ function codegen_toplevel_models!(state::CodegenState)
         # is assigned to it. That made every `spicecall(model_var; ...)` call in
         # the builder infer to Any, forcing the device struct to be heap-boxed
         # on every stamp!() call (every Newton iteration).
-        push!(model_defs, :(const $model_var = $value))
+        push!(model_defs, _at_netlist(:(const $model_var = $value), model_ast))
     end
 
     return model_defs, deferred
@@ -2854,7 +2940,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
                     cd.cond < 0 && (cond = :(!$cond))
                     expr = :($cond && $expr)
                 end
-                push!(block.args, expr)
+                _push_at_netlist!(block, cd.val, expr)
             end
         else
             cond_idx = n - length(params_in_order)
@@ -2868,7 +2954,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
                     expr = :($(cond_syms[-cd.cond]) || $expr)
                 end
             end
-            push!(block.args, :($s = $expr))
+            _push_at_netlist!(block, cd.val, :($s = $expr))
         end
     end
 
@@ -2886,7 +2972,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
         (_, def) = last(defs)  # Use most recent definition
         value = cg_model_value!(state, def.val[1], def.val[2])
         value === nothing && continue
-        push!(block.args, :($(cg_model_name!(state, model_name)) = $value))
+        _push_at_netlist!(block, def.val[1], :($(cg_model_name!(state, model_name)) = $value))
     end
 
     # Codegen device instances using MNA stamps
@@ -2928,16 +3014,17 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
         if length(instances) == 1 && only(instances)[2].cond == 0
             (_, instance) = only(instances)
             instance = instance.val
-            push!(block.args, codegen_instance(instance))
+            _push_at_netlist!(block, instance, codegen_instance(instance))
         else
             # Handle conditional instances
             for (_, instance) in instances
                 if instance.cond != 0
                     cond = cond_syms[abs(instance.cond)]
                     instance.cond < 0 && (cond = :(!$cond))
-                    push!(block.args, Expr(:if, cond, codegen_instance(instance.val)))
+                    push!(block.args, Expr(:if, cond,
+                        _at_netlist(codegen_instance(instance.val), instance.val)))
                 else
-                    push!(block.args, codegen_instance(instance.val))
+                    _push_at_netlist!(block, instance.val, codegen_instance(instance.val))
                 end
             end
         end
@@ -3131,7 +3218,9 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
-    return quote
+    scope_lnn = LineNumberNode(sema.ast)
+
+    fn = quote
         function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""), _mna_m_::Real=1.0; _mna_h_=nothing, _mna_h_p_=nothing, $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
@@ -3145,6 +3234,12 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
             return nothing
         end
     end
+    # Everything this wrapper writes itself — the port mappings, the inherited
+    # and the locally resolved parameters — belongs to the `.subckt` card; the
+    # spliced `$body` keeps the per-device positions it already carries.
+    _relocate_shallow!(fn, scope_lnn)
+    _relocate_wrapper!(fn.args[end].args[2], scope_lnn, body)
+    return fn
 end
 
 """
@@ -3307,7 +3402,7 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
     body = codegen_mna!(state; subckt_semas=subckt_semas, models_at_toplevel=true,
                         deferred_models=deferred_models)
 
-    return quote
+    code = quote
         # No import list. Everything generated code names is a `GlobalRef` or an
         # interpolated value — see `_baremodule_prelude` for what is left, which
         # is nothing on this path.
@@ -3359,6 +3454,16 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
             return ctx
         end
     end
+
+    # The deck itself, for the two builder frames and for the context handling
+    # each wraps the body in. Same rule as a subcircuit builder: the body's
+    # statements already point at the cards that produced them.
+    deck_lnn = LineNumberNode(sema_result.ast)
+    _relocate_shallow!(code, deck_lnn)
+    for a in code.args
+        a isa Expr && a.head === :function && _relocate_wrapper!(a.args[2], deck_lnn, body)
+    end
+    return code
 end
 
 #==============================================================================#

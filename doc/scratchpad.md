@@ -119,7 +119,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
-- [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [x] UX: generated code carries netlist source positions, so an error names the card that caused it — design: `doc/codegen_unification.md` §5 "Netlist source positions"
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
 - [ ] Features: `.option scale` (geometry scale factor) — nothing consumes it; needs every device's geometric parameters to scale

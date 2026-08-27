@@ -54,6 +54,28 @@ An override that reaches nothing is caught for you and throws rather than
 running as a silent no-op, so a misspelled *parameter* is not in this category —
 see [Names that reach nothing throw](@ref).
 
+## An error while the deck builds names the card
+
+Not every mistake waits for the solver. A `.model` card naming a parameter its
+device does not have, a value that does not evaluate — these throw while the
+deck is being built, and the top of the stack trace is Julia's rather than
+yours. Read down it for the frame that names your netlist:
+
+```
+ERROR: MethodError: no method matching sp_diode(; is::Float64, nosuchparam::Float64)
+Stacktrace:
+ [1] kwerr(...)
+ [2] ParsedModel(...)
+ [3] spicecall(...)
+ [4] top-level scope
+   @ ~/decks/amp.sp:5
+```
+
+Line 5 of `amp.sp` is the card at fault. Generated code carries the positions of
+the netlist it came from, card by card, so this works for a file and for an
+`sp"..."` deck alike — the latter reports the line of the `.jl` file the deck is
+written in.
+
 ## Is everything connected?
 
 **Do you have a ground node?** Is everything connected to it, through some path,
