@@ -542,18 +542,48 @@ by L/W, so it blocks the sky130/gf180/ihp coverage the Production-readiness
 pillar asks for; and there is **no binned `.model` card anywhere in the test
 suite**, which is why nothing ever noticed. A port needs a test either way.
 
-#### Netlist source positions in generated code
+#### Netlist source positions in generated code — done
 
 The legacy path pushed a `LineNumberNode(instance)` — built from the `SNode`, so
 carrying the netlist's own file and line — ahead of each device it emitted.
 
-The MNA path emits none. Measured on a three-device deck, the generated builder
-contains 29 `LineNumberNode`s and every one of them has
+The MNA path emitted none. Measured on a three-device deck, the generated builder
+contained 29 `LineNumberNode`s and every one of them had
 `file = src/spc/codegen.jl`: they are artifacts of the `quote` blocks in the
-codegen itself, not netlist positions. So a runtime error inside a stamp points
+codegen itself, not netlist positions. So a runtime error inside a stamp pointed
 at the compiler, never at the line of SPICE that caused it.
 
-Cheap to port and it improves every error a deck can raise.
+**Pushing one ahead of each device is not enough**, which is the one thing the
+port could not copy. Julia attributes a statement to the *nearest preceding*
+`LineNumberNode`, and a device's generated code is a `quote` block that opens
+with one of codegen.jl's own — so a position pushed in front of it is
+immediately overridden by the very artifacts above. (The legacy path got away
+with it only because it never ran.) Giving generated code a netlist position is
+therefore a rewrite, not an insertion: `_relocate_lines!` replaces every
+`LineNumberNode` inside the expression generated for a card, and
+`_push_at_netlist!` prepends one for the statements that carry none.
+
+Every card that generates a statement gets its own: `.param`, `.if`, `.model`
+(both the hoisted module-level `const` and the in-body binding), and each device
+instance, conditional or not. What a builder writes *around* that body — the
+port mappings and parameter resolution of a `.subckt`, the context handling of
+the top-level builder — belongs to the scope's own card, which is what
+`_relocate_shallow!` / `_relocate_wrapper!` assign, taking care not to touch the
+body they wrap. Measured on the ten-line deck of `test/source_positions.jl`: 63
+`LineNumberNode`s, all 63 in the netlist, on lines 1–8 and 10 — every card that
+emits anything, line 9 being the `.ends`.
+
+The effect on a real error, from the same test — a `.model` card naming a
+parameter the device does not have:
+
+```
+                                       before   top-level scope @ src/spc/codegen.jl:3316
+.model dmod d is=1e-14 nosuchparam=3     after   top-level scope @ badmodel.sp:5
+```
+
+A deck loaded from `sp"..."` is positioned the same way, against the `.jl` file
+the macro was written in: the parser's `LineNumberNode(::SNode)` already adds
+`ps.srcline`, so a card lands on the line you can actually read.
 
 #### A guard against two simultaneously active instances
 
