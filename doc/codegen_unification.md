@@ -502,6 +502,12 @@ off the source.
 
 #### Model binning — the substantive one
 
+**Done** — the codegen half is in, with `doc/model_binning.md` as its design and
+`test/binning.jl` as its test. The port did not keep the runtime half as it
+stood: the window bounds moved off the model card and into the bin, which is
+what lets a device with no `LMIN` field be binned. The section below is the
+survey that motivated it, left as written.
+
 `cg_model_def!` + `codegen!` were the only producer of `BinnedModel` in the
 repo. The **whole runtime half survives** in `src/spectre.jl` and now has nothing
 calling it:

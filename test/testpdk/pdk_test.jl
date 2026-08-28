@@ -204,6 +204,44 @@ end
         @test 0.3 < sol[:out] < 0.8
     end
 
+    @testset "binned .model family" begin
+        # `nch_binned.1` / `.2` aggregate into one `nch_binned` in the PDK
+        # module, and the subcircuit's `L` picks the bin. This is the PDK path,
+        # not the deck path: the family is bound in a `baremodule` with no
+        # `Base`, and referenced from a builder generated beside it.
+        @test isdefined(typical, :nch_binned)
+        @test typical.nch_binned isa Cadnip.BinnedModel
+
+        function build_binned_fet(L)
+            function (params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    Cadnip.MNA.reset_for_restamping!(ctx)
+                end
+                lens = ParamLens(params)
+
+                vdd = get_node!(ctx, :vdd)
+                out = get_node!(ctx, :out)
+                gate = get_node!(ctx, :gate)
+
+                typical.nfet_binned_mna_builder(lens, spec, t, ctx, out, gate, 0, 0, (;), x;
+                                                w=10e-6, l=L)
+                stamp!(Cadnip.MNA.Resistor(10e3), ctx, vdd, out)
+                stamp!(VoltageSource(2.0; name=:vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(0.8; name=:vg), ctx, gate, 0)
+                return ctx
+            end
+        end
+
+        # L = 0.5 µm → bin 1, vto = 0.4: conducting at vgs = 0.8.
+        short = dc!(MNACircuit(build_binned_fet(0.5e-6)))
+        @test short[:out] < 1.0
+        # L = 2 µm → bin 2, vto = 1.0: off.
+        long = dc!(MNACircuit(build_binned_fet(2e-6)))
+        @test long[:out] > 1.99
+    end
+
     @testset ".model card with an arithmetic expression" begin
         # `is='2e-14 - 1e-14'` hoists to a module-level `const`, so the `-` runs
         # when the PDK `baremodule` is defined. A `baremodule` has no `Base`, so

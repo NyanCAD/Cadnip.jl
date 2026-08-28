@@ -53,6 +53,16 @@ D1 a c pdk_diode
 D1 a c pdk_diode_scaled
 .ENDS diode_scaled
 
+* A binned `.model` family, the shape every foundry PDK ships its devices in:
+* one card per window of channel geometry, all referenced by the bare base name.
+* `lmin`/`lmax` are the window, not device parameters — sp_mos1 has no field for
+* them, so this only builds if they are stripped from the card.
+.MODEL nch_binned.1 nmos level=1 lmin=0    lmax=1e-6 vto=0.4 kp=100e-6
+.MODEL nch_binned.2 nmos level=1 lmin=1e-6 lmax=1    vto=1.0 kp=100e-6
+.SUBCKT nfet_binned d g s b W=10e-6 L=5e-7
+M1 d g s b nch_binned w={W} l={L}
+.ENDS nfet_binned
+
 * Two-input NAND gate
 .SUBCKT nand2_x1 a b out vdd vss
 * Pull-up network: PMOS in parallel
