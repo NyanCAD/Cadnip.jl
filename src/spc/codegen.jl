@@ -10,7 +10,16 @@ struct CodegenState
     # the `parent_params` it is called with. Empty at the top level, where such
     # a name is left free for the environment (`M_1_PI`) to resolve.
     inherited_params::OrderedSet{Symbol}
+    # Memo for `binned_model_families`, which every instance site asks about.
+    # `nothing` until first computed, and never invalidated: a scope's `.model`
+    # cards are fixed by the time its codegen runs. `_propagate_toplevel_models!`
+    # does add cards, but to a *subcircuit's* sema, whose `CodegenState` is built
+    # afterwards — never to the one this state was built from.
+    binned_families::Base.RefValue{Union{Nothing, OrderedDict{Symbol, Vector{Symbol}}}}
 end
+CodegenState(sema::SemaResult, is_subcircuit::Bool, inherited::OrderedSet{Symbol}) =
+    CodegenState(sema, is_subcircuit, inherited,
+                 Ref{Union{Nothing, OrderedDict{Symbol, Vector{Symbol}}}}(nothing))
 CodegenState(sema::SemaResult) = CodegenState(sema, false, OrderedSet{Symbol}())
 
 # LString and LSymbol are defined in spectre.jl
@@ -129,7 +138,10 @@ const spice_magnitudes = Dict(
 const spice_magnitude_order = ["meg", "mil", "t", "g", "k", "m", "u", "n", "p", "f", "a"]
 const spice_regex = Regex("($(join(spice_magnitude_order, "|")))")
 
-const binning_rx = r"(.*)\.([0-9]+)"
+# `nch.1` is bin 1 of the family `nch`. Anchored at both ends: only a name that
+# is *entirely* a base plus a numeric suffix is a bin, so `nch.1x` stays an
+# ordinary (if odd) model name rather than becoming bin 1 of `nch`.
+const binning_rx = r"^(.*)\.([0-9]+)$"
 
 # Phase 0: NumberLiteral is now the leaf node (FloatLiteral/IntLiteral don't exist)
 function cg_expr!(state::CodegenState, cs::SNode{SP.NumberLiteral})
@@ -531,10 +543,11 @@ Handles both direct model definitions in sema.models and models imported via
 imported_hdl_modules (which are ParsedModel{T} wrappers).
 """
 function va_device_type(state::CodegenState, model_sym::Symbol)
-    # First check sema.models (for .model card definitions)
-    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
-        (_, def) = last(state.sema.models[model_sym])
-        model_globalref = def.val[2]
+    # First check sema.models (for .model card definitions, a binned family
+    # answering through its first bin)
+    card = model_card_def(state, model_sym)
+    if card !== nothing
+        model_globalref = card[2]
         if model_globalref isa GlobalRef
             T = latest_global(model_globalref)
             # Handle ParsedModel{InnerT} - extract the inner type
@@ -2115,9 +2128,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     # Build a case-insensitive instance-parameter lookup against the model's
     # field names (SPICE is case-insensitive; VA field names may be mixed case).
     case_insensitive = Dict{Symbol,Symbol}()
-    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
-        (_, def) = last(state.sema.models[model_sym])
-        model_globalref = def.val[2]
+    card = model_card_def(state, model_sym)
+    if card !== nothing
+        model_globalref = card[2]
         if model_globalref isa GlobalRef
             T = latest_global(model_globalref)
             if T isa DataType && T <: Cadnip.ParsedModel
@@ -2204,9 +2217,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # Look up the model definition to get the GlobalRef for case-insensitive param lookup
     model_sym = LSymbol(model_ref_name)
     case_insensitive = Dict{Symbol,Symbol}()
-    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
-        (_, def) = last(state.sema.models[model_sym])
-        model_globalref = def.val[2]
+    card = model_card_def(state, model_sym)
+    if card !== nothing
+        model_globalref = card[2]
         if model_globalref isa GlobalRef
             T = latest_global(model_globalref)
             case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
@@ -2525,20 +2538,143 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
     end
 end
 
+#==================================== Model binning ===========================#
+# A foundry PDK does not give one `.model nch nmos …` card; it gives `nch.1`,
+# `nch.2`, … each valid over a window of channel geometry, and every instance
+# line names the bare `nch`. Sema already keeps the base name from being
+# reported as unresolved (`provided_binned_models`); the codegen half below
+# aggregates the numbered cards into a `BinnedModel` bound under the base name,
+# and the instance site's `spicecall` picks the bin from `l`/`w`.
+
+"The four card parameters that describe a bin's geometry window, not the device."
+const BINNING_PARAMS = (:lmin, :lmax, :wmin, :wmax)
+
 """
-    cg_model_value!(state, model_ast, model_ref) -> Union{Expr, Nothing}
+    binned_model_families(state) -> OrderedDict{Symbol, Vector{Symbol}}
+
+Group this scope's `.model` cards into binned families: `nch.1`, `nch.2`, … are
+bins of `nch`, the name instance lines reference. Maps the base name to its bin
+card names, ordered by the numeric suffix.
+
+A card written under the bare base name as well (`.model nch nmos` next to
+`.model nch.1 nmos`) is taken at its word: the explicit card is what `nch`
+means, and the numbered ones are left as the ordinary cards they resolve to.
+"""
+function binned_model_families(state::CodegenState)
+    cached = state.binned_families[]
+    cached === nothing || return cached
+    families = _binned_model_families(state.sema)
+    state.binned_families[] = families
+    return families
+end
+
+function _binned_model_families(sema::SemaResult)
+    numbered = OrderedDict{Symbol, Vector{Pair{Int, Symbol}}}()
+    for (model_name, defs) in sema.models
+        isempty(defs) && continue
+        m = match(binning_rx, String(model_name))
+        m === nothing && continue
+        base = Symbol(m.captures[1])
+        push!(get!(() -> Pair{Int, Symbol}[], numbered, base), parse(Int, m.captures[2]) => model_name)
+    end
+    families = OrderedDict{Symbol, Vector{Symbol}}()
+    for (base, bins) in numbered
+        if haskey(sema.models, base)
+            @warn "`.model $base` is defined directly as well as in bins ($(join(String.(last.(bins)), ", "))); \
+                   the direct card wins and the numbered cards are not binned"
+            continue
+        end
+        families[base] = last.(sort!(bins; by = first))
+    end
+    return families
+end
+
+"Every `.model` card name that is a bin of some family in this scope."
+function binned_model_cards(families::AbstractDict{Symbol, Vector{Symbol}})
+    cards = Set{Symbol}()
+    for (_, bins) in families
+        union!(cards, bins)
+    end
+    return cards
+end
+
+"""
+    cg_binning_window!(state, model_ast) -> (lmin, lmax, wmin, wmax)
+
+The geometry window a bin card declares. An unspecified bound is unbounded on
+that side, so a family that only bins by length need not spell out `wmin`/`wmax`.
+"""
+function cg_binning_window!(state::CodegenState, model_ast)
+    bounds = Dict{Symbol, Any}()
+    for p in model_ast.parameters
+        pname = LSymbol(p.name)
+        pname in BINNING_PARAMS || continue
+        bounds[pname] = cg_expr!(state, p.val)
+    end
+    return (get(bounds, :lmin, 0.0), get(bounds, :lmax, Inf),
+            get(bounds, :wmin, 0.0), get(bounds, :wmax, Inf))
+end
+
+"""
+    cg_binned_model_value!(state, base, bin_names) -> Expr
+
+Build the `BinnedModel` a family lowers to. It refers to the per-bin cards by
+their own generated names, so it has to be emitted into the same scope that
+binds them, after them.
+"""
+function cg_binned_model_value!(state::CodegenState, base::Symbol, bin_names::Vector{Symbol})
+    bins = Expr[]
+    for name in bin_names
+        (_, def) = last(state.sema.models[name])
+        (model_ast, model_ref) = def.val
+        if !(model_ref isa GlobalRef && model_ref.mod !== Cadnip && model_ref.mod !== Cadnip.SpectreEnvironment)
+            error("`.model $name` cannot be a bin of `$base`: binning is only implemented for cards that \
+                   resolve to a Verilog-A or registry device model, and this one lowers to a `$(LSymbol(model_ast.typ))` card.")
+        end
+        (lmin, lmax, wmin, wmax) = cg_binning_window!(state, model_ast)
+        push!(bins, :($(ModelBin)($lmin, $lmax, $wmin, $wmax, $(cg_model_name!(state, name)))))
+    end
+    return :($(BinnedModel)($(QuoteNode(base)), ($(bins...),)))
+end
+
+"""
+    model_card_def(state, model_sym) -> Union{Pair{SNode,GlobalRef}, Nothing}
+
+The `.model` card `model_sym` names, for the codegen-time questions the instance
+site asks of it (what device type does it stamp, what are its field names). A
+binned family answers through its first bin — every bin of a family is the same
+device type, which is the whole reason they can share an instance line.
+"""
+function model_card_def(state::CodegenState, model_sym::Symbol)
+    if haskey(state.sema.models, model_sym) && !isempty(state.sema.models[model_sym])
+        return last(state.sema.models[model_sym])[2].val
+    end
+    families = binned_model_families(state)
+    if haskey(families, model_sym)
+        first_bin = first(families[model_sym])
+        return last(state.sema.models[first_bin])[2].val
+    end
+    return nothing
+end
+
+"""
+    cg_model_value!(state, model_ast, model_ref; skip_params=()) -> Union{Expr, Nothing}
 
 Build the right-hand side a `.model` card lowers to: a NamedTuple for an `r`
 card, a `spicecall(ParsedModel, …)` for a VA/registry model. Returns `nothing`
 for a card that needs no binding of its own (a legacy `SpectreEnvironment`
 device, which the instance site constructs directly).
 
+`skip_params` names card parameters that are not the device's — the geometry
+window of a bin card, which `cg_binned_model_value!` reads instead and which
+most device models have no field for.
+
 The same card is lowered into different scopes — module level, the top-level
 builder, a subcircuit builder — but its identifiers are locals of whichever
 scope binds it, including the ones a subcircuit inherits from its parent
 (`codegen_mna_subcircuit` binds those from `parent_params`).
 """
-function cg_model_value!(state::CodegenState, model_ast, model_ref)
+function cg_model_value!(state::CodegenState, model_ast, model_ref; skip_params=())
     cg_val(node) = cg_expr!(state, node)
     typ = LSymbol(model_ast.typ)
     if typ == :r
@@ -2548,6 +2684,7 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref)
             pname = LSymbol(p.name)
             # Skip meta-parameters
             pname in (:level, :version, :type) && continue
+            pname in skip_params && continue
             pval = cg_val(p.val)
             # Use uppercase for R parameter (SPICE convention).
             # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
@@ -2568,6 +2705,7 @@ function cg_model_value!(state::CodegenState, model_ast, model_ref)
         type_val = nothing  # Track type parameter value for later
         for p in model_ast.parameters
             pname = LSymbol(p.name)
+            pname in skip_params && continue
             # Track meta-parameters for registry lookup
             if pname == :level
                 level = parse(Float64, String(p.val))
@@ -2638,8 +2776,20 @@ function codegen_toplevel_models!(state::CodegenState)
     model_defs = Expr[]
     deferred = Set{Symbol}()
 
+    families = binned_model_families(state)
+    bin_cards = binned_model_cards(families)
+
+    # A bin and the family binding that names it have to live in the same scope,
+    # so one bin reading a `.param` defers the whole family.
+    for (base, bins) in families
+        any(b -> !isempty(model_param_deps(state, last(state.sema.models[b])[2].val[1])), bins) || continue
+        push!(deferred, base)
+        union!(deferred, bins)
+    end
+
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
+        model_name in deferred && continue
         (_, def) = last(defs)  # Use most recent definition
         model_ast = def.val[1]  # The model SNode
         model_ref = def.val[2]  # The GlobalRef
@@ -2651,7 +2801,8 @@ function codegen_toplevel_models!(state::CodegenState)
             continue
         end
 
-        value = cg_model_value!(state, model_ast, model_ref)
+        skip = model_name in bin_cards ? BINNING_PARAMS : ()
+        value = cg_model_value!(state, model_ast, model_ref; skip_params=skip)
         value === nothing && continue
 
         model_var = cg_model_name!(state, model_name)
@@ -2662,6 +2813,12 @@ function codegen_toplevel_models!(state::CodegenState)
         # the builder infer to Any, forcing the device struct to be heap-boxed
         # on every stamp!() call (every Newton iteration).
         push!(model_defs, :(const $model_var = $value))
+    end
+
+    # The family binding comes after the bins it names.
+    for (base, bins) in families
+        base in deferred && continue
+        push!(model_defs, :(const $(cg_model_name!(state, base)) = $(cg_binned_model_value!(state, base, bins))))
     end
 
     return model_defs, deferred
@@ -2880,13 +3037,22 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     # parent's, whether the card itself was written at the top level or inside
     # this subcircuit. Inside a subcircuit builder those are locals like any
     # other, bound from `parent_params` by `codegen_mna_subcircuit`.
+    families = binned_model_families(state)
+    bin_cards = binned_model_cards(families)
     for (model_name, defs) in state.sema.models
         isempty(defs) && continue
         models_at_toplevel && !(model_name in deferred_models) && continue
         (_, def) = last(defs)  # Use most recent definition
-        value = cg_model_value!(state, def.val[1], def.val[2])
+        skip = model_name in bin_cards ? BINNING_PARAMS : ()
+        value = cg_model_value!(state, def.val[1], def.val[2]; skip_params=skip)
         value === nothing && continue
         push!(block.args, :($(cg_model_name!(state, model_name)) = $value))
+    end
+    # `nch.1`, `nch.2`, … aggregated into the `nch` an instance line names, after
+    # the bins themselves.
+    for (base, bins) in families
+        models_at_toplevel && !(base in deferred_models) && continue
+        push!(block.args, :($(cg_model_name!(state, base)) = $(cg_binned_model_value!(state, base, bins))))
     end
 
     # Codegen device instances using MNA stamps
@@ -3234,11 +3400,20 @@ card referenced from inside a subcircuit, and a card that reads a `.param`
 resolves that parameter in the subcircuit's scope.
 """
 function _propagate_toplevel_models!(state::CodegenState, sema_result)
+    families = binned_model_families(state)
     for (_, subckt_list) in sema_result.subckts
         for (_, subckt_entry) in subckt_list
             ss = subckt_entry.val
+            # A subcircuit references a binned family by its base name, which is
+            # no card of its own: copy the bins, and the subcircuit's own
+            # `binned_model_families` regroups them there.
+            wanted = Symbol[]
+            for (base, bins) in families
+                base in ss.exposed_models && append!(wanted, bins)
+            end
             for (model_name, defs) in sema_result.models
-                (model_name in ss.exposed_models && !haskey(ss.models, model_name)) || continue
+                (model_name in ss.exposed_models || model_name in wanted) || continue
+                haskey(ss.models, model_name) && continue
                 ss.models[model_name] = defs
                 # The subcircuit emits the card itself, and the parent's
                 # `.param`s are not locals there. Expose them so they arrive

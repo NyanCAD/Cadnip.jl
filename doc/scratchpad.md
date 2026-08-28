@@ -118,7 +118,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Bug: alternate E/G forms (`vol=`/`cur=`) fail in the parser with `LString(::Nothing)` — disabled block in `test/basic.jl`
 - [ ] Bug: an instance param reading another param of the same `X` line (`nrd='w/2'`) is built in the caller's scope, so `UndefVarError: w` — disabled block in `test/basic.jl`
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
-- [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [x] CedarSim porting: model binning (`.model nch.1`/`nch.2` referenced as `nch`) — design: `doc/model_binning.md`
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2

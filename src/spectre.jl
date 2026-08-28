@@ -374,10 +374,38 @@ function hasparam(params, name)
     return false
 end
 
+"""
+    ModelBin(lmin, lmax, wmin, wmax, model)
+
+One bin of a binned `.model` family: the geometry window it covers and the
+device model card that applies inside it.
+
+The window lives here rather than in `model` because `lmin`/`lmax`/`wmin`/`wmax`
+are not device parameters — they say which card to pick, not what the device
+does. Keeping them out of the model card is what lets a device that has no such
+fields (a diode, a level-1 MOSFET) be binned at all.
+"""
+struct ModelBin{M}
+    lmin::Float64
+    lmax::Float64
+    wmin::Float64
+    wmax::Float64
+    model::M
+    ModelBin(lmin, lmax, wmin, wmax, model::M) where M =
+        new{M}(float(lmin), float(lmax), float(wmin), float(wmax), model)
+end
+
+"""
+    BinnedModel(name, bins::Tuple{Vararg{ModelBin}})
+
+A family of `.model` cards written as `<name>.1`, `<name>.2`, … and referenced
+by the bare `<name>` from an instance line. The instance's `l` and `w` select
+the bin; see [`find_bin`](@ref).
+"""
 struct BinnedModel{B<:Tuple}
-    scale::Float64
+    name::Symbol
     bins::B
-    BinnedModel(scale, bins::B) where B = new{B}(float(scale), bins)
+    BinnedModel(name, bins::B) where B<:Tuple{Vararg{ModelBin}} = new{B}(Symbol(name), bins)
 end
 
 const ParsedNT = NamedTuple{names, types} where {names, types<:Tuple{Vararg{Union{DefaultOr{Int}, DefaultOr{Float64}, DefaultOr{Bool}}}}}
@@ -390,7 +418,9 @@ end
 
 Base.show(io::IO, m::ParsedModel) = print(io, "ParsedModel($(m.model), ...)")
 Base.nameof(m::ParsedModel{T}) where T = nameof(T)
-Base.nameof(m::BinnedModel) = nameof(first(m.bins))
+Base.nameof(m::BinnedModel) = m.name
+Base.show(io::IO, m::BinnedModel) =
+    print(io, "BinnedModel(:", m.name, ", ", length(m.bins), " bins of ", nameof(first(m.bins).model), ")")
 
 Base.@assume_effects :foldable function case_adjust_kwargs_fallback(model::Type{T}, kwargs::NamedTuple{Names}) where {Names, T}
     case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(T))
@@ -434,26 +464,53 @@ function (pm::ParsedModel)(;kwargs...)
     setproperties(pm.model, values(kwargs))
 end
 
-struct NoBinExpection <: CedarException
+struct NoBinError <: CedarException
     bm::BinnedModel
-    l::Float64
-    w::Float64
+    l::Any
+    w::Any
 end
-Base.showerror(io::IO, bin::NoBinExpection) = print(io, "NoBinExpection: no bin for BinnedModel $(typeof(bin.bm)) of size (l=$(bin.l), w=$(bin.w)).")
+function Base.showerror(io::IO, err::NoBinError)
+    print(io, "NoBinError: model `", err.bm.name, "` has no bin for (l=", err.l, ", w=", err.w, "). Bins:")
+    for bin in err.bm.bins
+        print(io, "\n  l ∈ [", bin.lmin, ", ", bin.lmax, "), w ∈ [", bin.wmin, ", ", bin.wmax, ")")
+    end
+end
 
+"""
+    NoGeometryError(name)
+
+A binned model was instantiated without both `l` and `w`, so no bin can be
+picked. SPICE has no default geometry to fall back on here — `.option defl` /
+`defw` are not implemented — so this is an error rather than a guess.
+"""
+struct NoGeometryError <: CedarException
+    name::Symbol
+    l::Any
+    w::Any
+end
+Base.showerror(io::IO, err::NoGeometryError) = print(io,
+    "NoGeometryError: binned model `", err.name, "` needs both `l` and `w` on the instance line ",
+    "to pick a bin (got l=", something(err.l, "unset"), ", w=", something(err.w, "unset"), ").")
+
+"""
+    find_bin(bm::BinnedModel, l, w) -> model card
+
+Pick the bin covering geometry `(l, w)`. Windows are half-open on both axes —
+`lmin <= l < lmax` and `wmin <= w < wmax`, the HSPICE rule — so adjacent bins
+sharing an edge do not overlap. Throws [`NoBinError`](@ref) when nothing covers
+the geometry.
+"""
 Base.@assume_effects :consistent :effect_free :terminates_globally @noinline function find_bin(bm::BinnedModel, l, w)
-    l = bm.scale*l
-    w = bm.scale*w
     for bin in bm.bins
-        (; LMIN, LMAX, WMIN, WMAX) = bin.model
-        if undefault(LMIN::DefaultOr{Float64}) <= l < undefault(LMAX::DefaultOr{Float64}) && undefault(WMIN::DefaultOr{Float64}) <= w < undefault(WMAX::DefaultOr{Float64})
-            return bin
+        if bin.lmin <= l < bin.lmax && bin.wmin <= w < bin.wmax
+            return bin.model
         end
     end
-    throw(NoBinExpection(bm, l, w))
+    throw(NoBinError(bm, l, w))
 end
 
-function (bm::BinnedModel)(; l, w, kwargs...)
+function (bm::BinnedModel)(; l=nothing, w=nothing, kwargs...)
+    (l === nothing || w === nothing) && throw(NoGeometryError(bm.name, l, w))
     find_bin(bm, l, w)(; l, w, kwargs...)
 end
 
@@ -493,7 +550,8 @@ end
     setproperties(pm.model, instkwargs)
 end
 
-function spicecall(bm::BinnedModel; l, w, kwargs...)
+function spicecall(bm::BinnedModel; l=nothing, w=nothing, kwargs...)
+    (l === nothing || w === nothing) && throw(NoGeometryError(bm.name, l, w))
     spicecall(find_bin(bm, l, w); l, w, kwargs...)
 end
 
