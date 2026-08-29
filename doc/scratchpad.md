@@ -120,7 +120,7 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Features: semiconductor resistor (`.model r rsh=`) — the `R`-less model card reaches the resistor path, which reads `.R` unguarded (`FieldError`) — skipped block in `test/basic.jl`
 - [ ] CedarSim porting: model binning has a full runtime half in `src/spectre.jl` and no producer since §5 — blocks binned PDKs — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
-- [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [x] Bug: `.if` chains selected the wrong branch (an `.elseif` body fired on an earlier branch's condition; a nested chain stamped from outside its branch), and two simultaneously active instances of one name stamped twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
 - [ ] Features: `.option scale` (geometry scale factor) — nothing consumes it; needs every device's geometric parameters to scale
 - [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"

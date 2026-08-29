@@ -555,19 +555,50 @@ at the compiler, never at the line of SPICE that caused it.
 
 Cheap to port and it improves every error a deck can raise.
 
-#### A guard against two simultaneously active instances
+#### A guard against two simultaneously active instances — ported
 
 For an instance name defined in more than one conditional branch, `codegen!`
 emitted a counter, incremented it inside each branch, and raised
 `"Multiple simultaneously active instances of $name"` if more than one fired.
-The MNA path (`process_instance`) emits the branches independently with no
-counter, so a deck whose `.if`/`.elseif` conditions both hold stamps the same
+The MNA path (`process_instance`) emitted the branches independently with no
+counter, so a deck whose `.if`/`.elseif` conditions both hold stamped the same
 name twice, silently.
 
-Port the *idea*, not the code: the legacy version read
+The idea is ported, not the code: the legacy version read
 `cond_syms[abs(instance.cond)]` unconditionally, which `BoundsError`s at
 `abs(0)` on a set mixing conditional and unconditional definitions of one name —
-a case the MNA path already handles correctly.
+a case the MNA path already handled correctly. `process_instance` now counts the
+live definitions first (an unconditional one always counts) and errors before
+stamping any of them; a name with a single definition gets no counter, since it
+cannot collide with itself.
+
+Writing the test found the larger defect underneath it. Sema records a case as
+`cond = ±i` — `+i` for the body of case *i*, `-i` for everything after it in the
+chain — and codegen collapsed both onto one boolean per case, `taken_i`, read
+plainly for `+i` and negated for `-i`. Those are not complements past
+`.if`/`.else`. Measured on `main`, with an `.if (sw==1) / .elseif (sw==2) /
+.else` chain over one resistor and a 1 V source:
+
+```
+sw=1   I_v1 = -1.5     both the 1Ω and the 2Ω R1 stamped (1Ω∥2Ω)
+sw=2   I_v1 = -0.5     correct
+sw=3   I_v1 = -0.25    correct
+```
+
+and, with that chain nested inside an outer `.if (a==1)` whose `.else` defines
+an 8 Ω R1, `a=0` gave `-0.375` (8Ω∥4Ω) — the inner chain stamping from outside
+the branch that contains it. Codegen now emits two booleans per case,
+
+```
+enter_i = reached_i && c_i      the body of case i runs
+fall_i  = reached_i && !c_i     control reaches the case after i
+```
+
+with `reached_i` being `enter_p` for a case nested in case *p*'s body and
+`fall_p` for one that follows case *p*. `+i` reads `enter_i` and `-i` reads
+`fall_i`. `test/basic.jl`'s `ifelse` testset covers the chain, the nested chain,
+and the double-stamp guard; before this it exercised a single `.if`/`.else` at
+one parameter value, which is the one shape both defects leave alone.
 
 #### `.option gmin` / `.option scale`, and the `isdefault` precedence
 

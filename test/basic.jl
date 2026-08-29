@@ -1109,8 +1109,9 @@ end
 end
 
 @testset "ifelse" begin
-    # Same SPICE code as original
-    spice_code = """
+    # Every deck here drives a 1 V source into whichever R1 its live branch
+    # defines, so I_v1 == -1/R reads the selection straight off the solution.
+    ifelse = sp"""
     * ifelse resistor
     .param switch=1
     v1 vcc 0 1
@@ -1119,10 +1120,73 @@ end
     .else
     R1 vcc 0 2
     .endif
-    """
-    ctx, sol = solve_mna_spice_code(spice_code)
-    # With switch=1, R1=1Ω, I = V/R = 1A
-    @test isapprox(sol[:I_v1], -1.0; atol=deftol*10)
+    """i
+    @test isapprox(dc!(MNACircuit(ifelse; switch=1.0))[:I_v1], -1.0; atol=deftol*10)
+    @test isapprox(dc!(MNACircuit(ifelse; switch=0.0))[:I_v1], -0.5; atol=deftol*10)
+
+    # A chain selects exactly one branch. The `.elseif` body used to be guarded
+    # by "this case or any earlier one", so sw=1 stamped both the 1Ω and the 2Ω
+    # R1 and solved 1Ω∥2Ω (I_v1 == -1.5) without complaining.
+    chain = sp"""
+    * elseif chain
+    .param sw=1
+    v1 vcc 0 1
+    .if (sw == 1)
+    R1 vcc 0 1
+    .elseif (sw == 2)
+    R1 vcc 0 2
+    .else
+    R1 vcc 0 4
+    .endif
+    """i
+    for (sw, i_v1) in ((1.0, -1.0), (2.0, -0.5), (3.0, -0.25))
+        @test isapprox(dc!(MNACircuit(chain; sw))[:I_v1], i_v1; atol=deftol*10)
+    end
+
+    # A chain nested in a branch stays inside it: with a≠1 the outer `.else`
+    # decides alone, whatever the inner conditions say. This is the case a single
+    # per-case flag cannot express — "case i was taken" and "control reached the
+    # case after i" stop being complements as soon as the chain is nested.
+    nested = sp"""
+    * chain nested in an .if body
+    .param a=1
+    .param b=1
+    v1 vcc 0 1
+    .if (a == 1)
+    .if (b == 1)
+    R1 vcc 0 1
+    .elseif (b == 2)
+    R1 vcc 0 2
+    .else
+    R1 vcc 0 4
+    .endif
+    .else
+    R1 vcc 0 8
+    .endif
+    """i
+    for (a, b, i_v1) in ((1.0, 1.0, -1.0), (1.0, 2.0, -0.5), (1.0, 3.0, -0.25),
+                         (0.0, 1.0, -0.125), (0.0, 2.0, -0.125), (0.0, 3.0, -0.125))
+        @test isapprox(dc!(MNACircuit(nested; a, b))[:I_v1], i_v1; atol=deftol*10)
+    end
+
+    # Two independent blocks may each define R1, as long as only one of them is
+    # live. Both at once is a device stamped twice, which used to solve 1Ω∥1Ω
+    # (I_v1 == -2.0) rather than say anything.
+    dup = sp"""
+    * one name defined in two conditional blocks
+    .param a=1
+    .param b=0
+    v1 vcc 0 1
+    .if (a == 1)
+    R1 vcc 0 1
+    .endif
+    .if (b == 1)
+    R1 vcc 0 2
+    .endif
+    """i
+    @test isapprox(dc!(MNACircuit(dup; a=1.0, b=0.0))[:I_v1], -1.0; atol=deftol*10)
+    @test isapprox(dc!(MNACircuit(dup; a=0.0, b=1.0))[:I_v1], -0.5; atol=deftol*10)
+    @test_throws "Multiple simultaneously active instances of r1" dc!(MNACircuit(dup; a=1.0, b=1.0))
 end
 
 @testset "SPICE CCVS (H element)" begin
