@@ -2823,7 +2823,27 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     # For subcircuits, param resolution is handled in codegen_mna_subcircuit's param_resolution_exprs
     # which uses parent_params for default expression evaluation
     params_in_order = collect(state.sema.params)
-    cond_syms = Vector{Symbol}(undef, length(state.sema.conditionals))
+
+    # Two booleans per `.if`/`.elseif` case, not one.
+    #
+    # Sema records a case as `cond = ±i`: `+i` is "the body of case i", `-i` is
+    # "everything after case i in its chain" — the `.elseif` that follows it, the
+    # `.else`, and anything nested in either. Those two are *not* complements
+    # once a chain is longer than `.if`/`.else`, because both are relative to the
+    # guard the chain itself sits under:
+    #
+    #     enter_i = reached_i && c_i      the body of case i runs
+    #     fall_i  = reached_i && !c_i     control reaches the next case
+    #
+    # where `reached_i` is `enter_p` for a case nested in case p's body and
+    # `fall_p` for one that follows case p. Collapsing the pair into a single
+    # symbol is what made `.elseif` fire whenever an *earlier* branch's condition
+    # held, and let a chain nested inside an `.if` body stamp from outside it.
+    enter_syms = Vector{Symbol}(undef, length(state.sema.conditionals))
+    fall_syms = Vector{Symbol}(undef, length(state.sema.conditionals))
+
+    # The guard for a `cond = ±i` as sema records it.
+    cond_guard(cond::Int) = cond > 0 ? enter_syms[cond] : fall_syms[-cond]
 
     # If parameter_order is populated, use it; otherwise fall back to direct iteration
     param_indices = if isempty(state.sema.parameter_order)
@@ -2850,25 +2870,28 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
                     expr = :($name = $def_expr)
                 end
                 if cd.cond != 0
-                    cond = cond_syms[abs(cd.cond)]
-                    cd.cond < 0 && (cond = :(!$cond))
-                    expr = :($cond && $expr)
+                    expr = :($(cond_guard(cd.cond)) && $expr)
                 end
                 push!(block.args, expr)
             end
         else
             cond_idx = n - length(params_in_order)
             _, cd = state.sema.conditionals[cond_idx]
-            s = cond_syms[cond_idx] = gensym()
-            expr = cg_expr!(state, cd.val.body)
-            if cd.cond != 0
-                if cd.cond > 0
-                    expr = :($(cond_syms[cd.cond]) && $expr)
-                else
-                    expr = :($(cond_syms[-cd.cond]) || $expr)
-                end
+            enter = enter_syms[cond_idx] = gensym(:enter)
+            fall = fall_syms[cond_idx] = gensym(:fall)
+            cond_expr = cg_expr!(state, cd.val.body)
+            # `fall` is spelled against `enter` rather than against the condition
+            # so the condition is evaluated once, and not at all when the case is
+            # unreachable — a condition may read a `.param` only its own branch
+            # of the chain defines.
+            if cd.cond == 0
+                push!(block.args, :($enter = $cond_expr))
+                push!(block.args, :($fall = !$enter))
+            else
+                reached = cond_guard(cd.cond)
+                push!(block.args, :($enter = $reached && $cond_expr))
+                push!(block.args, :($fall = $reached && !$enter))
             end
-            push!(block.args, :($s = $expr))
         end
     end
 
@@ -2930,12 +2953,28 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
             instance = instance.val
             push!(block.args, codegen_instance(instance))
         else
-            # Handle conditional instances
+            # Several definitions of one name, each guarded by the branch it was
+            # written in. Sema lets those through (the duplicate-name error only
+            # fires outside a conditional) on the understanding that at most one
+            # branch is live — but nothing checked it, so a deck whose conditions
+            # both hold stamped the device twice and solved a circuit nobody
+            # wrote. Count the live ones first and refuse rather than stamp.
+            #
+            # One definition needs no counter: it cannot collide with itself.
+            if length(instances) > 1
+                live = gensym(:live)
+                push!(block.args, :($live = 0))
+                for (_, instance) in instances
+                    push!(block.args, instance.cond == 0 ? :($live += 1) :
+                          :($(cond_guard(instance.cond)) && ($live += 1)))
+                end
+                push!(block.args, :($live > 1 && $(GlobalRef(Base, :error))(
+                    $("Multiple simultaneously active instances of $name"))))
+            end
             for (_, instance) in instances
                 if instance.cond != 0
-                    cond = cond_syms[abs(instance.cond)]
-                    instance.cond < 0 && (cond = :(!$cond))
-                    push!(block.args, Expr(:if, cond, codegen_instance(instance.val)))
+                    push!(block.args,
+                          Expr(:if, cond_guard(instance.cond), codegen_instance(instance.val)))
                 else
                     push!(block.args, codegen_instance(instance.val))
                 end
