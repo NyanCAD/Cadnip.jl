@@ -1,0 +1,8 @@
+* Forward-biased diode: junction shot noise plus flicker, loaded by a resistor
+V1 in 0 DC 5 AC 1
+R1 in out 10k
+D1 out 0 dmod
+.model dmod d is=1e-14 n=1 rs=0 kf=1e-14 af=1
+.noise v(out) V1 dec 2 1 1e6
+.print noise onoise_spectrum inoise_spectrum
+.end
