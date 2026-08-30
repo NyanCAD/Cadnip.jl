@@ -1,0 +1,9 @@
+* Level-1 NMOS common-source stage: channel thermal noise
+Vdd vdd 0 DC 5
+Vg g 0 DC 2 AC 1
+Rd vdd d 2k
+M1 d g 0 0 nch w=10u l=1u
+.model nch nmos level=1 vto=1 kp=200u lambda=0.01 tox=1e-8
+.noise v(d) Vg dec 2 1 1e6
+.print noise onoise_spectrum inoise_spectrum
+.end

@@ -1209,7 +1209,10 @@ all allocation primitives).
 function limit!(ctx::AnyMNAContext, base_name::Symbol, instance_name::Symbol, p::Int, n::Int,
                 vnew, x::AbstractVector, fn::F, args...; init::Float64=0.0) where {F}
     lidx = alloc_limit!(ctx, base_name, instance_name, p, n; init)
-    li = resolve_index(ctx, lidx)
+    # `limit_state_index`, not `resolve_index`: the read has to index `x` the way
+    # the pass that produced it was laid out, and this pass's charge count is
+    # still climbing (see the `limit_state_index` docstring).
+    li = limit_state_index(ctx, lidx)
     # ZERO_VECTOR (structure discovery, AC restamp) is the only legitimate
     # short x; an undersized non-empty x is a caller bug and should
     # BoundsError loudly rather than silently read vold = 0.

@@ -243,6 +243,18 @@ end
 end
 
 """
+    limit_state_index(ctx::DirectStampContext, idx::LimitIndex) -> Int
+
+Where a limit variable sits in the state vector — the same thing
+`resolve_index` answers here, because this context's counts come from a
+precompiled structure and are final before any stamping happens. The two part
+company only on `MNAContext`, which re-counts charges every pass; see the
+`MNAContext` method for what that costs.
+"""
+@inline limit_state_index(ctx::DirectStampContext, idx::LimitIndex)::Int =
+    resolve_index(ctx, idx)
+
+"""
     reset_direct_stamp!(dctx::DirectStampContext)
 
 Reset counters and zero sparse matrix values for a new iteration.

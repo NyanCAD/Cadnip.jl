@@ -108,6 +108,7 @@ elseif RUN_CORE
     @testset "AC Analysis" begin
         @testset "ac.jl" include("ac.jl")
         @testset "noise.jl" include("noise.jl")
+        @testset "noise_ngspice.jl" include("noise_ngspice.jl")
     end
 
     # Operating-point readout: device terminal currents

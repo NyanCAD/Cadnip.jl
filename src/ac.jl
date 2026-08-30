@@ -111,9 +111,12 @@ resp = ac_sol[:vout]                          # response over the grid
 ```
 """
 function ac!(circuit::MNA.MNACircuit, freqs::AbstractVector{<:Real}=Float64[]; gmin=1e-12)
-    # Build circuit with structure discovery
-    ctx = MNA.MNAContext()
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=MNA.ZERO_VECTOR, ctx=ctx)
+    # Build circuit with structure discovery. This has to be the same multi-pass
+    # detection the DC solve runs, not a single cold pass: a device that is off
+    # at `x = 0` may allocate states only once it turns on, and a context one
+    # state short would then index `dc_sol.x` past the missing slot and
+    # linearize at a bias no device is actually at.
+    ctx = MNA.build_with_detection(circuit)
 
     # Solve DC operating point using the MNA solve_dc
     dc_sol = MNA.solve_dc(circuit)

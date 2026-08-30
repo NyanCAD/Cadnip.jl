@@ -340,6 +340,15 @@ mutable struct MNAContext
     charge_V_values::Vector{Float64}  # Stored V_branch values for comparison
     charge_detection_pos::Int
 
+    # Offset of the limit block in the state vector of the last *completed*
+    # stamping pass — `n_nodes + n_currents + n_charges` as they stood when that
+    # pass ended, snapshotted by `reset_for_restamping!` before it clears them.
+    # This is what [`limit_state_index`](@ref) reads a limit variable's `vold`
+    # against: the vector handed to a pass was laid out by the previous one,
+    # while the current pass's own counts are still climbing as it stamps.
+    # `-1` until a pass has completed, i.e. there is no previous layout to go by.
+    prev_limit_base::Int
+
     # Newton limiting variables (PCNR — see doc/pcnr_plan.md)
     # One per (device instance, limited branch). Algebraic unknowns holding the
     # voltage the device evaluated at, tied to the branch by the linear row
@@ -424,6 +433,7 @@ function MNAContext()
         Float64[],          # charge_Q_values (for Q/V ratio comparison)
         Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
+        -1,                 # prev_limit_base (limit-block offset of the last completed pass)
         Symbol[],           # limit_names
         0,                  # n_limits
         Tuple{Int,Int}[],   # limit_branches
@@ -588,6 +598,42 @@ nodes are known, and resolved at assembly time when n_nodes is final.
 @inline resolve_index(ctx::MNAContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
 @inline resolve_index(ctx::MNAContext, idx::ChargeIndex)::Int = ctx.n_nodes + ctx.n_currents + idx.k
 @inline resolve_index(ctx::MNAContext, idx::LimitIndex)::Int = ctx.n_nodes + ctx.n_currents + ctx.n_charges + idx.k
+
+"""
+    limit_state_index(ctx, idx::LimitIndex) -> Int
+
+Index of a limit variable **in the state vector a stamping pass was handed** —
+which is not the same thing as [`resolve_index`](@ref).
+
+`resolve_index` answers where the variable lands in the system this pass is
+building, and it is correct only once the counts are final, i.e. at assembly —
+which is what its own docstring says. `limit!` needs an index *during* the pass,
+to read the voltage the device evaluated at last time out of `x`, and every
+count in that sum is still climbing at that moment. A device that allocates a
+limit before its own charge — the ordinary shape of a MOSFET with a gate charge
+— resolves its limit one slot early and reads a charge as its `vold`.
+
+Measured on a level-1 MOSFET with a `tox` on its model card, that is a silent
+2× error in `gm`, in the reported operating point and in every AC/noise
+linearization, while the DC node solution stays correct: the Newton path indexes
+through `DirectStampContext`, whose structure is precompiled and whose counts
+are therefore final. `test/noise_ngspice.jl` pins the case against ngspice.
+
+So the read is resolved against `prev_limit_base` — where the limit block sat in
+the pass that laid out `x`, rather than where it will sit in the one being built.
+On a `DirectStampContext` the two agree, and this is `resolve_index`.
+
+A context that has never completed a pass has no previous layout to go by
+(`prev_limit_base == -1`), and then `resolve_index` is the best information
+there is. Every pipeline here runs its first pass cold, on `ZERO_VECTOR`, so
+nothing reads `x` at that point; what the fallback keeps working is the direct
+single-pass use of the primitive, where the caller supplies both the context and
+a matching `x` (`test/mna/pcnr.jl`, "limit! API").
+"""
+@inline limit_state_index(ctx::MNAContext, idx::LimitIndex)::Int =
+    ctx.prev_limit_base < 0 ? resolve_index(ctx, idx) : ctx.prev_limit_base + idx.k
+
+export limit_state_index
 
 """
     get_current_idx(ctx::MNAContext, name::Symbol) -> CurrentIndex
@@ -1567,6 +1613,22 @@ pc.builder(pc.params, pc.spec, t; x=u, ctx=ctx)  # restamps into same ctx
 ```
 """
 function reset_for_restamping!(ctx::MNAContext)
+    # Snapshot where the limit block sat in the pass just finished, before
+    # anything is cleared: the solution vector the *next* pass gets handed was
+    # laid out by this one, and that is what a limit variable's `vold` read has
+    # to index against (see `limit_state_index`).
+    #
+    # Guarded on "a pass actually ran since the last reset", because resets come
+    # in pairs: a caller resets and then calls the builder, which resets again on
+    # the way in (`solve_dc`'s final rebuild, every `ac!`/`noise!`
+    # relinearization). Unguarded, that second reset would snapshot the zeros the
+    # first one just wrote and put every limit read at the top of the vector. Any
+    # stamping pass stamps into G, so a non-empty G is the mark of one having
+    # happened.
+    if !isempty(ctx.G_I)
+        ctx.prev_limit_base = ctx.n_nodes + ctx.n_currents + ctx.n_charges
+    end
+
     # Empty all arrays but preserve capacity (empty! keeps allocated memory)
 
     # Node structure
@@ -1614,7 +1676,7 @@ function reset_for_restamping!(ctx::MNAContext)
     empty!(ctx.opv_names)
     empty!(ctx.opv_values)
 
-    # Charge state variables
+    # Charge state variables (the count was snapshotted at the top).
     empty!(ctx.charge_names)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
@@ -1698,6 +1760,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_Q_values)
     empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
+    ctx.prev_limit_base = -1
     empty!(ctx.limit_names)
     ctx.n_limits = 0
     empty!(ctx.limit_branches)
