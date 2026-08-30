@@ -971,8 +971,32 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
                                     abstol, maxiters, nlsolve)
 end
 
-# Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
-# Uses a fixed seed for deterministic voltage-dependent capacitor detection.
+"""
+    _detect_structure(builder, params, spec) -> MNAContext
+
+Discover a circuit's state set, for a bare builder. The `MNACircuit` form is
+[`build_with_detection`](@ref), which is the same thing with the three arguments
+unpacked; every path that builds a context to solve or linearize on goes through
+one of them, and that is what keeps a solution vector interchangeable between
+them.
+
+One pass is not enough, for two reasons — both of which are about a state that
+only *exists* at some operating points:
+
+- A charge whose Q/V ratio moves is stamped through the charge formulation and
+  carries a state variable of its own; the detection cache that decides this is
+  filled by comparing successive passes.
+- A device that is off at `x = 0` may not allocate its states at all. A level-1
+  MOSFET with a `tox` on its model card is the small example: in cutoff it has
+  no gate charge, so a cold pass sizes the system one variable short of what the
+  device needs once it turns on.
+
+So the first pass runs cold (`x = ZERO_VECTOR`) to discover the structure, and
+the rest re-run at pseudo-random operating points in `[-1, +1]` to shake out the
+states the cold point hides. The seed is fixed, so detection is deterministic
+across calling contexts — a context built here and a solution vector solved on a
+context built there have the same layout.
+"""
 function _detect_structure(builder, params, spec)
     N_DETECTION_PASSES = 5
     ctx = nothing
@@ -988,6 +1012,8 @@ function _detect_structure(builder, params, spec)
             known_size = system_size(ctx)
         else
             known_size = system_size(ctx)
+            # Reset structure but preserve the detection cache (charge_is_vdep,
+            # charge_Q_values, charge_V_values).
             reset_for_restamping!(ctx)
             # Symmetric range [-1, +1] to cover all operating regions
             x = (rand(rng, known_size) .- 0.5) .* 2.0
@@ -1762,48 +1788,17 @@ end
 """
     build_with_detection(circuit::MNACircuit) -> MNAContext
 
-Build circuit with multi-pass voltage-dependent charge detection.
+Build `circuit` with multi-pass state detection, returning an `MNAContext` whose
+state set and `charge_is_vdep` cache are the ones a solve will use.
 
-This function runs the builder multiple times with different operating points
-to detect which charges have voltage-dependent capacitance (Q/V ratio varies).
-All code paths that build from MNACircuit should use this function to ensure
-consistent detection results.
-
-Uses a fixed seed for deterministic detection - ensures consistent results
-across different calling contexts.
-
-Returns an MNAContext with accurate charge_is_vdep detection cache.
+Every path that builds from an `MNACircuit` — DC, transient, AC, noise — must go
+through this, or a context it produced: a single cold pass can miss a state that
+only exists once a device turns on, and a solution vector then no longer indexes
+the same way in the two contexts. See [`_detect_structure`](@ref), which this
+unpacks the circuit for.
 """
-function build_with_detection(circuit::MNACircuit)
-    N_DETECTION_PASSES = 5
-    ctx = nothing
-    known_size = 0
-
-    # Fixed seed for deterministic detection
-    rng = Random.MersenneTwister(0xDEADBEEF)
-
-    for pass in 1:N_DETECTION_PASSES
-        if ctx === nothing
-            # First pass: use ZERO_VECTOR to discover structure and get initial system size
-            ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
-            known_size = system_size(ctx)
-        else
-            # Save system size BEFORE reset
-            known_size = system_size(ctx)
-
-            # Reset structure but preserve detection cache (charge_is_vdep, charge_Q_values, charge_V_values)
-            reset_for_restamping!(ctx)
-
-            # Symmetric range [-1, +1] to cover all operating regions
-            x = (rand(rng, known_size) .- 0.5) .* 2.0
-
-            # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
-        end
-    end
-
-    return ctx
-end
+build_with_detection(circuit::MNACircuit) =
+    _detect_structure(circuit.builder, circuit.params, circuit.spec)
 
 """
     expand_breakpoints(specs::Vector{BreakpointSpec}, tspan::Tuple{<:Real,<:Real};

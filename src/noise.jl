@@ -122,9 +122,11 @@ function noise!(circuit::MNA.MNACircuit, output::Symbol;
         "noise!(circuit, output; freqs=...) needs a non-empty Hz grid " *
         "(e.g. acdec(20, 1, 1e6))"))
 
-    # Structure discovery, then DC operating point.
-    ctx = MNA.MNAContext()
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=MNA.ZERO_VECTOR, ctx=ctx)
+    # Structure discovery, then DC operating point. The discovery is the same
+    # multi-pass detection the DC solve runs — a single cold pass can miss a
+    # state a device only allocates once it turns on, which would leave this
+    # context indexing `dc_sol.x` one slot off (see `build_with_detection`).
+    ctx = MNA.build_with_detection(circuit)
     dc_sol = MNA.solve_dc(circuit)
 
     # Rebuild the linearization (and noise channel) at the operating point.

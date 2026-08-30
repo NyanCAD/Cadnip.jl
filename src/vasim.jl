@@ -3119,14 +3119,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # calls stay counter-consistent — matching the native limit! primitive.
         push!(limit_preamble.args, quote
             $lidx_sym = Cadnip.MNA.alloc_limit!(ctx, $lim_name, _mna_instance_, $p_param, $n_param; init=0.0)
-            $li_sym = Cadnip.MNA.resolve_index(ctx, $lidx_sym)
+            # `limit_state_index`, not `resolve_index`: the vold read indexes the
+            # x this pass was handed, which the *previous* pass laid out. A model
+            # that allocates its limits before its charges — every MOSFET with a
+            # gate charge — would otherwise resolve one slot early and read a
+            # charge as its vold (see the `limit_state_index` docstring).
+            $li_sym = Cadnip.MNA.limit_state_index(ctx, $lidx_sym)
             # vold read tolerant of a short x: ZERO_VECTOR (structure discovery)
-            # and the intermediate detection passes in build_with_detection pass
-            # an x sized to a *prior* system, and voltage-dependent charge
-            # detection (e.g. a junction cap) grows n_charges between passes,
-            # shifting limit indices past that x. vold only affects the limited
-            # evaluation value, never the (branch-free) stamp structure, so 0.0
-            # is correct whenever x can't supply it.
+            # and the intermediate detection passes pass an x sized to a prior
+            # system. vold only affects the limited evaluation value, never the
+            # (branch-free) stamp structure, so 0.0 is correct whenever x can't
+            # supply it.
             # `Base.length`, not `length`: a model parameter named `length`
             # (photonic waveguides have one) shadows the Base function in the
             # generated code, and Float64 is not callable.
