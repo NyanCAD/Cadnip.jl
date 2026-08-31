@@ -85,14 +85,34 @@ catch err
 end
 ```
 
-Two things are genuinely not reachable this way, and both throw at construction:
-
-- **device instance parameters** (`r1=(r=2e3,)`, `m1=(w=…)`) — parameterize the
-  netlist with a `.param` and override that instead;
-- **a name no scope declares** — i.e. a typo, as above.
-
-A hand-written builder function declares no names, so its parameters are not
+A name no scope declares — a typo, as above — is the case this catches. A
+hand-written builder function declares no names, so its parameters are not
 checked.
+
+## Device lines are scopes too
+
+A device instance is a child of its scope the same way a subcircuit instance is,
+so its parameters are overridable under its own name:
+
+```julia
+alter(c; r1=(r=2e3,))          # R1's resistance
+alter(c; var"r1.r"=2e3)        # the same, as a sweep-axis name
+alter(c; m1=(w=2e-6,))         # a MOSFET's width
+alter(c; v1=(dc=1.8,))         # a source's DC value
+alter(c; v1=(acmag=1.0,))      # ...and the AC excitation, even with none on the card
+alter(c; r2=(m=4,))            # multiplicity, on any device
+```
+
+What a device declares is what its card resolves: the principal value under its
+SPICE name (`r`, `c`, `l`, `dc`, `gain`, `gm`, `rm`, a SIN/PULSE argument), every
+instance parameter the line spells out, and `m`. A parameter the card leaves at
+the model's default is *not* a knob — there is no value to hand the lens as a
+default — so spell it on the line to make it one:
+
+```spice
+M1 d g 0 0 nch w=1u l=100n     ; w and l are knobs
+M2 d g 0 0 nch                 ; neither is
+```
 
 ## Corners are just parameters
 

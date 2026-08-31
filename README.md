@@ -233,10 +233,11 @@ declares no parameter `vbais`. It declares: rd, vbias.
 
 The same check runs for `alter` and for sweep axes, and for a netlist that
 declares nothing at all — there the message ends "It declares no parameters at
-all." Two limits worth knowing: device instance parameters are not reachable
-this way (`r1=(r=2e3,)` throws — give the netlist a `.param` and use that
-instead), and a hand-written builder is not checked, since only it knows what
-its parameters mean.
+all." Device lines are scopes too, so `r1=(r=2e3,)` or `var"r1.r"=2e3` reaches a
+resistor's value and `m1=(w=…)` a MOSFET's width; what a device declares is what
+its card spells out, so a parameter left at the model's default is not a knob
+until the line names it. A hand-written builder is not checked at all, since
+only it knows what its parameters mean.
 
 ### Analyses
 

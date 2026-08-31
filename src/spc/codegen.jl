@@ -495,10 +495,12 @@ _scoped_current_expr(sense_name::Symbol) =
                                    Symbol(:I_, _mna_prefix_, "_", $(QuoteNode(sense_name))))
 
 """
-    _mfactor_expr!(state, params) -> Expr
+    _mfactor_value!(state, params) -> Expr
 
-Emit the multiplicity a device stamps at: its own `m=`, times the multiplicity
-of every `.subckt` instance enclosing it.
+The device's *own* `m=`, else 1. The multiplicity it actually stamps at is this
+times `_mna_m_`, the multiplicity of every `.subckt` instance enclosing it — the
+two are kept apart because `m` is a lens knob (`cg_device_params!`) and an
+override replaces the card's value, which the hierarchy then scales.
 
 `m` is not an ordinary parameter. A `.subckt` builder binds `_mna_m_` to the
 product of its caller's `_mna_m_` and its own `m` (the instance line's value,
@@ -507,8 +509,134 @@ hierarchy the way SPICE says it does — `X1 … sub m=5` around a `r a b 1 m=2`
 stamps ten parallel resistors. At the top level `_mna_m_` is `1.0`, so a device
 with no `m=` is unaffected.
 """
-_mfactor_expr!(state::CodegenState, params) =
-    hasparam(params, "m") ? :($(cg_expr!(state, getparam(params, "m"))) * _mna_m_) : :(_mna_m_)
+_mfactor_value!(state::CodegenState, params) =
+    hasparam(params, "m") ? cg_expr!(state, getparam(params, "m")) : 1.0
+
+#==============================================================================#
+# A device line is a scope
+#
+# `r1 = (r = 2e3,)` addresses instance R1's resistance exactly the way
+# `x1 = (rv = 2e3,)` addresses a parameter inside subcircuit instance X1 — the
+# namespace rule is the same one the lens has always read (a leaf is a parameter
+# of this scope, a group is a child), so a device instance is just another
+# child. What a device scope *declares* is what its netlist line resolves: the
+# principal value under its SPICE name (`r`, `c`, `l`, `dc`, `gain`, …), every
+# instance parameter the line spells out, and `m`. A device parameter the card
+# leaves at the model's default is not declared and an override naming it is
+# rejected, because there is no default codegen could hand the lens for it —
+# spell it on the line (`M1 … nch w=1u`) to make it a knob.
+#
+# The generated shape is one lens call per device, feeding the netlist's own
+# values in as the defaults, so the override outranks the card the same way it
+# outranks a `.subckt` default:
+#
+#     let r1#p = Base.getproperty(lens, :r1; type=:device)(; r = 1000.0, m = 1.0)
+#         stamp!(Resistor(getfield(r1#p, :r) / (getfield(r1#p, :m) * _mna_m_)), …)
+#
+# With a `ParamLens` carrying no override for `r1`, `getproperty` folds to an
+# `IdentityLens` and the call folds to the defaults tuple, so the hot path is
+# unchanged; with a `ParamObserver` the same call is what puts the device and
+# its parameter names in the observed tree, which is what lets
+# `check_override_names` diagnose `r1 = (rr = 2e3,)`.
+#==============================================================================#
+
+"""
+    DeviceParams
+
+The resolved parameters of one device instance: a `binding` to splice ahead of
+the stamp, and `dp[:name]` for each value the lens has had a chance to override.
+"""
+struct DeviceParams
+    var::Symbol
+    binding::Expr
+    names::Vector{Symbol}
+end
+
+Base.getindex(dp::DeviceParams, name::Symbol) =
+    :(Base.getfield($(dp.var), $(QuoteNode(name))))
+
+"""
+    dev_let(dp, body) -> Expr
+
+Wrap `body` in the `let` that binds this device's resolved parameters. A `let`
+rather than a statement, because an instance defined under an `.if` is emitted
+as `cond && <expr>` and has to stay a single expression.
+"""
+dev_let(dp::DeviceParams, body) = Expr(:let, dp.binding, body)
+
+"""
+    _lens_var(state) -> Symbol
+
+The name the builder's lens is bound to in this scope: a `.subckt` builder takes
+it as the `lens` argument, a top-level one wraps its `params` argument into
+`var"*lens#"`.
+"""
+_lens_var(state::CodegenState) = state.is_subcircuit ? :lens : Symbol("*lens#")
+
+"""
+    cg_device_params!(state, instance_name, pairs) -> DeviceParams
+
+Route a device instance's parameters through the lens. `pairs` are
+`name => value_expr`, the names as SPICE spells them and the values as the
+netlist card resolves them; the result reads back the overridden value.
+"""
+function cg_device_params!(state::CodegenState, instance_name::AbstractString,
+                           pairs::AbstractVector{<:Pair{Symbol}})
+    sym = Symbol(instance_name)
+    var = Symbol("*dev#", instance_name)
+    kws = Expr[Expr(:kw, n, v) for (n, v) in pairs]
+    binding = :($var = Base.getproperty($(_lens_var(state)), $(QuoteNode(sym)); type=:device)(; $(kws...)))
+    return DeviceParams(var, binding, Symbol[first(p) for p in pairs])
+end
+
+"""
+    _instance_param_pairs!(state, params) -> Vector{Pair{Symbol,Any}}
+
+The lens defaults for a model-card device (M/Q/D/N): every instance parameter
+the line spells out, under the name SPICE spells it, plus `m`.
+
+`m` is always last and always present — it is the device's multiplicity, not a
+model field, and `_mfactor_value!` explains why it is kept out of the kwargs
+headed for `spicecall`.
+"""
+function _instance_param_pairs!(state::CodegenState, params)
+    pairs = Pair{Symbol,Any}[]
+    for p in params
+        pname = LSymbol(p.name)
+        pname === :m && continue
+        push!(pairs, pname => cg_expr!(state, p.val))
+    end
+    push!(pairs, :m => _mfactor_value!(state, params))
+    return pairs
+end
+
+"""
+    _cg_va_instance_params!(state, instance, name, kwname) -> (dp, kwargs, m_expr)
+
+The same, for a Verilog-A module instantiated with subcircuit-call syntax
+(`X1 d g s b PSP103VA TYPE=1 W=1u`). It is a device line, not a subcircuit call,
+so its instance parameters are its own lens knobs — under the names SPICE
+spells them, while `kwname(child, lowercase_name)` gives the keyword the VA
+struct wants (the three call sites resolve case differently).
+"""
+function _cg_va_instance_params!(state::CodegenState, instance, name::AbstractString, kwname)
+    entries = Tuple{Symbol,Symbol,Any}[]
+    m_val = 1.0
+    for child in NyanSpectreNetlistParser.RedTree.children(instance)
+        (child !== nothing && isa(child, SNode{SP.Parameter})) || continue
+        pname = LSymbol(child.name)
+        if pname === :m
+            m_val = cg_expr!(state, child.val)
+            continue
+        end
+        push!(entries, (pname, kwname(child, pname), cg_expr!(state, child.val)))
+    end
+    pairs = Pair{Symbol,Any}[lname => ex for (lname, _, ex) in entries]
+    push!(pairs, :m => m_val)
+    dp = cg_device_params!(state, name, pairs)
+    kwargs = Expr[Expr(:kw, kw, dp[lname]) for (lname, kw, _) in entries]
+    return dp, kwargs, :($(dp[:m]) * _mna_m_)
+end
 
 # Helper to get a param value
 function getparam(params, name, default=nothing)
@@ -689,15 +817,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
         end
     end
 
-    # Handle multiplicity
-    m_expr = _mfactor_expr!(state, instance.params)
+    dp = cg_device_params!(state, name,
+        [:r => r_expr, :m => _mfactor_value!(state, instance.params)])
 
-    return quote
-        let r_val = $r_expr, m_val = $m_expr
+    return dev_let(dp, quote
+        let r_val = $(dp[:r]), m_val = $(dp[:m]) * _mna_m_
             # Parallel resistors: R_eff = R / m
             $(MNA).stamp!($(MNA).Resistor(r_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
-    end
+    end)
 end
 
 """
@@ -718,15 +846,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Capacitor})
         1e-12  # Default 1pF
     end
 
-    # Handle multiplicity
-    m_expr = _mfactor_expr!(state, instance.params)
+    dp = cg_device_params!(state, name,
+        [:c => c_expr, :m => _mfactor_value!(state, instance.params)])
 
-    return quote
-        let c_val = $c_expr, m_val = $m_expr
+    return dev_let(dp, quote
+        let c_val = $(dp[:c]), m_val = $(dp[:m]) * _mna_m_
             # Parallel capacitors: C_eff = C * m
             $(MNA).stamp!($(MNA).Capacitor(c_val * m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
-    end
+    end)
 end
 
 """
@@ -747,67 +875,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Inductor})
         1e-6  # Default 1uH
     end
 
-    # Handle multiplicity
-    m_expr = _mfactor_expr!(state, instance.params)
+    dp = cg_device_params!(state, name,
+        [:l => l_expr, :m => _mfactor_value!(state, instance.params)])
 
-    return quote
-        let l_val = $l_expr, m_val = $m_expr
+    return dev_let(dp, quote
+        let l_val = $(dp[:l]), m_val = $(dp[:m]) * _mna_m_
             # Parallel inductors: L_eff = L / m
             $(MNA).stamp!($(MNA).Inductor(l_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
         end
-    end
-end
-
-"""
-Generate stamp! call for a voltage source.
-"""
-function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.Voltage})
-    p = cg_net_name!(state, instance.pos)
-    n = cg_net_name!(state, instance.neg)
-    name = LString(instance.name)
-
-    # Parse source values
-    dc_val = 0.0
-    for val in instance.vals
-        if val isa SNode{SP.DCSource}
-            dc_val = cg_expr!(state, val.dcval)
-        end
-    end
-
-    return quote
-        let v = $dc_val
-            $(MNA).stamp!($(MNA).VoltageSource(v; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
-        end
-    end
-end
-
-"""
-Generate stamp! call for a current source.
-
-SPICE convention: I1 n+ n- val means current flows from n+ to n- through the source.
-This injects current into n- and extracts from n+.
-MNA convention: stamp!(CurrentSource, ctx, p, n) injects into p, extracts from n.
-So we swap: p=neg, n=pos.
-"""
-function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.Current})
-    pos = cg_net_name!(state, instance.pos)
-    neg = cg_net_name!(state, instance.neg)
-    name = LString(instance.name)
-
-    # Parse source values
-    dc_val = 0.0
-    for val in instance.vals
-        if val isa SNode{SP.DCSource}
-            dc_val = cg_expr!(state, val.dcval)
-        end
-    end
-
-    # Swap nodes: MNA injects into first arg, SPICE injects into neg
-    return quote
-        let i = $dc_val
-            $(MNA).stamp!($(MNA).CurrentSource(i; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $neg, $pos, t, spec.mode)
-        end
-    end
+    end)
 end
 
 """
@@ -834,11 +910,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
-    return quote
-        let gain = $gain_expr
+    dp = cg_device_params!(state, name, [:gain => gain_expr])
+
+    return dev_let(dp, quote
+        let gain = $(dp[:gain])
             $(MNA).stamp!($(MNA).VCVS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
         end
-    end
+    end)
 end
 
 """
@@ -865,11 +943,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
-    return quote
-        let gm = $gm_expr
+    dp = cg_device_params!(state, name, [:gm => gm_expr])
+
+    return dev_let(dp, quote
+        let gm = $(dp[:gm])
             $(MNA).stamp!($(MNA).VCCS(gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, $in_p, $in_n)
         end
-    end
+    end)
 end
 
 """
@@ -902,13 +982,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
-    return quote
-        let rm = $rm_expr
+    dp = cg_device_params!(state, name, [:rm => rm_expr])
+
+    return dev_let(dp, quote
+        let rm = $(dp[:rm])
             # Get the current index of the referenced voltage source
             I_in_idx = $(MNA).get_current_idx(ctx, $sense_expr)
             $(MNA).stamp!($(MNA).CCVS(rm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
-    end
+    end)
 end
 
 """
@@ -941,13 +1023,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
         1.0
     end
 
-    return quote
-        let gain = $gain_expr
+    dp = cg_device_params!(state, name, [:gain => gain_expr])
+
+    return dev_let(dp, quote
+        let gain = $(dp[:gain])
             # Get the current index of the referenced voltage source
             I_in_idx = $(MNA).get_current_idx(ctx, $sense_expr)
             $(MNA).stamp!($(MNA).CCCS(gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
-    end
+    end)
 end
 
 #==============================================================================#
@@ -1356,25 +1440,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
 
         # `m=` on the instance line is multiplicity, not a VA struct field — the
         # model reads it back through `$mfactor`, same as for an M/Q/D card.
-        m_expr = :(_mna_m_)
-        explicit_kwargs = Expr[]
-        for child in NyanSpectreNetlistParser.RedTree.children(instance)
-            if child !== nothing && isa(child, SNode{SP.Parameter})
-                name = LSymbol(child.name)
-                if name === :m
-                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
-                    continue
-                end
-                # Adjust case to match VA device fieldnames
-                adjusted_name = get(case_insensitive, name, name)
-                def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, adjusted_name, def))
-            end
-        end
+        name = LString(instance.name)
+        # Adjust case to match VA device fieldnames
+        dp, explicit_kwargs, m_expr = _cg_va_instance_params!(state, instance, name,
+            (child, lname) -> get(case_insensitive, lname, lname))
 
         # Port expressions
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
-        name = LString(instance.name)
 
         # Generate stamp! call for VA module
         # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
@@ -1390,15 +1462,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
             stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-            return quote
+            return dev_let(dp, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $stamp_expr
                 end
-            end
+            end)
         else
             # Normal model: direct call with @noinline stamp!
-            return quote
+            return dev_let(dp, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
@@ -1406,7 +1478,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
                         _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                         _mna_mfactor_ = $m_expr)
                 end
-            end
+            end)
         end
     end
 
@@ -1501,20 +1573,8 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         # Preserve original parameter name case since VA modules may be case-sensitive
         # `m=` on the instance line is multiplicity, not a VA struct field — the
         # model reads it back through `$mfactor`, same as for an M/Q/D card.
-        m_expr = :(_mna_m_)
-        explicit_kwargs = Expr[]
-        for child in NyanSpectreNetlistParser.RedTree.children(instance)
-            if child !== nothing && isa(child, SNode{SP.Parameter})
-                # Use original case for VA modules (they may be case-sensitive)
-                name = Symbol(String(child.name))
-                if LSymbol(child.name) === :m
-                    m_expr = :($(cg_expr!(state, child.val)) * _mna_m_)
-                    continue
-                end
-                def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, name, def))
-            end
-        end
+        dp, explicit_kwargs, m_expr = _cg_va_instance_params!(state, instance, String(instance_name),
+            (child, _) -> Symbol(String(child.name)))
 
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
@@ -1531,16 +1591,16 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         if is_large_model
             # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
             stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-            return quote
+            return dev_let(dp, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     # Build hierarchical instance name from _mna_prefix_ + local instance name
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
                     $stamp_expr
                 end
-            end
+            end)
         else
             # Normal model: direct call with @noinline stamp!
-            return quote
+            return dev_let(dp, quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     # Build hierarchical instance name from _mna_prefix_ + local instance name
                     local full_instance_name = _mna_prefix_ == Symbol("") ? $(QuoteNode(instance_name)) : Symbol(_mna_prefix_, "_", $(QuoteNode(instance_name)))
@@ -1549,7 +1609,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
                         _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                         _mna_mfactor_ = $m_expr)
                 end
-            end
+            end)
         end
     end
 
@@ -1607,18 +1667,38 @@ end
 # Spectre Instance Codegen
 #==============================================================================#
 
-# AC phasor expression for a Spectre vsource/isource: mag= (magnitude), phase=
-# (degrees). Independent of type=/transient params, so it applies whether or
-# not the source also carries a transient specification.
-function _cg_spectre_ac_expr(state::CodegenState, params)
-    hasparam(params, "mag") || return :(0.0 + 0.0im)
-    mag_expr = cg_expr!(state, getparam(params, "mag"))
-    if hasparam(params, "phase")
-        phase_expr = cg_expr!(state, getparam(params, "phase"))
-        return :($mag_expr * exp(im * $phase_expr * π / 180))
-    else
-        return :($mag_expr + 0.0im)
+"""
+    _ac_phasor_expr(mag, phase) -> Expr
+
+`mag * exp(im * phase° * π/180)`, the AC excitation a source card declares.
+
+`im` and `π` are spliced as values, not as names: a PDK `baremodule` has neither
+(`_baremodule_prelude` names the operators and `exp`, which is all a card needed
+before every source started carrying a phasor).
+"""
+_ac_phasor_expr(mag, phase) = :($mag * Base.exp($(im) * $phase * $(π) / 180))
+
+"""
+    _spectre_source_pairs!(state, params, is_sine) -> Vector{Pair{Symbol,Any}}
+
+The lens knobs a Spectre `vsource`/`isource` declares: its `dc` value and its AC
+phasor (`mag=`, `phase=` in degrees, independent of `type=` so it applies
+whether or not the source also carries a transient specification), plus the
+sine parameters when `type=sine`. A card that leaves any of them off declares
+it at the value Spectre would use, so an override can introduce one — an `.ac`
+sweep of a transient testbench wants exactly that.
+"""
+function _spectre_source_pairs!(state::CodegenState, params, is_sine::Bool)
+    val(nm, default) = hasparam(params, nm) ? cg_expr!(state, getparam(params, nm)) : default
+    pairs = Pair{Symbol,Any}[
+        :dc => val("dc", 0.0),
+        :mag => val("mag", 0.0),
+        :phase => val("phase", 0.0),
+    ]
+    if is_sine
+        push!(pairs, :vo => val("vo", 0.0), :va => val("va", 1.0), :freq => val("freq", 1e3))
     end
+    return pairs
 end
 
 """
@@ -1654,13 +1734,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1000.0  # Default 1k
         end
 
-        m_expr = _mfactor_expr!(state, instance.params)
+        dp = cg_device_params!(state, name,
+            [:r => r_expr, :m => _mfactor_value!(state, instance.params)])
 
-        return quote
-            let r_val = $r_expr, m_val = $m_expr
+        return dev_let(dp, quote
+            let r_val = $(dp[:r]), m_val = $(dp[:m]) * _mna_m_
                 $(MNA).stamp!($(MNA).Resistor(r_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
-        end
+        end)
 
     elseif master == "capacitor"
         length(nets) >= 2 || error("capacitor requires 2 nodes")
@@ -1673,13 +1754,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1e-12  # Default 1pF
         end
 
-        m_expr = _mfactor_expr!(state, instance.params)
+        dp = cg_device_params!(state, name,
+            [:c => c_expr, :m => _mfactor_value!(state, instance.params)])
 
-        return quote
-            let c_val = $c_expr, m_val = $m_expr
+        return dev_let(dp, quote
+            let c_val = $(dp[:c]), m_val = $(dp[:m]) * _mna_m_
                 $(MNA).stamp!($(MNA).Capacitor(c_val * m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
-        end
+        end)
 
     elseif master == "inductor"
         length(nets) >= 2 || error("inductor requires 2 nodes")
@@ -1692,59 +1774,55 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             1e-6  # Default 1uH
         end
 
-        m_expr = _mfactor_expr!(state, instance.params)
+        dp = cg_device_params!(state, name,
+            [:l => l_expr, :m => _mfactor_value!(state, instance.params)])
 
-        return quote
-            let l_val = $l_expr, m_val = $m_expr
+        return dev_let(dp, quote
+            let l_val = $(dp[:l]), m_val = $(dp[:m]) * _mna_m_
                 $(MNA).stamp!($(MNA).Inductor(l_val / m_val; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n)
             end
-        end
+        end)
 
     elseif master == "vsource"
         length(nets) >= 2 || error("vsource requires 2 nodes")
         p = cg_net_name!(state, nets[1])
         n = cg_net_name!(state, nets[2])
 
-        dc_val = if hasparam(instance.params, "dc")
-            cg_expr!(state, getparam(instance.params, "dc"))
-        else
-            0.0
-        end
-
-        # AC phasor for .ac analysis: mag= (magnitude), phase= (degrees)
-        ac_expr = _cg_spectre_ac_expr(state, instance.params)
-
         # Check for transient source types
         src_type = hasparam(instance.params, "type") ? lowercase(String(getparam(instance.params, "type"))) : nothing
+        is_sine = src_type == "sine" || src_type == "sin"
+
+        pairs = _spectre_source_pairs!(state, instance.params, is_sine)
+        dp = cg_device_params!(state, name, pairs)
+        # AC phasor for .ac analysis: mag= (magnitude), phase= (degrees)
+        ac_expr = _ac_phasor_expr(dp[:mag], dp[:phase])
 
         if src_type == "pwl" && hasparam(instance.params, "wave")
-            # PWL source with wave parameter - create transient function
+            # PWL source with wave parameter - create transient function. The
+            # wave is a vector literal, so its points are not lens knobs.
             wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
-            return quote
+            return dev_let(dp, quote
                 let wave = $wave_expr, ac = $ac_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
                     $(MNA).stamp!($(MNA).VoltageSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
-            end
-        elseif src_type == "sine" || src_type == "sin"
+            end)
+        elseif is_sine
             # Sinusoidal source - create transient function
-            vo = hasparam(instance.params, "vo") ? cg_expr!(state, getparam(instance.params, "vo")) : 0.0
-            va = hasparam(instance.params, "va") ? cg_expr!(state, getparam(instance.params, "va")) : 1.0
-            freq = hasparam(instance.params, "freq") ? cg_expr!(state, getparam(instance.params, "freq")) : 1e3
-            return quote
-                let vo = $vo, va = $va, freq = $freq, ac = $ac_expr
+            return dev_let(dp, quote
+                let vo = $(dp[:vo]), va = $(dp[:va]), freq = $(dp[:freq]), ac = $ac_expr
                     $(MNA).stamp!($(MNA).VoltageSource(vo; tran=$(MNA).SinWave(vo, va, freq), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
-            end
+            end)
         else
             # DC source - still use time/mode for consistency (DC sources return dc in all modes)
-            return quote
-                let v = $dc_val, ac = $ac_expr
+            return dev_let(dp, quote
+                let v = $(dp[:dc]), ac = $ac_expr
                     $(MNA).stamp!($(MNA).VoltageSource(v; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
-            end
+            end)
         end
 
     elseif master == "isource"
@@ -1754,35 +1832,31 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
         p = cg_net_name!(state, nets[1])
         n = cg_net_name!(state, nets[2])
 
-        dc_val = if hasparam(instance.params, "dc")
-            cg_expr!(state, getparam(instance.params, "dc"))
-        else
-            0.0
-        end
-
-        # AC phasor for .ac analysis: mag= (magnitude), phase= (degrees)
-        ac_expr = _cg_spectre_ac_expr(state, instance.params)
-
         # Check for transient source types
         src_type = hasparam(instance.params, "type") ? lowercase(String(getparam(instance.params, "type"))) : nothing
+
+        pairs = _spectre_source_pairs!(state, instance.params, false)
+        dp = cg_device_params!(state, name, pairs)
+        # AC phasor for .ac analysis: mag= (magnitude), phase= (degrees)
+        ac_expr = _ac_phasor_expr(dp[:mag], dp[:phase])
 
         if src_type == "pwl" && hasparam(instance.params, "wave")
             # PWL source with wave parameter - create transient function
             wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
-            return quote
+            return dev_let(dp, quote
                 let wave = $wave_expr, ac = $ac_expr
                     ts, ys = wave[1:2:end], wave[2:2:end]
                     $(MNA).stamp!($(MNA).CurrentSource(ys[1]; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
                            ctx, $p, $n, t, spec.mode)
                 end
-            end
+            end)
         else
             # DC source - still use time/mode for consistency
-            return quote
-                let i = $dc_val, ac = $ac_expr
+            return dev_let(dp, quote
+                let i = $(dp[:dc]), ac = $ac_expr
                     $(MNA).stamp!($(MNA).CurrentSource(i; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
                 end
-            end
+            end)
         end
 
     elseif master == "vcvs"
@@ -1794,10 +1868,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
         cn = cg_net_name!(state, nets[4])
 
         gain = hasparam(instance.params, "gain") ? cg_expr!(state, getparam(instance.params, "gain")) : 1.0
+        dp = cg_device_params!(state, name, [:gain => gain])
 
-        return quote
-            $(MNA).stamp!($(MNA).VCVS($gain; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
-        end
+        return dev_let(dp, quote
+            $(MNA).stamp!($(MNA).VCVS($(dp[:gain]); name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+        end)
 
     elseif master == "vccs"
         # Voltage-controlled current source
@@ -1808,10 +1883,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
         cn = cg_net_name!(state, nets[4])
 
         gm = hasparam(instance.params, "gm") ? cg_expr!(state, getparam(instance.params, "gm")) : 1.0
+        dp = cg_device_params!(state, name, [:gm => gm])
 
-        return quote
-            $(MNA).stamp!($(MNA).VCCS($gm; name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
-        end
+        return dev_let(dp, quote
+            $(MNA).stamp!($(MNA).VCCS($(dp[:gm]); name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+        end)
 
     else
         # Check if this is a user-defined subcircuit
@@ -1842,16 +1918,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             # This is a VA module instance
             port_exprs = [cg_net_name!(state, net) for net in nets]
 
-            # Extract explicit parameters from instance. `m=` is multiplicity,
-            # not a VA struct field — the model reads it back via `$mfactor`.
-            m_expr = _mfactor_expr!(state, instance.params)
-            explicit_kwargs = Expr[]
-            for p in instance.params
-                param_name = LSymbol(p.name)
-                param_name === :m && continue
-                param_val = cg_expr!(state, p.val)
-                push!(explicit_kwargs, Expr(:kw, param_name, param_val))
-            end
+            # Extract explicit parameters from instance. They are this device's
+            # lens knobs; `m=` is multiplicity, not a VA struct field — the model
+            # reads it back via `$mfactor`.
+            pairs = _instance_param_pairs!(state, instance.params)
+            dp = cg_device_params!(state, name, pairs)
+            explicit_kwargs = Expr[Expr(:kw, pname, dp[pname]) for (pname, _) in pairs if pname !== :m]
+            m_expr = :($(dp[:m]) * _mna_m_)
 
             # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
             # Include hierarchical instance name for unique internal node naming
@@ -1866,15 +1939,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
             if is_large_model
                 # Large model: use invoke(...) to prevent compiler explosion (see va_stamp_call)
                 stamp_expr = va_stamp_call(:dev, va_type, :ctx, port_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-                return quote
+                return dev_let(dp, quote
                     let dev = $va_module_ref(; $(explicit_kwargs...))
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $stamp_expr
                     end
-                end
+                end)
             else
                 # Normal model: direct call with @noinline stamp!
-                return quote
+                return dev_let(dp, quote
                     let dev = $va_module_ref(; $(explicit_kwargs...))
                         local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                         $(MNA).stamp!(dev, ctx, $(port_exprs...);
@@ -1882,7 +1955,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance},
                             _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                             _mna_mfactor_ = $m_expr)
                     end
-                end
+                end)
             end
         elseif haskey(state.sema.subckts, master_sym) || haskey(subckt_semas, master_sym)
             # User-defined subcircuit - generate call to subcircuit builder.
@@ -1970,16 +2043,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = _mfactor_expr!(state, instance.parameters)
-
-    # Build instance parameter kwargs
-    param_kwargs = Expr[]
-    for p in instance.parameters
-        param_name = LSymbol(p.name)
-        param_name === :m && continue
-        param_val = cg_expr!(state, p.val)
-        push!(param_kwargs, Expr(:kw, param_name, param_val))
-    end
+    # The instance parameters the card spells out are this device's lens knobs
+    # (see `cg_device_params!`); one a card leaves at the model's default is not,
+    # because there is no default to hand the lens.
+    pairs = _instance_param_pairs!(state, instance.parameters)
+    dp = cg_device_params!(state, name, pairs)
+    param_kwargs = Expr[Expr(:kw, pname, dp[pname]) for (pname, _) in pairs if pname !== :m]
+    m_expr = :($(dp[:m]) * _mna_m_)
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
@@ -1996,15 +2066,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
         stamp_expr = va_stamp_call(:dev, device_type, :ctx, [d, g, s, b], va_stamp_kwargs(:full_instance_name, m_expr))
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $stamp_expr
             end
-        end
+        end)
     else
         # Normal model: direct call for performance
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
@@ -2012,7 +2082,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
                     _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                     _mna_mfactor_ = $m_expr)
             end
-        end
+        end)
     end
 end
 
@@ -2046,16 +2116,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = _mfactor_expr!(state, instance.params)
-
-    # Build instance parameter kwargs
-    param_kwargs = Expr[]
-    for p in instance.params
-        param_name = LSymbol(p.name)
-        param_name === :m && continue
-        param_val = cg_expr!(state, p.val)
-        push!(param_kwargs, Expr(:kw, param_name, param_val))
-    end
+    # The instance parameters the card spells out are this device's lens knobs.
+    pairs = _instance_param_pairs!(state, instance.params)
+    dp = cg_device_params!(state, name, pairs)
+    param_kwargs = Expr[Expr(:kw, pname, dp[pname]) for (pname, _) in pairs if pname !== :m]
+    m_expr = :($(dp[:m]) * _mna_m_)
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
@@ -2071,15 +2136,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
         stamp_expr = va_stamp_call(:dev, device_type, :ctx, [c, b, e, s], va_stamp_kwargs(:full_instance_name, m_expr))
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $stamp_expr
             end
-        end
+        end)
     else
         # Normal model: direct call for performance
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $c, $b, $e, $s;
@@ -2087,7 +2152,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.BipolarTransis
                     _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                     _mna_mfactor_ = $m_expr)
             end
-        end
+        end)
     end
 end
 
@@ -2135,18 +2200,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
     # separately from the case-insensitive model-field lookup below: on a diode
     # *instance* line "m" always means multiplicity (never the model-card-only
     # "m" grading-coefficient parameter aliased to mj).
-    m_expr = _mfactor_expr!(state, instance.params)
-
-    # Build instance parameter kwargs with case-insensitive lookup
-    param_kwargs = Expr[]
-    for p in instance.params
-        param_name = LSymbol(p.name)
-        lname = Symbol(lowercase(String(param_name)))
-        lname === :m && continue
-        param_val = cg_expr!(state, p.val)
-        rname = get(case_insensitive, lname, param_name)
-        push!(param_kwargs, Expr(:kw, rname, param_val))
-    end
+    # The instance parameters the card spells out are this device's lens knobs.
+    # The lens names them as SPICE does (lowercase, as the user writes them in
+    # an override); the model field they set keeps its own case.
+    pairs = _instance_param_pairs!(state, instance.params)
+    dp = cg_device_params!(state, name, pairs)
+    param_kwargs = Expr[Expr(:kw, get(case_insensitive, pname, pname), dp[pname])
+                        for (pname, _) in pairs if pname !== :m]
+    m_expr = :($(dp[:m]) * _mna_m_)
 
     # Create the device instance via spicecall + setproperties, matching the
     # pattern used by MOSFET/BJT/OSDI handlers.
@@ -2160,14 +2221,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
 
     if is_large_model
         stamp_expr = va_stamp_call(:dev, device_type, :ctx, [pos, neg], va_stamp_kwargs(:full_instance_name, m_expr))
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $stamp_expr
             end
-        end
+        end)
     else
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $(MNA).stamp!(dev, ctx, $pos, $neg;
@@ -2175,7 +2236,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Diode})
                     _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                     _mna_mfactor_ = $m_expr)
             end
-        end
+        end)
     end
 end
 
@@ -2236,19 +2297,13 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     # Device multiplicity ("m=") is a SPICE instance parameter, not a VA struct
     # field - the VA model reads it back via the $mfactor builtin. Pull it out
     # of the kwargs headed for spicecall/setproperties.
-    m_expr = _mfactor_expr!(state, instance.parameters)
-
-    # Build instance parameter kwargs with case-insensitive lookup
-    param_kwargs = Expr[]
-    for p in instance.parameters
-        param_name = LSymbol(p.name)
-        lname = Symbol(lowercase(String(param_name)))
-        lname === :m && continue
-        param_val = cg_expr!(state, p.val)
-        # Use case-insensitive lookup to find correct parameter name
-        rname = get(case_insensitive, lname, param_name)
-        push!(param_kwargs, Expr(:kw, rname, param_val))
-    end
+    # The instance parameters the card spells out are this device's lens knobs.
+    # The lens names them as SPICE does; the model field they set keeps its case.
+    pairs = _instance_param_pairs!(state, instance.parameters)
+    dp = cg_device_params!(state, name, pairs)
+    param_kwargs = Expr[Expr(:kw, get(case_insensitive, pname, pname), dp[pname])
+                        for (pname, _) in pairs if pname !== :m]
+    m_expr = :($(dp[:m]) * _mna_m_)
 
     # Generate code to create device instance using spicecall + setproperties pattern
     # This avoids recompiling the 200-kwarg constructor for each netlist parse
@@ -2268,15 +2323,15 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
     if is_large_model
         # Large model: use invoke(...) to prevent LLVM SROA blow-up (see va_stamp_call)
         stamp_expr = va_stamp_call(:dev, device_type, :ctx, node_exprs, va_stamp_kwargs(:full_instance_name, m_expr))
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
                 $stamp_expr
             end
-        end
+        end)
     else
         # Normal model: direct call for performance
-        return quote
+        return dev_let(dp, quote
             let dev = $device_expr
                 nodes = $node_args
                 local full_instance_name = _mna_prefix_ == Symbol("") ? $local_name : Symbol(_mna_prefix_, "_", $local_name)
@@ -2285,7 +2340,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.OSDIDevice})
                     _mna_instance_ = full_instance_name, _mna_h_ = _mna_h_, _mna_h_p_ = _mna_h_p_,
                     _mna_mfactor_ = $m_expr)
             end
-        end
+        end)
     end
 end
 
@@ -2329,25 +2384,50 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
         end
     end
 
-    # Build AC expression: mag * exp(im * phase_deg * π/180)
-    ac_expr = if ac_mag !== nothing
-        if ac_phase !== nothing
-            :($ac_mag * exp(im * $ac_phase * π / 180))
-        else
-            :($ac_mag + 0.0im)
-        end
-    else
-        :(0.0 + 0.0im)
+    # The knobs this card declares (see `cg_device_params!`). The AC excitation
+    # is always one — a card with no `AC` declares it at zero, so
+    # `alter(c; var"v1.acmag"=1)` adds one where the netlist has none, which is
+    # exactly what an AC sweep of a transient testbench wants. The DC value is a
+    # knob whenever the card spells it, and on a card with no transient function
+    # at all; on a SIN/PULSE/PWL card that spells no `DC`, the DC value *derives*
+    # from the waveform (SIN's offset, PULSE's initial value, PWL's first point)
+    # and follows an override of that instead of shadowing it.
+    pairs = Pair{Symbol,Any}[
+        :acmag => (ac_mag === nothing ? 0.0 : ac_mag),
+        :acphase => (ac_phase === nothing ? 0.0 : ac_phase),
+    ]
+    has_dc = dc_val !== nothing || tran_source === nothing
+    has_dc && push!(pairs, :dc => (dc_val === nothing ? 0.0 : dc_val))
+
+    fname = tran_source === nothing ? nothing : LSymbol(tran_source.kw)
+    tvals = tran_source === nothing ? Any[] : Any[cg_expr!(state, v) for v in tran_source.values]
+
+    # A SIN/PULSE card's arguments are positional in SPICE; these are the names
+    # they go by, and the values SPICE fills in for the ones left off the card.
+    wave_defaults =
+        fname === :sin   ? Pair{Symbol,Any}[:vo => 0.0, :va => 0.0, :freq => 1.0,
+                                            :td => 0.0, :theta => 0.0, :phase => 0.0] :
+        fname === :pulse ? Pair{Symbol,Any}[:v1 => 0.0, :v2 => 1.0, :td => 0.0,
+                                            :tr => 1e-9, :tf => 1e-9, :pw => 1e-3,
+                                            :per => 2e-3] :
+                           Pair{Symbol,Any}[]
+    for (i, (wname, wdefault)) in enumerate(wave_defaults)
+        push!(pairs, wname => (length(tvals) >= i ? tvals[i] : wdefault))
     end
+
+    dp = cg_device_params!(state, name, pairs)
+
+    # AC: mag * exp(im * phase_deg * π/180). Both fold to the card's own values
+    # (and the whole expression to a constant) when nothing overrides them.
+    ac_expr = _ac_phasor_expr(dp[:acmag], dp[:acphase])
 
     # If we have a transient source, generate appropriate device
     if tran_source !== nothing
-        fname = LSymbol(tran_source.kw)
-
         if fname == :pwl
             # PWL source: values are interleaved time-value pairs
-            # PWL(t1 v1 t2 v2 ...)
-            vals = [cg_expr!(state, v) for v in tran_source.values]
+            # PWL(t1 v1 t2 v2 ...). The points are positional, so they are not
+            # lens knobs; the DC value is, when the card spells one.
+            vals = tvals
 
             # Check if all values are numeric constants (for zero-allocation SVector)
             all_constant = all(x -> x isa Number, vals)
@@ -2358,171 +2438,83 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 times_vals = Float64[Float64(vals[i]) for i in 1:2:length(vals)]
                 value_vals = Float64[Float64(vals[i]) for i in 2:2:length(vals)]
                 # DC value: use explicit dc= if specified, otherwise use first PWL value
-                dc_value = dc_val !== nothing ? dc_val : value_vals[1]
+                dc_value = dc_val !== nothing ? dp[:dc] : value_vals[1]
 
                 # Build SVector expression inside quote to avoid serialization issues
                 times_exprs = [:($(t)) for t in times_vals]
                 values_exprs = [:($(v)) for v in value_vals]
 
                 # Use unified source with transient function
-                if is_voltage
-                    return quote
-                        let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
-                            dc = $dc_value, ac = $ac_expr
-                            $(MNA).stamp!($(MNA).VoltageSource(dc; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
+                src = is_voltage ? :($(MNA).VoltageSource) : :($(MNA).CurrentSource)
+                return dev_let(dp, quote
+                    let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
+                        ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
+                        dc = $dc_value, ac = $ac_expr
+                        $(MNA).stamp!($src(dc; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
+                               ctx, $p, $n, t, spec.mode)
                     end
-                else
-                    return quote
-                        let ts = $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
-                            ys = $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...)),
-                            dc = $dc_value, ac = $ac_expr
-                            $(MNA).stamp!($(MNA).CurrentSource(dc; tran=$(MNA).PWLWave(ts, ys), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
-                    end
-                end
+                end)
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
                 # DC value: use explicit dc= if specified, otherwise use first PWL value
-                dc_expr = dc_val !== nothing ? dc_val : :(values[1])
-                if is_voltage
-                    return quote
-                        let vals = [$(vals...)]
-                            times = vals[1:2:end]
-                            values = vals[2:2:end]
-                            dc = $dc_expr
-                            ac = $ac_expr
-                            $(MNA).stamp!($(MNA).VoltageSource(dc; tran=$(MNA).PWLWave(times, values), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
+                dc_expr = dc_val !== nothing ? dp[:dc] : :(values[1])
+                src = is_voltage ? :($(MNA).VoltageSource) : :($(MNA).CurrentSource)
+                return dev_let(dp, quote
+                    let vals = [$(vals...)]
+                        times = vals[1:2:end]
+                        values = vals[2:2:end]
+                        dc = $dc_expr
+                        ac = $ac_expr
+                        $(MNA).stamp!($src(dc; tran=$(MNA).PWLWave(times, values), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
+                               ctx, $p, $n, t, spec.mode)
                     end
-                else
-                    return quote
-                        let vals = [$(vals...)]
-                            times = vals[1:2:end]
-                            values = vals[2:2:end]
-                            dc = $dc_expr
-                            ac = $ac_expr
-                            $(MNA).stamp!($(MNA).CurrentSource(dc; tran=$(MNA).PWLWave(times, values), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                                   ctx, $p, $n, t, spec.mode)
-                        end
-                    end
-                end
+                end)
             end
 
         elseif fname == :sin
             # SIN source: SIN(vo va freq [td theta phase])
-            # SPICE order: vo, va, freq, td, theta, phase
             # SPICE SIN formula: vo + va * sin(2π*freq*(t-td) + phase°) * exp(-theta*(t-td))
-            vals = [cg_expr!(state, v) for v in tran_source.values]
-            n_vals = length(vals)
-
-            vo_expr = n_vals >= 1 ? vals[1] : 0.0
-            va_expr = n_vals >= 2 ? vals[2] : 0.0
-            freq_expr = n_vals >= 3 ? vals[3] : 1.0
-            td_expr = n_vals >= 4 ? vals[4] : 0.0
-            theta_expr = n_vals >= 5 ? vals[5] : 0.0
-            phase_expr = n_vals >= 6 ? vals[6] : 0.0  # phase in degrees
-
-            # DC value: use explicit dc= if specified, otherwise use vo (the offset)
-            dc_expr = dc_val !== nothing ? dc_val : vo_expr
-
-            # SPICE SIN: vo + va * exp(-theta*(t-td)) * sin(2π*freq*(t-td) + phase_rad)
-            if is_voltage
-                return quote
-                    let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr,
-                        ac = $ac_expr
-                        $(MNA).stamp!($(MNA).VoltageSource(dc; tran=$(MNA).SinWave(vo, va, freq, td, theta, phase), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                               ctx, $p, $n, t, spec.mode)
-                    end
+            # DC value: use explicit dc= if specified, otherwise the (resolved) offset
+            dc_expr = dc_val !== nothing ? dp[:dc] : dp[:vo]
+            src = is_voltage ? :($(MNA).VoltageSource) : :($(MNA).CurrentSource)
+            return dev_let(dp, quote
+                let vo = $(dp[:vo]), va = $(dp[:va]), freq = $(dp[:freq]),
+                    td = $(dp[:td]), theta = $(dp[:theta]), phase = $(dp[:phase]),
+                    dc = $dc_expr, ac = $ac_expr
+                    $(MNA).stamp!($src(dc; tran=$(MNA).SinWave(vo, va, freq, td, theta, phase), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
+                           ctx, $p, $n, t, spec.mode)
                 end
-            else
-                return quote
-                    let io = $vo_expr, ia = $va_expr, freq = $freq_expr,
-                        td = $td_expr, theta = $theta_expr, phase = $phase_expr, dc = $dc_expr,
-                        ac = $ac_expr
-                        $(MNA).stamp!($(MNA).CurrentSource(dc; tran=$(MNA).SinWave(io, ia, freq, td, theta, phase), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                               ctx, $p, $n, t, spec.mode)
-                    end
-                end
-            end
+            end)
 
         elseif fname == :pulse
             # PULSE source: pulse(v1 v2 td tr tf pw period)
             # Periodic: repeats with period `per` from `td` onward (see pulse_at_time).
-            vals = [cg_expr!(state, v) for v in tran_source.values]
-            n_vals = length(vals)
-
-            v1_expr = n_vals >= 1 ? vals[1] : 0.0
-            v2_expr = n_vals >= 2 ? vals[2] : 1.0
-            td_expr = n_vals >= 3 ? vals[3] : 0.0
-            tr_expr = n_vals >= 4 ? vals[4] : 1e-9
-            tf_expr = n_vals >= 5 ? vals[5] : 1e-9
-            pw_expr = n_vals >= 6 ? vals[6] : 1e-3
-            per_expr = n_vals >= 7 ? vals[7] : 2e-3
-
-            # DC value: use explicit dc= if specified, otherwise use v1 (initial pulse value)
-            dc_expr = dc_val !== nothing ? dc_val : v1_expr
-
-            if is_voltage
-                return quote
-                    let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
-                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr,
-                        ac = $ac_expr
-                        $(MNA).stamp!($(MNA).VoltageSource(dc; tran=$(MNA).PulseWave(v1, v2, td, tr, tf, pw, per), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                               ctx, $p, $n, t, spec.mode)
-                    end
+            # DC value: use explicit dc= if specified, otherwise the (resolved) initial value
+            dc_expr = dc_val !== nothing ? dp[:dc] : dp[:v1]
+            src = is_voltage ? :($(MNA).VoltageSource) : :($(MNA).CurrentSource)
+            return dev_let(dp, quote
+                let v1 = $(dp[:v1]), v2 = $(dp[:v2]), td = $(dp[:td]),
+                    tr = $(dp[:tr]), tf = $(dp[:tf]), pw = $(dp[:pw]), per = $(dp[:per]),
+                    dc = $dc_expr, ac = $ac_expr
+                    $(MNA).stamp!($src(dc; tran=$(MNA).PulseWave(v1, v2, td, tr, tf, pw, per), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
+                           ctx, $p, $n, t, spec.mode)
                 end
-            else
-                return quote
-                    let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
-                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr, dc = $dc_expr,
-                        ac = $ac_expr
-                        $(MNA).stamp!($(MNA).CurrentSource(dc; tran=$(MNA).PulseWave(i1, i2, td, tr, tf, pw, per), ac=ac, name=$(_scoped_sym_expr(Symbol(name)))),
-                               ctx, $p, $n, t, spec.mode)
-                    end
-                end
-            end
+            end)
 
         else
             # Unknown transient source type - fall back to DC
             @warn "Unknown transient source type: $fname, using DC value"
-            dc_val_actual = dc_val !== nothing ? dc_val : 0.0
-            if is_voltage
-                return quote
-                    let v = $dc_val_actual, ac = $ac_expr
-                        $(MNA).stamp!($(MNA).VoltageSource(v; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
-                    end
-                end
-            else
-                return quote
-                    let i = $dc_val_actual, ac = $ac_expr
-                        $(MNA).stamp!($(MNA).CurrentSource(i; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
-                    end
-                end
-            end
         end
     end
 
-    # No transient source - use DC value with optional AC
-    dc_val_actual = dc_val !== nothing ? dc_val : 0.0
-    if is_voltage
-        return quote
-            let v = $dc_val_actual, ac = $ac_expr
-                $(MNA).stamp!($(MNA).VoltageSource(v; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
-            end
+    # No transient source (or one we don't know) - DC value with optional AC
+    dc_val_actual = has_dc ? dp[:dc] : 0.0
+    src = is_voltage ? :($(MNA).VoltageSource) : :($(MNA).CurrentSource)
+    return dev_let(dp, quote
+        let v = $dc_val_actual, ac = $ac_expr
+            $(MNA).stamp!($src(v; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
         end
-    else
-        return quote
-            let i = $dc_val_actual, ac = $ac_expr
-                $(MNA).stamp!($(MNA).CurrentSource(i; ac=ac, name=$(_scoped_sym_expr(Symbol(name)))), ctx, $p, $n, t, spec.mode)
-            end
-        end
-    end
+    end)
 end
 
 """
@@ -2796,10 +2788,11 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     lens_var = is_subcircuit ? :lens : :var"*lens#"
 
     if !is_subcircuit
-        if needs_lens
-            # Top-level: wrap params argument in lens
-            push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
-        else
+        # Top-level: wrap params argument in lens. Unconditionally, because
+        # every device line consults it too (`cg_device_params!`) — `needs_lens`
+        # only decides whether this scope's *own* parameters go through it.
+        push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
+        if !needs_lens
             # A deck that declares nothing — no `.param`, no subcircuit instance
             # — has no reason to consult its lens, and an unconsulted lens
             # observes as an empty tree, which `observed_params` cannot tell
@@ -3062,7 +3055,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     end
 
     # `m` is the subcircuit's multiplicity, not a value the body reads by name:
-    # it scales every device inside (see `_mfactor_expr!`). Accept it whether or
+    # it scales every device inside (see `_mfactor_value!`). Accept it whether or
     # not the `.subckt` line declares a default, so `X1 a b sub m=5` reaches a
     # subcircuit that never mentions `m`; a declared default flows through the
     # ordinary parameter path below and this adds nothing.
@@ -3139,7 +3132,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
             $(inherited_param_exprs...)
             $(param_resolution_exprs...)
             # This instance's multiplicity composes with every enclosing one, so
-            # devices inside stamp at the product (see `_mfactor_expr!`).
+            # devices inside stamp at the product (see `_mfactor_value!`).
             _mna_m_ = _mna_m_ * m
             $body
             return nothing
