@@ -83,7 +83,7 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Noise N3 rest (input-referral): `noise!(…; input=:V1)`, `ns[:inoise]`, `total_noise(…; referred=:input)`
 - [x] UX/design: netlist `.param` overrides reach the netlist — design: `doc/parameter_overrides.md`
 - [x] UX/design: `test/design_flow.jl` walks an NMOS common-source stage op → DC → AC → transient → noise
-- [ ] Finish the override design: reach raw device instance parameters (`r1=(r=2e3,)`) through the lens — design: `doc/parameter_overrides.md`
+- [x] Finish the override design: raw device instance parameters (`r1=(r=2e3,)`, `var"x1.m1.w"`) reach the lens — design: `doc/parameter_overrides.md` §1
 - [x] Diagnose unknown override names — design: `doc/parameter_overrides.md` §2
 - [x] Bug: a deck declaring nothing (no `.param`, no subckt) observed as unobservable, so every override on it passed silently — `doc/FINDINGS.rst` 4
 - [x] Codegen: a deck is a namespace — each loaded netlist gets its own module — design: `doc/parameter_overrides.md` §3

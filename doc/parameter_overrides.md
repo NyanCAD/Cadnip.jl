@@ -66,34 +66,143 @@ wrapped in a subcircuit whose W/L are formal parameters as in
 `test/testpdk/testpdk.spice`, sweeps correctly including overriding a value the
 instance line spells out, two levels down.
 
-An override that names nothing no longer passes silently (§2). One piece of the
-design is still unimplemented — device instance parameters (§1). The sections
-after those are adjacent defects, not parts of this design: §3, §4 and §5 are
-independent bugs that happened to surface nearby, all since fixed and kept here
-for the reasoning.
+An override that names nothing no longer passes silently (§2), and device
+instance parameters reach the lens (§1). The sections after those are adjacent
+defects, not parts of this design: §3, §4 and §5 are independent bugs that
+happened to surface nearby, all since fixed and kept here for the reasoning.
 
-## 1. Raw device instance parameters are not overridable (unfinished here)
+## 1. Raw device instance parameters (done)
 
-`alter(c; var"r1.r"=2e3)`, `r1=(r=2e3,)` and `var"r1.params.r"` are all silently
-ignored. The namespace rule above already accommodates them — a group under an
-instance name is that instance's scope — but codegen never consults the lens at
-device sites.
+`alter(c; var"r1.r"=2e3)` and `r1=(r=2e3,)` used to be silently ignored. The
+namespace rule above already accommodated them — a group under an instance name
+is that instance's scope — codegen just never consulted the lens at device
+sites. It does now: a device line is a scope like any other, and the same
+`getproperty`-then-call it uses for a `.subckt` instance is what a device gets.
 
-Narrower than it looks: the PDK wrapper-subcircuit path above already covers the
-W/L case, so this only bites *raw* device lines in hand-written netlists
-(`M1 d g 0 0 nch w=20u l=1u`).
+### What a device declares
 
-Costlier than it looks: 17 `cg_mna_instance!` methods and ~57 sites where a value
-or parameter expression is built, so it wants a shared helper rather than a hook
-per site, and a per-device lens lookup inflates generated code for every device —
-on c6288 (212k devices) compile time is already a known problem. Gate on the
-zero-alloc transient tests *and* c6288 build time, not just the vacask
-benchmarks.
+The knobs are what the card *resolves*, which is not the same as what the model
+has fields for:
 
-Prior art: the commented-out CedarSim test in `test/basic.jl` ("device == param")
-shows device parameters were in the lens tree by design (`i1=(dc=-1,)`,
-`rload=(r=2000.0,)`), and the netlist-*text* `alter(io, ast; r1=(r=4.0,))` still
-honours that spelling.
+| device | declares |
+|---|---|
+| R / C / L (SPICE and Spectre) | `r` / `c` / `l`, `m` |
+| V / I | `acmag`, `acphase`, `dc`, and a SIN/PULSE card's arguments under their SPICE names (`vo va freq td theta phase`, `v1 v2 td tr tf pw per`) |
+| Spectre `vsource`/`isource` | `dc`, `mag`, `phase`, plus `vo va freq` at `type=sine` |
+| E / G / H / F, Spectre `vcvs`/`vccs` | `gain` / `gm` / `rm` / `gain` |
+| M / Q / D / N (model cards), and a VA module instantiated as `X1 … PSP103VA W=1u` | every instance parameter the line spells out, plus `m` |
+
+A B (behavioral) source is the one device with no knobs: its value *is* an
+expression, and the names in it are `.param`s, which the existing path already
+reaches.
+
+`acmag`/`acphase` are declared even by a card that carries no `AC` spec, at
+zero — so an override can *introduce* an excitation where the netlist has none,
+which is what an `.ac` sweep of a transient testbench wants. `dc` is declared
+whenever the card spells it, and additionally when there is no transient
+function to derive it from; on a SIN/PULSE/PWL card with no explicit `DC`, the
+DC value follows the *resolved* offset (`vo`, `v1`, the first PWL point) rather
+than shadowing it, so overriding the offset moves both.
+
+The line that had to be drawn is the model-card one. A MOSFET has hundreds of
+parameters and the card names four; the other 200 have no *default* codegen
+could hand the lens, because they live in the model struct and are only known
+once the card is resolved. Worse, `setproperties` silently ignores a kwarg that
+is not a field, so routing an unspelled name through would have been a no-op
+with no error — the exact failure this whole path exists to prevent. So a
+parameter the card leaves at the model's default is not a knob, and spelling it
+on the line (`M1 … nch w=1u`) is how you make it one. The PDK idiom — devices
+wrapped in a subcircuit whose W/L are formal parameters — was never affected
+either way.
+
+Two knobs are deliberately *not* per-point: a SPICE `PWL(...)` list and a
+Spectre `wave=[...]` are positional vectors, not named parameters, so only the
+source's `dc` and AC phasor are reachable on a PWL card.
+
+`m` is a knob on every device, and it is the one that has to be taken apart:
+`_mfactor_expr!` emits the card's `m` *times* `_mna_m_`, the enclosing
+subcircuit multiplicity, and the lens overrides only the first. Hence
+`_mfactor_value!` — the card's own `m` — with the `* _mna_m_` moved to the use
+site.
+
+### The generated shape, and what it costs
+
+One lens call per device, with the netlist's own values as the defaults, so the
+override outranks the card exactly as it outranks a `.subckt` default:
+
+```julia
+let var"*dev#r1" = Base.getproperty(var"*lens#", :r1; type=:device)(; r = rtop, m = 1.0)
+    stamp!(Resistor(getfield(var"*dev#r1", :r) / (getfield(var"*dev#r1", :m) * _mna_m_)), …)
+end
+```
+
+A `let` rather than a statement, because an instance defined under an `.if` is
+emitted as `cond && <expr>` and has to stay one expression.
+
+The worry recorded here beforehand was cost: ~17 `cg_mna_instance!` methods and
+a per-device lens lookup inflating generated code for every device, with c6288
+(212k devices) already a known compile-time problem. Half of that was cheaper
+than feared and half of it is real.
+
+The methods were cheap: a shared helper (`cg_device_params!`) and a mechanical
+edit each, not a hook per value site.
+
+The generated code is not free, and the measurement is the useful part. Two
+2000-element RC ladders, same 2002-variable system, one written flat and one as
+2000 instances of a two-device `.subckt`:
+
+| flat: 4002 raw device lines | before | after | |
+|---|---|---|---|
+| expr nodes | 424381 | 696565 | +64% |
+| source chars | 5362633 | 6626049 | +24% |
+| eval (s) | 9.8 | 15.6 | +59% |
+| build + assemble (s) | 41.2 | 53.5 | +30% |
+| first `dc!` (s) | 76.4 | 102.7 | +34% |
+
+| hierarchical: 2 device lines, 2000 instances | before | after | |
+|---|---|---|---|
+| expr nodes | 260570 | 260800 | +0.09% |
+| eval (s) | 3.29 | 3.36 | noise |
+| build + assemble (s) | 22.2 | 22.9 | +3% |
+| first `dc!` (s) | 48.967 | 48.965 | — |
+
+So the cost is ~68 expression nodes per device *line in the source text*, and
+nothing per *instance*: a `.subckt` body is emitted once and called 2000 times.
+That is what settles the c6288 question the warning was really about — c6288 is
+2419 gates built from ten `.subckt` definitions whose devices are all
+subcircuit calls, so it has no raw device lines at all and pays nothing. A flat
+netlist with thousands of device lines pays a third more compile time, which is
+the honest price of the feature; it is a shape a generated deck can have, and
+worth knowing before generating one.
+
+Steady state is untouched: with a `ParamLens` carrying no override for `r1`,
+`getproperty` returns an `IdentityLens` — `get(nt, :r1, (;))` on a `NamedTuple`
+with a constant key constant-folds — and `IdentityLens(; kwargs...)` is
+`values(kwargs)`, so the whole thing is the defaults tuple the card already
+built. `test/mna/pcnr.jl`'s `@allocated rebuild() == 0` still holds, and the
+hierarchical `dc!` above is identical to the digit.
+
+The same call is what makes a device *observable*: with a `ParamObserver` in
+place of the lens it records the device and its parameter names, which is what
+lets §2's checker say `r1` declares `m, r` rather than reporting `r1` as an
+unknown name. `type=:device` is passed so the diagnostic can say "a device
+instance" rather than "a subcircuit instance".
+
+One consequence worth naming: the top-level builder now binds its lens
+unconditionally. `needs_lens` used to gate it on the deck declaring a `.param`
+or instantiating a subcircuit; every device consults the lens now, so that gate
+only decides whether the scope's *own* parameters go through it.
+
+Contracts in `test/params.jl` (`"device instance parameter overrides"`): a
+resistor's value in both spellings and against a `.param` the card reads, `m`,
+a source's `dc` and `acmag`, a controlled source's gain, a device parameter as a
+sweep axis, a device one level down inside a subcircuit
+(`var"x1.r1.r"`), and an unspelled model parameter rejected.
+
+Prior art, still honoured: the netlist-*text* `alter(io, ast; r1=(r=4.0,))`
+always accepted this spelling, and the commented-out CedarSim test in
+`test/basic.jl` ("device == param") shows device parameters were in the lens
+tree by design (`i1=(dc=-1,)`, `rload=(r=2000.0,)`).
 
 ## 2. Unknown override names are diagnosed (done)
 

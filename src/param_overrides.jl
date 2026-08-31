@@ -98,11 +98,19 @@ end
 _declares(own, name) = own !== nothing && haskey(own, name)
 _instantiates(obs, name) = name !== :params && haskey(obs, name)
 
+# A device line is a scope too (`cg_device_params!`), and it is recorded with
+# `type = :device` so the message can say which kind of instance it is.
+function _child_kind(obs::Dict, name::Symbol)
+    child = get(obs, name, nothing)
+    child isa ParamObserver && getfield(child, :type) === :device ?
+        "a device instance" : "a subcircuit instance"
+end
+
 function _check_param(obs::Dict, own, name::Symbol, path::Vector{Symbol})
     _declares(own, name) && return nothing
     if _instantiates(obs, name)
         _override_error(path, name,
-            "`$name` names a subcircuit instance, not a parameter",
+            "`$name` names $(_child_kind(obs, name)), not a parameter",
             "Write `$(_spell(path, name)) = (inner_param = value,)` to set a parameter inside it")
     end
     _unknown_error(own, path, name)
@@ -119,11 +127,14 @@ function _check_child(obs::Dict, own, name::Symbol, sub::NamedTuple, path::Vecto
     _unknown_error(own, path, name)
 end
 
-_spell(path::Vector{Symbol}, name::Symbol) =
-    isempty(path) ? string(name) : string(join(path, "."), ".", name)
-
+# The scope an unknown name was looked up in. A device line is an instance like
+# any other, so the wording is the same; what differs is what it declares, which
+# `_unknown_error` lists.
 _scope_desc(path::Vector{Symbol}) =
     isempty(path) ? "the top level" : "instance `$(join(path, "."))`"
+
+_spell(path::Vector{Symbol}, name::Symbol) =
+    isempty(path) ? string(name) : string(join(path, "."), ".", name)
 
 _override_error(path, name, what, hint) =
     throw(ArgumentError(string(

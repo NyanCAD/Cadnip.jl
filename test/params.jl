@@ -10,7 +10,7 @@ using Cadnip.MNA: Resistor, Capacitor, VoltageSource
 
 using Cadnip.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using Cadnip: ParamLens, IdentityLens
-using Cadnip: dc!, CircuitSweep, Sweep
+using Cadnip: dc!, ac!, CircuitSweep, Sweep
 
 # Loading a Makie backend activates CadnipMakieExt, which defines Cadnip.explore.
 import CairoMakie
@@ -551,12 +551,14 @@ end
     msg = errmsg(() -> MNACircuit(divider_ckt; vin=(x=1.0,)))
     @test occursin("is a parameter of this scope", msg) && occursin("vin = value", msg)
 
-    # Device instance parameters are the one documented gap
-    # (doc/parameter_overrides.md §1). Devices never consult the lens, so they
-    # are simply absent from the observed tree and read as unknown names — the
-    # override is still rejected rather than quietly ignored.
-    @test_throws ArgumentError MNACircuit(divider_ckt; r1=(r=2e3,))
-    @test_throws ArgumentError MNACircuit(divider_ckt; r1=2e3)
+    # A device line is a scope too, so a name it does not declare is diagnosed
+    # the same way — and the message names the device rather than a subcircuit.
+    msg = errmsg(() -> MNACircuit(divider_ckt; r1=(rr=2e3,)))
+    @test occursin("r1.rr", msg)
+    @test occursin("instance `r1`", msg)
+    @test occursin("m, r", msg)
+    msg = errmsg(() -> MNACircuit(divider_ckt; r1=2e3))
+    @test occursin("a device instance", msg) && occursin("r1 = (inner_param = value,)", msg)
 
     # A deck that declares nothing is still a deck. "Declares an empty set" and
     # "cannot be observed" are opposite verdicts — check everything vs check
@@ -568,9 +570,13 @@ end
     @test occursin("the top level", msg)
     @test occursin("no parameters at all", msg)
     @test_throws ArgumentError alter(MNACircuit(bare_ckt); vbais=1.0)
-    @test_throws ArgumentError alter(MNACircuit(bare_ckt); r1=(r=2e3,))
-    @test_throws ArgumentError alter(MNACircuit(bare_ckt); var"r1.r"=2e3)
-    @test_throws ArgumentError alter(MNACircuit(bare_ckt); v1=(dc=2.0,))
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); r1=(rr=2e3,))
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); var"r1.rr"=2e3)
+    @test_throws ArgumentError alter(MNACircuit(bare_ckt); v1=(dcc=2.0,))
+    # ...while the names its device lines *do* declare are reachable, which is
+    # the only knob a deck with no `.param` at all has.
+    @test dc!(alter(MNACircuit(bare_ckt); r1=(r=3e3,)))[:out] ≈ 1.25
+    @test dc!(alter(MNACircuit(bare_ckt); var"v1.dc"=10.0))[:out] ≈ 5.0
     # The sweep axis is the case this matters most for: unchecked, it came back
     # a flat curve — every point at the netlist default — rather than an error.
     @test_throws ArgumentError dc!(CircuitSweep(bare_ckt, Sweep(vbais=[1.0, 2.0])))
@@ -659,6 +665,77 @@ end
 
     # A `.subckt` default the instance line does not set stays overridable.
     @test dc!(MNACircuit(hier_ckt; x1=(r2val=3e3,)))[:vout] ≈ 1.8
+end
+
+#==============================================================================#
+# Test: device instance parameters
+#
+# A device line is a scope like any other — `r1 = (r = 2e3,)` addresses R1's
+# resistance the way `x1 = (rv = 2e3,)` addresses a parameter inside X1. What it
+# declares is what the card resolves: the principal value under its SPICE name,
+# every instance parameter the line spells out, and `m`.
+#==============================================================================#
+
+const device_ckt = sp"""
+.param rtop=1k
+V1 in 0 DC 3 AC 1
+R1 in out {rtop}
+R2 out 0 1k m=2
+C1 out 0 1n
+E1 buf 0 out 0 2.0
+"""i
+
+# A raw device inside a subcircuit: the device scope sits under the instance.
+const device_hier_ckt = sp"""
+.subckt dstage a out
+R1 a out 1k
+R2 out 0 1k
+.ends
+V1 in 0 DC 3
+X1 in vout dstage
+"""i
+
+@testset "device instance parameter overrides" begin
+    # Baseline: 3V across 1k + 500 (R2 is two 1k in parallel).
+    @test dc!(MNACircuit(device_ckt))[:out] ≈ 1.0
+
+    # The principal value of a two-terminal device, whether the card spells it
+    # as a bare value or the deck computes it from a `.param`.
+    @test dc!(MNACircuit(device_ckt; r1=(r=2e3,)))[:out] ≈ 0.6
+    @test dc!(alter(MNACircuit(device_ckt); var"r1.r"=2e3))[:out] ≈ 0.6
+    @test dc!(MNACircuit(device_ckt; params=(rtop=2e3,)))[:out] ≈ 0.6
+    # The override outranks the `.param` the card reads, exactly as it outranks
+    # a value an instance line spells out.
+    @test dc!(MNACircuit(device_ckt; rtop=2e3, r1=(r=1e3,)))[:out] ≈ 1.0
+
+    # Multiplicity is a knob of its own: R2 back to a single 1k halves the tap.
+    @test dc!(MNACircuit(device_ckt; r2=(m=1,)))[:out] ≈ 1.5
+
+    # A source's DC value, and the AC excitation it carries.
+    @test dc!(MNACircuit(device_ckt; v1=(dc=6.0,)))[:out] ≈ 2.0
+    @test Cadnip.freqresp(ac!(MNACircuit(device_ckt; v1=(acmag=2.0,))), :out, [1.0]) ≈
+          2 .* Cadnip.freqresp(ac!(MNACircuit(device_ckt)), :out, [1.0])
+
+    # A controlled source's gain.
+    @test dc!(MNACircuit(device_ckt))[:buf] ≈ 2.0
+    @test dc!(MNACircuit(device_ckt; e1=(gain=3.0,)))[:buf] ≈ 3.0
+
+    # A device parameter is a sweep axis like any other.
+    cs = CircuitSweep(device_ckt, Sweep(var"r1.r" = [1e3, 2e3]))
+    @test [sol[:out] for (_, sol) in dc!(cs)] ≈ [1.0, 0.6]
+
+    # A capacitor is a knob even though DC cannot see it — the name resolves.
+    @test dc!(MNACircuit(device_ckt; c1=(c=2e-9,)))[:out] ≈ 1.0
+
+    # One level down, the device scope hangs off the instance scope.
+    @test dc!(MNACircuit(device_hier_ckt))[:vout] ≈ 1.5
+    @test dc!(MNACircuit(device_hier_ckt; x1=(r1=(r=3e3,),)))[:vout] ≈ 0.75
+    @test dc!(alter(MNACircuit(device_hier_ckt); var"x1.r1.r"=3e3))[:vout] ≈ 0.75
+
+    # A parameter the card leaves at the model's default is not a knob: there is
+    # no value codegen could hand the lens as its default. Spell it on the line
+    # to make it one.
+    @test_throws ArgumentError MNACircuit(device_ckt; r1=(w=1e-6,))
 end
 
 @testset "subcircuits inherit the parent's .param" begin

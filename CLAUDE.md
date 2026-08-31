@@ -337,12 +337,19 @@ lens reads, and `compact_params` maps back (it is what `ParamObserver` reports,
 so an observed tree can be handed straight back as an override). Both are
 `@generated`, so the whole thing folds away at compile time.
 
+A device line is a scope too, under the same rule: `r1=(r=2k,)` /
+`var"r1.r"=2k` addresses instance R1's resistance, `m1=(w=…)` a MOSFET's width,
+`v1=(dc=…)`/`v1=(acmag=…)` a source's excitation, and `m` is a knob on every
+device. What a device declares is what its card resolves — the principal value,
+every instance parameter the line spells out, and `m`; a parameter left at the
+model's default is not a knob, so spell it on the line (`M1 … nch w=1u`) to make
+it one.
+
 An override outranks the netlist: a subcircuit parameter the instance line
 spells out (`X1 a b divider r1val=2k`) is still reachable from `alter` and from
-a sweep axis. Two things are *not* reachable — device instance parameters
-(`r1=(r=2k,)`, `m1=(w=…)` — parameterize the netlist with a `.param` instead),
-and a name no scope declares at all, i.e. a typo — and both now throw at
-construction instead of running as a no-op. Nothing is tabulated for this: the
+a sweep axis, and so is a device value the card computes from a `.param`. A name
+no scope declares at all — i.e. a typo — throws at construction instead of
+running as a no-op. Nothing is tabulated for this: the
 names come from building once with a `ParamObserver` in place of the `ParamLens`
 (`src/param_overrides.jl`), which every generated builder accepts. A
 hand-written builder that reads `params` as a plain NamedTuple throws on the
