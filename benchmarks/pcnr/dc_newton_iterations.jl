@@ -432,4 +432,9 @@ function main()
     end
 end
 
-main()
+# Only run the full benchmark when invoked as a script; `include`-ing this file
+# (e.g. from a baseline-capture harness) reuses the circuit builders without
+# triggering the run.
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
