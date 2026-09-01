@@ -224,25 +224,16 @@ _option_value_node(p::SNode{SP.TempStatement}) = p.temp
 The `.option` names that name an `MNASpec` field, and so rebind it for the deck
 that carries the card (see `codegen_mna!`). `temp` is the deck's analysis
 temperature; the rest are the `\$simparam` values a Verilog-A model reads —
-`gmin` also stamps the internal-node conductance the VA lowering adds.
+`gmin` also stamps the internal-node conductance the VA lowering adds, and
+`scale` is the geometry scale factor each device model applies to the instance
+dimensions it has.
 
-Three `MNASpec` fields are deliberately *not* here. `mode` and `time` belong to
+Four `MNASpec` fields are deliberately *not* here. `mode` and `time` belong to
 the analysis being run, not to the deck. `gshunt` and `srcFact` are the DC
 homotopy's working state: `solve_dc` rewrites them per continuation step, so a
 card value would be overwritten rather than honoured.
 """
-const SPEC_OPTIONS = (:temp, :gmin, :tnom, :abstol, :reltol, :vntol, :iabstol)
-
-"""
-    UNIMPLEMENTED_OPTIONS
-
-Options that change what a deck simulates to but that the MNA backend does not
-implement, mapped to the value at which the card is a no-op. Setting one to
-anything else warns at load time rather than being silently dropped
-(`doc/FINDINGS.rst` finding 2). `scale` multiplies every device's geometry;
-nothing consumes it today.
-"""
-const UNIMPLEMENTED_OPTIONS = (scale = 1.0,)
+const SPEC_OPTIONS = (:temp, :gmin, :tnom, :abstol, :reltol, :vntol, :iabstol, :scale)
 
 """
     _is_declared_param(state, id) -> Bool
@@ -2714,20 +2705,6 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[],
     end
     if !isempty(spec_kws)
         push!(block.args, :(spec = $(MNA).MNASpec(spec; $(spec_kws...))))
-    end
-
-    # An option we recognize as result-affecting but do not implement is worth a
-    # word: dropping it silently means a deck simulates to something other than
-    # what it says. Skipped when the card sets the value that makes it a no-op
-    # (`.option scale=1`), which is what a PDK that spells the default out has.
-    for (name, neutral) in pairs(UNIMPLEMENTED_OPTIONS)
-        haskey(state.sema.options, name) || continue
-        valnode = _option_value_node(state.sema.options[name][end][2])
-        valnode === nothing && continue
-        value = cg_expr!(state, valnode)
-        value isa Number && value == neutral && continue
-        @warn "`.option $name` is parsed but not implemented by the MNA backend; \
-               it does not affect this simulation" value
     end
 
     # Record the resolved spec on the context, so an analysis that evaluates a

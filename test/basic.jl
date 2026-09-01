@@ -883,6 +883,32 @@ const _OPT_DEFAULT_CIRCUIT, _OPT_GMIN_CIRCUIT = cd(_OPT_FIXTURE_DIR) do
      MNACircuit(_OPT_GMIN_DECK * ".option gmin=1e-3\n"; lang=:spice))
 end
 
+# `.option scale` is the element geometry scale factor. Cadnip does not rescale
+# anything itself: the factor rides in the spec as `$simparam("scale")` and each
+# model applies it to the dimensions it actually has, which is the only place
+# that knows a `w` is a length and an `ad` an area. So the check is not that the
+# factor arrives, but that a real model comes out the same device either way.
+#
+# 20/1 at scale=1e-6 and 20u/1u are the same transistor. W/L is scale-invariant,
+# so gm cannot tell them apart; the gate-source capacitance can, since the
+# overlap term is `cgso·W` in absolute metres.
+const _OPT_SCALED_MOS = """
+* geometry through .option scale
+%OPTION%.model nch nmos level=1 vto=0.7 kp=100u cgso=1e-9 cgdo=1e-9
+Vdd d 0 DC 2
+Vg  g 0 DC 1.2
+M1 d g 0 0 nch w=20 l=1
+"""
+# The first line of a SPICE deck is its title, so the card goes after it.
+_opt_deck(card="") = replace(_OPT_SCALED_MOS, "%OPTION%" => card)
+const _OPT_SCALE_CIRCUIT = MNACircuit(_opt_deck(".option scale=1e-6\n"); lang=:spice)
+const _OPT_UNSCALED_CIRCUIT = MNACircuit(_opt_deck(); lang=:spice)
+const _OPT_METRES_CIRCUIT = MNACircuit(replace(_opt_deck(), "w=20 l=1" => "w=20u l=1u");
+                                       lang=:spice)
+# No card at all — the caller sets the factor on the spec it passes in.
+const _OPT_SPEC_SCALE_CIRCUIT = MNACircuit(_opt_deck(); lang=:spice,
+                                           spec=MNASpec(scale=1e-6))
+
 # Every spec option at once, with a `.temp` card alongside the `.option` ones,
 # against a caller spec whose other fields must survive. Top level, so the
 # builder is callable directly below (`MNACircuit(code)` eval's it).
@@ -934,21 +960,36 @@ R1 vcc 0 1k
               (1e-11, 0.5, _OPT_MULTI_CIRCUIT.spec.mode)
     end
 
-    @testset "an unimplemented result-affecting option warns" begin
-        # `.option scale=1` is the no-op every PDK that spells the default out
-        # carries; anything else changes what the deck means and we drop it.
-        @test_logs min_level=Base.CoreLogging.Warn MNACircuit("""
-        * scale=1 is a no-op
-        .option scale=1
-        V1 vcc 0 DC 1
-        R1 vcc 0 1k
-        """; lang=:spice)
-        @test_logs (:warn, r"`.option scale` is parsed but not implemented") min_level=Base.CoreLogging.Warn MNACircuit("""
-        * scale=2 is not
-        .option scale=2
-        V1 vcc 0 DC 1
-        R1 vcc 0 1k
-        """; lang=:spice)
+    @testset "the geometry scale factor reaches the devices" begin
+        scaled   = dc!(_OPT_SCALE_CIRCUIT)
+        unscaled = dc!(_OPT_UNSCALED_CIRCUIT)
+        metres   = dc!(_OPT_METRES_CIRCUIT)
+
+        # `w=20 l=1` under `.option scale=1e-6` is the same device as
+        # `w=20u l=1u` with no card — down to the overlap capacitance, which is
+        # the part that carries an absolute length.
+        @test scaled[:m1_cgs] ≈ metres[:m1_cgs] rtol=1e-12
+        @test scaled[:i_m1_d] ≈ metres[:i_m1_d] rtol=1e-12
+
+        # And the card is doing the work: read as metres, the same line is a
+        # 20 m wide transistor, whose capacitance is larger by at least the
+        # 1e6 the overlap term picks up (the Meyer term goes as the square).
+        @test unscaled[:m1_cgs] ≥ 1e6 * scaled[:m1_cgs]
+
+        # W/L is scale-invariant, which is why the drain current alone cannot
+        # tell the two decks apart — the geometry check has to be a capacitance.
+        @test unscaled[:i_m1_d] ≈ scaled[:i_m1_d] rtol=1e-9
+
+        # The resolved factor is on the context like every other spec option,
+        # and stays out of the caller's `circuit.spec`.
+        ctx = MNAContext()
+        Base.invokelatest(_OPT_SCALE_CIRCUIT.builder, _OPT_SCALE_CIRCUIT.params,
+                          _OPT_SCALE_CIRCUIT.spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
+        @test Cadnip.MNA.stamped_spec(ctx).scale == 1e-6
+        @test _OPT_SCALE_CIRCUIT.spec.scale == 1.0
+
+        # A caller can set it without a card at all.
+        @test dc!(_OPT_SPEC_SCALE_CIRCUIT)[:m1_cgs] ≈ scaled[:m1_cgs] rtol=1e-12
     end
 end
 

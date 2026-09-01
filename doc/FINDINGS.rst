@@ -154,7 +154,7 @@ dropped.
 *Status*: the dead ``codegen!`` path is gone (``doc/codegen_unification.md``
 §5), and the practical effect is mostly fixed. ``codegen_mna!`` now threads
 every option that names an ``MNASpec`` field —
-``temp``/``gmin``/``tnom``/``abstol``/``reltol``/``vntol``/``iabstol``
+``temp``/``gmin``/``tnom``/``abstol``/``reltol``/``vntol``/``iabstol``/``scale``
 (``SPEC_OPTIONS`` in ``src/spc/codegen.jl``) — through one ``MNASpec(spec;
 ...)`` rebind, so ``.option gmin=1e-3`` reaches the devices that read
 ``$simparam("gmin")`` and the internal-node conductance the Verilog-A lowering
@@ -163,10 +163,13 @@ the DC homotopy's working state (``solve_dc`` rewrites them per continuation
 step, so a card would be overwritten, not honoured).  What the deck resolved to
 is readable back off the context it stamped into (``stamped_spec``).
 
-``.option scale=`` is still not implemented — nothing consumes a geometry scale
-factor — but it no longer disappears quietly: a value other than the no-op ``1``
-warns at load time (``UNIMPLEMENTED_OPTIONS``).  Options that name nothing in
-either list (``.option post``, ``.option method=trap``) are still ignored
+``.option scale=`` is implemented too, and needed no geometry table of its own.
+The SPICE-distilled models already read ``$simparam("scale", 1)`` and apply it
+where it belongs (``mos1.va``: ``MOS1l = l*cpscale``, ``MOS1drainArea =
+ad*cpscale*cpscale``, ``MOS1w = w*cpscale``), so adding ``scale`` to ``MNASpec``
+and to ``SPEC_OPTIONS`` was the whole change — the ``UNIMPLEMENTED_OPTIONS``
+warning it used to raise is gone with it.  Options that name nothing in
+``SPEC_OPTIONS`` (``.option post``, ``.option method=trap``) are still ignored
 silently, as a simulator that does not need them should.
 
 3. ``temper()`` in a ``.param`` sees no temperature at all

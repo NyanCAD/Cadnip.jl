@@ -274,6 +274,7 @@ unconditional way `.temp` does:
 | `gmin` | the minimum conductance device models stamp, and `$simparam("gmin")` |
 | `tnom` | the nominal temperature model parameters are specified at |
 | `abstol`, `reltol`, `vntol`, `iabstol` | the tolerances a Verilog-A model reads via `$simparam` |
+| `scale` | the element geometry scale factor, as `$simparam("scale")` |
 
 ```@example analyses
 probe = MNACircuit(sp"""
@@ -295,10 +296,35 @@ with, and it is where `noise!` reads its temperature from.
 The tolerances a solver actually converges against are arguments of the analysis
 — `tran!`'s `abstol`/`reltol` kwargs, `CedarDCOp(abstol=…)` for the operating
 point — not deck options; the `MNASpec` fields of those names exist for
-Verilog-A models to read through `$simparam`. Options
-outside the table are ignored, with one exception: `.option scale` (a geometry
-scale factor, unimplemented) warns when set to anything but `1`, rather than
-being dropped silently.
+Verilog-A models to read through `$simparam`. Options outside the table are
+ignored, as a simulator that does not need them should.
+
+`.option scale` deserves a word, because an extracted layout netlist usually
+carries one (`.option scale=1u`, after which every `w=` and `l=` on a device
+line is a number of microns). Cadnip does not rescale device lines itself. The
+factor travels in the spec and each device model applies it to the geometry it
+has — a MOSFET scales `l` and `w` by it, `ad` and `as` by its square, and leaves
+a dimensionless area factor alone — which is the only place that knows which
+instance parameter is a length. Every SPICE-distilled model in
+`VADistillerModels` reads it, and a handwritten Verilog-A module gets it the
+same way, from `$simparam("scale", 1)`:
+
+```@example analyses
+using VADistillerModels        # supplies the `nmos level=1` model card
+
+scaled = MNACircuit(sp"""
+* w and l are read as microns
+.option scale=1u
+.model nch nmos level=1 vto=0.7 kp=100u cgso=1e-9
+Vdd d 0 DC 2
+Vg  g 0 DC 1.2
+M1 d g 0 0 nch w=20 l=1
+""")
+
+# the gate-source capacitance carries an absolute width (cgso·W), so it is the
+# part of the operating point that can tell 20 µm from 20 m
+dc!(scaled)[:m1_cgs]
+```
 
 ## Sweeping an analysis
 

@@ -20,9 +20,17 @@ Passed explicitly to circuit builders (not via ScopedValue) to enable JIT optimi
 - `temp::Float64`: Temperature in Celsius (default: 27.0)
 - `mode::Symbol`: Analysis mode - `:dcop`, `:tran`, `:tranop`, `:ac` (default: :tran)
 - `time::T`: Current simulation time for transient sources (default: 0.0)
+- `scale::Float64`: Element geometry scale factor (default: 1.0)
 
 The time field is parameterized to support ForwardDiff automatic differentiation
 during transient analysis with Rosenbrock ODE solvers.
+
+`scale` is the SPICE `.option scale` factor. It is not applied here: it is
+handed to the devices as `\$simparam("scale")`, and each model scales the
+instance geometry it actually has — `l`/`w` linearly, `ad`/`as` quadratically,
+`pd`/`ps` linearly for a MOSFET, and nothing at all for a dimensionless area
+factor. The SPICE-distilled models in `VADistillerModels` all read it; a
+handwritten Verilog-A module reads it the same way if it wants to.
 
 # Example
 ```julia
@@ -48,6 +56,7 @@ Base.@kwdef struct MNASpec{T<:Real}
     reltol::Float64 = 1e-3     # Relative tolerance
     vntol::Float64 = 1e-6      # Voltage tolerance
     iabstol::Float64 = 1e-12   # Current absolute tolerance
+    scale::Float64 = 1.0       # Element geometry scale factor (`.option scale`)
 end
 
 export MNASpec
@@ -70,8 +79,10 @@ MNASpec(spec; gmin=1e-9, tnom=25.0)   # several at once
 """
 MNASpec(base::MNASpec; temp=base.temp, mode=base.mode, time=base.time,
         gmin=base.gmin, gshunt=base.gshunt, srcFact=base.srcFact, tnom=base.tnom,
-        abstol=base.abstol, reltol=base.reltol, vntol=base.vntol, iabstol=base.iabstol) =
-    MNASpec(; temp, mode, time, gmin, gshunt, srcFact, tnom, abstol, reltol, vntol, iabstol)
+        abstol=base.abstol, reltol=base.reltol, vntol=base.vntol, iabstol=base.iabstol,
+        scale=base.scale) =
+    MNASpec(; temp, mode, time, gmin, gshunt, srcFact, tnom, abstol, reltol, vntol,
+            iabstol, scale)
 
 """
     with_temp(spec::MNASpec, temp::Real) -> MNASpec
