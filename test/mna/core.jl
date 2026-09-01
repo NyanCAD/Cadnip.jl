@@ -1585,9 +1585,9 @@ using NyanVerilogAParser
         # temperature sweep or the `:dcop` rebind a DC sweep does internally.
         custom = MNASpec(temp=27.0, mode=:tran, gmin=1e-9, gshunt=1e-11,
                          srcFact=0.5, tnom=25.0, abstol=1e-15, reltol=1e-6,
-                         vntol=1e-9, iabstol=1e-15)
+                         vntol=1e-9, iabstol=1e-15, scale=1e-6)
         rest(s) = (s.gmin, s.gshunt, s.srcFact, s.tnom, s.abstol, s.reltol,
-                   s.vntol, s.iabstol)
+                   s.vntol, s.iabstol, s.scale)
         @test rest(with_temp(custom, 100.0)) == rest(custom)
         @test rest(with_mode(custom, :dcop)) == rest(custom)
 
@@ -1597,9 +1597,9 @@ using NyanVerilogAParser
         several = MNASpec(custom; temp=85.0, gmin=1e-6, tnom=40.0)
         @test (several.temp, several.gmin, several.tnom) == (85.0, 1e-6, 40.0)
         @test (several.mode, several.gshunt, several.srcFact, several.abstol,
-               several.reltol, several.vntol, several.iabstol) ==
+               several.reltol, several.vntol, several.iabstol, several.scale) ==
               (custom.mode, custom.gshunt, custom.srcFact, custom.abstol,
-               custom.reltol, custom.vntol, custom.iabstol)
+               custom.reltol, custom.vntol, custom.iabstol, custom.scale)
 
         # The `time` field's type is the one a Rosenbrock transient fills with a
         # ForwardDiff dual, so it has to survive a rebind that does not name it.

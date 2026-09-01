@@ -122,5 +122,5 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] UX: generated code carries no netlist source positions, so a stamp error points at `codegen.jl` — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
-- [ ] Features: `.option scale` (geometry scale factor) — nothing consumes it; needs every device's geometric parameters to scale
+- [x] Features: `.option scale` (geometry scale factor) — no geometry table needed: the models already read `$simparam("scale")`, so `scale` joins `MNASpec`/`SPEC_OPTIONS` — `doc/FINDINGS.rst` 2
 - [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"
