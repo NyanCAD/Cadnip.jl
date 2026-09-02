@@ -583,7 +583,32 @@ fills in only what the caller left at its default. Whether that is the right
 rule is a live argument (#275 decided against it for `temp`), but it is worth
 knowing the shape existed before re-deriving it.
 
-#### Lower priority: netlist introspection
+#### Lower priority: netlist introspection — ported
+
+**Done**, as `netlist(circuit)` in `src/circsummary.jl`, tests in
+`test/introspect.jl`. Read the sketch below for what it was; three things
+changed in the port.
+
+It is a *value*, not a lookup through the circuit. `MNACircuit` has fields of
+its own (`builder`, `params`, `spec`), so `circuit.r1` cannot be the netlist's
+namespace without one shadowing the other. `netlist(circuit)` returns a
+`NetlistIndex` that *is* the namespace, and nothing else: `nl.r1`, `nl[:r1]`,
+`keys(nl)`, and the struct's own fields deliberately unreachable through `.`,
+because a deck is free to name a device `title`.
+
+It holds no CST. The sketch kept `SNode`s and read the source out of them at
+print time, which keeps the whole parse tree alive for the life of the deck.
+The index is built once at codegen time and copies out what it prints —
+`Symbol`, `Int`, `String` — so the tree is still free to go when codegen
+returns. Measured on a 5000-device deck: 40 ms and 1.5 MiB against sema's own
+190 ms and 8 MiB, 9.4% of `make_mna_circuit`.
+
+`SemaResult.kind` turned out to be dead — never assigned, so every deck read
+back `SpectreCircuit`, `.sp` files included. `circuit_kind` (`src/spc/sema.jl`)
+now assigns it from the deck's own statements, which is what the index prints as
+the language, and the enum's `Mixed` member finally has a producer.
+
+The sketch, for the record:
 
 `query.jl` gave `circuit.r1` → an `SpRef` tagged `Param`/`Model`/`Subckt`/
 `Instance`/`SPNet`/`Ambiguous`, with a `show` that printed the defining netlist

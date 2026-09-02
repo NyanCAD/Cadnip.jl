@@ -223,6 +223,62 @@ Two `sp"..."` strings in the same *local* scope are the exception: a module
 cannot be defined in expression position, so that case is ordinary Julia
 redefinition in a scope you wrote.
 
+## What is in this deck?
+
+A netlist is text until it is loaded, and code afterwards — which is convenient
+for the simulator and awkward for you, because "what is `r1`?" is a question
+about the text. `netlist(circuit)` answers it: it is the deck's own namespace,
+as sema resolved it, with the card that defines each name.
+
+```@example netlists
+nl = netlist(divider)
+```
+
+Names are addressed with `.` or `[]`, case-insensitively as SPICE resolves them,
+and each one prints the line that defines it:
+
+```@example netlists
+nl.R1
+```
+
+There are five kinds of name in a deck — instances, parameters, models,
+subcircuits and nets — and each answers with what it has: a net has no defining
+card, so it reports its connections instead.
+
+```@example netlists
+nl.out
+```
+
+SPICE happily lets one name be several of these at once. That is not a corner
+case — a `.param x1` next to an `X1` instance line is the collision
+[Parameters and sweeps](@ref) has its own rule for — and the index is how you
+see that it is there:
+
+```@example netlists
+collision = netlist(MNACircuit(sp"""
+* a parameter and an instance sharing a name
+.param x1=2.0
+V1 vcc 0 DC 'x1'
+X1 vcc 0 rdiv
+.subckt rdiv a b
+R3 a b 1k
+.ends
+"""))
+
+collision.x1
+```
+
+A subcircuit is a namespace of its own, and the index nests the same way, so
+`R3` is reachable through the subcircuit that declares it rather than from the
+top level:
+
+```@example netlists
+collision.rdiv[:r3]
+```
+
+`netlist` needs a deck to read: it throws for a hand-written builder function,
+which has no cards to point at.
+
 ## Include directives and libraries
 
 The usual SPICE directives pull in external content, and paths resolve relative

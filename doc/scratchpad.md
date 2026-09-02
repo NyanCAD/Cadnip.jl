@@ -123,4 +123,4 @@ The most nebulous and least important at this stage: copying features from other
 - [ ] Bug: two simultaneously active conditional instances of one name stamp twice, silently — design: `doc/codegen_unification.md` §5 "Worth porting"
 - [x] Features: every `.option` naming an `MNASpec` field reaches the builder (`gmin`, `tnom`, the `$simparam` tolerances), recorded as `stamped_spec(ctx)`; `.option scale` stays unimplemented but warns — `doc/FINDINGS.rst` 2
 - [ ] Features: `.option scale` (geometry scale factor) — nothing consumes it; needs every device's geometric parameters to scale
-- [ ] UX: netlist introspection (`circuit.r1` → kind + defining line), sketched by the deleted `SpRef` — design: `doc/codegen_unification.md` §5 "Worth porting"
+- [x] UX: netlist introspection — `netlist(circuit).r1` → kind, nets and the defining card; `SemaResult.kind` was dead and now classifies the deck — `doc/codegen_unification.md` §5 "Worth porting"

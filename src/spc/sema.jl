@@ -654,9 +654,41 @@ function sema(n::SNode; imps = nothing, parse_cache=nothing, imported_hdl_module
         scope.parse_cache = parse_cache
     end
     scope.imported_hdl_modules = imported_hdl_modules
+    scope.kind = circuit_kind(n)
     sema!(scope, n)
     resolve_scopes!(scope)
     scope
+end
+
+"""
+    circuit_kind(n::SNode) -> CircuitKind
+
+Which language a deck is written in.
+
+The parser wraps a run of SPICE in one `SPICENetlistSource` statement, whatever
+started it — a `.sp` file, or a `simulator lang=spice` inside a Spectre deck —
+and leaves native Spectre statements at the top level. So the two are just the
+two shapes of statement, and a deck carrying both is `Mixed`. A `simulator`
+card is the switch, not content, and counts as neither.
+
+`SemaResult.kind` was never assigned before this — nothing wrote the field, so
+every deck kept the constructor's `SpectreCircuit` and `Mixed` had no producer
+at all, plain `.sp` files reading back as Spectre. It is what
+`netlist(circuit)` prints as the deck's language.
+"""
+function circuit_kind(n::SNode)
+    saw_spice = false
+    saw_spectre = false
+    for stmt in n.stmts
+        if isa(stmt, SNode{SPICENetlistSource})
+            saw_spice = true
+        elseif !isa(stmt, SNode{SC.Simulator})
+            saw_spectre = true
+        end
+    end
+    saw_spice && saw_spectre && return Mixed
+    saw_spice && return SPICECircuit
+    return SpectreCircuit
 end
 
 #=============================== Scope Resultion ==============================#
