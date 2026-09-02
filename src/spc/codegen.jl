@@ -3275,6 +3275,13 @@ end
 # Internal: codegen from a pre-built SemaResult. Separates AST parsing from
 # codegen so test infrastructure can pre-populate `sema_result.imported_hdl_modules`.
 function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
+    # What the deck declares, for `netlist(circuit)`. Taken before codegen gets
+    # to mutate the sema: `_propagate_toplevel_models!` below copies a
+    # parent-level `.model` card into every subcircuit that references it, and
+    # the index is supposed to report what the deck wrote, not what codegen
+    # needed.
+    index = netlist_index(sema_result)
+
     state = CodegenState(sema_result)
     subckt_semas = _subckt_sema_index(sema_result)
 
@@ -3311,6 +3318,10 @@ function _make_mna_circuit_with_sema(sema_result; circuit_name::Symbol=:circuit)
         # No import list. Everything generated code names is a `GlobalRef` or an
         # interpolated value — see `_baremodule_prelude` for what is left, which
         # is nothing on this path.
+
+        # Spliced as a value: the index holds only symbols, ints and strings, so
+        # the CST is still free to go once codegen is done.
+        const $(NETLIST_INDEX_BINDING) = $(index)
 
         # Top-level model factory functions (accessible by subcircuit builders and main circuit)
         $(model_defs...)
