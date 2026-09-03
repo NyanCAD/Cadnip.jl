@@ -224,6 +224,55 @@ ns = noise!(lowpass, :out; freqs=acdec(10, 1e3, 1e8), input=:V1)
 ns[:inoise][1], total_noise(ns; referred=:input)
 ```
 
+## DC sensitivity — `sens!`
+
+`sens!(circuit, output)` says how far `output` moves when a parameter moves —
+SPICE's `.sens v(out)`. It differentiates the operating point itself, through the
+implicit function theorem, so no parameter is ever re-solved for:
+
+```@example analyses
+biased = MNACircuit(sp"""
+* a divider whose two resistances are parameters
+.param rtop=1k
+.param rbot=3k
+V1 in 0 DC 1
+R1 in out rtop
+R2 out 0 rbot
+""")
+
+s = sens!(biased, :out)
+```
+
+The absolute column is `∂out/∂p` in output units per parameter unit; the `per %`
+column — `normalized_sensitivity` — is the same number scaled by the
+parameter's own value, which is what makes a 1 kΩ resistor and a 1 V supply
+comparable:
+
+```@example analyses
+s[:rtop], normalized_sensitivity(s, :rtop)
+```
+
+By default it covers every parameter the circuit declares: `.param` cards at the
+top level, each subcircuit's own parameters, and the instance parameters on an
+`X` line, spelled with the same dotted selectors `alter` uses (`x1.rv`). Narrow
+it with `params=`, and sort by the normalized column to see what to tighten
+first:
+
+```@example analyses
+sort!(normalized_sensitivity(s); by = p -> -abs(p.second))
+```
+
+The cost is one Newton solve and one matrix factorization however many
+parameters are covered: the adjoint system `Gᵀλ = e_out` is solved once, and each
+parameter then costs a re-stamping of the residual at the frozen operating point,
+not a DC solve. Point it at an amplifier's bias and the answer is the stage's
+small-signal gain, `∂V(drain)/∂vbias`, without an AC analysis.
+
+Two things to expect: it is a *DC* sensitivity, so a capacitance comes back
+exactly zero unless it moves the operating point, and a device value written
+inline (`R1 in out 1k`) is not a parameter of anything — give it a `.param` to
+make it one.
+
 ## Temperature
 
 Every analysis runs at the temperature of the circuit's `MNASpec`, 27 °C by

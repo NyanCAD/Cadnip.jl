@@ -317,6 +317,26 @@ branch_names(sol::SciMLBase.AbstractTimeseriesSolution) = branch_names(_mna_sys(
 export node_names, branch_names
 
 """
+    state_index(ctx::MNAContext, name::Symbol) -> Int or nothing
+
+Row of `name` in the solution vector: a node voltage first, then a branch
+current, `0` for ground, and `nothing` when the circuit has no variable by that
+name.
+
+This is the raw lookup behind every name-addressed row an analysis needs — the
+output and input columns of [`noise!`](@ref), the adjoint seed of `sens!` —
+each of which wraps it in the error message its own API calls for.
+"""
+function state_index(ctx::MNAContext, name::Symbol)
+    (name === :gnd || name === Symbol("0")) && return 0
+    ni = findfirst(==(name), ctx.node_names)
+    ni === nothing || return ni
+    ci = findfirst(==(name), ctx.current_names)
+    ci === nothing || return ctx.n_nodes + ci
+    return nothing
+end
+
+"""
     nameat(sol, name::Symbol, t::Real)
 
 Look up a variable by name at time `t` on a SciML transient solution whose

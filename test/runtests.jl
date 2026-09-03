@@ -110,6 +110,11 @@ elseif RUN_CORE
         @testset "noise.jl" include("noise.jl")
     end
 
+    # DC sensitivity (SPICE `.sens`) over the operating-point adjoint
+    @testset "Sensitivity" begin
+        @testset "sensitivity.jl" include("sensitivity.jl")
+    end
+
     # Operating-point readout: device terminal currents
     @testset "Operating Point Info" begin
         @testset "opinfo.jl" include("opinfo.jl")

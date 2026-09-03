@@ -373,12 +373,18 @@ Gaps
 Not defects, just unimplemented; the backend raises :exc:`NotImplementedError`
 for each, and :file:`README.rst` records what Cadnip would need.
 
+One is gone since this list was written: `.sens` is now ``sens!(circuit,
+output)``, a DC sensitivity taken from the operating point's own adjoint —
+one factorization for the output, one residual re-stamping per parameter, and
+no re-solve. It covers every parameter the circuit declares (the same names
+``alter`` addresses, including the dotted subcircuit ones), which does *not*
+include the raw device instance parameters of finding 4 — that gap is shared,
+not separate. Design and measurements: :file:`doc/sensitivity_design.md`.
+
 ============================== ================================================
 SPICE feature                  what is missing
 ============================== ================================================
 `.dc` of a source or resistor  raw-device instance overrides (see 4 above)
-`.sens`                        a sensitivity analysis over the ForwardDiff
-                               derivatives Cadnip already computes
 `.pz`                          a pole-zero entry point over the descriptor
                                system ``subsystem(ac, :name)`` returns
 `.tf`                          DC gain with input/output resistance

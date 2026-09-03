@@ -103,6 +103,7 @@ include("va_env.jl")
 include("sweeps.jl")
 include("ac.jl")
 include("noise.jl")
+include("sensitivity.jl")
 include("ModelLoader.jl")
 include("circsummary.jl")
 

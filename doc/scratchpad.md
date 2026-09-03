@@ -104,6 +104,9 @@ The most nebulous and least important at this stage: copying features from other
 - [x] Bug: a `.subckt` body reading a parent `.param` it has no local default for raised `UndefVarError` — the builder now binds `parent_params` as locals — design: `doc/parameter_overrides.md` §5
 - [x] Noise N3 rest: dropped — Julia is the simulation API, a deck does not drive an analysis; `.noise` only had to stop failing to parse — design: `doc/noise_analysis_design.md` N3
 - [x] Cleanup: delete the unreachable pre-MNA codegen path (`codegen!`, `SpCircuit`, `query.jl`, `generated.jl`) — design: `doc/codegen_unification.md` §5, `doc/FINDINGS.rst` 2 & 6
+- [x] Ecosystem/features: DC sensitivity `sens!(circuit, output)` (SPICE `.sens`) over the operating-point adjoint — design: `doc/sensitivity_design.md`
+- [ ] Ecosystem: AC sensitivity `∂|H(jω)|/∂p` — the same adjoint against `(jωC + G)` — design: `doc/sensitivity_design.md` "Not done"
+- [ ] Ecosystem: transient trajectory sensitivity — wants the MNA `ODEProblem` to carry its parameters as a SciML `p` — design: `doc/sensitivity_design.md` "Not done"
 - [ ] Noise N4: validation against ngspice `.noise` through the high-level API
 - [ ] Noise N5 (stretch): differentiable noise objectives + cyclostationary (PSS/PAC) noise
 - [x] Bug: a netlist `.temp`/`.option temp` card dropped the rest of `spec` (gmin, tnom, tolerances) on rebind — the card still wins unconditionally (it's the deck's own control card, not a default to negotiate against a caller), fixed via `with_temp` — design/measurements: `doc/FINDINGS.rst` finding 1
