@@ -44,7 +44,7 @@ sol[:out]
 
 !!! note "Two namespaces"
     `Cadnip` exports the analyses and the sweep API (`dc!`, `tran!`, `ac!`,
-    `noise!`, `alter`, `Sweep`, `CircuitSweep`, `acdec`, …) and the netlist
+    `noise!`, `sens!`, `alter`, `Sweep`, `CircuitSweep`, `acdec`, …) and the netlist
     macros. The circuit and device layer lives in the `Cadnip.MNA` submodule, so
     `MNACircuit` and friends are imported from there — `using Cadnip.MNA:
     MNACircuit, nameat`, as above.
@@ -84,7 +84,7 @@ magnitude_db(ac, :out)[1:3]     # flat in the passband
 | ---- | -------------- |
 | [Loading circuits](@ref) | netlist files, string macros, subcircuits, include/PDK directives |
 | [Parameters and sweeps](@ref) | `.param` overrides, `alter`, sweep axes, continuation |
-| [Analyses](@ref) | `dc!`, `tran!`, `ac!`, `noise!` and how to read their results |
+| [Analyses](@ref) | `dc!`, `tran!`, `ac!`, `noise!`, `sens!` and how to read their results |
 | [Devices and models](@ref) | built-in devices, model cards, Verilog-A, custom devices |
 | [How a circuit becomes equations](@ref) | the lumped model, MNA, stamping, where each analysis sits |
 | [When a circuit does not solve](@ref) | typos, floating nodes, DC convergence, transient trouble |

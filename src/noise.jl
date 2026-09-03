@@ -197,14 +197,12 @@ System index of node-voltage or branch-current `name` in `ctx`. Errors for
 ground or unknown names.
 """
 function _noise_output_index(ctx::MNA.MNAContext, name::Symbol)
-    (name === :gnd || name === Symbol("0")) &&
-        error("noise!: output cannot be ground (node 0)")
-    ni = findfirst(==(name), ctx.node_names)
-    ni === nothing || return ni
-    ci = findfirst(==(name), ctx.current_names)
-    ci === nothing || return ctx.n_nodes + ci
-    error("noise!: unknown output $name. Available nodes: $(ctx.node_names), " *
-          "currents: $(ctx.current_names)")
+    idx = MNA.state_index(ctx, name)
+    idx === 0 && error("noise!: output cannot be ground (node 0)")
+    idx === nothing &&
+        error("noise!: unknown output $name. Available nodes: $(ctx.node_names), " *
+              "currents: $(ctx.current_names)")
+    return idx
 end
 
 """
