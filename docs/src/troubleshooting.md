@@ -110,6 +110,22 @@ warm = dc!(divider; u0=op.x)
 warm.converged
 ```
 
+You rarely have a whole vector, though — what you usually have is a hunch about
+one or two nodes. Name them, which is what SPICE writes as `.nodeset`, and every
+state you do not name starts at zero exactly as a cold start leaves it:
+
+```@example trouble
+hinted = dc!(divider; u0=(out = 2.4,))
+hinted[:out], hinted.converged
+```
+
+A guess costs nothing when it is wrong — the stepping tiers above restart from
+zeros regardless — and a name the circuit does not have throws rather than
+quietly doing nothing. Where it earns its keep is a circuit with *more than one*
+operating point: a latch, a Schmitt trigger, anything cross-coupled. Newton
+returns the root nearest where it started, so the guess is how you say which
+state you meant.
+
 ### Walk in from a circuit that does solve
 
 Sweep a supply from a low value up to its nominal one, continuing each point

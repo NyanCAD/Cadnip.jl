@@ -384,10 +384,6 @@ SPICE feature                  what is missing
 `.tf`                          DC gain with input/output resistance
 `.disto`                       distortion analysis, ``distof1``/``distof2``
 `.meas`                        any measurement API
-`.ic` values                   a named-node initial state on ``tran!``
-                               (``CedarUICOp`` covers `uic` itself)
-`.nodeset`                     a named partial guess for ``dc!``; only a full
-                               ``u0`` vector is accepted
 `.ac oct` / `.ac lin`          octave and linear counterparts to ``acdec``
 `.tran` output interval        no output-interval option; SciML's ``saveat``
                                reaches it, Cadnip does not name it
@@ -398,6 +394,23 @@ AC device op variables         ``ac!`` exposes solution variables only
 `.noise v(a,b)`                node-pair output; only a single name is indexed
 `.noise` with a current input  input referral accepts voltage sources only
 ============================== ================================================
+
+Two rows left this table.  ``.ic`` values and ``.nodeset`` wanted the same
+thing — a *named*, partial starting state where only a full ``u0`` vector was
+accepted — and now every entry point that takes a ``u0`` takes one:
+``u0=(out=2.5, q=5.0)`` on ``dc!``, on ``tran!``, and on the ``DAEProblem`` /
+``ODEProblem`` / ``DDEProblem`` constructors, resolved against the circuit's own
+names (``state_index``), with every unnamed state at zero and an unknown name an
+``ArgumentError`` rather than a silent no-op.  Which card it is is the
+initialization algorithm's reading of the same value: ``CedarTranOp`` /
+``CedarDCOp`` take it as the Newton guess for the operating point (``.nodeset``)
+— they used to discard the problem's ``u0`` and always start from zeros, which
+is what made a named guess unreachable from ``tran!`` — and ``CedarUICOp`` takes
+it as the state it relaxes and integrates from (``.ic`` with `uic`).
+``tran!`` also forwards ``u0`` to the problem constructor now, rather than
+letting it fall through to ``solve``, and ``dc!(::CircuitSweep; u0=...)`` seeds
+the first point, so a sweep of a circuit with several operating points follows
+the branch you named.
 
 Two more ergonomic ones, which cost this backend real code:
 

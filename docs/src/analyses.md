@@ -144,8 +144,40 @@ Breakpoints of `PWL`, `PULSE` and `SIN` sources are derived automatically and
 handed to the integrator as `tstops`, so it lands on source edges instead of
 discovering them through rejected steps (`auto_tstops=false` disables this).
 
+### Where the run starts
+
 Initialization follows SPICE: transient sources are evaluated at `t = 0` and a
-DC steady state is solved there before stepping.
+DC steady state is solved there before stepping. `u0` says where that starts
+from — a full state vector (a previous `sol.x`, or `sol(t)` to resume a run), or
+just the states you can name, everything else at zero:
+
+```@example analyses
+using Cadnip.MNA: CedarUICOp
+
+charged = tran!(lowpass, (0.0, 20e-6);
+                u0=(out = 0.5,), initializealg=CedarUICOp(use_shampine=true))
+nameat(charged, :out, 0.0)
+```
+
+What the value *means* is the initialization algorithm's business, and that is
+the difference between SPICE's two cards. The default `CedarTranOp` solves the
+operating point, so a named state is the guess Newton starts from — `.nodeset`:
+it decides *which* operating point a circuit with several gets, and the run
+still begins at an operating point. `CedarUICOp`, above, relaxes the algebraic
+constraints around the state you gave instead of solving for equilibrium, so the
+run begins at that state — `.ic` with `uic`, which is how you start a capacitor
+charged or push an oscillator off its unstable equilibrium.
+
+!!! note "`use_shampine=true` when the sources are moving at t = 0"
+    `CedarUICOp` relaxes the state with a few fixed picosecond steps and reads
+    the derivative off the last of them. On a deck whose sources are already
+    moving at `t = 0` — the `SIN` above — that estimate is not consistent enough
+    for the DAE check that follows, and the run fails to initialize. Shampine
+    collocation refines state and derivative together and is the fix; on an
+    undriven deck the default is fine.
+
+A name no state answers to throws, so a typo is not a silently ignored initial
+condition.
 
 ## AC small-signal — `ac!`
 

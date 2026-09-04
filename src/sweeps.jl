@@ -435,7 +435,10 @@ Returns a `DCSolution` with voltage/current accessors.
 
 `u0` is the Newton starting point. The default (`nothing`) starts cold from
 zeros; pass a previous solution vector to continue from a nearby operating
-point — see `dc!(::CircuitSweep)`, which does exactly that between sweep points.
+point — see `dc!(::CircuitSweep)`, which does exactly that between sweep points
+— or name the states you have a guess for, which is what SPICE spells
+`.nodeset`: everything unnamed still starts at zero, and a name the circuit does
+not have throws rather than passing quietly.
 
 # Example
 ```julia
@@ -445,6 +448,7 @@ sol[:out]        # Voltage at output node
 sol.converged    # whether Newton reached tolerance
 
 warm = dc!(MNA.alter(circuit; R1=1.01e3); u0=sol.x)   # continue from `sol`
+hint = dc!(latch; u0=(q=5.0, qbar=0.0))               # pick a bistable branch
 ```
 """
 function dc!(circuit::MNA.MNACircuit; u0=nothing)
@@ -489,7 +493,7 @@ Base.eltype(::Type{SweepResult{P,S}}) where {P,S} = Tuple{P,S}
 export SweepResult
 
 """
-    dc!(cs::CircuitSweep; continuation=true) -> SweepResult
+    dc!(cs::CircuitSweep; continuation=true, u0=nothing) -> SweepResult
 
 DC operating point analysis over a circuit sweep. Returns a `SweepResult` that
 pairs each parameter point with its `DCSolution`.
@@ -507,14 +511,20 @@ one), the guess is dropped outright if a point changes the system size, and the
 stepping fallbacks restart from zeros regardless. Pass `continuation=false` for
 independent cold solves — e.g. on a circuit with multiple DC solutions, where
 following a branch is exactly what you don't want.
+
+`u0` seeds the *first* point — a state vector or a naming (`u0=(q=5.0,)`), same
+as `dc!(circuit)` — after which continuation takes over. On a circuit with
+several operating points that is how you say which branch the sweep should
+follow; with `continuation=false` every point starts from the seed instead.
 """
-function dc!(cs::CircuitSweep; continuation::Bool=true, kwargs...)
+function dc!(cs::CircuitSweep; continuation::Bool=true, u0=nothing, kwargs...)
     points = Any[]
     solutions = Any[]
     state = nothing
     it_state = iterate(cs.iterator)
-    # Last converged solution vector, the warm start for the next point.
-    u_prev = nothing
+    # The seed for the first point, then the last converged solution vector —
+    # the warm start for the next point.
+    u_prev = u0
     while it_state !== nothing
         params_nt, next_state = it_state
         circuit = MNA.alter(cs.circuit; params_nt...)
@@ -559,6 +569,13 @@ iteration, ensuring correct handling of nonlinear devices.
   dominated by the tiniest-unit variable. `reltol` must stay scalar when
   `solver` is a Sundials DAE algorithm (e.g. `IDA`) — vector `reltol` isn't
   supported by `IDASVtolerances`.
+- `u0`: The state the run starts from. A full solution vector (a previous
+  `sol.x`, or `sol(t)` to resume), or a *named partial* state — `u0=(q=5.0,
+  qbar=0.0)`, what SPICE writes as `.nodeset`/`.ic`, with everything unnamed at
+  zero. What it means is the initialization algorithm's business:
+  `CedarTranOp`/`CedarDCOp` take it as the Newton guess for the operating point,
+  `CedarUICOp` as the state it relaxes and integrates from. A name the circuit
+  does not have throws.
 - `explicit_jacobian`: Use explicit Jacobian (default: true for performance)
 - `auto_tstops::Bool=true`: Automatically derive solver `tstops` (and, on the
   ODE/DDE path, `d_discontinuities`) from PWL/PULSE/SIN source breakpoints
@@ -587,7 +604,7 @@ sol(1e-7)  # Get state at t=0.1μs
 """
 function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, auto_tstops::Bool=true,
-               kwargs...)
+               u0=nothing, kwargs...)
     # Default to IDA (DAE solver) with tuned parameters for circuit simulation.
     # Key settings:
     # - linear_solver=:KLU: Sparse direct solver. For long simulations with many timesteps,
@@ -602,7 +619,7 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
 
     # Dispatch based on solver type
     return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, auto_tstops=auto_tstops,
-                          kwargs...)
+                          u0=u0, kwargs...)
 end
 
 # The problem constructors own tstops/d_discontinuities: user-supplied values
@@ -631,7 +648,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
                         initializealg=MNA.CedarTranOp(), auto_tstops::Bool=true, tstops=nothing,
-                        kwargs...)
+                        u0=nothing, kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
     if explicit_jacobian === nothing
@@ -644,7 +661,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                              "use a per-class NamedTuple only for `abstol`."))
     end
 
-    prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian,
+    prob = SciMLBase.DAEProblem(circuit, tspan; u0=u0, explicit_jacobian=explicit_jacobian,
                                 auto_tstops=auto_tstops, tstops=tstops)
     abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
@@ -657,8 +674,8 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
                         abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarTranOp(),
                         auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
-                        kwargs...)
-    prob = SciMLBase.ODEProblem(circuit, tspan; auto_tstops=auto_tstops,
+                        u0=nothing, kwargs...)
+    prob = SciMLBase.ODEProblem(circuit, tspan; u0=u0, auto_tstops=auto_tstops,
                                 tstops=tstops, d_discontinuities=d_discontinuities)
     abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
@@ -671,8 +688,9 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         abstol=1e-10, reltol=1e-8, constant_lags=Float64[],
                         initializealg=MNA.CedarTranOp(),
                         auto_tstops::Bool=true, tstops=nothing, d_discontinuities=nothing,
-                        kwargs...)
-    prob = SciMLBase.DDEProblem(circuit, tspan; constant_lags=constant_lags, auto_tstops=auto_tstops,
+                        u0=nothing, kwargs...)
+    prob = SciMLBase.DDEProblem(circuit, tspan; u0=u0, constant_lags=constant_lags,
+                                auto_tstops=auto_tstops,
                                 tstops=tstops, d_discontinuities=d_discontinuities)
     abstol = _resolve_abstol(abstol, prob)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)

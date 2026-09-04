@@ -431,18 +431,10 @@ SII.is_variable(sys::MNAData, sym::Symbol) = sym in _sii_all_names(sys)
 SII.is_variable(::MNAData, ::Any) = false
 SII.variable_symbols(sys::MNAData) = _sii_all_names(sys)
 
-function SII.variable_index(sys::MNAData, sym::Symbol)
-    (sym === :gnd || sym === Symbol("0")) && return nothing
-    idx = findfirst(==(sym), sys.node_names)
-    idx === nothing || return idx
-    idx = findfirst(==(sym), sys.current_names)
-    idx === nothing || return sys.n_nodes + idx
-    idx = findfirst(==(sym), sys.charge_names)
-    idx === nothing || return sys.n_nodes + sys.n_currents + idx
-    idx = findfirst(==(sym), sys.limit_names)
-    idx === nothing || return sys.n_nodes + sys.n_currents + sys.n_charges + idx
-    return nothing
-end
+# The SII spelling of `state_index` (src/mna/solve.jl), which is the one place
+# that knows the solution vector's order. Ground needs no special case: it is
+# never in the name vectors, so it falls out as `nothing` like any non-state.
+SII.variable_index(sys::MNAData, sym::Symbol) = state_index(sys, sym)
 SII.variable_index(::MNAData, ::Any) = nothing
 
 SII.is_independent_variable(::MNAData, sym::Symbol) = sym === :t
