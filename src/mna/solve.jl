@@ -314,7 +314,7 @@ end
 node_names(sol::SciMLBase.AbstractTimeseriesSolution) = node_names(_mna_sys(sol))
 branch_names(sol::SciMLBase.AbstractTimeseriesSolution) = branch_names(_mna_sys(sol))
 
-export node_names, branch_names
+export node_names, branch_names, state_index
 
 """
     nameat(sol, name::Symbol, t::Real)
@@ -912,6 +912,101 @@ function _dc_solve_with_fallbacks(cs::CompiledStructure, ws::EvalWorkspace, u0::
     return u, false
 end
 
+#==============================================================================#
+# Named initial state
+#
+# Everything that takes a `u0` — `dc!`, `tran!`, the problem constructors —
+# takes it either as the full solution vector (a warm start continued from a
+# previous solve) or by name, which is what a netlist writes as `.nodeset` /
+# `.ic`: `u0 = (out = 2.5, q = 5.0)`. A named guess is *partial*; every state
+# it doesn't mention starts at zero, exactly as a cold start does.
+#==============================================================================#
+
+"""
+    state_index(sys, name::Symbol) -> Union{Int,Nothing}
+
+Index of the state variable `name` in the solution vector, or `nothing` when
+`name` names no state. `sys` is anything carrying the four name vectors: an
+`MNAContext` mid-build, an assembled `MNAData`, or a `DCSolution`, for which
+`sol.x[state_index(sol, name)] == sol[name]`.
+
+The order is the solution vector's: node voltages, then branch currents, then
+charge states, then Newton limiting variables — the same order
+[`node_names`](@ref) and [`branch_names`](@ref) report their halves in.
+
+Ground is deliberately not a state — it is pinned at 0 V and has no row — so
+`:gnd`, `Symbol("0")` and `:gnd!` return `nothing` like any other non-state
+name.
+"""
+function state_index(sys, name::Symbol)
+    idx = findfirst(==(name), sys.node_names)
+    idx === nothing || return idx
+    off = length(sys.node_names)
+    idx = findfirst(==(name), sys.current_names)
+    idx === nothing || return off + idx
+    off += length(sys.current_names)
+    idx = findfirst(==(name), sys.charge_names)
+    idx === nothing || return off + idx
+    off += length(sys.charge_names)
+    idx = findfirst(==(name), sys.limit_names)
+    idx === nothing || return off + idx
+    return nothing
+end
+
+# How many names to list back when one doesn't resolve. A flat netlist has a
+# handful; c6288 has 212k, and a 212k-name ArgumentError helps nobody.
+const _U0_NAMES_SHOWN = 20
+
+function _unknown_state_error(sys, name::Symbol)
+    if name === :gnd || name === Symbol("0") || name === Symbol("gnd!")
+        throw(ArgumentError(string(
+            "initial value for `", name, "` — ground is not a state variable. ",
+            "It is pinned at 0 V and has no entry in the solution vector.")))
+    end
+    known = vcat(sys.node_names, sys.current_names, sys.charge_names, sys.limit_names)
+    listing = isempty(known) ? "It has no state variables at all." :
+              string("It has: ", join(first(known, _U0_NAMES_SHOWN), ", "),
+                     length(known) > _U0_NAMES_SHOWN ?
+                         string(", … and ", length(known) - _U0_NAMES_SHOWN, " more.") : ".")
+    throw(ArgumentError(string(
+        "unknown initial-value name `", name, "` — the circuit has no node, ",
+        "branch current, charge or limiting variable by that name. ", listing)))
+end
+
+"""
+    named_u0(sys, u0) -> Union{Nothing,Vector{Float64}}
+
+Resolve a `u0` argument against a circuit's own names.
+
+`nothing` (a cold start) and a plain vector (a full state, e.g. a previous
+solution) pass through untouched. A `NamedTuple`, a `Symbol`-keyed `AbstractDict`,
+a single `name => value` pair or an iterable of them is a *partial* guess: the
+named states take their value, everything else starts at zero. A name that
+resolves to no state throws, rather than silently doing nothing.
+"""
+named_u0(sys, u0::Nothing) = nothing
+named_u0(sys, u0::AbstractVector) = u0
+named_u0(sys, u0::NamedTuple) = _named_u0(sys, pairs(u0))
+named_u0(sys, u0::AbstractDict{Symbol}) = _named_u0(sys, u0)
+named_u0(sys, u0::Pair{Symbol}) = _named_u0(sys, (u0,))
+named_u0(sys, u0::AbstractVector{<:Pair{Symbol}}) = _named_u0(sys, u0)
+named_u0(sys, u0::Tuple{Vararg{Pair{Symbol}}}) = _named_u0(sys, u0)
+
+named_u0(sys, u0) = throw(ArgumentError(string(
+    "u0 must be `nothing`, a full state vector, or the states named — a ",
+    "NamedTuple, a Symbol-keyed Dict, or `name => value` pairs. Got a ",
+    typeof(u0), ".")))
+
+function _named_u0(sys, entries)
+    u0 = zeros(Float64, system_size(sys))
+    for (name, value) in entries
+        idx = state_index(sys, name)
+        idx === nothing && _unknown_state_error(sys, name)
+        u0[idx] = value
+    end
+    return u0
+end
+
 # Initial guess for a DC solve, `nothing` meaning a cold start.
 #
 # Cold start is zeros: more robust for highly nonlinear circuits (diodes,
@@ -949,15 +1044,22 @@ with LevenbergMarquardt (GMIN-like regularization) and PseudoTransient for diffi
 
 `u0` is the Newton starting point; `nothing` (the default) starts cold from
 zeros. Pass a previous solution vector to *continue* from a nearby operating
-point — what a `.dc` sweep does from point to point. Only the direct Newton
-tiers use it; the GMIN/source-stepping fallbacks always restart from zeros, so a
-warm start that turns out to be a bad guess costs an iteration count, never a
-solution.
+point — what a `.dc` sweep does from point to point — or a named partial guess
+(`(out = 2.5,)`, SPICE's `.nodeset`), resolved against `ctx`'s own names by
+[`named_u0`](@ref). Only the direct Newton tiers use it; the GMIN/source-stepping
+fallbacks always restart from zeros, so a guess that turns out to be a bad one
+costs an iteration count, never a solution.
 """
 function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
                             abstol::Real=1e-10, maxiters::Int=100,
                             nlsolve=CedarRobustNLSolve(), u0=nothing)
     n = system_size(ctx)
+
+    # Resolve any named guess against the context that just discovered the
+    # structure, before it is compiled: the names are the circuit's own. Done
+    # before the empty-system exit so naming a state a stateless circuit does
+    # not have still reports, rather than passing quietly.
+    u0 = named_u0(ctx, u0)
 
     if n == 0
         return Float64[], true
@@ -1013,7 +1115,9 @@ Supports both linear and nonlinear devices.
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
 - `maxiters`: Maximum Newton iterations (default: 100)
-- `u0`: Newton starting point, `nothing` (default) for a cold start from zeros
+- `u0`: Newton starting point — `nothing` (default) for a cold start from
+  zeros, a solution vector to continue from, or a named partial guess
+  (`(out = 2.5,)`, see [`named_u0`](@ref))
 
 # See Also
 - `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
@@ -2059,7 +2163,10 @@ Structure discovery happens once, then values are updated in-place each iteratio
 - `tspan`: Time span for simulation `(t0, tf)`
 
 # Keyword Arguments
-- `u0`: Initial state (default: DC solution)
+- `u0`: Starting state for the initialization algorithm — a full solution
+  vector, or a named partial guess (`(out = 2.5,)`, see [`named_u0`](@ref)).
+  The default (`nothing`, i.e. zeros) leaves initialization to compute the
+  operating point cold.
 - `du0`: Initial derivatives (default: computed for consistency)
 - `explicit_jacobian`: Whether to provide explicit Jacobian to solver (default: true).
   Set to `false` if you encounter IDA initialization failures with time-dependent sources.
@@ -2113,7 +2220,11 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
+    # Zeros unless the caller supplied a starting state — a full vector, or a
+    # named partial guess resolved against this circuit's own names. The
+    # initialization algorithm starts from it: `CedarDCOp`/`CedarTranOp` as the
+    # Newton guess (`.nodeset`), `CedarUICOp` as the state it relaxes (`.ic`).
+    u0 = named_u0(ctx, u0)
     if u0 === nothing
         u0 = zeros(n)
     end
@@ -2164,7 +2275,10 @@ The circuit is automatically compiled for ~10x faster evaluation.
 - `tspan`: Time span for simulation `(t0, tf)`
 
 # Keyword Arguments
-- `u0`: Initial state (default: computed by CedarDCOp during solve)
+- `u0`: Starting state for the initialization algorithm — a full solution
+  vector, or a named partial guess (`(out = 2.5,)`, see [`named_u0`](@ref)).
+  The default (`nothing`, i.e. zeros) leaves CedarDCOp to find the operating
+  point cold during solve.
 - `auto_tstops`: Derive solver `tstops`/`d_discontinuities` from PWL/PULSE/SIN
   source breakpoints and store them in `prob.kwargs` (default: true). A
   `tstops`/`d_discontinuities` kwarg passed to this constructor is *merged*
@@ -2216,7 +2330,9 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     cs = compile_structure(builder, params, base_spec; ctx=ctx, dense=dense)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Use zeros as initial guess - CedarTranOp/CedarDCOp will compute DC during init()
+    # Zeros unless the caller supplied a starting state (see `DAEProblem` above);
+    # CedarTranOp/CedarDCOp start their DC solve from it during init().
+    u0 = named_u0(ctx, u0)
     if u0 === nothing
         u0 = zeros(n)
     end
@@ -2327,7 +2443,9 @@ function SciMLBase.DDEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     cs = compile_structure(builder, params, base_spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Use zeros as initial guess - CedarTranOp will compute DC during solve()
+    # Zeros unless the caller supplied a starting state (see `DAEProblem` above);
+    # it is also the history the DDE reads for t < t0.
+    u0 = named_u0(ctx, u0)
     if u0 === nothing
         u0 = zeros(n)
     end

@@ -10,9 +10,9 @@ using .MNA
 export MNA
 
 # Solution readout: `node_names` / `branch_names` classify the names a solution
-# answers to. Declared in MNA (src/mna/solve.jl), with the AC methods in
-# src/ac.jl.
-export node_names, branch_names
+# answers to, and `state_index` says where one lives in the solution vector.
+# Declared in MNA (src/mna/solve.jl), with the AC methods in src/ac.jl.
+export node_names, branch_names, state_index
 
 # re-exports
 export DAEProblem

@@ -50,6 +50,11 @@ devices (diodes, MOSFETs, voltage-dependent capacitors).
   If regular solve fails, tries GMIN stepping (gshunt homotopy) then
   source stepping (srcFact homotopy) for robust convergence.
 
+The Newton iteration starts from the problem's `u0` — zeros for a cold start,
+or the guess passed as `tran!(circuit, tspan; u0=(out=2.5,))`, which is what
+SPICE spells `.nodeset`. The stepping fallbacks always restart from zeros, so a
+guess that turns out to be a bad one costs iterations, never a solution.
+
 # Example
 ```julia
 sol = tran!(circuit, (0.0, 1e-3))  # Uses CedarDCOp by default
@@ -184,11 +189,15 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     mode = alg isa CedarDCOp ? :dcop : :tranop
     cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
-    # Use zeros as initial guess (same as dc_solve_with_ctx)
-    u0_zeros = zeros(length(u0))
+    # Start Newton where the problem says to: zeros by default (a cold start,
+    # which is also the state PCNR seeds its junctions from), or the guess the
+    # caller named through `tran!(...; u0=(out=2.5,))` — SPICE's `.nodeset`.
+    # Copied because the Newton tiers hand it to NonlinearSolve, which may
+    # write through it.
+    u_start = copy(u0)
 
     # Call the shared DC solve with optional fallback chain
-    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, u0_zeros;
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, u_start;
                                                      abstol=abstol, maxiters=alg.maxiters,
                                                      nlsolve=alg.nlsolve,
                                                      use_stepping=alg.use_stepping)
@@ -242,8 +251,9 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
     mode = alg isa CedarDCOp ? :dcop : :tranop
     cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
-    # Solve DC operating point with optional fallback chain
-    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, zeros(length(u0));
+    # Solve DC operating point with optional fallback chain, starting from the
+    # problem's u0 (zeros unless the caller named a guess — see the IDA branch).
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, copy(u0);
                                                      abstol=abstol, maxiters=alg.maxiters,
                                                      nlsolve=alg.nlsolve,
                                                      use_stepping=alg.use_stepping)
@@ -283,7 +293,7 @@ function SciMLBase.initialize_dae!(integrator::DelayDiffEq.DDEIntegrator,
     mode = alg isa CedarDCOp ? :dcop : :tranop
     cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
-    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, zeros(length(u0));
+    u_sol, converged = MNA._dc_solve_with_fallbacks(cs_dc, ws, copy(u0);
                                                      abstol=abstol, maxiters=alg.maxiters,
                                                      nlsolve=alg.nlsolve,
                                                      use_stepping=alg.use_stepping)

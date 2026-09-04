@@ -115,6 +115,11 @@ elseif RUN_CORE
         @testset "opinfo.jl" include("opinfo.jl")
     end
 
+    # Named initial state: `.nodeset` for dc!, `.ic` for tran!
+    @testset "Initial State" begin
+        @testset "initial_state.jl" include("initial_state.jl")
+    end
+
     # End-to-end design flow: hand derivation → op → DC sweep → AC → tran → noise
     @testset "Design Flow" begin
         @testset "design_flow.jl" include("design_flow.jl")
